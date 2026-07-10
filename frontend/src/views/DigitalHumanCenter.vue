@@ -1,0 +1,514 @@
+<script setup lang="ts">
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { api } from '../api'
+import type { AgentSession, AgentStreamEvent, DigitalHuman, ModelConfig, PromptRecommendation } from '../types'
+import { renderMarkdown } from '../utils/markdown'
+
+type ReactStep = {
+  type: 'model' | 'reasoning' | 'thought' | 'action' | 'observation' | 'error'
+  content: string
+  tool?: string
+  displayName?: string
+}
+
+type ChatMessage = {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  error?: string
+  created_at?: string
+  steps: ReactStep[]
+  liveReasoning: string
+  liveContent: string
+  streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
+}
+
+const profiles = ref<DigitalHuman[]>([])
+const models = ref<ModelConfig[]>([])
+const sessions = ref<AgentSession[]>([])
+const promptRecommendations = ref<PromptRecommendation[]>([])
+const fallbackPrompts = ref<string[]>([])
+const messages = ref<ChatMessage[]>([])
+const question = ref('')
+const selectedProfileId = ref<number | null>(null)
+const selectedModelId = ref<number | null>(null)
+const selectedSessionId = ref<number | null>(null)
+const sending = ref(false)
+const loadingSessions = ref(false)
+const loadingSession = ref(false)
+const loadingPrompts = ref(false)
+const error = ref('')
+const chatScroll = ref<HTMLElement | null>(null)
+
+const selectedProfile = computed(() => profiles.value.find((item) => item.id === selectedProfileId.value) || null)
+const filteredSessions = computed(() => {
+  const profileId = selectedProfileId.value
+  if (!profileId) return sessions.value
+  return sessions.value.filter((item) => item.digital_human_id === profileId)
+})
+const activeModel = computed(
+  () =>
+    models.value.find((item) => item.id === selectedModelId.value) ||
+    models.value.find((item) => item.is_active) ||
+    models.value[0] ||
+    null
+)
+
+const modelGroups = computed(() => {
+  const groups = new Map<string, ModelConfig[]>()
+  for (const model of models.value) {
+    const platform = model.platform_name || model.provider_name || '默认平台'
+    groups.set(platform, [...(groups.get(platform) || []), model])
+  }
+  return Array.from(groups, ([platform, rows]) => ({
+    platform,
+    rows: [...rows].sort((a, b) => Number(b.is_active) - Number(a.is_active) || a.id - b.id)
+  }))
+})
+
+const displayedPrompts = computed(() => {
+  const rows: Array<{ id?: number; text: string; reason?: string | null; source: 'dynamic' | 'fallback' }> = []
+  const seen = new Set<string>()
+  for (const item of promptRecommendations.value) {
+    const text = item.prompt_text.trim()
+    if (!text || seen.has(text)) continue
+    seen.add(text)
+    rows.push({ id: item.id, text, reason: item.reason, source: 'dynamic' })
+  }
+  const fallback = fallbackPrompts.value.length ? fallbackPrompts.value : selectedProfile.value?.quick_prompts || []
+  for (const text of fallback) {
+    const normalized = text.trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    rows.push({ text: normalized, source: 'fallback' })
+    if (rows.length >= 6) break
+  }
+  return rows.slice(0, 6)
+})
+
+async function load() {
+  const [profilePayload, modelPayload] = await Promise.all([
+    api.digitalHumans(),
+    api.modelConfigs()
+  ])
+  profiles.value = profilePayload
+  models.value = modelPayload.filter((item) => item.status !== 'disabled')
+  if (!selectedProfileId.value && profiles.value[0]) {
+    selectedProfileId.value = profiles.value[0].id
+  }
+  if (!selectedModelId.value || !models.value.some((item) => item.id === selectedModelId.value)) {
+    selectedModelId.value = models.value.find((item) => item.is_active)?.id || models.value[0]?.id || null
+  }
+  const profileId = selectedProfileId.value
+  await Promise.all([
+    refreshSessions(profileId),
+    profileId ? loadPromptRecommendations(profileId) : Promise.resolve()
+  ])
+}
+
+async function refreshSessions(profileId: number | null = selectedProfileId.value) {
+  const requestedProfileId = profileId ?? null
+  loadingSessions.value = true
+  try {
+    const payload = await api.agentSessions('research', requestedProfileId)
+    if ((selectedProfileId.value ?? null) === requestedProfileId) {
+      sessions.value = payload
+    }
+  } catch {
+    // 历史会话刷新失败不影响当前流式会话。
+  } finally {
+    if ((selectedProfileId.value ?? null) === requestedProfileId) {
+      loadingSessions.value = false
+    }
+  }
+}
+
+async function openSession(id: number) {
+  if (sending.value) return
+  error.value = ''
+  loadingSession.value = true
+  try {
+    const detail = await api.agentSession(id)
+    selectedSessionId.value = detail.id
+    selectedProfileId.value = detail.digital_human_id || selectedProfileId.value
+    selectedModelId.value = detail.model_config_id || selectedModelId.value
+    if (selectedProfileId.value) {
+      await loadPromptRecommendations(selectedProfileId.value)
+    }
+    messages.value = detail.messages.map((item) => ({
+      id: item.id,
+      role: item.role,
+      content: item.error || item.content,
+      error: item.error || undefined,
+      created_at: item.created_at,
+      steps: [],
+      liveReasoning: '',
+      liveContent: '',
+      streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined
+    }))
+    scrollChat(false)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '加载历史会话失败'
+  } finally {
+    loadingSession.value = false
+  }
+}
+
+function newSession(profileId?: number | null) {
+  if (sending.value) return
+  selectedSessionId.value = null
+  selectedProfileId.value = profileId ?? selectedProfileId.value ?? profiles.value[0]?.id ?? null
+  messages.value = []
+  question.value = ''
+  error.value = ''
+  if (selectedProfileId.value) {
+    loadPromptRecommendations(selectedProfileId.value)
+  }
+  refreshSessions(selectedProfileId.value)
+}
+
+function applyQuickPrompt(prompt: string) {
+  if (sending.value) return
+  question.value = prompt
+}
+
+async function loadPromptRecommendations(profileId: number) {
+  loadingPrompts.value = true
+  try {
+    const payload = await api.promptRecommendations(profileId)
+    if (selectedProfileId.value !== profileId) return
+    promptRecommendations.value = payload.items
+    fallbackPrompts.value = payload.fallback_prompts
+  } catch {
+    if (selectedProfileId.value === profileId) {
+      promptRecommendations.value = []
+      fallbackPrompts.value = selectedProfile.value?.quick_prompts || []
+    }
+  } finally {
+    if (selectedProfileId.value === profileId) {
+      loadingPrompts.value = false
+    }
+  }
+}
+
+async function refreshPromptRecommendations() {
+  if (!selectedProfileId.value || sending.value) return
+  loadingPrompts.value = true
+  try {
+    const payload = await api.refreshPromptRecommendations(selectedProfileId.value)
+    promptRecommendations.value = payload.items
+    fallbackPrompts.value = payload.fallback_prompts
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '刷新推荐失败'
+  } finally {
+    loadingPrompts.value = false
+  }
+}
+
+async function dismissPrompt(item: { id?: number }) {
+  if (!item.id || sending.value) return
+  promptRecommendations.value = promptRecommendations.value.filter((row) => row.id !== item.id)
+  try {
+    await api.dismissPromptRecommendation(item.id)
+  } catch {
+    // 关闭失败不影响当前会话，下一次刷新会恢复服务端状态。
+  }
+}
+
+function modelOptionLabel(model: ModelConfig | null) {
+  if (!model) return '默认模型'
+  return `${model.display_name} / ${model.model_name}`
+}
+
+function sessionModelLabel(session: AgentSession) {
+  const model = models.value.find((item) => item.id === session.model_config_id)
+  return model ? modelOptionLabel(model) : session.model_display_name || '默认模型'
+}
+
+function stepLabel(step: ReactStep) {
+  if (step.type === 'model') return '模型'
+  if (step.type === 'reasoning') return 'Reasoning'
+  if (step.type === 'thought') return 'Thought'
+  if (step.type === 'action') return `Action: ${step.displayName || step.tool || 'tool'}`
+  if (step.type === 'observation') return 'Observation'
+  return 'Error'
+}
+
+function streamStatusText(message: ChatMessage) {
+  if (message.streamStatus === 'connecting') return 'Stream 连接中'
+  if (message.streamStatus === 'streaming') return '正在接收模型分片'
+  if (message.streamStatus === 'tooling') return '正在执行 ReAct 工具'
+  if (message.streamStatus === 'error') return '流式响应异常'
+  if (message.streamStatus === 'done') return '流式响应完成'
+  return '等待响应'
+}
+
+function scrollChat(smooth = true) {
+  nextTick(() => {
+    chatScroll.value?.scrollTo({
+      top: chatScroll.value.scrollHeight,
+      behavior: smooth ? 'smooth' : 'auto'
+    })
+  })
+}
+
+function pushStep(reply: ChatMessage, step: ReactStep) {
+  if (!step.content.trim()) return
+  reply.steps.push(step)
+}
+
+function flushReasoning(reply: ChatMessage) {
+  if (reply.liveReasoning.trim()) {
+    pushStep(reply, { type: 'reasoning', content: reply.liveReasoning.trim() })
+  }
+  reply.liveReasoning = ''
+}
+
+function flushThought(reply: ChatMessage) {
+  if (reply.liveContent.trim()) {
+    pushStep(reply, { type: 'thought', content: reply.liveContent.trim() })
+  }
+  reply.liveContent = ''
+}
+
+async function send() {
+  const text = question.value.trim()
+  if (!text || sending.value) return
+
+  const history = messages.value
+    .filter((item) => item.content)
+    .map((item) => ({ role: item.role, content: item.content }))
+    .slice(-8)
+
+  sending.value = true
+  error.value = ''
+  question.value = ''
+  messages.value.push({
+    id: Date.now(),
+    role: 'user',
+    content: text,
+    created_at: new Date().toISOString(),
+    steps: [],
+    liveReasoning: '',
+    liveContent: ''
+  })
+  messages.value.push({
+    id: Date.now() + 1,
+    role: 'assistant',
+    content: '',
+    created_at: new Date().toISOString(),
+    steps: [],
+    liveReasoning: '',
+    liveContent: '',
+    streamStatus: 'connecting'
+  })
+  const reply = messages.value[messages.value.length - 1]
+  scrollChat()
+
+  try {
+    await api.streamAgentChat(
+      {
+        question: text,
+        history,
+        session_id: selectedSessionId.value,
+        digital_human_id: selectedProfileId.value,
+        model_config_id: selectedModelId.value
+      },
+      (event: AgentStreamEvent) => {
+        if (event.type === 'session') {
+          selectedSessionId.value = event.session_id || selectedSessionId.value
+          if (event.profile?.id) selectedProfileId.value = event.profile.id
+          if (event.model?.id) selectedModelId.value = event.model.id
+          return
+        }
+        if (event.type === 'model_selected') {
+          if (event.model?.id) selectedModelId.value = event.model.id
+          pushStep(reply, {
+            type: 'model',
+            content: `${event.model?.display_name || '默认模型'} / ${event.model?.model_name || ''}`
+          })
+        } else if (event.type === 'reasoning_delta') {
+          reply.streamStatus = 'streaming'
+          reply.liveReasoning += event.content || ''
+        } else if (event.type === 'content_delta') {
+          reply.streamStatus = 'streaming'
+          flushReasoning(reply)
+          reply.liveContent += event.content || ''
+        } else if (event.type === 'content_end') {
+          flushReasoning(reply)
+          if (event.role === 'answer') {
+            reply.content = reply.liveContent.trim()
+            reply.liveContent = ''
+            reply.streamStatus = 'done'
+          } else {
+            flushThought(reply)
+            reply.streamStatus = 'tooling'
+          }
+        } else if (event.type === 'action') {
+          reply.streamStatus = 'tooling'
+          flushReasoning(reply)
+          flushThought(reply)
+          pushStep(reply, { type: 'action', tool: event.tool, displayName: event.display_name, content: event.content || '' })
+        } else if (event.type === 'observation') {
+          reply.streamStatus = 'tooling'
+          flushReasoning(reply)
+          pushStep(reply, { type: 'observation', content: event.content || '' })
+        } else if (event.type === 'error') {
+          flushReasoning(reply)
+          flushThought(reply)
+          reply.error = event.content || 'ReAct 响应失败'
+          reply.streamStatus = 'error'
+          pushStep(reply, { type: 'error', content: reply.error })
+          error.value = reply.error
+        } else if (event.type === 'done') {
+          reply.streamStatus = reply.error ? 'error' : 'done'
+        }
+        scrollChat()
+      }
+    )
+    if (!reply.content && !reply.error && !reply.steps.length) {
+      reply.error = '未收到最终回答，请重试。'
+      reply.streamStatus = 'error'
+    }
+    await refreshSessions()
+    if (selectedProfileId.value) {
+      await loadPromptRecommendations(selectedProfileId.value)
+    }
+  } catch (err) {
+    reply.error = err instanceof Error ? err.message : '发送失败'
+    reply.streamStatus = 'error'
+    error.value = reply.error
+  } finally {
+    sending.value = false
+    if (!reply.error && reply.streamStatus !== 'done') {
+      reply.streamStatus = 'done'
+    }
+    scrollChat()
+  }
+}
+
+onMounted(load)
+</script>
+
+<template>
+  <section class="digital-center">
+    <aside class="session-rail page-section">
+      <header class="section-header">
+        <div>
+          <h2>历史会话</h2>
+          <p>{{ filteredSessions.length }} 条记录，切换后恢复上下文。</p>
+        </div>
+        <button type="button" @click="newSession()">新建</button>
+      </header>
+
+      <div class="assistant-switcher">
+        <label>当前数字人</label>
+        <select v-model.number="selectedProfileId" :disabled="sending" @change="newSession(selectedProfileId)">
+          <option v-for="item in profiles" :key="item.id" :value="item.id">{{ item.name }}</option>
+        </select>
+        <p>{{ selectedProfile?.description || '暂无可用数字人，请先配置画像。' }}</p>
+      </div>
+
+      <div class="session-list">
+        <button
+          v-for="item in filteredSessions"
+          :key="item.id"
+          class="session-item"
+          :class="{ active: selectedSessionId === item.id }"
+          type="button"
+          @click="openSession(item.id)"
+        >
+          <strong>{{ item.title }}</strong>
+          <span>{{ item.digital_human_name || '数字人' }} · {{ sessionModelLabel(item) }}</span>
+          <small>{{ item.message_count }} 条 · {{ item.status }}</small>
+        </button>
+        <div v-if="!filteredSessions.length" class="session-empty">
+          {{ loadingSessions || loadingSession ? '正在加载历史会话' : '当前数字人暂无历史会话' }}
+        </div>
+      </div>
+    </aside>
+
+    <main class="chat-workspace page-section">
+      <section v-if="selectedProfile" class="persona-strip">
+        <div>
+          <strong>{{ selectedProfile.name }}</strong>
+          <span>{{ selectedProfile.avatar_tone }}</span>
+        </div>
+        <p>{{ selectedProfile.description }}</p>
+        <div class="quick-prompts">
+          <button
+            v-for="prompt in displayedPrompts"
+            :key="`${prompt.source}-${prompt.id || prompt.text}`"
+            type="button"
+            :disabled="sending"
+            :class="{ dynamic: prompt.source === 'dynamic' }"
+            :title="prompt.reason || (prompt.source === 'dynamic' ? '根据历史对话和系统数据推荐' : '该数字人的固定提示词')"
+            @click="applyQuickPrompt(prompt.text)"
+          >
+            {{ prompt.text }}
+          </button>
+          <button type="button" :disabled="sending || loadingPrompts || !selectedProfileId" @click="refreshPromptRecommendations">
+            {{ loadingPrompts ? '推荐生成中' : '刷新推荐' }}
+          </button>
+        </div>
+      </section>
+
+      <section ref="chatScroll" class="message-list">
+        <div v-if="!messages.length" class="chat-empty">
+          <strong>{{ selectedProfile?.name || 'A股研究数字人' }}</strong>
+          <span>选择数字人和模型后开始会话，ReAct 的 Thought / Action / Observation 会在这里随回答一起出现。</span>
+        </div>
+
+        <article v-for="item in messages" :key="item.id" class="message" :class="item.role">
+          <template v-if="item.role === 'user'">
+            <span>你</span>
+            <p>{{ item.content }}</p>
+          </template>
+          <template v-else>
+            <div v-if="item.streamStatus" class="stream-status" :class="item.streamStatus">
+              <span class="stream-status-pulse"></span>
+              <strong>{{ streamStatusText(item) }}</strong>
+            </div>
+
+            <div v-if="item.steps.length" class="react-steps">
+              <div v-for="(step, index) in item.steps" :key="index" class="react-step" :class="step.type">
+                <strong>{{ stepLabel(step) }}</strong>
+                <span>{{ step.content }}</span>
+              </div>
+            </div>
+
+            <div v-if="item.liveReasoning" class="react-step reasoning live">
+              <strong>Reasoning</strong>
+              <span>{{ item.liveReasoning }}</span>
+            </div>
+
+            <div v-if="item.liveContent" class="md-body" v-html="renderMarkdown(item.liveContent)"></div>
+            <div v-else-if="item.content" class="md-body" v-html="renderMarkdown(item.content)"></div>
+            <div v-else-if="item.error" class="chat-error">{{ item.error }}</div>
+            <div v-else-if="!item.steps.length && !item.liveReasoning" class="chat-typing">正在思考与查询...</div>
+          </template>
+        </article>
+      </section>
+
+      <form class="chat-input" @submit.prevent="send">
+        <input
+          v-model="question"
+          type="text"
+          placeholder="例如：今天有哪些需要优先处理的事件？"
+          :disabled="sending || !selectedProfile"
+        />
+        <select v-model.number="selectedModelId" :disabled="sending || !models.length" :title="modelOptionLabel(activeModel)">
+          <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
+            <option v-for="item in group.rows" :key="item.id" :value="item.id">
+              {{ modelOptionLabel(item) }}
+            </option>
+          </optgroup>
+        </select>
+        <button type="submit" :disabled="sending || !question.trim() || !selectedProfile">
+          {{ sending ? '运行中' : '发送' }}
+        </button>
+      </form>
+      <p v-if="error" class="chat-page-error">{{ error }}</p>
+    </main>
+  </section>
+</template>

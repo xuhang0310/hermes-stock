@@ -1,0 +1,24 @@
+[project]
+name = "hermes-stock"
+version = "0.1.0"
+description = "Local A-share multi-agent research and risk-control workspace"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "SQLAlchemy>=2.0.36",
+    "PyMySQL>=1.1.1",
+    "python-dotenv>=1.0.1",
+    "cryptography>=44.0.0",
+    "paramiko>=3.4.0",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+hermes-api = "backend.app.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

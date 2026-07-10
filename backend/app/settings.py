@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import quote_plus
+
+from dotenv import load_dotenv
+
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+RABBIT_ENV = Path(r"C:\Users\Administrator\Documents\hermes-rabbit\backend\.env")
+
+if RABBIT_ENV.exists():
+    load_dotenv(RABBIT_ENV, override=False)
+load_dotenv(BASE_DIR / ".env", override=True)
+
+
+@dataclass(frozen=True)
+class Settings:
+    db_host: str = os.getenv("STOCK_DB_HOST", os.getenv("RABBIT_DB_HOST", "127.0.0.1"))
+    db_port: int = int(os.getenv("STOCK_DB_PORT", os.getenv("RABBIT_DB_PORT", "3306")))
+    db_user: str = os.getenv("STOCK_DB_USER", os.getenv("RABBIT_DB_USER", "root"))
+    db_password: str = os.getenv("STOCK_DB_PASSWORD", os.getenv("RABBIT_DB_PASSWORD", ""))
+    db_name: str = os.getenv("STOCK_DB_NAME", "hermes-stock")
+    db_echo: bool = os.getenv("STOCK_DB_ECHO", "false").lower() == "true"
+    auth_secret: str = os.getenv("STOCK_AUTH_SECRET", "")
+    webhook_enc_key: str = os.getenv("STOCK_WEBHOOK_ENC_KEY", "")
+    llm_base_url: str = os.getenv("STOCK_LLM_BASE_URL", os.getenv("RABBIT_LLM_BASE_URL", ""))
+    llm_api_key: str = os.getenv("STOCK_LLM_API_KEY", os.getenv("RABBIT_LLM_API_KEY", ""))
+    llm_model: str = os.getenv("STOCK_LLM_MODEL", os.getenv("RABBIT_LLM_MODEL", "gpt-4.1-mini"))
+    agent_max_steps: int = int(os.getenv("STOCK_AGENT_MAX_STEPS", os.getenv("RABBIT_AGENT_MAX_STEPS", "6")))
+    tushare_token: str = os.getenv("STOCK_TUSHARE_TOKEN", os.getenv("TUSHARE_TOKEN", ""))
+    tavily_api_key: str = os.getenv("STOCK_TAVILY_API_KEY", os.getenv("TAVILY_API_KEY", ""))
+    # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号
+    admin_username: str = os.getenv("STOCK_ADMIN_USERNAME", "")
+    admin_password: str = os.getenv("STOCK_ADMIN_PASSWORD", "")
+    scheduler_enabled: bool = os.getenv("STOCK_SCHEDULER_ENABLED", "true").lower() == "true"
+    scheduler_tick_seconds: int = int(os.getenv("STOCK_SCHEDULER_TICK_SECONDS", "30"))
+    stock_holidays: tuple[str, ...] = tuple(
+        day.strip()
+        for day in os.getenv("STOCK_HOLIDAYS", "").split(",")
+        if day.strip()
+    )
+    cors_origins: tuple[str, ...] = tuple(
+        origin.strip()
+        for origin in os.getenv("STOCK_CORS_ORIGINS", "*").split(",")
+        if origin.strip()
+    )
+
+    @property
+    def database_url(self) -> str:
+        explicit = os.getenv("DATABASE_URL")
+        if explicit:
+            return explicit
+
+        password = quote_plus(self.db_password)
+        return (
+            f"mysql+pymysql://{self.db_user}:{password}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+            "?charset=utf8mb4"
+        )
+
+    @property
+    def server_database_url(self) -> str:
+        password = quote_plus(self.db_password)
+        return (
+            f"mysql+pymysql://{self.db_user}:{password}"
+            f"@{self.db_host}:{self.db_port}/?charset=utf8mb4"
+        )
+
+
+settings = Settings()

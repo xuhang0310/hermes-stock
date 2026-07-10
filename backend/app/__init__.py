@@ -1,0 +1,1 @@
+"""SixRabbits Stock backend application."""
