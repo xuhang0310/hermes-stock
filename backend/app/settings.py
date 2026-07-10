@@ -36,6 +36,10 @@ class Settings:
     admin_username: str = os.getenv("STOCK_ADMIN_USERNAME", "")
     admin_password: str = os.getenv("STOCK_ADMIN_PASSWORD", "")
     scheduler_enabled: bool = os.getenv("STOCK_SCHEDULER_ENABLED", "true").lower() == "true"
+    feishu_bot_enabled: bool = os.getenv("STOCK_FEISHU_BOT_ENABLED", "true").lower() == "true"
+    log_level: str = os.getenv("STOCK_LOG_LEVEL", "INFO")
+    log_dir: str = os.getenv("STOCK_LOG_DIR", "logs")
+    log_retention_days: int = int(os.getenv("STOCK_LOG_RETENTION_DAYS", "90"))
     scheduler_tick_seconds: int = int(os.getenv("STOCK_SCHEDULER_TICK_SECONDS", "30"))
     stock_holidays: tuple[str, ...] = tuple(
         day.strip()

@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
+import FeishuBotPanel from './FeishuBotPanel.vue'
 import type { AgentSession, AgentStreamEvent, DigitalHuman, ModelConfig, PromptRecommendation } from '../types'
 import { renderMarkdown } from '../utils/markdown'
+
+const activeCenterTab = ref<'chat' | 'feishuBots'>('chat')
 
 type ReactStep = {
   type: 'model' | 'reasoning' | 'thought' | 'action' | 'observation' | 'error'
@@ -391,7 +394,18 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="digital-center">
+  <header class="settings-tabs page-section digital-center-tabs">
+    <button type="button" :class="{ active: activeCenterTab === 'chat' }" @click="activeCenterTab = 'chat'">
+      数字人对话
+    </button>
+    <button type="button" :class="{ active: activeCenterTab === 'feishuBots' }" @click="activeCenterTab = 'feishuBots'">
+      飞书机器人
+    </button>
+  </header>
+
+  <FeishuBotPanel v-if="activeCenterTab === 'feishuBots'" />
+
+  <section v-else class="digital-center">
     <aside class="session-rail page-section">
       <header class="section-header">
         <div>

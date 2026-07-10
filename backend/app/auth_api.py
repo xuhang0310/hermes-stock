@@ -16,6 +16,7 @@ from .auth import (
     user_payload,
     verify_password,
 )
+from .applog import log_event
 from .database import get_db
 
 
@@ -34,10 +35,13 @@ class ChangePasswordIn(BaseModel):
 
 @router.post("/login")
 def login(payload: LoginIn, db: Annotated[Session, Depends(get_db)]) -> dict:
-    user = authenticate_user(db, payload.username.strip(), payload.password)
+    username = payload.username.strip()
+    user = authenticate_user(db, username, payload.password)
     if user is None:
+        log_event("auth", "WARNING", "登录失败", username=username)
         raise HTTPException(status_code=401, detail="账号或密码错误，或账号未启用")
     context = AuthContext(user=user, permissions=permissions_for(user))
+    log_event("auth", "INFO", "登录成功", username=username, role=user.role)
     return {
         "access_token": create_access_token(user),
         "token_type": "bearer",

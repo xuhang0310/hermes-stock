@@ -329,6 +329,32 @@ export type NotifyChannelTestResult = {
   latency_ms: number
 }
 
+export type FeishuBotRuntime = {
+  running: boolean
+  today_count: number
+  last_event_at: string | null
+  error: string | null
+}
+
+export type FeishuBotBinding = {
+  profile_id: number
+  code: string
+  name: string
+  app_id_masked: string | null
+  has_secret: boolean
+  cipher_invalid: boolean
+  enabled: boolean
+  feature_enabled: boolean
+  runtime: FeishuBotRuntime
+}
+
+export type FeishuBotTestResult = {
+  ok: boolean
+  message?: string
+  error?: string
+  latency_ms: number
+}
+
 export type ScheduleJob = {
   job_key: string
   name: string

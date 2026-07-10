@@ -12,6 +12,7 @@ dependencies = [
     "cryptography>=44.0.0",
     "paramiko>=3.4.0",
     "httpx>=0.28.0",
+    "lark-oapi>=1.7.0",
 ]
 
 [project.scripts]

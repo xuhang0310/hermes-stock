@@ -130,16 +130,9 @@ def _is_due(job: ScheduledJob, now: datetime) -> bool:
 # 小工具：日志 / 心跳 / 模板渲染
 # --------------------------------------------------------------------------- #
 def _log(level: str, message: str, context: dict | None = None) -> None:
-    with SessionLocal() as session:
-        session.add(
-            SystemLog(
-                level=level,
-                module="scheduler",
-                message=message,
-                context_json=json.dumps(context, ensure_ascii=False) if context else None,
-            )
-        )
-        session.commit()
+    from .applog import log_event
+
+    log_event("scheduler", level, message, context=context)
 
 
 def _upsert_heartbeat(session, component: str, status: str, now: datetime, detail: dict | None = None) -> None:
@@ -282,6 +275,11 @@ def _run_health_check(now: datetime) -> str:
             problems.append(f"近 24 小时有 {failed_runs} 个定时任务执行失败")
         _upsert_heartbeat(session, HEARTBEAT_COMPONENT, "ok", now, {"checked_at": now.isoformat()})
         session.commit()
+
+    # 借每日健康检查清理一次过期 system_logs，避免只增表无限膨胀
+    from .applog import prune_system_logs
+
+    prune_system_logs()
 
     if problems:
         body = "系统健康检查发现以下异常，请及时处理：\n" + "\n".join(f"- {item}" for item in problems)

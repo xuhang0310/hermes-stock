@@ -153,14 +153,10 @@ def _post_with_retry(url: str, payload: dict, attempts: int = 3) -> tuple[bool, 
 
 
 def _log(db: Session, level: str, message: str, context: dict | None = None) -> None:
-    db.add(
-        SystemLog(
-            level=level,
-            module="feishu",
-            message=message,
-            context_json=json.dumps(context, ensure_ascii=False) if context else None,
-        )
-    )
+    # db 参数保留以兼容调用点；实际改由统一日志中枢独立事务写入 + 落进程日志文件
+    from .applog import log_event
+
+    log_event("feishu", level, message, context=context)
 
 
 def get_channel(db: Session, channel_key: str) -> NotifyChannel | None:

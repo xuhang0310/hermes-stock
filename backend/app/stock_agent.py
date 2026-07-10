@@ -41,8 +41,8 @@ FORBIDDEN_SQL = re.compile(
     r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|rename|"
     r"call|handler|load_file|lock|unlock|shutdown|kill|outfile|dumpfile|benchmark|sleep|"
     r"information_schema|performance_schema|mysql|"
-    # 通知与调度配置表存有 webhook 密文等敏感配置，禁止 Agent 查询
-    r"notify_channels|scheduled_jobs|job_runs)\b",
+    # 通知/调度/数字人配置表存有 webhook、飞书 App Secret 等密文，禁止 Agent 查询
+    r"notify_channels|scheduled_jobs|job_runs|digital_human_profiles)\b",
     re.IGNORECASE,
 )
 
@@ -198,6 +198,13 @@ def _audit(record: dict) -> None:
         with AUDIT_LOG.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
+        pass
+    try:  # 同时并入统一日志文件（agent_sql 高频，仅落文件不入库）
+        from .applog import get_logger
+
+        summary = {k: record.get(k) for k in ("tool", "rows", "ms", "error", "rejected") if record.get(k) is not None}
+        get_logger("agent_sql").info(json.dumps(summary, ensure_ascii=False))
+    except Exception:  # noqa: BLE001
         pass
 
 

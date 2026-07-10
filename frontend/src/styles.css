@@ -2597,3 +2597,82 @@ tbody tr.clickable-row:focus-visible td {
   border-color: rgba(255, 93, 93, 0.4);
   color: var(--danger);
 }
+
+/* 数字人中心 - 飞书机器人 */
+.digital-center-tabs {
+  margin-bottom: 14px;
+}
+
+.feishu-bot-editor {
+  margin-top: 14px;
+  border-color: var(--line-strong);
+}
+
+.feishu-bot-editor .row-actions {
+  margin-top: 4px;
+}
+
+.feishu-bot-guide {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 13px;
+  font-size: 12px;
+  color: var(--muted-2);
+  line-height: 1.75;
+}
+
+.job-status.running {
+  color: var(--warning);
+}
+
+.cell-actions button.danger {
+  color: var(--danger);
+  border-color: rgba(255, 93, 93, 0.35);
+}
+
+/* 运行日志视图 */
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.log-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.log-toolbar select {
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.log-toolbar button.auto-on {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.log-counts {
+  display: inline-flex;
+  gap: 12px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
+.log-panel-scroll {
+  max-height: 62vh;
+  overflow: auto;
+  padding: 6px 4px;
+}

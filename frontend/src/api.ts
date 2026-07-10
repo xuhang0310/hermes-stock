@@ -22,6 +22,8 @@ import type {
   DataSourceConfig,
   NotifyChannel,
   NotifyChannelTestResult,
+  FeishuBotBinding,
+  FeishuBotTestResult,
   ScheduleJob,
   JobRun,
   ScheduleStatus,
@@ -209,7 +211,15 @@ export const api = {
   agents: () => request<AgentItem[]>('/api/agents'),
   reports: () => request<ReportItem[]>('/api/reports'),
   riskChecks: () => request<RiskCheck[]>('/api/risk-checks'),
-  logs: () => request<SystemLog[]>('/api/logs'),
+  logs: (params?: { module?: string; level?: string; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.module) q.set('module', params.module)
+    if (params?.level) q.set('level', params.level)
+    if (params?.limit) q.set('limit', String(params.limit))
+    const suffix = q.toString()
+    return request<SystemLog[]>(`/api/logs${suffix ? `?${suffix}` : ''}`)
+  },
+  logModules: () => request<string[]>('/api/logs/modules'),
   seedDemo: () => request<{ ok: boolean; message: string }>('/api/dev/seed-demo', { method: 'POST' }),
   modelPlatforms: () => request<ModelPlatform[]>('/api/model-platforms'),
   saveModelPlatform: (payload: Record<string, unknown>, id?: number) =>
@@ -246,6 +256,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
+  feishuBots: () => request<FeishuBotBinding[]>('/api/feishu-bots'),
+  saveFeishuBot: (profileId: number, payload: { app_id?: string | null; app_secret?: string | null; enabled: boolean }) =>
+    request<FeishuBotBinding>(`/api/feishu-bots/${profileId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    }),
+  testFeishuBot: (profileId: number, payload: { app_id?: string | null; app_secret?: string | null }) =>
+    request<FeishuBotTestResult>(`/api/feishu-bots/${profileId}/test`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  toggleFeishuBot: (profileId: number) =>
+    request<FeishuBotBinding>(`/api/feishu-bots/${profileId}/toggle`, { method: 'POST' }),
+  unbindFeishuBot: (profileId: number) =>
+    request<{ ok: boolean }>(`/api/feishu-bots/${profileId}`, { method: 'DELETE' }),
   scheduleJobs: () => request<ScheduleJob[]>('/api/schedule/jobs'),
   saveScheduleJob: (jobKey: string, payload: Record<string, unknown>) =>
     request<ScheduleJob>(`/api/schedule/jobs/${jobKey}`, {

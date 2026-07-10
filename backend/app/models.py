@@ -374,6 +374,9 @@ class DigitalHumanProfile(Base):
     quick_prompts_json: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="enabled")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    feishu_app_id: Mapped[str | None] = mapped_column(String(80))
+    feishu_app_secret_cipher: Mapped[str | None] = mapped_column(Text)
+    feishu_bot_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

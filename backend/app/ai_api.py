@@ -29,6 +29,7 @@ from .prompt_recommendations import (
     recommendation_out,
     refresh_recommendations_for_user_profile,
 )
+from .applog import log_event
 from .stock_agent import run_agent_events
 from .stock_tools import stock_strategy_payload
 from .settings import settings
@@ -894,6 +895,13 @@ async def agent_chat(
         event_count = 0
 
         def produce_events() -> None:
+            started = time.monotonic()
+            log_event(
+                "agent", "INFO", "对话开始",
+                to_db=False, chat_mode=payload.chat_mode,
+                digital_human=(profile.code if profile else None),
+                question=payload.question[:80],
+            )
             try:
                 for event in run_agent_events(
                     payload.question,
@@ -906,7 +914,18 @@ async def agent_chat(
                 ):
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
             except Exception as exc:  # noqa: BLE001
+                log_event(
+                    "agent", "ERROR", "对话失败",
+                    chat_mode=payload.chat_mode,
+                    digital_human=(profile.code if profile else None),
+                    error=str(exc)[:300],
+                )
                 asyncio.run_coroutine_threadsafe(queue.put({"type": "error", "content": str(exc)}), loop).result()
+            else:
+                log_event(
+                    "agent", "INFO", "对话完成",
+                    to_db=False, chat_mode=payload.chat_mode, ms=int((time.monotonic() - started) * 1000),
+                )
             finally:
                 asyncio.run_coroutine_threadsafe(queue.put(_AGENT_STREAM_DONE), loop).result()
 

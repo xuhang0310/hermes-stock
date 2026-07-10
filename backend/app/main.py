@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -12,13 +13,18 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+import time
+
 from .ai_api import router as ai_router
+from .applog import configure_logging, get_logger, log_event, prune_system_logs
 from .auth import AuthContext, require_permission
 from .auth_api import router as auth_router
 from .database import get_db, initialize_default_database, session_scope
 from .position_agent import run_position_agent, run_position_agent_events
 from .position_import import parse_position_screenshot
 from .prompt_recommendations import start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
+from .feishu_bot import start_feishu_bots, stop_feishu_bots
+from .feishu_bot_api import router as feishu_bot_router
 from .repository import StockRepository
 from .rhythm_api import router as rhythm_router
 from .rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
@@ -109,9 +115,13 @@ def _sse_event(event: dict) -> str:
 
 
 def create_app(init_db: bool = True) -> FastAPI:
+    configure_logging()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if init_db:
+            # 建表前不入库（system_logs 尚不存在），只落进程日志
+            log_event("system", "INFO", "应用启动：初始化数据库与后台组件", to_db=False)
             initialize_default_database()
             # 保证内置飞书通道与节律任务存在（正常启动不跑 seed_demo，这里补齐基础数据）
             with session_scope() as db:
@@ -120,10 +130,16 @@ def create_app(init_db: bool = True) -> FastAPI:
                 ensure_default_jobs(db)
             start_prompt_recommendation_scheduler()
             start_rhythm_scheduler()
+            start_feishu_bots()
+            log_event("system", "INFO", "后台组件已启动：调度器 + 飞书机器人 + 推荐刷新")
+            # 启动时清理一次过期日志（每日健康检查还会再清理），控制表体积
+            await asyncio.to_thread(prune_system_logs)
         try:
             yield
         finally:
             if init_db:
+                log_event("system", "INFO", "应用关闭：停止后台组件", to_db=False)
+                stop_feishu_bots()
                 await stop_rhythm_scheduler()
                 await stop_prompt_recommendation_scheduler()
 
@@ -140,9 +156,41 @@ def create_app(init_db: bool = True) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    _req_logger = get_logger("api")
+
+    @app.middleware("http")
+    async def _log_requests(request: Request, call_next):
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:  # noqa: BLE001
+            elapsed = int((time.monotonic() - started) * 1000)
+            # 入库是同步阻塞操作，放到线程池，避免卡住事件循环（异常常伴随 DB 变慢）
+            await asyncio.to_thread(
+                log_event, "api", "ERROR", "请求未处理异常",
+                method=request.method, path=request.url.path, ms=elapsed,
+            )
+            raise
+        elapsed = int((time.monotonic() - started) * 1000)
+        line = f"{request.method} {request.url.path} -> {response.status_code} ({elapsed}ms)"
+        if response.status_code >= 500:
+            # 5xx 入库便于前端排查；4xx/2xx 只落进程日志文件，避免撑爆数据库。
+            # 入库同步阻塞，放线程池执行，防止 5xx 高峰期堵塞事件循环。
+            await asyncio.to_thread(
+                log_event, "api", "ERROR", line,
+                method=request.method, path=request.url.path,
+                status=response.status_code, ms=elapsed,
+            )
+        elif response.status_code >= 400:
+            _req_logger.warning(line)
+        else:
+            _req_logger.info(line)
+        return response
+
     app.include_router(auth_router)
     app.include_router(ai_router)
     app.include_router(rhythm_router)
+    app.include_router(feishu_bot_router)
 
     def repo(db: Session = Depends(get_db)) -> StockRepository:
         return StockRepository(db)
@@ -420,9 +468,18 @@ def create_app(init_db: bool = True) -> FastAPI:
     def logs(
         repository: StockRepository = Depends(repo),
         limit: int = Query(default=100, ge=1, le=500),
+        module: str | None = Query(default=None),
+        level: str | None = Query(default=None),
         _context: AuthContext = Depends(require_permission("system:view")),
     ) -> list[dict]:
-        return repository.system_logs(limit)
+        return repository.system_logs(limit, module=module, level=level)
+
+    @app.get("/api/logs/modules")
+    def log_modules(
+        repository: StockRepository = Depends(repo),
+        _context: AuthContext = Depends(require_permission("system:view")),
+    ) -> list[str]:
+        return repository.system_log_modules()
 
     return app
 

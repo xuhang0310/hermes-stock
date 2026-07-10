@@ -78,6 +78,27 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
                     "ADD COLUMN chat_mode VARCHAR(24) NOT NULL DEFAULT 'research' AFTER status"
                 )
             )
+        # 数字人 ↔ 飞书自建应用（机器人）绑定字段
+        for column_name, ddl in (
+            ("feishu_app_id", "ADD COLUMN feishu_app_id VARCHAR(80) NULL AFTER sort_order"),
+            ("feishu_app_secret_cipher", "ADD COLUMN feishu_app_secret_cipher TEXT NULL AFTER feishu_app_id"),
+            ("feishu_bot_enabled", "ADD COLUMN feishu_bot_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER feishu_app_secret_cipher"),
+        ):
+            has_column = connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() "
+                    "AND table_name = 'digital_human_profiles' "
+                    "AND column_name = :column_name"
+                ),
+                {"column_name": column_name},
+            ).scalar()
+            if not has_column:
+                connection.execute(text(f"ALTER TABLE digital_human_profiles {ddl}"))
+                from .applog import get_logger
+
+                get_logger("db").info(f"迁移：digital_human_profiles 新增列 {column_name}")
+
         has_prompt_recommendation_unique = connection.execute(
             text(
                 "SELECT COUNT(*) FROM information_schema.statistics "

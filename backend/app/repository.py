@@ -995,9 +995,22 @@ class StockRepository:
             for item, symbol_name in rows
         ]
 
-    def system_logs(self, limit: int = 100) -> list[dict[str, Any]]:
-        rows = self.db.scalars(select(SystemLog).order_by(desc(SystemLog.created_at), desc(SystemLog.id)).limit(limit)).all()
+    def system_logs(
+        self, limit: int = 100, module: str | None = None, level: str | None = None
+    ) -> list[dict[str, Any]]:
+        query = select(SystemLog)
+        if module:
+            query = query.where(SystemLog.module == module)
+        if level:
+            query = query.where(SystemLog.level == level.upper())
+        rows = self.db.scalars(
+            query.order_by(desc(SystemLog.created_at), desc(SystemLog.id)).limit(limit)
+        ).all()
         return [system_log_out(row) for row in rows]
+
+    def system_log_modules(self) -> list[str]:
+        rows = self.db.scalars(select(SystemLog.module).distinct()).all()
+        return sorted({str(r) for r in rows if r})
 
     def _event_out(self, event: Event, symbol_name: str | None) -> dict[str, Any]:
         return {

@@ -107,12 +107,19 @@ def parse_position_input(
     mime_type: str = "image/png",
     model_config_id: int | None = None,
 ) -> dict[str, Any]:
+    from .applog import log_event
+
     clean_base64 = None
     image_hash = None
     if image_base64:
         _, clean_base64, image_hash = decode_image_payload(image_base64)
+    log_event(
+        "position", "INFO", "持仓录入解析开始",
+        to_db=False, has_image=bool(clean_base64), instruction=instruction[:60],
+    )
     llm_config = _active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
+        log_event("position", "ERROR", "持仓录入失败：模型未配置 API Key / Base URL")
         raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
 
     schema_example = """
@@ -189,6 +196,7 @@ def parse_position_input(
         response = client.post(url, json=payload, headers=headers)
     if response.status_code >= 400:
         body = response.text[:600]
+        log_event("position", "ERROR", "持仓录入失败：视觉模型接口错误", status=response.status_code)
         raise RuntimeError(f"视觉模型接口返回 {response.status_code}: {body}")
 
     body = response.json()
@@ -206,6 +214,10 @@ def parse_position_input(
     )
     if not reply:
         reply = "我可以帮你录入 A 股持仓。你可以直接输入代码、名称、数量、成本价，也可以上传券商持仓截图。"
+    log_event(
+        "position", "INFO", "持仓录入解析完成",
+        intent=intent, should_save=should_save, rows=len(normalized_rows),
+    )
     return {
         "model": {
             "id": llm_config.get("id"),
