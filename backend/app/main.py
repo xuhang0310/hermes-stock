@@ -15,21 +15,21 @@ from sqlalchemy.orm import Session
 
 import time
 
-from .ai_api import router as ai_router
-from .applog import configure_logging, get_logger, log_event, prune_system_logs
-from .auth import AuthContext, require_permission
-from .auth_api import router as auth_router
-from .database import get_db, initialize_default_database, session_scope
-from .position_agent import run_position_agent, run_position_agent_events
-from .position_import import parse_position_screenshot
-from .prompt_recommendations import start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
-from .feishu_bot import start_feishu_bots, stop_feishu_bots
-from .feishu_bot_api import router as feishu_bot_router
-from .repository import StockRepository
-from .rhythm_api import router as rhythm_router
-from .rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
-from .seed import seed_demo, seed_notify_channels, seed_position_accounts
-from .settings import settings
+from backend.app.ai.ai_api import router as ai_router
+from backend.app.core.applog import configure_logging, get_logger, log_event, prune_system_logs
+from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.auth.auth_api import router as auth_router
+from backend.app.core.database import get_db, initialize_default_database, session_scope
+from backend.app.agents.position_agent import run_position_agent, run_position_agent_events
+from backend.app.agents.position_import import parse_position_screenshot
+from backend.app.ai.prompt_recommendations import start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
+from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
+from backend.app.feishu.feishu_bot_api import router as feishu_bot_router
+from backend.app.data.repository import StockRepository
+from backend.app.scheduler.rhythm_api import router as rhythm_router
+from backend.app.scheduler.rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
+from backend.app.seed.seed import seed_demo, seed_notify_channels, seed_position_accounts
+from backend.app.core.settings import settings
 
 
 class WatchlistCreate(BaseModel):
@@ -253,7 +253,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     def position_brokers(
         _context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> list[dict]:
-        from .broker_presets import BROKER_PRESETS
+        from backend.app.data.broker_presets import BROKER_PRESETS
 
         return BROKER_PRESETS
 

@@ -11,8 +11,8 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .database import SessionLocal
-from .models import (
+from backend.app.core.database import SessionLocal
+from backend.app.core.models import (
     AiChatMessage,
     AiChatSession,
     AiPromptRecommendation,

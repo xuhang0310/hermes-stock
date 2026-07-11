@@ -7,9 +7,9 @@ from typing import Any
 
 import httpx
 
-from .position_import import decode_image_payload
-from .repository import StockRepository
-from .stock_agent import _active_llm_config, _stream_chat
+from backend.app.agents.position_import import decode_image_payload
+from backend.app.data.repository import StockRepository
+from backend.app.agents.stock_agent import _active_llm_config, _stream_chat
 
 
 POSITION_AGENT_TOOLS: list[dict[str, Any]] = [

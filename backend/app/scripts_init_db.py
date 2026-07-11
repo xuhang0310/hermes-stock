@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 
-from .database import initialize_default_database, session_scope
-from .seed import seed_demo
+from backend.app.core.database import initialize_default_database, session_scope
+from backend.app.seed.seed import seed_demo
 
 
 def main() -> int:

@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .stock_agent import _active_llm_config
+from backend.app.agents.stock_agent import _active_llm_config
 
 
 KEY_MAP = {
@@ -107,7 +107,7 @@ def parse_position_input(
     mime_type: str = "image/png",
     model_config_id: int | None = None,
 ) -> dict[str, Any]:
-    from .applog import log_event
+    from backend.app.core.applog import log_event
 
     clean_base64 = None
     image_hash = None

@@ -28,7 +28,7 @@ import logging.handlers
 import threading
 from pathlib import Path
 
-from .settings import settings
+from backend.app.core.settings import settings
 
 _LOGGER_PREFIX = "hermes"
 _configured = False
@@ -53,7 +53,7 @@ def _log_dir() -> Path:
     base = getattr(settings, "log_dir", "") or "logs"
     path = Path(base)
     if not path.is_absolute():
-        path = Path(__file__).resolve().parents[2] / base
+        path = Path(__file__).resolve().parents[3] / base  # core/ -> app/ -> backend/ -> 仓库根
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -111,8 +111,8 @@ def _level_no(level: str) -> int:
 
 def _write_db(level: str, category: str, message: str, context: dict | None) -> None:
     # 延迟导入，避免 applog ← models ← database 的循环
-    from .database import SessionLocal
-    from .models import SystemLog
+    from backend.app.core.database import SessionLocal
+    from backend.app.core.models import SystemLog
 
     try:
         with SessionLocal() as session:
@@ -138,8 +138,8 @@ def prune_system_logs(max_age_days: int | None = None) -> int:
     """
     from datetime import datetime, timedelta
 
-    from .database import SessionLocal
-    from .models import SystemLog
+    from backend.app.core.database import SessionLocal
+    from backend.app.core.models import SystemLog
 
     days = max_age_days if max_age_days is not None else getattr(settings, "log_retention_days", 90)
     try:

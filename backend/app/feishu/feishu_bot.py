@@ -28,11 +28,11 @@ from datetime import date, datetime
 import httpx
 from sqlalchemy import select
 
-from .database import SessionLocal
-from .feishu import decrypt_value
-from .models import DigitalHumanProfile, SystemLog
-from .rhythm_scheduler import _build_digital_human_context
-from .settings import settings
+from backend.app.core.database import SessionLocal
+from backend.app.feishu.feishu import decrypt_value
+from backend.app.core.models import DigitalHumanProfile, SystemLog
+from backend.app.scheduler.rhythm_scheduler import _build_digital_human_context
+from backend.app.core.settings import settings
 
 
 FEISHU_BASE = "https://open.feishu.cn"
@@ -51,7 +51,7 @@ _inflight_lock = threading.Lock()
 
 
 def _log(level: str, message: str, context: dict | None = None) -> None:
-    from .applog import log_event
+    from backend.app.core.applog import log_event
 
     log_event("feishu_bot", level, message, context=context)
 
@@ -460,7 +460,7 @@ class BotWorker:
 
 def _consume_agent_with_history(question: str, history: list[dict], context: str | None, code: str | None):
     """带多轮上下文的无头调用：消费 run_agent_events 生成器收集最终答案。"""
-    from .stock_agent import run_agent_events
+    from backend.app.agents.stock_agent import run_agent_events
 
     buffer: list[str] = []
     answer = ""

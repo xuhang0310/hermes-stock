@@ -10,8 +10,8 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
-from .database import engine
-from .settings import settings
+from backend.app.core.database import engine
+from backend.app.core.settings import settings
 
 
 TUSHARE_URL = "https://api.tushare.pro"

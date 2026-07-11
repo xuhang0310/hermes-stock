@@ -247,4 +247,4 @@ Vue 3 + TS，无路由，`App.vue` 按 `activePage` 切换视图。
 
 ---
 
-*本方案对应代码：`backend/app/{feishu,rhythm_scheduler,rhythm_api}.py`、`models.py`（3 新表）、`settings.py`（4 配置）、`frontend/src/views/{NotifyChannelSettingsView,RhythmView}.vue`。另见 `docs/database.md`、`docs/ask-stock.md`。*
+*本方案对应代码：`backend/app/feishu/feishu.py`、`backend/app/scheduler/{rhythm_scheduler,rhythm_api}.py`、`backend/app/core/models.py`（3 新表）、`backend/app/core/settings.py`（4 配置）、`frontend/src/views/{NotifyChannelSettingsView,RhythmView}.vue`。另见 `docs/database.md`、`docs/ask-stock.md`。*

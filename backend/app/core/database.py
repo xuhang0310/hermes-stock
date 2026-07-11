@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from .settings import settings
+from backend.app.core.settings import settings
 
 
 class Base(DeclarativeBase):
@@ -53,7 +53,7 @@ def ensure_mysql_database(database_url: str) -> None:
 
 
 def init_database(engine: Engine) -> None:
-    from . import models  # noqa: F401
+    from backend.app.core import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _ensure_schema_upgrades(engine)
@@ -95,7 +95,7 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             ).scalar()
             if not has_column:
                 connection.execute(text(f"ALTER TABLE digital_human_profiles {ddl}"))
-                from .applog import get_logger
+                from backend.app.core.applog import get_logger
 
                 get_logger("db").info(f"迁移：digital_human_profiles 新增列 {column_name}")
 

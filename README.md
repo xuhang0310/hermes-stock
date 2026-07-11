@@ -4,16 +4,21 @@ A-share multi-agent research and risk-control workspace.
 
 > Product/display name is **SixRabbits Stock**. Internal identifiers (repo dir, Python package, MySQL database `hermes-stock`, `STOCK_*`/`RABBIT_*` env keys) keep the `hermes` naming for continuity — do not rename those.
 
-The project now follows the same backend shape as `hermes-rabbit`:
+The backend is organized into domain packages under `backend/app/` (entry points `main.py` / `scripts_init_db.py` stay at the top level):
 
 ```text
-backend/app/settings.py    environment and MySQL settings
-backend/app/database.py    SQLAlchemy engine/session/base
-backend/app/models.py      database models
-backend/app/repository.py  query/write repository
-backend/app/seed.py        demo bootstrap data
-backend/app/main.py        FastAPI API
-frontend/                 Vue 3 workspace
+backend/app/main.py            FastAPI factory + CRUD/read endpoints (uvicorn entry)
+backend/app/scripts_init_db.py create-tables + seed CLI
+backend/app/core/              settings · database · applog · models
+backend/app/auth/              auth service + auth API
+backend/app/data/              repository · broker presets
+backend/app/market/            stock_tools · digital_human_tools (行情/问股)
+backend/app/agents/            stock_agent (ReAct) · position_agent · position_import
+backend/app/ai/                ai_api · prompt_recommendations
+backend/app/feishu/            feishu push · feishu_bot · feishu_bot_api
+backend/app/scheduler/         rhythm_scheduler · rhythm_api (定时任务)
+backend/app/seed/              demo bootstrap data
+frontend/                      Vue 3 workspace
 ```
 
 ## Database

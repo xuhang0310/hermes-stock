@@ -8,7 +8,7 @@ from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parents[2]  # core/ -> app/ -> backend/（backend/.env 所在）
 RABBIT_ENV = Path(r"C:\Users\Administrator\Documents\hermes-rabbit\backend\.env")
 
 if RABBIT_ENV.exists():

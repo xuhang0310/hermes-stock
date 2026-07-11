@@ -12,9 +12,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, selectinload
 
-from .auth import AuthContext, require_permission
-from .database import SessionLocal, get_db
-from .models import (
+from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.core.database import SessionLocal, get_db
+from backend.app.core.models import (
     AiChatMessage,
     AiPromptRecommendation,
     AiChatSession,
@@ -23,16 +23,16 @@ from .models import (
     LlmModelConfig,
     LlmModelPlatform,
 )
-from .prompt_recommendations import (
+from backend.app.ai.prompt_recommendations import (
     active_recommendations,
     dismiss_recommendation,
     recommendation_out,
     refresh_recommendations_for_user_profile,
 )
-from .applog import log_event
-from .stock_agent import run_agent_events
-from .stock_tools import stock_strategy_payload
-from .settings import settings
+from backend.app.core.applog import log_event
+from backend.app.agents.stock_agent import run_agent_events
+from backend.app.market.stock_tools import stock_strategy_payload
+from backend.app.core.settings import settings
 
 
 router = APIRouter(prefix="/api", tags=["ai"])

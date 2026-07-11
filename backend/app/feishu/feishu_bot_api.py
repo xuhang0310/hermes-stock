@@ -8,12 +8,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .auth import AuthContext, require_permission
-from .database import get_db
-from .feishu import decrypt_value, encrypt_value, is_cipher_invalid
-from .feishu_bot import bot_runtime, fetch_bot_info, fetch_tenant_token, restart_bot
-from .models import DigitalHumanProfile
-from .settings import settings
+from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.core.database import get_db
+from backend.app.feishu.feishu import decrypt_value, encrypt_value, is_cipher_invalid
+from backend.app.feishu.feishu_bot import bot_runtime, fetch_bot_info, fetch_tenant_token, restart_bot
+from backend.app.core.models import DigitalHumanProfile
+from backend.app.core.settings import settings
 
 
 router = APIRouter(prefix="/api", tags=["feishu-bot"])

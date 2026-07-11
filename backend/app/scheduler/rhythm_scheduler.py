@@ -20,9 +20,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
-from .database import SessionLocal
-from .feishu import send_alert, send_feishu
-from .models import (
+from backend.app.core.database import SessionLocal
+from backend.app.feishu.feishu import send_alert, send_feishu
+from backend.app.core.models import (
     AgentReport,
     DataSourceConfig,
     DigitalHumanProfile,
@@ -31,8 +31,8 @@ from .models import (
     ScheduledJob,
     SystemLog,
 )
-from .settings import settings
-from .stock_agent import run_agent_events
+from backend.app.core.settings import settings
+from backend.app.agents.stock_agent import run_agent_events
 
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -130,7 +130,7 @@ def _is_due(job: ScheduledJob, now: datetime) -> bool:
 # 小工具：日志 / 心跳 / 模板渲染
 # --------------------------------------------------------------------------- #
 def _log(level: str, message: str, context: dict | None = None) -> None:
-    from .applog import log_event
+    from backend.app.core.applog import log_event
 
     log_event("scheduler", level, message, context=context)
 
@@ -277,7 +277,7 @@ def _run_health_check(now: datetime) -> str:
         session.commit()
 
     # 借每日健康检查清理一次过期 system_logs，避免只增表无限膨胀
-    from .applog import prune_system_logs
+    from backend.app.core.applog import prune_system_logs
 
     prune_system_logs()
 

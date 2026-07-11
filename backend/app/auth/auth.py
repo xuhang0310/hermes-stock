@@ -16,9 +16,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .database import get_db
-from .models import User
-from .settings import settings
+from backend.app.core.database import get_db
+from backend.app.core.models import User
+from backend.app.core.settings import settings
 
 
 TOKEN_TTL_SECONDS = 60 * 60 * 12

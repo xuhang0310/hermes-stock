@@ -8,9 +8,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .auth import AuthContext, require_permission
-from .database import get_db
-from .feishu import (
+from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.core.database import get_db
+from backend.app.feishu.feishu import (
     BUILTIN_CHANNEL_KEYS,
     decrypt_value,
     encrypt_value,
@@ -20,9 +20,9 @@ from .feishu import (
     test_channel,
     validate_webhook_url,
 )
-from .models import Heartbeat, JobRun, NotifyChannel, ScheduledJob, SystemLog
-from .rhythm_scheduler import DH_TO_AGENT, HEARTBEAT_COMPONENT, dispatch_manual_run, is_trading_day, now_sh
-from .settings import settings
+from backend.app.core.models import Heartbeat, JobRun, NotifyChannel, ScheduledJob, SystemLog
+from backend.app.scheduler.rhythm_scheduler import DH_TO_AGENT, HEARTBEAT_COMPONENT, dispatch_manual_run, is_trading_day, now_sh
+from backend.app.core.settings import settings
 
 
 router = APIRouter(prefix="/api", tags=["rhythm"])

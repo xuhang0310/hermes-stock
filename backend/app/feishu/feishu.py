@@ -14,8 +14,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Notification, NotifyChannel, SystemLog
-from .settings import settings
+from backend.app.core.models import Notification, NotifyChannel, SystemLog
+from backend.app.core.settings import settings
 
 
 ALERT_CHANNEL_KEY = "feishu-alert"
@@ -154,7 +154,7 @@ def _post_with_retry(url: str, payload: dict, attempts: int = 3) -> tuple[bool, 
 
 def _log(db: Session, level: str, message: str, context: dict | None = None) -> None:
     # db 参数保留以兼容调用点；实际改由统一日志中枢独立事务写入 + 落进程日志文件
-    from .applog import log_event
+    from backend.app.core.applog import log_event
 
     log_event("feishu", level, message, context=context)
 

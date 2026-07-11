@@ -13,8 +13,8 @@ import httpx
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
-from .database import SessionLocal, engine
-from .digital_human_tools import (
+from backend.app.core.database import SessionLocal, engine
+from backend.app.market.digital_human_tools import (
     digital_human_observation_preview,
     digital_human_skill_prompt,
     digital_human_tool_display_name,
@@ -22,9 +22,9 @@ from .digital_human_tools import (
     digital_human_tool_schemas,
     execute_digital_human_tool,
 )
-from .models import LlmModelConfig
-from .settings import settings
-from .stock_tools import (
+from backend.app.core.models import LlmModelConfig
+from backend.app.core.settings import settings
+from backend.app.market.stock_tools import (
     STOCK_TOOL_SCHEMAS,
     execute_stock_tool,
     stock_tool_display_name,
@@ -33,7 +33,7 @@ from .stock_tools import (
 )
 
 
-AUDIT_LOG = Path(__file__).resolve().parents[1] / "agent_audit.log"
+AUDIT_LOG = Path(__file__).resolve().parents[2] / "agent_audit.log"  # agents/ -> app/ -> backend/
 MAX_ROWS = 100
 OBSERVATION_CHAR_LIMIT = 7000
 
@@ -200,7 +200,7 @@ def _audit(record: dict) -> None:
     except OSError:
         pass
     try:  # 同时并入统一日志文件（agent_sql 高频，仅落文件不入库）
-        from .applog import get_logger
+        from backend.app.core.applog import get_logger
 
         summary = {k: record.get(k) for k in ("tool", "rows", "ms", "error", "rejected") if record.get(k) is not None}
         get_logger("agent_sql").info(json.dumps(summary, ensure_ascii=False))

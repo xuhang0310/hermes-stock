@@ -118,11 +118,11 @@ os.environ.setdefault("STOCK_DB_USER", os.getenv("RABBIT_DB_USER", "root"))
 os.environ.setdefault("STOCK_DB_PASSWORD", os.getenv("RABBIT_DB_PASSWORD", ""))
 os.environ["STOCK_DB_NAME"] = "hermes-stock"
 
-from backend.app.database import initialize_default_database, session_scope  # noqa: E402
-from backend.app.auth import hash_password  # noqa: E402
+from backend.app.core.database import initialize_default_database, session_scope  # noqa: E402
+from backend.app.auth.auth import hash_password  # noqa: E402
 from backend.app.main import create_app  # noqa: E402
-from backend.app.models import User  # noqa: E402
-from backend.app.seed import seed_demo  # noqa: E402
+from backend.app.core.models import User  # noqa: E402
+from backend.app.seed.seed import seed_demo  # noqa: E402
 
 
 class BackendApiTests(unittest.TestCase):

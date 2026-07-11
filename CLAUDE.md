@@ -41,33 +41,49 @@ Health check: `http://127.0.0.1:8000/api/health`.
 
 ## Configuration & environment
 
-- **MySQL only.** `database.py` hard-rejects any URL that is not `mysql+pymysql://` — there is no SQLite path.
-- Settings resolution order (`backend/app/settings.py`): it loads a **hardcoded** `hermes-rabbit/backend/.env` (`C:\Users\Administrator\Documents\hermes-rabbit\backend\.env`, `RABBIT_DB_*` etc.) first without override, then `backend/.env` (`STOCK_*`) with override. So `STOCK_*` wins, falling back to `RABBIT_*`. The database name is forced to `hermes-stock` by default regardless of the rabbit env.
+- **MySQL only.** `core/database.py` hard-rejects any URL that is not `mysql+pymysql://` — there is no SQLite path.
+- Settings resolution order (`backend/app/core/settings.py`): it loads a **hardcoded** `hermes-rabbit/backend/.env` (`C:\Users\Administrator\Documents\hermes-rabbit\backend\.env`, `RABBIT_DB_*` etc.) first without override, then `backend/.env` (`STOCK_*`) with override. So `STOCK_*` wins, falling back to `RABBIT_*`. The database name is forced to `hermes-stock` by default regardless of the rabbit env.
 - `DATABASE_URL` (full SQLAlchemy URL), if set, overrides all `STOCK_DB_*`/`RABBIT_DB_*` pieces.
 - `backend/.env` is git-ignored; `backend/.env.example` documents DB keys. LLM/data-source keys: `STOCK_LLM_BASE_URL`, `STOCK_LLM_API_KEY`, `STOCK_LLM_MODEL`, `STOCK_AGENT_MAX_STEPS`, `STOCK_TUSHARE_TOKEN`, `STOCK_TAVILY_API_KEY`. Admin bootstrap: `STOCK_ADMIN_USERNAME`/`STOCK_ADMIN_PASSWORD` are **not** hardcoded (default empty). An initial `super_admin` is seeded **only** when both are set in env **and** the users table has no enabled user; otherwise no default account is created — create users directly in the DB.
-- This checkout is **not a git repository** — `git` commands will fail. Don't assume version-control state.
+- This checkout **is** a git repo (remote `origin` = Gitee `china0310/hermes-stock`, default push branch `master`). `backend/.env` is git-ignored — never commit it.
 
 ## Backend architecture
 
-Layered, single-responsibility modules under `backend/app/`:
+Single-responsibility modules grouped into **domain packages** under `backend/app/`. Entry points stay at the top level and must not move: `main.py` (uvicorn serves `backend.app.main:app`) and `scripts_init_db.py` (`python -m backend.app.scripts_init_db`). Internal imports are **absolute** — `from backend.app.<pkg>.<mod> import ...` (not relative dots).
 
-- `settings.py` — frozen dataclass, builds `database_url`.
-- `database.py` — engine/session/`Base`. Schema is created with `Base.metadata.create_all`; there is **no Alembic**. Additive migrations are hand-coded in `_ensure_schema_upgrades()` (raw `information_schema` checks + `ALTER TABLE`). Add new column/index migrations there.
-- `models.py` — all SQLAlchemy models (~35 tables). Groups: instruments/watchlist/positions, market data (`daily_bars`, `documents`), rules/`events`/evidence, agents/reports/risk/reviews, and AI config (`llm_model_platforms`, `llm_model_configs`, `digital_human_profiles`, `ai_chat_sessions`/`messages`). `events` is the central traceability hub. See `docs/database.md`.
-- `repository.py` — `StockRepository`, the single place for read queries and output-dict shaping (dashboard, events, positions, charts, watchlist, reports, risk, logs).
-- `main.py` — `create_app(init_db=True)` factory; the module-level `app` is what uvicorn serves. CRUD/read endpoints live here; AI and auth endpoints are mounted from routers.
-- `auth.py` / `auth_api.py` — custom HMAC-signed JWT-style tokens (not PyJWT), PBKDF2 password hashing. A static `ROLE_PERMISSIONS` map (`super_admin`/`admin`/`researcher`/`viewer`) plus per-user `permission_scope`. **Every** protected endpoint uses `Depends(require_permission("..."))` — follow this pattern for new endpoints rather than checking roles inline.
+```
+backend/app/
+  main.py  scripts_init_db.py      # 入口，勿移动（systemd/uvicorn/命令依赖）
+  core/       settings  database  applog  models
+  auth/       auth  auth_api
+  data/       repository  broker_presets
+  market/     stock_tools  digital_human_tools
+  agents/     stock_agent  position_agent  position_import
+  ai/         ai_api  prompt_recommendations
+  feishu/     feishu(推送)  feishu_bot  feishu_bot_api
+  scheduler/  rhythm_scheduler  rhythm_api
+  seed/       seed
+```
+
+Note: a `__file__`-relative path in a package module resolves via `parents[N]` counted from its **package depth** — e.g. `core/settings.py` uses `parents[2]` to reach `backend/`, `core/applog.py` uses `parents[3]` for the repo root. Adjust N if you move a file between depths.
+
+- `core/settings.py` — frozen dataclass, builds `database_url`.
+- `core/database.py` — engine/session/`Base`. Schema is created with `Base.metadata.create_all`; there is **no Alembic**. Additive migrations are hand-coded in `_ensure_schema_upgrades()` (raw `information_schema` checks + `ALTER TABLE`). Add new column/index migrations there.
+- `core/models.py` — all SQLAlchemy models (~35 tables). Groups: instruments/watchlist/positions, market data (`daily_bars`, `documents`), rules/`events`/evidence, agents/reports/risk/reviews, and AI config (`llm_model_platforms`, `llm_model_configs`, `digital_human_profiles`, `ai_chat_sessions`/`messages`). `events` is the central traceability hub. See `docs/database.md`.
+- `data/repository.py` — `StockRepository`, the single place for read queries and output-dict shaping (dashboard, events, positions, charts, watchlist, reports, risk, logs).
+- `main.py` — `create_app(init_db=True)` factory; the module-level `app` is what uvicorn serves. CRUD/read endpoints live here; AI/auth/scheduler/feishu-bot endpoints are mounted from the routers in `ai/`, `auth/`, `scheduler/`, `feishu/`.
+- `auth/auth.py` / `auth/auth_api.py` — custom HMAC-signed JWT-style tokens (not PyJWT), PBKDF2 password hashing. A static `ROLE_PERMISSIONS` map (`super_admin`/`admin`/`researcher`/`viewer`) plus per-user `permission_scope`. **Every** protected endpoint uses `Depends(require_permission("..."))` — follow this pattern for new endpoints rather than checking roles inline.
 
 ### The ReAct agent (core feature)
 
-`stock_agent.py::run_agent_events(...)` is the heart of the chat system — a synchronous generator implementing a ReAct tool-calling loop against an **OpenAI-compatible** `/chat/completions` endpoint (streamed with `httpx`, parsed by `_parse_sse_events`). It yields typed events (`model_selected`, `reasoning_delta`, `content_delta`, `content_end`, `action`, `observation`, `tool_start/tool_done`, `error`, `done`).
+`agents/stock_agent.py::run_agent_events(...)` is the heart of the chat system — a synchronous generator implementing a ReAct tool-calling loop against an **OpenAI-compatible** `/chat/completions` endpoint (streamed with `httpx`, parsed by `_parse_sse_events`). It yields typed events (`model_selected`, `reasoning_delta`, `content_delta`, `content_end`, `action`, `observation`, `tool_start/tool_done`, `error`, `done`).
 
-- `ai_api.py::agent_chat` (`POST /api/agent/chat`) wraps that generator: it runs the blocking producer in a thread, bridges events into an asyncio queue, streams them to the client as SSE, and persists the final assistant message.
-- **Two chat modes** (`chat_mode`): `research` uses generic DB tools (`run_sql`, `get_schema`) plus per-digital-human tools (`digital_human_tools.py`); `stock` uses the market toolset in `stock_tools.py` (TuShare daily/quotes/indicators, Tavily news search, MA/pattern/chip analysis).
+- `ai/ai_api.py::agent_chat` (`POST /api/agent/chat`) wraps that generator: it runs the blocking producer in a thread, bridges events into an asyncio queue, streams them to the client as SSE, and persists the final assistant message.
+- **Two chat modes** (`chat_mode`): `research` uses generic DB tools (`run_sql`, `get_schema`) plus per-digital-human tools (`market/digital_human_tools.py`); `stock` uses the market toolset in `market/stock_tools.py` (TuShare daily/quotes/indicators, Tavily news search, MA/pattern/chip analysis).
 - The active model is resolved from the DB (`LlmModelConfig` where `is_active`), falling back to `STOCK_LLM_*` env. Model platforms/configs are user-managed via the model-config endpoints.
 - **`run_sql` is a hard read-only sandbox** (`validate_sql` + `FORBIDDEN_SQL` regex): single statement, `SELECT`-only, no comments, no system schemas, auto-`LIMIT`. Every call is appended to `backend/agent_audit.log`. Keep these guards intact.
 
-Adjacent agent flows: `position_agent.py` (natural-language / screenshot position entry, streamed) and `position_import.py` (vision-model screenshot parsing into `position_holding_snapshots`). `prompt_recommendations.py` runs a background scheduler started/stopped in the app lifespan.
+Adjacent agent flows: `agents/position_agent.py` (natural-language / screenshot position entry, streamed) and `agents/position_import.py` (vision-model screenshot parsing into `position_holding_snapshots`). `ai/prompt_recommendations.py` runs a background scheduler started/stopped in the app lifespan.
 
 ## Frontend architecture
 

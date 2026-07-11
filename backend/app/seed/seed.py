@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
-from .auth import hash_password
-from .broker_presets import DEFAULT_BROKER_CODES, broker_name_for
-from .models import (
+from backend.app.auth.auth import hash_password
+from backend.app.data.broker_presets import DEFAULT_BROKER_CODES, broker_name_for
+from backend.app.core.models import (
     AgentProfile,
     AgentReport,
     AgentTask,
@@ -29,7 +29,7 @@ from .models import (
     WatchlistGroup,
     WatchlistItem,
 )
-from .settings import settings
+from backend.app.core.settings import settings
 
 
 def now_utc() -> datetime:
