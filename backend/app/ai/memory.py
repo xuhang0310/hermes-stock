@@ -26,6 +26,7 @@ from backend.app.agents.stock_agent import _active_llm_config
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import AiChatMessage, AiChatSession, UserMemory
+from backend.app.core.settings import settings
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -67,19 +68,23 @@ def _ensure_chroma() -> tuple[Any, Any, int]:
         _CHROMA_PATH.mkdir(parents=True, exist_ok=True)
         _chroma_client = chromadb.PersistentClient(path=str(_CHROMA_PATH))
 
-        # 尝试用 LLM 提供商的 embeddings API
-        llm_config = _active_llm_config()
-        if llm_config["api_key"] and llm_config["base_url"]:
+        # 优先用独立配置的 embeddings 服务（与聊天模型解耦，见 STOCK_EMBEDDING_*）；
+        # 未配置时回退到活跃 LLM 提供商的 /embeddings。
+        emb_base = settings.embedding_base_url
+        emb_key = settings.embedding_api_key
+        emb_model = settings.embedding_model or "text-embedding-3-small"
+        if not (emb_base and emb_key):
+            llm_config = _active_llm_config()
+            emb_base = llm_config.get("base_url") or ""
+            emb_key = llm_config.get("api_key") or ""
+        if emb_base and emb_key:
             try:
-                _embedding_fn = _RemoteEmbeddingFunction(
-                    base_url=llm_config["base_url"],
-                    api_key=llm_config["api_key"],
-                )
-                _embedding_dim = _embedding_fn.dim
-                # 测试连通性
+                _embedding_fn = _RemoteEmbeddingFunction(base_url=emb_base, api_key=emb_key, model=emb_model)
+                # 测试连通性（同时探测真实维度）
                 test_vec = _embedding_fn(["test"])
                 if test_vec and len(test_vec[0]) > 0:
-                    log_event("agent", "INFO", f"使用远程嵌入 API，维度={_embedding_dim}", to_db=False)
+                    _embedding_dim = _embedding_fn.dim
+                    log_event("agent", "INFO", f"使用远程嵌入 API（{emb_model}），维度={_embedding_dim}", to_db=False)
                     return _chroma_client, _embedding_fn, _embedding_dim
             except Exception:
                 log_event("agent", "WARNING", "远程嵌入 API 不可用，降级到本地模型", to_db=False)
@@ -108,14 +113,15 @@ def _ensure_chroma() -> tuple[Any, Any, int]:
 class _RemoteEmbeddingFunction:
     """OpenAI-compatible /embeddings API 封装，同时探测维度。"""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, model: str = "text-embedding-3-small"):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._model = model
         self.dim = 0
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
         url = self._base_url + "/embeddings"
-        payload = {"input": texts, "model": "text-embedding-3-small"}
+        payload = {"input": texts, "model": self._model}
         headers = {"Authorization": f"Bearer {self._api_key}"}
         with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             resp = client.post(url, json=payload, headers=headers)

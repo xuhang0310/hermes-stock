@@ -32,6 +32,10 @@ class Settings:
     agent_max_steps: int = int(os.getenv("STOCK_AGENT_MAX_STEPS", os.getenv("RABBIT_AGENT_MAX_STEPS", "6")))
     tushare_token: str = os.getenv("STOCK_TUSHARE_TOKEN", os.getenv("TUSHARE_TOKEN", ""))
     tavily_api_key: str = os.getenv("STOCK_TAVILY_API_KEY", os.getenv("TAVILY_API_KEY", ""))
+    # 向量记忆嵌入服务（与聊天模型解耦；未配置则回退活跃 LLM 提供商的 /embeddings）
+    embedding_base_url: str = os.getenv("STOCK_EMBEDDING_BASE_URL", "")
+    embedding_api_key: str = os.getenv("STOCK_EMBEDDING_API_KEY", "")
+    embedding_model: str = os.getenv("STOCK_EMBEDDING_MODEL", "")
     # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号
     admin_username: str = os.getenv("STOCK_ADMIN_USERNAME", "")
     admin_password: str = os.getenv("STOCK_ADMIN_PASSWORD", "")
