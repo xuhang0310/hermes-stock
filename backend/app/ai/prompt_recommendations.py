@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import desc, func, select
+import httpx
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from backend.app.agents.stock_agent import _active_llm_config
+from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import (
     AiChatMessage,
@@ -39,6 +43,11 @@ class CandidatePrompt:
     reason: str
     source_type: str
     score: float
+
+
+# ---------------------------------------------------------------------------
+# 公共 API（保留不变）
+# ---------------------------------------------------------------------------
 
 
 def recommendation_out(row: AiPromptRecommendation) -> dict[str, Any]:
@@ -79,10 +88,11 @@ def refresh_recommendations_for_user_profile(
     profile: DigitalHumanProfile,
     chat_mode: str = "research",
 ) -> list[AiPromptRecommendation]:
+    """为一个用户+数字人组合刷新推荐（LLM 驱动，失败时走 fallback）。"""
     context = _collect_context(db, user_id=user_id, digital_human_id=profile.id, chat_mode=chat_mode)
-    candidates = _build_candidates(profile.code, context)
+    candidates = _build_candidates(profile, context)
     if not candidates:
-        candidates = _fallback_candidates(profile.code, context)
+        candidates = _fallback_candidates(profile)
 
     now = datetime.now()
     expires_at = now + timedelta(hours=RECOMMENDATION_TTL_HOURS)
@@ -123,7 +133,9 @@ def refresh_recommendations_for_user_profile(
 def refresh_all_recommendations(db: Session) -> int:
     users = db.scalars(select(User).where(User.is_enabled.is_(True))).all()
     profiles = db.scalars(
-        select(DigitalHumanProfile).where(DigitalHumanProfile.status == "enabled").order_by(DigitalHumanProfile.sort_order, DigitalHumanProfile.id)
+        select(DigitalHumanProfile)
+        .where(DigitalHumanProfile.status == "enabled")
+        .order_by(DigitalHumanProfile.sort_order, DigitalHumanProfile.id)
     ).all()
     count = 0
     for user in users:
@@ -140,6 +152,11 @@ def dismiss_recommendation(db: Session, *, user_id: int, recommendation_id: int)
     row.status = "dismissed"
     db.commit()
     return True
+
+
+# ---------------------------------------------------------------------------
+# 后台调度器（保留不变）
+# ---------------------------------------------------------------------------
 
 
 def start_prompt_recommendation_scheduler() -> None:
@@ -174,23 +191,37 @@ def _refresh_all_in_new_session() -> None:
         refresh_all_recommendations(db)
 
 
+# ---------------------------------------------------------------------------
+# 上下文收集（简化：去掉 keyword_counts，增加 assistant 消息）
+# ---------------------------------------------------------------------------
+
+
 def _collect_context(db: Session, *, user_id: int, digital_human_id: int, chat_mode: str) -> dict[str, Any]:
+    """收集用户上下文：对话历史、持仓、自选、风险、事件。"""
     since = datetime.now() - timedelta(days=30)
     messages = db.execute(
-        select(AiChatMessage.content, AiChatMessage.created_at)
+        select(AiChatMessage.role, AiChatMessage.content, AiChatMessage.created_at)
         .join(AiChatSession, AiChatSession.id == AiChatMessage.session_id)
         .where(
             AiChatSession.user_id == user_id,
             AiChatSession.digital_human_id == digital_human_id,
             AiChatSession.chat_mode == chat_mode,
-            AiChatMessage.role == "user",
             AiChatMessage.created_at >= since,
         )
-        .order_by(desc(AiChatMessage.id))
-        .limit(40)
+        .order_by(AiChatMessage.id.desc())
+        .limit(60)
     ).all()
-    message_texts = [content for content, _ in messages if content]
-    symbols = _symbols_from_texts(message_texts)
+
+    message_dicts = [
+        {"role": role, "content": content or ""}
+        for role, content, _ in messages
+        if content
+    ]
+    # 反向排列，让 LLM 按时间顺序阅读
+    message_dicts.reverse()
+
+    user_texts = [m["content"] for m in message_dicts if m["role"] == "user"]
+    symbols = _symbols_from_texts(user_texts)
 
     positions = db.execute(
         select(Position, Instrument.name)
@@ -229,185 +260,218 @@ def _collect_context(db: Session, *, user_id: int, digital_human_id: int, chat_m
         }
         for item, name in positions
     ]
-    watch_rows = [{"symbol": item.symbol, "name": name or item.symbol, "group": group or "默认", "reason": item.reason} for item, name, group in watchlist]
+    watch_rows = [
+        {"symbol": item.symbol, "name": name or item.symbol, "group": group or "默认", "reason": item.reason}
+        for item, name, group in watchlist
+    ]
     for row in position_rows + watch_rows:
         if row["symbol"] not in symbols:
             symbols.append(row["symbol"])
 
     return {
-        "messages": message_texts,
+        "messages": message_dicts,
         "symbols": symbols[:8],
         "positions": position_rows,
         "watchlist": watch_rows,
         "risks": [{"symbol": s, "level": l, "type": t, "finding": f} for s, l, t, f in risks],
         "events": [{"symbol": s, "level": l, "title": t} for s, l, t in events],
-        "keyword_counts": _keyword_counts(message_texts),
     }
 
 
-def _build_candidates(code: str, context: dict[str, Any]) -> list[CandidatePrompt]:
-    builders = {
-        "stock-pm": _pm_candidates,
-        "risk-officer": _risk_candidates,
-        "market-sentinel": _sentinel_candidates,
-        "research-analyst": _research_candidates,
-        "intelligence-officer": _intelligence_candidates,
-        "quant-analyst": _quant_candidates,
-        "macro-strategist": _macro_candidates,
-        "short-term-hunter": _hunter_candidates,
-    }
-    return builders.get(code, _pm_candidates)(context)
+# ---------------------------------------------------------------------------
+# LLM 驱动的推荐生成（新核心逻辑）
+# ---------------------------------------------------------------------------
 
 
-def _fallback_candidates(code: str, context: dict[str, Any]) -> list[CandidatePrompt]:
-    return {
-        "stock-pm": [
-            CandidatePrompt("今天有哪些需要优先处理的事件？", "总调度默认入口，适合先看全局优先级。", "role_default", 40),
-            CandidatePrompt("把自选和持仓的重点列出来", "总调度需要先建立今日观察范围。", "role_default", 38),
-        ],
-        "risk-officer": [
-            CandidatePrompt("当前持仓是否触发风控？", "风控官默认入口，先检查持仓风险。", "role_default", 40),
-            CandidatePrompt("帮我反驳一下当前持仓逻辑", "风控官适合做反方论证。", "role_default", 36),
-        ],
-        "market-sentinel": [
-            CandidatePrompt("最近的L0事件是什么？", "盘中哨兵默认关注事件优先级。", "role_default", 40),
-            CandidatePrompt("哪些事件需要立即通知？", "盘中哨兵适合做通知判断。", "role_default", 36),
-        ],
-        "research-analyst": [
-            CandidatePrompt("哪些标的缺少研究证据？", "研究员默认先找证据缺口。", "role_default", 40),
-            CandidatePrompt("把报告结论整理成表格", "研究员适合整理已有证据。", "role_default", 36),
-        ],
-        "intelligence-officer": [
-            CandidatePrompt("汇总最近影响持仓和自选池的情报", "情报官默认入口，先做消息过滤和来源分层。", "role_default", 40),
-            CandidatePrompt("把外部消息按可信度排序并标出待核验项", "情报官需要先核验来源，再转交研究或风控。", "role_default", 36),
-        ],
-        "quant-analyst": [
-            CandidatePrompt("比较持仓和自选池的量化信号", "量化分析师默认先做组合内横向比较。", "role_default", 40),
-            CandidatePrompt("列出数据不足无法判断的标的", "量化分析师必须先说明样本和数据缺口。", "role_default", 36),
-        ],
-        "macro-strategist": [
-            CandidatePrompt("当前宏观背景对持仓有什么影响？", "宏观策略师默认把宏观叙事落到持仓和自选池。", "role_default", 40),
-            CandidatePrompt("列出需要跟踪的宏观验证指标", "宏观策略师需要把判断变成可验证指标。", "role_default", 36),
-        ],
-        "short-term-hunter": [
-            CandidatePrompt("扫描自选和持仓里的短线候选", "短线猎手默认只在自选和持仓范围内扫描。", "role_default", 40),
-            CandidatePrompt("列出需要冷静观察、不能追高的标的", "短线猎手必须优先提示纪律和风险。", "role_default", 36),
-        ],
-    }.get(code, [])
+def _build_candidates(profile: DigitalHumanProfile, context: dict[str, Any]) -> list[CandidatePrompt]:
+    """使用 LLM 分析对话历史并生成推荐。无对话或 LLM 失败时返回空列表。"""
+    if not context["messages"]:
+        return []
+    return _call_llm_for_recommendations(profile, context)
 
 
-def _pm_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("根据最近对话，生成今天的A股研究总调度清单", "你最近在数字人中心持续使用总调度入口，适合先汇总全局事项。", "history", 88),
-        CandidatePrompt("把当前持仓和自选池按处理优先级排序", "系统已有持仓/自选池，适合总调度统一排优先级。", "position", 84),
+def _fallback_candidates(profile: DigitalHumanProfile) -> list[CandidatePrompt]:
+    """LLM 生成失败时，从数字人的 quick_prompts_json 读取备用提示词。"""
+    try:
+        items = json.loads(profile.quick_prompts_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(items, list):
+        return []
+    result: list[CandidatePrompt] = []
+    for item in items:
+        if isinstance(item, str):
+            result.append(CandidatePrompt(item, "角色预设提示词", "fallback", 30))
+        elif isinstance(item, dict):
+            result.append(CandidatePrompt(
+                str(item.get("text", item.get("prompt", ""))),
+                str(item.get("reason", "角色预设提示词")),
+                "fallback",
+                float(item.get("score", 30)),
+            ))
+    return [c for c in result if c.text]
+
+
+def _call_llm_for_recommendations(
+    profile: DigitalHumanProfile,
+    context: dict[str, Any],
+) -> list[CandidatePrompt]:
+    """调用 LLM 分析对话并生成推荐。失败返回空列表。"""
+    try:
+        llm_config = _active_llm_config()
+        if not llm_config["api_key"] or not llm_config["base_url"]:
+            log_event("agent", "WARNING", "LLM 推荐跳过：未配置 API Key/Base URL", to_db=False)
+            return []
+
+        messages = _build_llm_messages(profile, context)
+        url = llm_config["base_url"].rstrip("/") + "/chat/completions"
+        payload: dict[str, Any] = {
+            "model": llm_config["model"],
+            "messages": messages,
+            "temperature": 0,
+            "stream": False,
+        }
+        headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
+        with httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
+            response = client.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                body = response.text[:300]
+                raise RuntimeError(f"LLM 返回 {response.status_code}: {body}")
+
+        data = response.json()
+        content = data["choices"][0]["message"]["content"]
+        parsed = _extract_json(content)
+        return _parse_llm_response(parsed)
+    except Exception:
+        log_event("agent", "WARNING", "LLM 推荐生成失败，将使用 fallback", to_db=False)
+        return []
+
+
+def _build_llm_messages(profile: DigitalHumanProfile, context: dict[str, Any]) -> list[dict[str, str]]:
+    """构建发送给 LLM 的消息（system + user）。"""
+    system_prompt = (
+        "你是一个用户意图分析专家，为股票研究平台的用户生成个性化后续提问推荐。\n"
+        "\n"
+        "你需要：\n"
+        "1. 分析用户的历史对话，提取关注点、未解决问题、研究缺口\n"
+        "2. 根据当前数字人角色的定位，生成 5-8 条最有价值的推荐提问\n"
+        "3. 每条推荐的分数应反映其对用户的紧迫性和相关性（0-100，分数越高越紧急）\n"
+        "\n"
+        "输出严格的 JSON 格式，不要包含其他文字。"
+    )
+
+    # 最近的对话（最多 20 条）
+    recent = context["messages"][-20:]
+    convo_lines: list[str] = []
+    for msg in recent:
+        role_label = "用户" if msg["role"] == "user" else "助手"
+        snippet = msg["content"][:500]
+        convo_lines.append(f"[{role_label}] {snippet}")
+
+    # 持仓
+    pos_lines: list[str] = []
+    for p in context["positions"]:
+        parts = [f"{p['symbol']} {p['name']}", f"仓位{p['position_pct']}%"]
+        if p.get("stop_price"):
+            parts.append(f"止损{p['stop_price']}")
+        if p.get("thesis"):
+            parts.append(f"逻辑：{p['thesis'][:100]}")
+        pos_lines.append("  " + " | ".join(parts))
+
+    # 自选
+    wl_lines: list[str] = []
+    for w in context["watchlist"]:
+        parts = [f"{w['symbol']} {w['name']}", f"分组：{w['group']}"]
+        if w.get("reason"):
+            parts.append(f"理由：{w['reason'][:80]}")
+        wl_lines.append("  " + " | ".join(parts))
+
+    # 事件
+    ev_lines: list[str] = []
+    for e in context["events"][:10]:
+        ev_lines.append(f"  [{e['level']}] {e['symbol']} {e['title']}")
+
+    user_message = (
+        f"【当前角色】\n"
+        f"名称：{profile.name}\n"
+        f"定位：{profile.description}\n"
+        f"角色说明：{profile.system_prompt[:800]}\n"
+        f"\n"
+        f"【用户最近对话】（共 {len(context['messages'])} 条消息，{'有历史对话' if convo_lines else '暂无对话记录'}）\n"
+        f"{chr(10).join(convo_lines) if convo_lines else '（暂无对话记录）'}\n"
+        f"\n"
+        f"【用户当前持仓】\n"
+        f"{chr(10).join(pos_lines) if pos_lines else '（暂无持仓）'}\n"
+        f"\n"
+        f"【用户自选池】\n"
+        f"{chr(10).join(wl_lines) if wl_lines else '（暂无自选）'}\n"
+        f"\n"
+        f"【最近系统事件】\n"
+        f"{chr(10).join(ev_lines) if ev_lines else '（暂无事件）'}\n"
+        f"\n"
+        f"请分析并生成推荐。只输出如下 JSON：\n"
+        f'{{"analysis":{{"focus_symbols":["代码"],"topics":["主题"],"unresolved":["未解决问题"],"gaps":["研究缺口"]}},'
+        f'"recommendations":[{{"text":"提问文本（不超过100字）","reason":"推荐理由","score":85,"source_type":"llm"}}]}}'
+    )
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
     ]
-    if context["events"]:
-        items.append(CandidatePrompt("今天有哪些事件需要优先处理？", f"系统最近有 {len(context['events'])} 条事件记录。", "event", 82))
-    if context["risks"]:
-        items.append(CandidatePrompt("目前系统里最大的风险是什么？", f"系统最近有 {len(context['risks'])} 条风险记录。", "risk", 80))
-    for symbol in context["symbols"][:2]:
-        items.append(CandidatePrompt(f"围绕 {symbol} 生成下一步行动清单", "该标的出现在最近对话或当前持仓/自选池中。", "history", 76))
-    if _mentioned(context, "日报"):
-        items.append(CandidatePrompt("继续生成一份A股研究台日报，并突出未闭环事项", "你最近多次提到日报。", "history", 90))
-    return items
 
 
-def _risk_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("检查当前持仓是否触发止损或仓位风险", "风控官会优先基于 open positions 做风险判断。", "position", 88),
-        CandidatePrompt("列出当前持仓里缺少止损价或风险说明的标的", "持仓台账需要补齐风控字段。", "position", 84),
-    ]
-    for row in context["positions"][:3]:
-        symbol = row["symbol"]
-        if not row.get("stop_price"):
-            items.append(CandidatePrompt(f"给 {symbol} 补一套止损和撤退条件", "该持仓缺少止损价。", "position", 90))
-        items.append(CandidatePrompt(f"反驳一下 {symbol} 当前持仓逻辑", "风控官适合做反方论证。", "position", 78))
-    if context["risks"]:
-        items.append(CandidatePrompt("把最近风险记录按严重程度排序并给出处理建议", f"系统最近有 {len(context['risks'])} 条风险记录。", "risk", 86))
-    if _mentioned(context, "止损") or _mentioned(context, "风险"):
-        items.append(CandidatePrompt("复盘最近对话里提到的风险点，找出还没闭环的部分", "你最近关注风险/止损类问题。", "history", 92))
-    return items
+def _extract_json(text: str) -> dict[str, Any]:
+    """从 LLM 响应中安全提取 JSON，支持 code block 包裹和不完整截断。"""
+    # 直接解析
+    try:
+        return json.loads(text)  # type: ignore[no-any-return]
+    except json.JSONDecodeError:
+        pass
+
+    # 从 ```json ... ``` 中提取
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())  # type: ignore[no-any-return]
+        except json.JSONDecodeError:
+            pass
+
+    # 从最外层 { } 中提取
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m:
+        try:
+            return json.loads(m.group(0))  # type: ignore[no-any-return]
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"无法从 LLM 响应中提取 JSON，原始文本前 200 字符：{text[:200]}")
 
 
-def _sentinel_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("检查持仓和自选池里有没有需要通知的异动", "盘中哨兵默认关注通知价值。", "event", 88),
-        CandidatePrompt("按标的汇总最近事件，并标记噪音和有效信号", "盘中哨兵适合做事件去重。", "event", 82),
-    ]
-    if context["events"]:
-        items.append(CandidatePrompt("最近的L0/L1事件分别是什么？", f"系统最近有 {len(context['events'])} 条事件记录。", "event", 90))
-    for symbol in context["symbols"][:3]:
-        items.append(CandidatePrompt(f"检查 {symbol} 最近有没有异常事件或需要通知的信号", "该标的出现在最近对话或当前观察范围。", "history", 78))
-    if _mentioned(context, "通知") or _mentioned(context, "异动"):
-        items.append(CandidatePrompt("根据最近对话，判断哪些异动值得通知，哪些只是噪音", "你最近关注通知/异动判断。", "history", 92))
-    return items
+def _parse_llm_response(data: dict[str, Any]) -> list[CandidatePrompt]:
+    """将 LLM 返回的 JSON 解析为 CandidatePrompt 列表。"""
+    recommendations = data.get("recommendations")
+    if not isinstance(recommendations, list):
+        return []
+
+    result: list[CandidatePrompt] = []
+    for item in recommendations:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        result.append(CandidatePrompt(
+            text=text[:500],
+            reason=str(item.get("reason", ""))[:500],
+            source_type=str(item.get("source_type", "llm")),
+            score=min(100.0, max(0.0, float(item.get("score", 50)))),
+        ))
+    return result
 
 
-def _research_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("识别当前持仓和自选池里缺少研究证据的标的", "研究员默认先检查证据缺口。", "research", 88),
-        CandidatePrompt("把最近对话里提到的标的整理成研究优先级", "根据历史对话生成研究任务。", "history", 84),
-    ]
-    for symbol in context["symbols"][:4]:
-        items.append(CandidatePrompt(f"给 {symbol} 生成一份研究备忘录", "该标的出现在最近对话或当前观察范围。", "history", 82))
-        items.append(CandidatePrompt(f"梳理 {symbol} 的事件、报告和研究缺口", "研究员适合补齐个股证据链。", "research", 78))
-    if _mentioned(context, "报告") or _mentioned(context, "研究"):
-        items.append(CandidatePrompt("把最近讨论过的报告结论整理成表格", "你最近关注报告/研究整理。", "history", 90))
-    return items
-
-
-def _intelligence_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("汇总最近影响持仓和自选池的情报", "情报官默认先做消息过滤和来源分层。", "event", 88),
-        CandidatePrompt("把外部消息按可信度排序并标出待核验项", "情报官需要先核验来源，再转交研究或风控。", "history", 84),
-    ]
-    if context["events"]:
-        items.append(CandidatePrompt("把最近事件按来源、级别和影响方向整理出来", f"系统最近有 {len(context['events'])} 条事件记录。", "event", 90))
-    for symbol in context["symbols"][:3]:
-        items.append(CandidatePrompt(f"检查 {symbol} 最近有没有公告、政策或舆情需要核验", "该标的出现在持仓/自选池或最近对话中。", "history", 80))
-    if _mentioned(context, "通知") or _mentioned(context, "异动"):
-        items.append(CandidatePrompt("把最近提到的异动消息分成有效情报和噪音", "你最近关注通知/异动判断。", "history", 88))
-    return items
-
-
-def _quant_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("比较持仓和自选池的量化信号", "量化分析师默认先做组合内横向比较。", "position", 88),
-        CandidatePrompt("列出数据不足无法判断的标的", "量化分析师必须先说明样本和数据缺口。", "research", 82),
-    ]
-    for symbol in context["symbols"][:4]:
-        items.append(CandidatePrompt(f"给 {symbol} 生成量化信号快照", "该标的出现在持仓/自选池或最近对话中。", "history", 84))
-    if context["positions"]:
-        items.append(CandidatePrompt("按放量、回撤和相对强弱给当前持仓排序", "系统已有 open positions，可做横向因子比较。", "position", 86))
-    return items
-
-
-def _macro_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("当前宏观背景对持仓有什么影响？", "宏观策略师默认把宏观叙事落到持仓和自选池。", "position", 88),
-        CandidatePrompt("列出需要跟踪的宏观验证指标", "宏观策略师需要把判断变成可验证指标。", "role_default", 82),
-    ]
-    if context["watchlist"] or context["positions"]:
-        items.append(CandidatePrompt("给自选池和持仓做一版宏观敏感性检查", "系统已有持仓/自选池，可映射宏观影响链。", "position", 86))
-    if context["events"]:
-        items.append(CandidatePrompt("把最近事件放到政策和行业轮动框架里解释", f"系统最近有 {len(context['events'])} 条事件记录。", "event", 80))
-    for symbol in context["symbols"][:2]:
-        items.append(CandidatePrompt(f"分析宏观和行业环境对 {symbol} 的影响", "该标的出现在当前观察范围内。", "history", 78))
-    return items
-
-
-def _hunter_candidates(context: dict[str, Any]) -> list[CandidatePrompt]:
-    items = [
-        CandidatePrompt("扫描自选和持仓里的短线候选", "短线猎手默认只在自选和持仓范围内扫描。", "position", 88),
-        CandidatePrompt("列出需要冷静观察、不能追高的标的", "短线猎手必须优先提示纪律和风险。", "risk", 84),
-    ]
-    if context["events"]:
-        items.append(CandidatePrompt("哪些事件可能形成短线情绪催化？", f"系统最近有 {len(context['events'])} 条事件记录。", "event", 86))
-    for symbol in context["symbols"][:4]:
-        items.append(CandidatePrompt(f"检查 {symbol} 是否有短线放量、异动或热点信号", "该标的出现在持仓/自选池或最近对话中。", "history", 82))
-    if _mentioned(context, "异动"):
-        items.append(CandidatePrompt("把最近异动标的按短线纪律重新排序", "你最近关注异动信号。", "history", 90))
-    return items
+# ---------------------------------------------------------------------------
+# 去重 & 代码提取工具
+# ---------------------------------------------------------------------------
 
 
 def _dedupe_candidates(candidates: list[CandidatePrompt]) -> list[CandidatePrompt]:
@@ -446,13 +510,3 @@ def _normalize_symbol(raw: str) -> str | None:
             return f"{value}.BJ"
         return f"{value}.SZ"
     return None
-
-
-def _keyword_counts(texts: list[str]) -> dict[str, int]:
-    keywords = ["日报", "风险", "止损", "报告", "研究", "通知", "异动", "自选", "持仓", "政策", "公告", "宏观", "量化", "短线", "热点"]
-    joined = "\n".join(texts)
-    return {keyword: joined.count(keyword) for keyword in keywords}
-
-
-def _mentioned(context: dict[str, Any], keyword: str) -> bool:
-    return int(context.get("keyword_counts", {}).get(keyword, 0)) > 0
