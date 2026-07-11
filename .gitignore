@@ -22,3 +22,4 @@ logs/
 *.log
 tmp/
 backend/agent_audit.log
+backend/chroma_data/

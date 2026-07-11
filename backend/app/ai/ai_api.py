@@ -23,6 +23,7 @@ from backend.app.core.models import (
     LlmModelConfig,
     LlmModelPlatform,
 )
+from backend.app.ai.memory import retrieve_memories, schedule_memory_digestion
 from backend.app.ai.prompt_recommendations import (
     active_recommendations,
     dismiss_recommendation,
@@ -881,6 +882,11 @@ async def agent_chat(
     model_payload = _model_out(model_config) if model_config else None
     digital_human_context = _digital_human_context(context, profile)
     model_config_id = model_config.id if model_config else None
+    # 检索用户长期记忆，注入到 system prompt
+    memory_context = retrieve_memories(
+        db, user_id=context.user.id, query=payload.question,
+        digital_human_id=payload.digital_human_id,
+    )
 
     async def event_stream():
         yield ": connected\n\n"
@@ -911,6 +917,7 @@ async def agent_chat(
                     payload.chat_mode,
                     payload.skills,
                     profile.code if profile else None,
+                    memory_context,
                 ):
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
             except Exception as exc:  # noqa: BLE001
@@ -955,6 +962,8 @@ async def agent_chat(
         if producer.done():
             await producer
         _store_assistant_message(session_id, final_answer, final_error, event_count)
+        # 异步触发记忆消化（不阻塞 SSE 响应）
+        asyncio.create_task(schedule_memory_digestion(session_id, context.user.id, payload.digital_human_id))
         yield _sse_event({"type": "done"})
 
     return StreamingResponse(

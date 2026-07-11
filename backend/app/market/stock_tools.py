@@ -393,8 +393,9 @@ def stock_strategy_payload() -> dict:
     }
 
 
-def stock_system_prompt_with_skills(extra_context: str | None = None, skills: list[str] | None = None) -> str:
+def stock_system_prompt_with_skills(extra_context: str | None = None, skills: list[str] | None = None, memory_context: str = "") -> str:
     context = f"\n\n当前用户与数字人上下文:\n{extra_context.strip()}" if extra_context and extra_context.strip() else ""
+    memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
     selected_ids = set(skills or [])
     selected = [item for item in STOCK_STRATEGIES if item["id"] in selected_ids]
     strategy_block = (
@@ -410,7 +411,7 @@ def stock_system_prompt_with_skills(extra_context: str | None = None, skills: li
 
 当前激活策略:
 {strategy_block}
-
+{memory_block}
 工作规则:
 1. 不要编造行情、新闻、财务或估值数据；缺少 Token 或数据源失败时必须明确说明。
 2. 如果用户只给股票名称或不完整代码，先调用 resolve_stock。

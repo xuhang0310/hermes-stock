@@ -435,6 +435,32 @@ class AiPromptRecommendation(Base):
     digital_human: Mapped[DigitalHumanProfile] = relationship()
 
 
+class UserMemory(Base):
+    """长期用户记忆 — 从对话中异步提取的结构化事实/偏好/决策/缺口。"""
+
+    __tablename__ = "user_memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    digital_human_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("digital_human_profiles.id"))
+    memory_type: Mapped[str] = mapped_column(String(24), nullable=False, default="fact")
+    # fact | preference | decision | gap | interest
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[str | None] = mapped_column(Text)
+    # 来源引用，如 "session:123, 2026-07-11"
+    importance: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+    # active | superseded | archived
+    access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    user: Mapped[User] = relationship()
+    digital_human: Mapped[DigitalHumanProfile | None] = relationship()
+
+
 class AgentProfile(Base):
     __tablename__ = "agent_profiles"
 

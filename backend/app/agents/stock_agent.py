@@ -133,12 +133,13 @@ TOOLS = [
 ]
 
 
-def _system_prompt(extra_context: str | None = None, digital_human_code: str | None = None) -> str:
+def _system_prompt(extra_context: str | None = None, digital_human_code: str | None = None, memory_context: str = "") -> str:
     schema_lines = [
         f"- {table}: {meta['label']}，常用字段 {', '.join(meta['fields'])}"
         for table, meta in SCHEMA_DICTIONARY.items()
     ]
     context = f"\n\n当前数字人职责:\n{extra_context.strip()}" if extra_context and extra_context.strip() else ""
+    memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
     skill_block = digital_human_skill_prompt(digital_human_code)
     return f"""你是 SixRabbits Stock A股多智能体研究台的数据研究数字人，采用 ReAct 方式工作。
 今天日期: {date.today().isoformat()}
@@ -147,7 +148,7 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 {chr(10).join(schema_lines)}
 
 {skill_block}
-
+{memory_block}
 工作规则:
 1. 默认研究范围是系统自己的 open positions 和 active watchlist_items；问题未指定标的时，先分析持仓，再分析自选。
 2. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
@@ -359,14 +360,15 @@ def run_agent_events(
     chat_mode: str = "research",
     skills: list[str] | None = None,
     digital_human_code: str | None = None,
+    memory_context: str = "",
 ) -> Generator[dict, None, None]:
     stock_mode = chat_mode == "stock"
     digital_tool_names = digital_human_tool_names(digital_human_code) if not stock_mode else set()
     tools = STOCK_TOOL_SCHEMAS if stock_mode else [*TOOLS, *digital_human_tool_schemas(digital_human_code)]
     system_prompt = (
-        stock_system_prompt_with_skills(digital_human_context, skills)
+        stock_system_prompt_with_skills(digital_human_context, skills, memory_context)
         if stock_mode
-        else _system_prompt(digital_human_context, digital_human_code)
+        else _system_prompt(digital_human_context, digital_human_code, memory_context)
     )
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     for item in (history or [])[-8:]:
