@@ -50,7 +50,7 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDE_NAMES = {".env", "agent_audit.log"}
-EXCLUDE_DIRS = {"__pycache__", "node_modules", ".venv", ".git"}
+EXCLUDE_DIRS = {"__pycache__", "node_modules", ".venv", ".git", "chroma_data"}
 
 
 def log(msg: str) -> None:
