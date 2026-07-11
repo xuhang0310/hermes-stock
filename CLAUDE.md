@@ -44,7 +44,7 @@ Health check: `http://127.0.0.1:8000/api/health`.
 - **MySQL only.** `core/database.py` hard-rejects any URL that is not `mysql+pymysql://` — there is no SQLite path.
 - Settings resolution order (`backend/app/core/settings.py`): it loads a **hardcoded** `hermes-rabbit/backend/.env` (`C:\Users\Administrator\Documents\hermes-rabbit\backend\.env`, `RABBIT_DB_*` etc.) first without override, then `backend/.env` (`STOCK_*`) with override. So `STOCK_*` wins, falling back to `RABBIT_*`. The database name is forced to `hermes-stock` by default regardless of the rabbit env.
 - `DATABASE_URL` (full SQLAlchemy URL), if set, overrides all `STOCK_DB_*`/`RABBIT_DB_*` pieces.
-- `backend/.env` is git-ignored; `backend/.env.example` documents DB keys. LLM/data-source keys: `STOCK_LLM_BASE_URL`, `STOCK_LLM_API_KEY`, `STOCK_LLM_MODEL`, `STOCK_AGENT_MAX_STEPS`, `STOCK_TUSHARE_TOKEN`, `STOCK_TAVILY_API_KEY`. Admin bootstrap: `STOCK_ADMIN_USERNAME`/`STOCK_ADMIN_PASSWORD` are **not** hardcoded (default empty). An initial `super_admin` is seeded **only** when both are set in env **and** the users table has no enabled user; otherwise no default account is created — create users directly in the DB.
+- `backend/.env` is git-ignored; `backend/.env.example` documents DB keys. LLM/data-source keys: `STOCK_LLM_BASE_URL`, `STOCK_LLM_API_KEY`, `STOCK_LLM_MODEL`, `STOCK_AGENT_MAX_STEPS`, `STOCK_TUSHARE_TOKEN`, `STOCK_TAVILY_API_KEY`. Vector-memory embeddings (`ai/memory.py`, ChromaDB): `STOCK_EMBEDDING_BASE_URL`/`STOCK_EMBEDDING_API_KEY`/`STOCK_EMBEDDING_MODEL` — decoupled from the chat model; if unset it falls back to the active LLM provider's `/embeddings`, and gracefully disables memory if none works. Admin bootstrap: `STOCK_ADMIN_USERNAME`/`STOCK_ADMIN_PASSWORD` are **not** hardcoded (default empty). An initial `super_admin` is seeded **only** when both are set in env **and** the users table has no enabled user; otherwise no default account is created — create users directly in the DB.
 - This checkout **is** a git repo (remote `origin` = Gitee `china0310/hermes-stock`, default push branch `master`). `backend/.env` is git-ignored — never commit it.
 
 ## Backend architecture
@@ -59,7 +59,7 @@ backend/app/
   data/       repository  broker_presets
   market/     stock_tools  digital_human_tools
   agents/     stock_agent  position_agent  position_import
-  ai/         ai_api  prompt_recommendations
+  ai/         ai_api  prompt_recommendations  memory(向量记忆)
   feishu/     feishu(推送)  feishu_bot  feishu_bot_api
   scheduler/  rhythm_scheduler  rhythm_api
   seed/       seed
