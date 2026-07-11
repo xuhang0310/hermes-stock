@@ -36,6 +36,8 @@ class Settings:
     embedding_base_url: str = os.getenv("STOCK_EMBEDDING_BASE_URL", "")
     embedding_api_key: str = os.getenv("STOCK_EMBEDDING_API_KEY", "")
     embedding_model: str = os.getenv("STOCK_EMBEDDING_MODEL", "")
+    # 记忆检索重排模型（复用 embedding 的 base_url/api_key，走同一提供商的 /rerank）；空=关闭重排
+    rerank_model: str = os.getenv("STOCK_RERANK_MODEL", "")
     # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号
     admin_username: str = os.getenv("STOCK_ADMIN_USERNAME", "")
     admin_password: str = os.getenv("STOCK_ADMIN_PASSWORD", "")

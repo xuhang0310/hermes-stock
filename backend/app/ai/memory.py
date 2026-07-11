@@ -35,6 +35,7 @@ from backend.app.core.settings import settings
 DIGEST_MIN_MESSAGES = 4
 DIGEST_LOOKBACK = 20
 MEMORY_RETRIEVAL_LIMIT = 8
+RERANK_POOL = 24  # 开启重排时，先从混合检索取这么多候选，再由 rerank 精排到 MEMORY_RETRIEVAL_LIMIT
 MEMORY_CONTEXT_TOKEN_BUDGET = 800
 MEMORY_TYPES = {"fact": "事实", "preference": "偏好", "decision": "决策", "gap": "缺口", "interest": "关注"}
 
@@ -199,6 +200,31 @@ def _delete_memory_vector(memory_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _rerank(query: str, memories: list[UserMemory], top_n: int) -> list[UserMemory]:
+    """用 rerank 模型对候选记忆按与 query 的相关性精排；任何失败都回退原融合排序。"""
+    if len(memories) <= 1:
+        return memories[:top_n]
+    try:
+        docs = [m.content for m in memories]
+        url = settings.embedding_base_url.rstrip("/") + "/rerank"
+        payload = {"model": settings.rerank_model, "query": query, "documents": docs, "top_n": top_n}
+        headers = {"Authorization": f"Bearer {settings.embedding_api_key}"}
+        with httpx.Client(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+            resp = client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                raise RuntimeError(f"rerank {resp.status_code}: {resp.text[:150]}")
+            results = resp.json().get("results", [])
+        ordered = [
+            memories[r["index"]]
+            for r in results
+            if isinstance(r.get("index"), int) and 0 <= r["index"] < len(memories)
+        ]
+        return ordered[:top_n] if ordered else memories[:top_n]
+    except Exception:
+        log_event("agent", "WARNING", "记忆重排不可用，回退融合排序", to_db=False)
+        return memories[:top_n]
+
+
 def retrieve_memories(
     db: Session,
     *,
@@ -208,7 +234,15 @@ def retrieve_memories(
     limit: int = MEMORY_RETRIEVAL_LIMIT,
 ) -> str:
     """检索与当前查询相关的用户记忆，返回可直接注入 system prompt 的文本块。"""
-    memories = _hybrid_search(db, user_id=user_id, query=query, digital_human_id=digital_human_id, limit=limit)
+    rerank_on = bool(settings.rerank_model and settings.embedding_base_url and settings.embedding_api_key)
+    # 开启重排时先召回更大的候选池（RERANK_POOL），再精排到 limit
+    pool = _hybrid_search(
+        db, user_id=user_id, query=query, digital_human_id=digital_human_id,
+        limit=RERANK_POOL if rerank_on else limit,
+    )
+    if not pool:
+        return ""
+    memories = _rerank(query, pool, top_n=limit) if rerank_on else pool[:limit]
     if not memories:
         return ""
 
