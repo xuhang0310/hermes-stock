@@ -275,6 +275,15 @@ def _data_source_defaults() -> dict[str, dict]:
             "status": "enabled",
             "remark": "问股消息面、新闻、公告和市场叙事搜索源。",
         },
+        "brave": {
+            "provider": "brave",
+            "display_name": "Brave Search",
+            "provider_type": "search",
+            "base_url": "https://api.search.brave.com/res/v1/web/search",
+            "env_has_api_key": bool(settings.brave_api_key),
+            "status": "enabled",
+            "remark": "备选联网搜索源（Brave Search API，GET + X-Subscription-Token）。填 Key 并启用后优先于 Tavily；禁用或留空则自动回退 Tavily。",
+        },
         "embedding": {
             "provider": "embedding",
             "display_name": "向量嵌入",

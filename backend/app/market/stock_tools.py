@@ -16,6 +16,7 @@ from backend.app.core.settings import settings
 
 TUSHARE_URL = "https://api.tushare.pro"
 TAVILY_URL = "https://api.tavily.com/search"
+BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 MAX_DAILY_ROWS = 180
 MAX_MINUTE_ROWS = 8000
 _STOCK_BASIC_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": []}
@@ -1162,30 +1163,61 @@ def search_stock_news(query: str, symbol: str | None = None, max_results: int = 
         keyword = f"{normalize_a_share_symbol(symbol)} {keyword}"
     if not keyword:
         return {"error": "query is empty"}
-    api_key = _data_source_api_key("tavily", settings.tavily_api_key)
-    if not api_key:
-        return {"error": "未配置 STOCK_TAVILY_API_KEY，无法使用 Tavily Search。"}
-    url = _data_source_base_url("tavily", TAVILY_URL)
+    resolved = _resolve_search_source()
+    if not resolved:
+        return {"error": "未配置联网搜索源（Tavily 或 Brave），无法搜索。请在数据源配置页填写 API Key 并启用。"}
+    provider, api_key, url = resolved
 
     started = time.monotonic()
     try:
-        with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-            response = client.post(
-                url,
-                json={
-                    "api_key": api_key,
-                    "query": keyword,
-                    "search_depth": "basic",
-                    "include_answer": False,
-                    "max_results": max_results,
-                },
-            )
-            response.raise_for_status()
-            body = response.json()
+        if provider == "brave":
+            results = _brave_search(url, api_key, keyword, max_results)
+        else:
+            results = _tavily_search(url, api_key, keyword, max_results)
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"Tavily Search 调用失败: {str(exc)[:500]}"}
+        label = "Brave Search" if provider == "brave" else "Tavily Search"
+        return {"error": f"{label} 调用失败: {str(exc)[:500]}"}
 
-    results = []
+    saved = _cache_documents(results, symbol=normalize_a_share_symbol(symbol) if symbol else None)
+    return {
+        "query": keyword,
+        "source": f"{provider}.search",
+        "results": results,
+        "saved_rows": saved,
+        "ms": int((time.monotonic() - started) * 1000),
+    }
+
+
+def _resolve_search_source() -> tuple[str, str, str] | None:
+    """选出当前联网搜索源，返回 (provider, api_key, url)。
+
+    优先级：启用且已配 Key 的 Brave > 启用且已配 Key 的 Tavily；都没有则返回 None。
+    在数据源配置页禁用某个源（status≠enabled）时 _data_source_api_key 返回空，会自动回退到下一个。
+    """
+    brave_key = _data_source_api_key("brave", settings.brave_api_key)
+    if brave_key:
+        return "brave", brave_key, _data_source_base_url("brave", BRAVE_URL)
+    tavily_key = _data_source_api_key("tavily", settings.tavily_api_key)
+    if tavily_key:
+        return "tavily", tavily_key, _data_source_base_url("tavily", TAVILY_URL)
+    return None
+
+
+def _tavily_search(url: str, api_key: str, keyword: str, max_results: int) -> list[dict]:
+    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        response = client.post(
+            url,
+            json={
+                "api_key": api_key,
+                "query": keyword,
+                "search_depth": "basic",
+                "include_answer": False,
+                "max_results": max_results,
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+    results: list[dict] = []
     for item in body.get("results") or []:
         results.append(
             {
@@ -1195,14 +1227,39 @@ def search_stock_news(query: str, symbol: str | None = None, max_results: int = 
                 "score": item.get("score"),
             }
         )
-    saved = _cache_documents(results, symbol=normalize_a_share_symbol(symbol) if symbol else None)
-    return {
-        "query": keyword,
-        "source": "tavily.search",
-        "results": results,
-        "saved_rows": saved,
-        "ms": int((time.monotonic() - started) * 1000),
-    }
+    return results
+
+
+def _brave_search(url: str, api_key: str, keyword: str, max_results: int) -> list[dict]:
+    count = max(1, min(int(max_results), 20))
+    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        response = client.get(
+            url,
+            params={"q": keyword, "count": count},
+            headers={
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": api_key,
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+    results: list[dict] = []
+    for bucket in ("web", "news"):
+        for item in (body.get(bucket) or {}).get("results") or []:
+            results.append(
+                {
+                    "title": item.get("title"),
+                    "url": item.get("url"),
+                    "content": _strip_html_tags(item.get("description") or item.get("snippet") or ""),
+                    "score": None,
+                }
+            )
+    return results[:count]
+
+
+def _strip_html_tags(value: str) -> str:
+    return re.sub(r"<[^>]+>", "", value).strip()
 
 
 def _tushare_request(api_name: str, params: dict[str, Any], fields: str) -> dict:
