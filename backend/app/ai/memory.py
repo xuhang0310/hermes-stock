@@ -43,72 +43,57 @@ MEMORY_TYPES = {"fact": "事实", "preference": "偏好", "decision": "决策", 
 HYBRID_VECTOR_WEIGHT = 0.55  # 语义相似度权重
 HYBRID_KEYWORD_WEIGHT = 0.45  # 关键词匹配权重
 
-# ChromaDB 路径
+# 向量库：chroma（嵌入式，默认）| milvus（服务端），按 STOCK_VECTOR_BACKEND 切换
 _CHROMA_PATH = Path(__file__).resolve().parents[2] / "chroma_data"
+_COLLECTION = "user_memories"
 
 # 延迟初始化
-_chroma_client: Any = None
 _embedding_fn: Any = None
 _embedding_dim: int = 0
+_store: Any = None
+_store_ready: bool | None = None
 
 # ---------------------------------------------------------------------------
-# 嵌入 & 向量库初始化
+# 嵌入函数（与向量库解耦；远程 /embeddings 优先，缺则本地降级）
 # ---------------------------------------------------------------------------
 
 
-def _ensure_chroma() -> tuple[Any, Any, int]:
-    """延迟初始化 ChromaDB 客户端和嵌入函数。返回 (client, embedding_fn, dim)。"""
-    global _chroma_client, _embedding_fn, _embedding_dim
-    if _chroma_client is not None:
-        return _chroma_client, _embedding_fn, _embedding_dim
+def _ensure_embedding():
+    """延迟初始化嵌入函数（与向量库无关）。优先独立配置的 embeddings 服务
+    （STOCK_EMBEDDING_*），未配置回退活跃 LLM 的 /embeddings，都不行再降级本地模型。"""
+    global _embedding_fn, _embedding_dim
+    if _embedding_fn is not None:
+        return _embedding_fn
+
+    emb_base = settings.embedding_base_url
+    emb_key = settings.embedding_api_key
+    emb_model = settings.embedding_model or "text-embedding-3-small"
+    if not (emb_base and emb_key):
+        llm_config = _active_llm_config()
+        emb_base = llm_config.get("base_url") or ""
+        emb_key = llm_config.get("api_key") or ""
+    if emb_base and emb_key:
+        try:
+            fn = _RemoteEmbeddingFunction(base_url=emb_base, api_key=emb_key, model=emb_model)
+            test_vec = fn(["test"])  # 测试连通性并探测真实维度
+            if test_vec and len(test_vec[0]) > 0:
+                _embedding_fn = fn
+                _embedding_dim = fn.dim
+                log_event("agent", "INFO", f"使用远程嵌入 API（{emb_model}），维度={_embedding_dim}", to_db=False)
+                return _embedding_fn
+        except Exception:
+            log_event("agent", "WARNING", "远程嵌入 API 不可用，降级到本地模型", to_db=False)
 
     try:
-        import chromadb
         from chromadb.utils import embedding_functions as ef
-
-        _CHROMA_PATH.mkdir(parents=True, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(path=str(_CHROMA_PATH))
-
-        # 优先用独立配置的 embeddings 服务（与聊天模型解耦，见 STOCK_EMBEDDING_*）；
-        # 未配置时回退到活跃 LLM 提供商的 /embeddings。
-        emb_base = settings.embedding_base_url
-        emb_key = settings.embedding_api_key
-        emb_model = settings.embedding_model or "text-embedding-3-small"
-        if not (emb_base and emb_key):
-            llm_config = _active_llm_config()
-            emb_base = llm_config.get("base_url") or ""
-            emb_key = llm_config.get("api_key") or ""
-        if emb_base and emb_key:
-            try:
-                _embedding_fn = _RemoteEmbeddingFunction(base_url=emb_base, api_key=emb_key, model=emb_model)
-                # 测试连通性（同时探测真实维度）
-                test_vec = _embedding_fn(["test"])
-                if test_vec and len(test_vec[0]) > 0:
-                    _embedding_dim = _embedding_fn.dim
-                    log_event("agent", "INFO", f"使用远程嵌入 API（{emb_model}），维度={_embedding_dim}", to_db=False)
-                    return _chroma_client, _embedding_fn, _embedding_dim
-            except Exception:
-                log_event("agent", "WARNING", "远程嵌入 API 不可用，降级到本地模型", to_db=False)
-
-        # 降级：本地 sentence-transformers
-        _embedding_fn = ef.SentenceTransformerEmbeddingFunction(
-            model_name="shibing624/text2vec-base-chinese",
-        )
+        _embedding_fn = ef.SentenceTransformerEmbeddingFunction(model_name="shibing624/text2vec-base-chinese")
         _embedding_dim = 768
-        log_event("agent", "INFO", f"使用本地嵌入模型 text2vec-base-chinese，维度={_embedding_dim}", to_db=False)
-
-    except ImportError:
-        log_event("agent", "WARNING", "chromadb 未安装，向量检索不可用", to_db=False)
-        _chroma_client = False  # 标记为不可用
-        _embedding_fn = None
-        _embedding_dim = 0
+        log_event("agent", "INFO", "使用本地嵌入模型 text2vec-base-chinese，维度=768", to_db=False)
     except Exception:
-        log_event("agent", "ERROR", "ChromaDB 初始化失败", to_db=False)
-        _chroma_client = False
+        log_event("agent", "WARNING", "嵌入模型不可用，向量检索关闭", to_db=False)
         _embedding_fn = None
         _embedding_dim = 0
-
-    return _chroma_client, _embedding_fn, _embedding_dim
+    return _embedding_fn
 
 
 class _RemoteEmbeddingFunction:
@@ -137,27 +122,113 @@ class _RemoteEmbeddingFunction:
 
 def _embed(texts: list[str]) -> list[list[float]] | None:
     """生成文本嵌入向量。失败返回 None。"""
-    _, ef, _ = _ensure_chroma()
-    if ef is None:
+    fn = _ensure_embedding()
+    if fn is None:
         return None
     try:
-        return ef(texts)
+        return fn(texts)
     except Exception:
         return None
 
 
-def _get_collection():
-    """获取或创建 ChromaDB collection。"""
-    client, ef, dim = _ensure_chroma()
-    if client is False or ef is None:
-        return None
-    try:
-        return client.get_or_create_collection(
-            name="user_memories",
-            metadata={"hnsw:space": "cosine"},
+# ---------------------------------------------------------------------------
+# 向量库后端抽象：upsert / delete / delete_user / query（分越高越相关）
+# ---------------------------------------------------------------------------
+
+
+class _ChromaStore:
+    """ChromaDB 嵌入式后端（默认；本地/Windows 开发用）。"""
+
+    def __init__(self):
+        import chromadb
+        _CHROMA_PATH.mkdir(parents=True, exist_ok=True)
+        self._client = chromadb.PersistentClient(path=str(_CHROMA_PATH))
+        self._col = self._client.get_or_create_collection(name=_COLLECTION, metadata={"hnsw:space": "cosine"})
+
+    def upsert(self, ids, embeddings, metadatas, documents):
+        self._col.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+
+    def delete(self, ids):
+        self._col.delete(ids=ids)
+
+    def delete_user(self, user_id):
+        self._col.delete(where={} if user_id is None else {"user_id": user_id})
+
+    def query(self, embedding, user_id, n):
+        res = self._col.query(query_embeddings=embedding, n_results=n, where={"user_id": user_id}, include=["distances"])
+        ids = res.get("ids", [[]])[0]
+        dists = res.get("distances", [[]])[0]
+        out = []
+        for did, dist in zip(ids, dists):
+            try:  # cosine distance ∈ [0,2] → similarity ∈ [0,1]
+                out.append((int(did), max(0.0, 1.0 - float(dist) / 2.0)))
+            except (ValueError, TypeError):
+                continue
+        return out
+
+
+class _MilvusStore:
+    """Milvus 服务端后端（生产；STOCK_MILVUS_URI）。user_id 显式建字段可过滤。"""
+
+    def __init__(self):
+        from pymilvus import MilvusClient, DataType
+        if _ensure_embedding() is None or not _embedding_dim:
+            raise RuntimeError("嵌入维度未知，无法建 Milvus collection")
+        self._dim = _embedding_dim
+        self._c = MilvusClient(uri=settings.milvus_uri, token=settings.milvus_token or "")
+        if not self._c.has_collection(_COLLECTION):
+            schema = self._c.create_schema(auto_id=False, enable_dynamic_field=True)
+            schema.add_field("id", DataType.INT64, is_primary=True)
+            schema.add_field("vector", DataType.FLOAT_VECTOR, dim=self._dim)
+            schema.add_field("user_id", DataType.INT64)
+            idx = self._c.prepare_index_params()
+            idx.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="COSINE")
+            self._c.create_collection(collection_name=_COLLECTION, schema=schema, index_params=idx)
+        self._c.load_collection(_COLLECTION)
+
+    def upsert(self, ids, embeddings, metadatas, documents):
+        data = [
+            {"id": int(i), "vector": v, "user_id": int((meta or {}).get("user_id", 0)), "content": doc}
+            for i, v, meta, doc in zip(ids, embeddings, metadatas, documents)
+        ]
+        self._c.upsert(collection_name=_COLLECTION, data=data)
+
+    def delete(self, ids):
+        self._c.delete(collection_name=_COLLECTION, ids=[int(i) for i in ids])
+
+    def delete_user(self, user_id):
+        flt = "id >= 0" if user_id is None else f"user_id == {int(user_id)}"
+        self._c.delete(collection_name=_COLLECTION, filter=flt)
+
+    def query(self, embedding, user_id, n):
+        res = self._c.search(
+            collection_name=_COLLECTION, data=embedding, limit=n,
+            filter=f"user_id == {int(user_id)}", output_fields=[],
         )
-    except Exception:
-        return None
+        out = []
+        for hit in (res[0] if res else []):
+            try:  # Milvus COSINE 的 distance 即相似度（越大越近）
+                out.append((int(hit["id"]), float(hit.get("distance", 0.0))))
+            except (ValueError, TypeError, KeyError):
+                continue
+        return out
+
+
+def _get_store():
+    """按 STOCK_VECTOR_BACKEND 惰性初始化向量库后端；失败优雅降级（返回 None）。"""
+    global _store, _store_ready
+    if _store_ready is not None:
+        return _store if _store_ready else None
+    backend = (settings.vector_backend or "chroma").lower()
+    try:
+        _store = _MilvusStore() if backend == "milvus" else _ChromaStore()
+        _store_ready = True
+        log_event("agent", "INFO", f"向量库后端就绪：{backend}", to_db=False)
+    except Exception as exc:  # noqa: BLE001
+        log_event("agent", "ERROR", f"向量库后端初始化失败（{backend}）：{str(exc)[:160]}", to_db=False)
+        _store = None
+        _store_ready = False
+    return _store
 
 
 # ---------------------------------------------------------------------------
@@ -166,31 +237,30 @@ def _get_collection():
 
 
 def _index_memory(row: UserMemory) -> None:
-    """将一条记忆的向量写入 ChromaDB。"""
-    collection = _get_collection()
-    if collection is None:
+    """将一条记忆的向量写入向量库。"""
+    store = _get_store()
+    if store is None:
         return
     vec = _embed([row.content])
     if vec is None:
         return
     try:
-        collection.upsert(
-            ids=[str(row.id)],
-            embeddings=vec,
-            metadatas=[{"user_id": row.user_id, "memory_type": row.memory_type, "importance": row.importance}],
-            documents=[row.content],
+        store.upsert(
+            [str(row.id)], vec,
+            [{"user_id": row.user_id, "memory_type": row.memory_type, "importance": row.importance}],
+            [row.content],
         )
     except Exception:
         pass
 
 
 def _delete_memory_vector(memory_id: int) -> None:
-    """从 ChromaDB 中删除一条记忆的向量。"""
-    collection = _get_collection()
-    if collection is None:
+    """从向量库删除一条记忆的向量。"""
+    store = _get_store()
+    if store is None:
         return
     try:
-        collection.delete(ids=[str(memory_id)])
+        store.delete([str(memory_id)])
     except Exception:
         pass
 
@@ -349,39 +419,17 @@ def _vector_search(
     user_id: int,
     limit: int = MEMORY_RETRIEVAL_LIMIT,
 ) -> list[tuple[int, float]]:
-    """基于 ChromaDB 的向量语义搜索。返回 [(memory_id, score), ...]."""
-    collection = _get_collection()
-    if collection is None:
+    """向量语义搜索（后端无关）。返回 [(memory_id, score), ...]，分越高越相关。"""
+    store = _get_store()
+    if store is None:
         return []
-
     vec = _embed([query])
     if vec is None:
         return []
-
     try:
-        results = collection.query(
-            query_embeddings=vec,
-            n_results=limit,
-            where={"user_id": user_id},
-            include=["metadatas", "distances"],
-        )
+        return store.query(vec, user_id, limit)
     except Exception:
         return []
-
-    ids = results.get("ids", [[]])[0]
-    distances = results.get("distances", [[]])[0]
-
-    # 余弦距离转相似度分数（ChromaDB 默认用 cosine distance）
-    scored: list[tuple[int, float]] = []
-    for doc_id, distance in zip(ids, distances):
-        try:
-            mem_id = int(doc_id)
-        except (ValueError, TypeError):
-            continue
-        # cosine distance ∈ [0, 2]，转成 similarity ∈ [0, 1]
-        sim = max(0.0, 1.0 - distance / 2.0)
-        scored.append((mem_id, sim))
-    return scored
 
 
 def _extract_keywords(query: str) -> list[str]:
@@ -625,9 +673,9 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
 
 
 def rebuild_vector_index(db: Session, user_id: int | None = None) -> int:
-    """重建 ChromaDB 向量索引（从 MySQL 全量重新嵌入）。"""
-    collection = _get_collection()
-    if collection is None:
+    """从 MySQL 全量重新嵌入并重建向量索引（切换后端 / 迁移到 Milvus 时用）。"""
+    store = _get_store()
+    if store is None:
         return -1
 
     filters = [UserMemory.status == "active"]
@@ -638,13 +686,12 @@ def rebuild_vector_index(db: Session, user_id: int | None = None) -> int:
     if not memories:
         return 0
 
-    # 清空并重建
-    try:
-        collection.delete(where={} if user_id is None else {"user_id": user_id})
+    try:  # 清空对应范围再重建
+        store.delete_user(user_id)
     except Exception:
         pass
 
-    batch_size = 20
+    batch_size = 32
     total = 0
     for i in range(0, len(memories), batch_size):
         batch = memories[i:i + batch_size]
@@ -653,11 +700,10 @@ def rebuild_vector_index(db: Session, user_id: int | None = None) -> int:
         if vecs is None:
             continue
         try:
-            collection.upsert(
-                ids=[str(m.id) for m in batch],
-                embeddings=vecs,
-                metadatas=[{"user_id": m.user_id, "memory_type": m.memory_type, "importance": m.importance} for m in batch],
-                documents=texts,
+            store.upsert(
+                [str(m.id) for m in batch], vecs,
+                [{"user_id": m.user_id, "memory_type": m.memory_type, "importance": m.importance} for m in batch],
+                texts,
             )
             total += len(batch)
         except Exception:
