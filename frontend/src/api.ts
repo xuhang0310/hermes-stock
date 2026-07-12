@@ -318,6 +318,8 @@ export const api = {
     return request<AgentSession[]>(`/api/agent/sessions${suffix ? `?${suffix}` : ''}`)
   },
   agentSession: (id: number) => request<AgentSessionDetail>(`/api/agent/sessions/${id}`),
+  agentDeleteSession: (id: number) =>
+    request<{ ok: boolean }>(`/api/agent/sessions/${id}`, { method: 'DELETE' }),
   promptRecommendations: (digitalHumanId: number) =>
     request<{ items: PromptRecommendation[]; fallback_prompts: string[] }>(
       `/api/agent/prompt-recommendations?digital_human_id=${digitalHumanId}`

@@ -170,6 +170,21 @@ function newSession(profileId?: number | null) {
   refreshSessions(selectedProfileId.value)
 }
 
+async function deleteSession(item: AgentSession) {
+  if (sending.value) return
+  const removedId = item.id
+  const wasActive = selectedSessionId.value === removedId
+  // 乐观移除：立即从列表隐藏（逻辑删除，服务端仅置为 deleted、记录仍保留）
+  sessions.value = sessions.value.filter((session) => session.id !== removedId)
+  try {
+    await api.agentDeleteSession(removedId)
+    if (wasActive) newSession(selectedProfileId.value)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '删除会话失败'
+    refreshSessions(selectedProfileId.value) // 失败则回滚到服务端真实列表
+  }
+}
+
 function applyQuickPrompt(prompt: string) {
   if (sending.value) return
   question.value = prompt
@@ -424,18 +439,29 @@ onMounted(load)
       </div>
 
       <div class="session-list">
-        <button
+        <div
           v-for="item in filteredSessions"
           :key="item.id"
-          class="session-item"
-          :class="{ active: selectedSessionId === item.id }"
-          type="button"
-          @click="openSession(item.id)"
+          class="session-item-wrap"
         >
-          <strong>{{ item.title }}</strong>
-          <span>{{ item.digital_human_name || '数字人' }} · {{ sessionModelLabel(item) }}</span>
-          <small>{{ item.message_count }} 条 · {{ item.status }}</small>
-        </button>
+          <button
+            class="session-item"
+            :class="{ active: selectedSessionId === item.id }"
+            type="button"
+            @click="openSession(item.id)"
+          >
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.digital_human_name || '数字人' }} · {{ sessionModelLabel(item) }}</span>
+            <small>{{ item.message_count }} 条 · {{ item.status }}</small>
+          </button>
+          <button
+            class="session-delete"
+            type="button"
+            title="删除该会话（从列表移除，记录仍保留在后台）"
+            :disabled="sending || loadingSession"
+            @click.stop="deleteSession(item)"
+          >×</button>
+        </div>
         <div v-if="!filteredSessions.length" class="session-empty">
           {{ loadingSessions || loadingSession ? '正在加载历史会话' : '当前数字人暂无历史会话' }}
         </div>

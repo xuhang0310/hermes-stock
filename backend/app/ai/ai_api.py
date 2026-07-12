@@ -781,7 +781,7 @@ def agent_sessions(
             selectinload(AiChatSession.model_config).selectinload(LlmModelConfig.platform),
             selectinload(AiChatSession.messages),
         )
-        .where(AiChatSession.user_id == context.user.id)
+        .where(AiChatSession.user_id == context.user.id, AiChatSession.status != "deleted")
     )
     if chat_mode:
         query = query.where(AiChatSession.chat_mode == chat_mode)
@@ -820,7 +820,7 @@ def agent_session_detail(
             selectinload(AiChatSession.model_config).selectinload(LlmModelConfig.platform),
             selectinload(AiChatSession.messages),
         )
-        .where(AiChatSession.id == session_id, AiChatSession.user_id == context.user.id)
+        .where(AiChatSession.id == session_id, AiChatSession.user_id == context.user.id, AiChatSession.status != "deleted")
         .limit(1)
     )
     if row is None:
@@ -846,6 +846,24 @@ def agent_session_detail(
             if item.role in {"user", "assistant"}
         ],
     }
+
+
+@router.delete("/agent/sessions/{session_id}")
+def agent_session_delete(
+    session_id: int,
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    row = db.scalar(
+        select(AiChatSession)
+        .where(AiChatSession.id == session_id, AiChatSession.user_id == context.user.id)
+        .limit(1)
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="会话不存在或无权操作")
+    row.status = "deleted"  # 逻辑删除：仅从历史列表隐藏，消息与会话记录仍保留在库中
+    db.commit()
+    return {"ok": True, "id": session_id, "status": row.status}
 
 
 @router.post("/agent/chat")

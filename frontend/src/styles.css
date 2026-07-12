@@ -1525,6 +1525,53 @@ tbody tr.clickable-row:focus-visible td {
   font-size: 13px;
 }
 
+.session-item-wrap {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+/* 会话标题右上角给删除按钮留位，避免长标题压到 × */
+.session-item-wrap .session-item strong {
+  padding-right: 22px;
+}
+
+.session-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid rgba(213, 180, 106, 0.18);
+  border-radius: 6px;
+  background: rgba(12, 12, 13, 0.72);
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.5;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.session-item-wrap:hover .session-delete {
+  opacity: 1;
+}
+
+.session-delete:hover {
+  border-color: rgba(224, 108, 108, 0.7);
+  background: rgba(224, 108, 108, 0.14);
+  color: #e06c6c;
+}
+
+.session-delete:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
 .chat-workspace {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
