@@ -104,7 +104,12 @@ async function streamRequest(
     for (const raw of events) {
       const dataLine = raw.split('\n').find((line) => line.startsWith('data: '))
       if (!dataLine) continue
-      onEvent(JSON.parse(dataLine.slice(6)) as AgentStreamEvent)
+      const event = JSON.parse(dataLine.slice(6)) as AgentStreamEvent
+      onEvent(event)
+      if (event.type === 'done') {
+        await reader.cancel()
+        return
+      }
     }
   }
 }
@@ -140,7 +145,12 @@ async function streamJsonRequest<T>(
     for (const raw of events) {
       const dataLine = raw.split('\n').find((line) => line.startsWith('data: '))
       if (!dataLine) continue
-      onEvent(JSON.parse(dataLine.slice(6)) as T)
+      const event = JSON.parse(dataLine.slice(6)) as T
+      onEvent(event)
+      if ((event as { type?: string }).type === 'done') {
+        await reader.cancel()
+        return
+      }
     }
   }
 }
