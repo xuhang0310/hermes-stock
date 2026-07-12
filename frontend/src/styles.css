@@ -1572,6 +1572,18 @@ tbody tr.clickable-row:focus-visible td {
   cursor: not-allowed;
 }
 
+button.btn-stop {
+  border-color: rgba(224, 108, 108, 0.6);
+  background: rgba(224, 108, 108, 0.16);
+  color: #f2c0c0;
+}
+
+button.btn-stop:hover {
+  border-color: rgba(224, 108, 108, 0.85);
+  background: rgba(224, 108, 108, 0.26);
+  color: #f7d4d4;
+}
+
 .chat-workspace {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;

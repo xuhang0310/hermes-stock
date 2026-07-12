@@ -76,7 +76,8 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 async function streamRequest(
   url: string,
   payload: unknown,
-  onEvent: (event: AgentStreamEvent) => void
+  onEvent: (event: AgentStreamEvent) => void,
+  signal?: AbortSignal
 ) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authToken) {
@@ -85,7 +86,8 @@ async function streamRequest(
   const response = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal
   })
   if (!response.ok || !response.body) {
     const detail = await response.text()
@@ -342,8 +344,9 @@ export const api = {
       chat_mode?: 'research' | 'stock'
       skills?: string[]
     },
-    onEvent: (event: AgentStreamEvent) => void
-  ) => streamRequest('/api/agent/chat', payload, onEvent),
+    onEvent: (event: AgentStreamEvent) => void,
+    signal?: AbortSignal
+  ) => streamRequest('/api/agent/chat', payload, onEvent, signal),
   streamStockChat: (
     payload: {
       question: string
@@ -352,6 +355,7 @@ export const api = {
       model_config_id?: number | null
       skills?: string[]
     },
-    onEvent: (event: AgentStreamEvent) => void
-  ) => streamRequest('/api/agent/chat', { ...payload, chat_mode: 'stock' }, onEvent)
+    onEvent: (event: AgentStreamEvent) => void,
+    signal?: AbortSignal
+  ) => streamRequest('/api/agent/chat', { ...payload, chat_mode: 'stock' }, onEvent, signal)
 }

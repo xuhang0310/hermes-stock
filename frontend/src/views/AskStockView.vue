@@ -55,6 +55,7 @@ const selectedSessionId = ref<number | null>(null)
 const messages = ref<ChatMessage[]>([])
 const question = ref('')
 const sending = ref(false)
+const abortController = ref<AbortController | null>(null)
 const loadingSession = ref(false)
 const error = ref('')
 const chatScroll = ref<HTMLElement | null>(null)
@@ -352,6 +353,8 @@ async function send() {
   const reply = messages.value[messages.value.length - 1]
   scrollChat()
 
+  const controller = new AbortController()
+  abortController.value = controller
   try {
     await api.streamStockChat(
       {
@@ -411,20 +414,37 @@ async function send() {
           reply.streamStatus = reply.error ? 'error' : 'done'
         }
         scrollChat()
-      }
+      },
+      controller.signal
     )
     await refreshSessions()
   } catch (err) {
-    reply.error = err instanceof Error ? err.message : '发送失败'
-    reply.streamStatus = 'error'
-    error.value = reply.error
+    if (controller.signal.aborted) {
+      // 用户主动点了“停止”：保留已经收到的内容，不当作错误
+      flushReasoning(reply)
+      flushThought(reply)
+      if (reply.liveContent) {
+        reply.content = reply.liveContent.trim()
+        reply.liveContent = ''
+      }
+      reply.streamStatus = 'done'
+    } else {
+      reply.error = err instanceof Error ? err.message : '发送失败'
+      reply.streamStatus = 'error'
+      error.value = reply.error
+    }
   } finally {
+    abortController.value = null
     sending.value = false
     if (!reply.error && reply.streamStatus !== 'done') {
       reply.streamStatus = 'done'
     }
     scrollChat()
   }
+}
+
+function stopSending() {
+  abortController.value?.abort()
 }
 
 onMounted(load)
@@ -581,8 +601,13 @@ onMounted(load)
           </optgroup>
         </select>
         <button type="button" :disabled="sending" @click="newSession">新会话</button>
-        <button type="submit" :disabled="sending || !question.trim()">
-          {{ sending ? '分析中' : '发送' }}
+        <button
+          :type="sending ? 'button' : 'submit'"
+          :class="{ 'btn-stop': sending }"
+          :disabled="!sending && !question.trim()"
+          @click="sending ? stopSending() : undefined"
+        >
+          {{ sending ? '⏹ 停止' : '发送' }}
         </button>
       </form>
       <p v-if="error" class="chat-page-error">{{ error }}</p>

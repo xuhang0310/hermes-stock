@@ -37,6 +37,7 @@ const selectedProfileId = ref<number | null>(null)
 const selectedModelId = ref<number | null>(null)
 const selectedSessionId = ref<number | null>(null)
 const sending = ref(false)
+const abortController = ref<AbortController | null>(null)
 const loadingSessions = ref(false)
 const loadingSession = ref(false)
 const loadingPrompts = ref(false)
@@ -323,6 +324,8 @@ async function send() {
   const reply = messages.value[messages.value.length - 1]
   scrollChat()
 
+  const controller = new AbortController()
+  abortController.value = controller
   try {
     await api.streamAgentChat(
       {
@@ -382,7 +385,8 @@ async function send() {
           reply.streamStatus = reply.error ? 'error' : 'done'
         }
         scrollChat()
-      }
+      },
+      controller.signal
     )
     if (!reply.content && !reply.error && !reply.steps.length) {
       reply.error = '未收到最终回答，请重试。'
@@ -393,16 +397,32 @@ async function send() {
       await loadPromptRecommendations(selectedProfileId.value)
     }
   } catch (err) {
-    reply.error = err instanceof Error ? err.message : '发送失败'
-    reply.streamStatus = 'error'
-    error.value = reply.error
+    if (controller.signal.aborted) {
+      // 用户主动点了“停止”：保留已经收到的内容，不当作错误
+      flushReasoning(reply)
+      flushThought(reply)
+      if (reply.liveContent) {
+        reply.content = reply.liveContent.trim()
+        reply.liveContent = ''
+      }
+      reply.streamStatus = 'done'
+    } else {
+      reply.error = err instanceof Error ? err.message : '发送失败'
+      reply.streamStatus = 'error'
+      error.value = reply.error
+    }
   } finally {
+    abortController.value = null
     sending.value = false
     if (!reply.error && reply.streamStatus !== 'done') {
       reply.streamStatus = 'done'
     }
     scrollChat()
   }
+}
+
+function stopSending() {
+  abortController.value?.abort()
 }
 
 onMounted(load)
@@ -544,8 +564,13 @@ onMounted(load)
             </option>
           </optgroup>
         </select>
-        <button type="submit" :disabled="sending || !question.trim() || !selectedProfile">
-          {{ sending ? '运行中' : '发送' }}
+        <button
+          :type="sending ? 'button' : 'submit'"
+          :class="{ 'btn-stop': sending }"
+          :disabled="!sending && (!question.trim() || !selectedProfile)"
+          @click="sending ? stopSending() : undefined"
+        >
+          {{ sending ? '⏹ 停止' : '发送' }}
         </button>
       </form>
       <p v-if="error" class="chat-page-error">{{ error }}</p>
