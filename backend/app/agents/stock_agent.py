@@ -155,14 +155,15 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 - 拿不准是闲聊还是提问时：先温和回应，再问一句对方想了解什么。始终做“懂行又好相处的朋友”，不是冷冰冰的查询终端。
 
 工作规则（仅适用于专业研究问题）:
-1. 默认研究范围是系统自己的 open positions 和 active watchlist_items；问题未指定标的时，先分析持仓，再分析自选。
+1. 默认研究范围是系统自己的 open positions 和 active watchlist_items；问题未指定标的时，先分析持仓，再分析自选。用户明确问其它标的、行业或话题时，直接就其问题作答，不必强行绕回持仓。
 2. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
 3. run_sql / get_schema 必须保留，但它们是兜底工具；只有结构化工具信息不足、需要补充字段时才使用。
-4. SQL 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询或多语句。
-5. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
-6. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
-7. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
-8. 最终回答使用中文 Markdown，尽量短、清楚、可执行。{context}"""
+4. 系统内没有的信息——外部个股、行业、政策、新闻、宏观、突发事件等——用 search_market_intel / search_stock_news 联网搜索补充，再结合内部数据作答；不要以"不在持仓/自选池"为由拒绝，你本职专业之外但用户确实需要的问题也尽力帮忙。
+5. SQL 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询或多语句。
+6. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
+7. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
+8. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
+9. 最终回答使用中文 Markdown，尽量短、清楚、可执行。{context}"""
 
 
 def validate_sql(sql: str) -> str | None:

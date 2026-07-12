@@ -17,6 +17,9 @@ COMMON_TOOL_NAMES = [
     "get_watchlist_snapshot",
     "get_symbol_context",
     "get_recent_internal_evidence",
+    # 联网搜索：每个数字人都具备，用于补充系统内没有的外部信息（个股新闻、行业、政策、宏观等）
+    "search_market_intel",
+    "search_stock_news",
 ]
 
 ROLE_TOOL_NAMES: dict[str, list[str]] = {
@@ -40,13 +43,10 @@ ROLE_TOOL_NAMES: dict[str, list[str]] = {
         "get_research_gaps",
         "get_daily_history",
         "analyze_trend",
-        "search_market_intel",
     ],
     "intelligence-officer": [
         "get_intelligence_digest",
         "rank_intelligence_sources",
-        "search_stock_news",
-        "search_market_intel",
     ],
     "quant-analyst": [
         "run_quant_signal_snapshot",
@@ -61,7 +61,6 @@ ROLE_TOOL_NAMES: dict[str, list[str]] = {
     "macro-strategist": [
         "get_macro_policy_digest",
         "assess_macro_market_backdrop",
-        "search_market_intel",
     ],
     "short-term-hunter": [
         "scan_short_term_opportunities",
@@ -69,7 +68,6 @@ ROLE_TOOL_NAMES: dict[str, list[str]] = {
         "get_realtime_quote",
         "get_volume_analysis",
         "analyze_pattern",
-        "search_market_intel",
     ],
 }
 
@@ -196,10 +194,11 @@ def digital_human_skill_prompt(profile_code: str | None) -> str:
 - {role["output"]}
 
 工具使用规则:
-1. 所有数字人都必须优先基于系统自己的持仓和自选池判断，默认先调用 get_my_universe 或对应快照工具。
+1. 研究本系统自己的持仓和自选池时，优先调用 get_my_universe 或对应快照工具，用真实数据说话。
 2. run_sql / get_schema 是通用底座工具，可以兜底探索，但优先使用结构化专属工具。
-3. 如果用户问外部标的，先说明该标的是否在当前持仓/自选池内，再按需要继续分析。
-4. 结论必须说明数据来源；没有数据时说缺失，不要补故事。"""
+3. 用户问系统外的标的、行业、政策、新闻、宏观或突发事件时，用 search_market_intel / search_stock_news 联网搜索补充；可以先说明它是否在系统持仓·自选范围内，再结合搜索结果和你的专业能力作答，绝不因为"不在持仓/自选池"就拒绝回答。
+4. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。
+5. 结论要标注来源（内部数据 / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。"""
 
 
 def digital_human_tool_schemas(profile_code: str | None) -> list[dict[str, Any]]:
