@@ -146,15 +146,24 @@ class _RemoteEmbeddingFunction:
         self.dim = 0
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
-        url = self._base_url + "/embeddings"
-        payload = {"input": texts, "model": self._model}
-        headers = {"Authorization": f"Bearer {self._api_key}"}
+        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
         with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-            resp = client.post(url, json=payload, headers=headers)
-            if resp.status_code != 200:
-                raise RuntimeError(f"Embeddings API 返回 {resp.status_code}: {resp.text[:200]}")
-            data = resp.json()
-            vectors = [item["embedding"] for item in data["data"]]
+            if "multimodal-embedding" in self._base_url:
+                # DashScope 原生多模态嵌入（qwen3-vl-embedding）：input={contents:[{text}]}，dim 与 Milvus 对齐 1024
+                payload = {"model": self._model,
+                           "input": {"contents": [{"text": t} for t in texts]},
+                           "parameters": {"dimension": 1024}}
+                resp = client.post(self._base_url, json=payload, headers=headers)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"嵌入 API 返回 {resp.status_code}: {resp.text[:200]}")
+                vectors = [item["embedding"] for item in resp.json()["output"]["embeddings"]]
+            else:
+                # OpenAI 兼容 /embeddings（SiliconFlow bge-m3、千问 text-embedding-v4 等）
+                resp = client.post(self._base_url.rstrip("/") + "/embeddings",
+                                   json={"input": texts, "model": self._model}, headers=headers)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"嵌入 API 返回 {resp.status_code}: {resp.text[:200]}")
+                vectors = [item["embedding"] for item in resp.json()["data"]]
             if self.dim == 0 and vectors:
                 self.dim = len(vectors[0])
             return vectors
@@ -320,7 +329,8 @@ def _rerank(query: str, memories: list[UserMemory], top_n: int) -> list[UserMemo
         return memories[:top_n]
     try:
         docs = [m.content for m in memories]
-        url = base.rstrip("/") + "/rerank"
+        b = base.rstrip("/")  # SiliconFlow 用 /rerank；千问 compatible-api 用完整 /reranks 路径
+        url = b if b.endswith(("/rerank", "/reranks")) else b + "/rerank"
         payload = {"model": model, "query": query, "documents": docs, "top_n": top_n}
         headers = {"Authorization": f"Bearer {key}"}
         with httpx.Client(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
