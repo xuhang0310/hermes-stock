@@ -147,26 +147,28 @@ class _RemoteEmbeddingFunction:
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+        multimodal = "multimodal-embedding" in self._base_url
+        url = self._base_url if multimodal else self._base_url.rstrip("/") + "/embeddings"
+        vectors: list[list[float]] = []
         with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-            if "multimodal-embedding" in self._base_url:
-                # DashScope 原生多模态嵌入（qwen3-vl-embedding）：input={contents:[{text}]}，dim 与 Milvus 对齐 1024
-                payload = {"model": self._model,
-                           "input": {"contents": [{"text": t} for t in texts]},
-                           "parameters": {"dimension": 1024}}
-                resp = client.post(self._base_url, json=payload, headers=headers)
-                if resp.status_code != 200:
-                    raise RuntimeError(f"嵌入 API 返回 {resp.status_code}: {resp.text[:200]}")
-                vectors = [item["embedding"] for item in resp.json()["output"]["embeddings"]]
-            else:
-                # OpenAI 兼容 /embeddings（SiliconFlow bge-m3、千问 text-embedding-v4 等）
-                resp = client.post(self._base_url.rstrip("/") + "/embeddings",
-                                   json={"input": texts, "model": self._model}, headers=headers)
-                if resp.status_code != 200:
-                    raise RuntimeError(f"嵌入 API 返回 {resp.status_code}: {resp.text[:200]}")
-                vectors = [item["embedding"] for item in resp.json()["data"]]
-            if self.dim == 0 and vectors:
-                self.dim = len(vectors[0])
-            return vectors
+            for i in range(0, len(texts), 10):  # 分块：千问 text-embedding-v4 批量上限 10，统一分块兼容各家
+                batch = texts[i:i + 10]
+                if multimodal:
+                    # DashScope 原生多模态嵌入（qwen3-vl-embedding）：input={contents:[{text}]}，dim 对齐 Milvus 1024
+                    payload = {"model": self._model, "input": {"contents": [{"text": t} for t in batch]},
+                               "parameters": {"dimension": 1024}}
+                    resp = client.post(url, json=payload, headers=headers)
+                    if resp.status_code != 200:
+                        raise RuntimeError(f"嵌入 API 返回 {resp.status_code}: {resp.text[:200]}")
+                    vectors.extend(item["embedding"] for item in resp.json()["output"]["embeddings"])
+                else:  # OpenAI 兼容 /embeddings（SiliconFlow bge-m3、千问 text-embedding-v4 等）
+                    resp = client.post(url, json={"input": batch, "model": self._model}, headers=headers)
+                    if resp.status_code != 200:
+                        raise RuntimeError(f"嵌入 API 返回 {resp.status_code}: {resp.text[:200]}")
+                    vectors.extend(item["embedding"] for item in resp.json()["data"])
+        if self.dim == 0 and vectors:
+            self.dim = len(vectors[0])
+        return vectors
 
 
 def _embed(texts: list[str]) -> list[list[float]] | None:
