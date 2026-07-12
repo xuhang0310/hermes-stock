@@ -28,6 +28,7 @@ from backend.app.feishu.feishu_bot_api import router as feishu_bot_router
 from backend.app.data.repository import StockRepository
 from backend.app.scheduler.rhythm_api import router as rhythm_router
 from backend.app.scheduler.rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
+from backend.app.skills.registry import skill_registry
 from backend.app.seed.seed import seed_demo, seed_notify_channels, seed_position_accounts
 from backend.app.core.settings import settings
 
@@ -119,6 +120,8 @@ def create_app(init_db: bool = True) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # 技能系统：启动时自动发现并注册所有技能（Phase 1：仅注册，不接管分发链）
+        skill_registry.discover()
         if init_db:
             # 建表前不入库（system_logs 尚不存在），只落进程日志
             log_event("system", "INFO", "应用启动：初始化数据库与后台组件", to_db=False)

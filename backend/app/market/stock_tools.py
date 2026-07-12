@@ -444,82 +444,20 @@ def normalize_a_share_symbol(raw: str) -> str:
 
 
 def execute_stock_tool(name: str, args: dict[str, Any]) -> dict:
-    if name == "resolve_stock":
-        return resolve_stock(str(args.get("query") or ""))
-    if name == "get_tushare_daily":
-        return get_tushare_daily(
-            str(args.get("symbol") or ""),
-            start_date=_optional_str(args.get("start_date")),
-            end_date=_optional_str(args.get("end_date")),
-            limit=_int_arg(args.get("limit"), default=90, maximum=MAX_DAILY_ROWS),
-        )
-    if name == "get_daily_history":
-        return get_tushare_daily(
-            str(args.get("symbol") or ""),
-            limit=_int_arg(args.get("days"), default=90, maximum=MAX_DAILY_ROWS),
-        )
-    if name == "get_realtime_quote":
-        return get_realtime_quote(str(args.get("symbol") or ""))
-    if name == "analyze_daily_bars":
-        return analyze_daily_bars(
-            str(args.get("symbol") or ""),
-            start_date=_optional_str(args.get("start_date")),
-            end_date=_optional_str(args.get("end_date")),
-        )
-    if name == "analyze_trend":
-        return analyze_daily_bars(
-            str(args.get("symbol") or ""),
-            start_date=_optional_str(args.get("start_date")),
-            end_date=_optional_str(args.get("end_date")),
-        )
-    if name == "calculate_ma":
-        return calculate_ma(
-            str(args.get("symbol") or ""),
-            periods=_optional_str(args.get("periods")),
-            limit=_int_arg(args.get("limit"), default=160, maximum=MAX_DAILY_ROWS),
-        )
-    if name == "get_volume_analysis":
-        return get_volume_analysis(
-            str(args.get("symbol") or ""),
-            days=_int_arg(args.get("days"), default=30, maximum=120),
-        )
-    if name == "get_chip_distribution":
-        return get_chip_distribution(str(args.get("symbol") or ""))
-    if name == "get_capital_flow":
-        return get_capital_flow(
-            str(args.get("symbol") or ""),
-            days=_int_arg(args.get("days"), default=10, maximum=60),
-        )
-    if name == "get_stock_info":
-        return get_stock_info(str(args.get("symbol") or ""))
-    if name == "get_analysis_context":
-        return get_analysis_context(
-            str(args.get("symbol") or ""),
-            limit=_int_arg(args.get("limit"), default=20, maximum=60),
-        )
-    if name == "analyze_pattern":
-        return analyze_pattern(
-            str(args.get("symbol") or ""),
-            days=_int_arg(args.get("days"), default=60, maximum=120),
-        )
-    if name == "search_stock_news":
-        return search_stock_news(
-            str(args.get("query") or ""),
-            symbol=_optional_str(args.get("symbol")),
-            max_results=_int_arg(args.get("max_results"), default=5, maximum=8),
-        )
-    if name == "search_market_intel":
-        return search_market_intel(
-            str(args.get("query") or ""),
-            symbol=_optional_str(args.get("symbol")),
-            max_results=_int_arg(args.get("max_results"), default=6, maximum=8),
-        )
-    if name == "search_comprehensive_intel":
-        return search_market_intel(
-            str(args.get("query") or ""),
-            symbol=_optional_str(args.get("symbol")),
-            max_results=_int_arg(args.get("max_results"), default=6, maximum=8),
-        )
+    """Phase 2：转发到 skill_registry 执行。
+
+    原 16 分支 if/elif 已由 backend/app/skills/ 下各技能文件的 executor 接管——它们调用
+    同一批 stock_tools 函数、用同一套参数抽取（_optional_str / _int_arg / MAX_DAILY_ROWS），
+    结果与原分发逐字一致。run_sql / get_schema 等基础工具不经此函数，仍在
+    stock_agent.run_agent_events 内联处理，只读沙箱与 agent_audit.log 留痕不变。
+
+    此处 lazy import 是为避免低层 stock_tools 在 import 期反向依赖 skills 包（skills 在
+    架构上位于 stock_tools 之上）。首次调用后 importlib 会走 sys.modules 缓存，无开销。
+    """
+    from backend.app.skills.registry import skill_registry
+
+    if skill_registry.has_tool(name):
+        return skill_registry.execute(name, args)
     return {"error": f"Unknown stock tool: {name}"}
 
 def resolve_stock(query: str) -> dict:

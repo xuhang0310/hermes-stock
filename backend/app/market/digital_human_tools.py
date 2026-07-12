@@ -217,75 +217,20 @@ def digital_human_tool_display_name(name: str) -> str:
 
 
 def execute_digital_human_tool(profile_code: str | None, name: str, args: dict[str, Any]) -> dict:
+    """Phase 3：stock 工具委托 execute_stock_tool（Phase 2 已转发 registry），数字人工具
+    转发 skill_registry 执行。原 23 分支 if/elif 已由 skills/digital_human.py 的 executor
+    （调用同一批函数、同一套参数抽取）接管，结果逐字一致。profile_code 当前不参与执行
+    （与原实现一致），仅保留签名以兼容调用方。
+
+    工具组装与角色路由（ROLE_TOOL_NAMES + COMMON_TOOL_NAMES）未改，仍在
+    digital_human_tool_schemas；run_sql / get_schema 基础工具不经此函数，沙箱不变。
+    """
     if name in _stock_tool_names():
         return execute_stock_tool(name, args)
-    if name == "get_my_universe":
-        return get_my_universe()
-    if name == "get_portfolio_snapshot":
-        return get_portfolio_snapshot()
-    if name == "get_watchlist_snapshot":
-        return get_watchlist_snapshot()
-    if name == "get_symbol_context":
-        return get_symbol_context(str(args.get("symbol") or ""))
-    if name == "get_recent_internal_evidence":
-        return get_recent_internal_evidence(
-            symbol=_optional_str(args.get("symbol")),
-            limit=_int_arg(args.get("limit"), default=12, maximum=30),
-        )
-    if name == "get_priority_items":
-        return get_priority_items()
-    if name == "build_daily_brief":
-        return build_daily_brief()
-    if name == "check_stop_loss_status":
-        return check_stop_loss_status(symbol=_optional_str(args.get("symbol")))
-    if name == "get_risk_context":
-        return get_risk_context(symbol=_optional_str(args.get("symbol")))
-    if name == "generate_counter_arguments":
-        return generate_counter_arguments(symbol=_optional_str(args.get("symbol")))
-    if name == "get_recent_alerts":
-        return get_recent_alerts(
-            symbol=_optional_str(args.get("symbol")),
-            level=_optional_str(args.get("level")),
-            limit=_int_arg(args.get("limit"), default=10, maximum=30),
-        )
-    if name == "detect_market_anomalies":
-        return detect_market_anomalies(symbol=_optional_str(args.get("symbol")))
-    if name == "get_symbol_reports":
-        return get_symbol_reports(str(args.get("symbol") or ""), limit=_int_arg(args.get("limit"), default=8, maximum=20))
-    if name == "get_symbol_documents":
-        return get_symbol_documents(str(args.get("symbol") or ""), limit=_int_arg(args.get("limit"), default=8, maximum=20))
-    if name == "get_research_gaps":
-        return get_research_gaps(symbol=_optional_str(args.get("symbol")))
-    if name == "get_intelligence_digest":
-        return get_intelligence_digest(
-            query=_optional_str(args.get("query")),
-            symbol=_optional_str(args.get("symbol")),
-            limit=_int_arg(args.get("limit"), default=8, maximum=20),
-        )
-    if name == "rank_intelligence_sources":
-        return rank_intelligence_sources(
-            query=_optional_str(args.get("query")),
-            symbol=_optional_str(args.get("symbol")),
-            limit=_int_arg(args.get("limit"), default=8, maximum=20),
-        )
-    if name == "run_quant_signal_snapshot":
-        return run_quant_signal_snapshot(str(args.get("symbol") or ""))
-    if name == "compare_universe_quant_factors":
-        return compare_universe_quant_factors(limit=_int_arg(args.get("limit"), default=20, maximum=50))
-    if name == "get_macro_policy_digest":
-        return get_macro_policy_digest(
-            query=_optional_str(args.get("query")),
-            limit=_int_arg(args.get("limit"), default=8, maximum=20),
-        )
-    if name == "assess_macro_market_backdrop":
-        return assess_macro_market_backdrop()
-    if name == "scan_short_term_opportunities":
-        return scan_short_term_opportunities(limit=_int_arg(args.get("limit"), default=10, maximum=30))
-    if name == "get_hotspot_momentum":
-        return get_hotspot_momentum(
-            query=_optional_str(args.get("query")),
-            symbol=_optional_str(args.get("symbol")),
-        )
+    from backend.app.skills.registry import skill_registry
+
+    if skill_registry.has_tool(name):
+        return skill_registry.execute(name, args)
     return {"error": f"未知数字人工具: {name}"}
 
 
