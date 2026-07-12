@@ -244,6 +244,7 @@ class _MilvusStore:
         res = self._c.search(
             collection_name=_COLLECTION, data=embedding, limit=n,
             filter=f"user_id == {int(user_id)}", output_fields=[],
+            consistency_level="Strong",  # 刚写入的记忆需立即可检索（与 chroma 一致）
         )
         out = []
         for hit in (res[0] if res else []):
