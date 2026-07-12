@@ -355,6 +355,7 @@ class DataSourceConfig(Base):
     provider_type: Mapped[str] = mapped_column(String(80), nullable=False, default="market_data")
     base_url: Mapped[str | None] = mapped_column(String(255))
     api_key: Mapped[str | None] = mapped_column(String(500))
+    model: Mapped[str | None] = mapped_column(String(120))  # 嵌入/重排等需要独立模型名
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="enabled")
     remark: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

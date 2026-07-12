@@ -58,20 +58,60 @@ _store_ready: bool | None = None
 # ---------------------------------------------------------------------------
 
 
+def _resolve_embedding_cfg() -> tuple[str, str, str]:
+    """嵌入配置解析：后台数据源(embedding) → env(STOCK_EMBEDDING_*) → 活跃 LLM。返回 (base_url, api_key, model)。"""
+    base = key = model = ""
+    try:
+        from backend.app.core.models import DataSourceConfig
+        with SessionLocal() as db:
+            row = db.get(DataSourceConfig, "embedding")
+            if row and (row.status or "enabled") == "enabled":
+                base = (row.base_url or "").strip()
+                key = (row.api_key or "").strip()
+                model = (row.model or "").strip()
+    except Exception:
+        pass
+    base = base or settings.embedding_base_url
+    key = key or settings.embedding_api_key
+    model = model or settings.embedding_model
+    if not (base and key):
+        llm = _active_llm_config()
+        base = base or (llm.get("base_url") or "")
+        key = key or (llm.get("api_key") or "")
+    return base, key, (model or "text-embedding-3-small")
+
+
+def _resolve_rerank_cfg() -> tuple[str, str, str]:
+    """重排配置解析：后台数据源(rerank) → env(STOCK_RERANK_MODEL)。base/key 未单独配置则复用嵌入配置；
+    无模型名视为关闭重排（返回空）。返回 (base_url, api_key, model)。"""
+    base = key = model = ""
+    try:
+        from backend.app.core.models import DataSourceConfig
+        with SessionLocal() as db:
+            row = db.get(DataSourceConfig, "rerank")
+            if row and (row.status or "enabled") == "enabled":
+                base = (row.base_url or "").strip()
+                key = (row.api_key or "").strip()
+                model = (row.model or "").strip()
+    except Exception:
+        pass
+    model = model or settings.rerank_model
+    if not model:
+        return "", "", ""
+    if not (base and key):
+        emb_base, emb_key, _ = _resolve_embedding_cfg()
+        base = base or emb_base
+        key = key or emb_key
+    return base, key, model
+
+
 def _ensure_embedding():
-    """延迟初始化嵌入函数（与向量库无关）。优先独立配置的 embeddings 服务
-    （STOCK_EMBEDDING_*），未配置回退活跃 LLM 的 /embeddings，都不行再降级本地模型。"""
+    """延迟初始化嵌入函数（与向量库无关）。配置优先级见 _resolve_embedding_cfg；都不行再降级本地模型。"""
     global _embedding_fn, _embedding_dim
     if _embedding_fn is not None:
         return _embedding_fn
 
-    emb_base = settings.embedding_base_url
-    emb_key = settings.embedding_api_key
-    emb_model = settings.embedding_model or "text-embedding-3-small"
-    if not (emb_base and emb_key):
-        llm_config = _active_llm_config()
-        emb_base = llm_config.get("base_url") or ""
-        emb_key = llm_config.get("api_key") or ""
+    emb_base, emb_key, emb_model = _resolve_embedding_cfg()
     if emb_base and emb_key:
         try:
             fn = _RemoteEmbeddingFunction(base_url=emb_base, api_key=emb_key, model=emb_model)
@@ -274,11 +314,14 @@ def _rerank(query: str, memories: list[UserMemory], top_n: int) -> list[UserMemo
     """用 rerank 模型对候选记忆按与 query 的相关性精排；任何失败都回退原融合排序。"""
     if len(memories) <= 1:
         return memories[:top_n]
+    base, key, model = _resolve_rerank_cfg()
+    if not (base and key and model):
+        return memories[:top_n]
     try:
         docs = [m.content for m in memories]
-        url = settings.embedding_base_url.rstrip("/") + "/rerank"
-        payload = {"model": settings.rerank_model, "query": query, "documents": docs, "top_n": top_n}
-        headers = {"Authorization": f"Bearer {settings.embedding_api_key}"}
+        url = base.rstrip("/") + "/rerank"
+        payload = {"model": model, "query": query, "documents": docs, "top_n": top_n}
+        headers = {"Authorization": f"Bearer {key}"}
         with httpx.Client(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
             resp = client.post(url, json=payload, headers=headers)
             if resp.status_code != 200:
@@ -304,7 +347,7 @@ def retrieve_memories(
     limit: int = MEMORY_RETRIEVAL_LIMIT,
 ) -> str:
     """检索与当前查询相关的用户记忆，返回可直接注入 system prompt 的文本块。"""
-    rerank_on = bool(settings.rerank_model and settings.embedding_base_url and settings.embedding_api_key)
+    rerank_on = all(_resolve_rerank_cfg())
     # 开启重排时先召回更大的候选池（RERANK_POOL），再精排到 limit
     pool = _hybrid_search(
         db, user_id=user_id, query=query, digital_human_id=digital_human_id,

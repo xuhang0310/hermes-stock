@@ -152,6 +152,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         ):
             _add_column("position_accounts", column, ddl)
         _add_column("positions", "account_id", "account_id INT NULL")
+        # 数据源配置：embedding/rerank 需要独立 model 字段（后台可配置嵌入/重排模型）
+        _add_column("data_source_configs", "model", "model VARCHAR(120) NULL")
 
         # 回填 broker_code（按中文券商名反查），positions.account_id（关联该 symbol 最新快照账户）
         connection.execute(

@@ -12,6 +12,7 @@ const form = reactive({
   provider_type: 'market_data',
   base_url: '',
   api_key: '',
+  model: '',
   status: 'enabled',
   remark: ''
 })
@@ -30,6 +31,7 @@ function edit(row: DataSourceConfig) {
     provider_type: row.provider_type,
     base_url: row.base_url || '',
     api_key: '',
+    model: row.model || '',
     status: row.status,
     remark: row.remark || ''
   })
@@ -49,6 +51,7 @@ async function save() {
     ...form,
     api_key: form.api_key || null,
     base_url: form.base_url || null,
+    model: form.model || null,
     remark: form.remark || null
   })
   message.value = `${form.display_name} 已保存，下一次问股工具调用会直接生效`
@@ -88,6 +91,8 @@ onMounted(load)
         <select v-model="form.provider_type">
           <option value="market_data">market_data</option>
           <option value="search">search</option>
+          <option value="embedding">embedding</option>
+          <option value="rerank">rerank</option>
         </select>
       </label>
       <label>
@@ -97,6 +102,10 @@ onMounted(load)
       <label>
         <span>API Key / Token</span>
         <input v-model="form.api_key" type="password" placeholder="留空则保留数据库 Key 或继续使用环境变量" />
+      </label>
+      <label>
+        <span>模型名称</span>
+        <input v-model="form.model" placeholder="嵌入/重排需填，如 BAAI/bge-m3、text-embedding-v3；重排留空即关闭" />
       </label>
       <label>
         <span>状态</span>
@@ -117,7 +126,7 @@ onMounted(load)
       <header class="section-header">
         <div>
           <h2>问股数据源</h2>
-          <p>TuShare 负责行情和日线，Tavily Search 负责新闻与消息面。Key 优先读取数据库，缺省时回退环境变量。</p>
+          <p>TuShare 行情日线、Tavily 新闻消息面、向量嵌入与记忆重排都在这里配置。Key 与模型优先读数据库，缺省回退环境变量。嵌入/重排可用 SiliconFlow、千问 DashScope 等（与聊天模型独立）。</p>
         </div>
       </header>
       <div class="table-wrap">
@@ -127,6 +136,7 @@ onMounted(load)
               <th>数据源</th>
               <th>类型</th>
               <th>地址</th>
+              <th>模型</th>
               <th>Key</th>
               <th>来源</th>
               <th>状态</th>
@@ -136,12 +146,13 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-if="!sources.length">
-              <td colspan="8" class="empty-cell">暂无记录</td>
+              <td colspan="9" class="empty-cell">暂无记录</td>
             </tr>
             <tr v-for="item in sources" :key="item.provider" :class="{ 'row-active': item.provider === editingProvider }">
               <td>{{ item.display_name }}</td>
               <td>{{ item.provider_type }}</td>
               <td class="nowrap">{{ item.base_url || '-' }}</td>
+              <td class="nowrap">{{ item.model || '-' }}</td>
               <td>{{ item.api_key_masked || '-' }}</td>
               <td>{{ keySourceLabel(item.key_source) }}</td>
               <td><span class="job-status" :class="item.status === 'enabled' ? 'success' : 'none'">{{ item.status }}</span></td>

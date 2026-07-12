@@ -80,6 +80,7 @@ class DataSourceConfigIn(BaseModel):
     provider_type: str = Field(default="market_data", max_length=80)
     base_url: str | None = Field(default=None, max_length=255)
     api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=120)
     status: str = Field(default="enabled", max_length=24)
     remark: str | None = None
 
@@ -274,6 +275,26 @@ def _data_source_defaults() -> dict[str, dict]:
             "status": "enabled",
             "remark": "问股消息面、新闻、公告和市场叙事搜索源。",
         },
+        "embedding": {
+            "provider": "embedding",
+            "display_name": "向量嵌入",
+            "provider_type": "embedding",
+            "base_url": "https://api.siliconflow.cn/v1",
+            "model": "BAAI/bge-m3",
+            "env_has_api_key": bool(settings.embedding_api_key),
+            "status": "enabled",
+            "remark": "用户长期记忆的语义向量化（OpenAI 兼容 /embeddings，与聊天模型解耦）。可填 SiliconFlow、千问 DashScope 等；填了这里就以此为准，否则回退 env / 活跃 LLM。",
+        },
+        "rerank": {
+            "provider": "rerank",
+            "display_name": "记忆重排",
+            "provider_type": "rerank",
+            "base_url": "https://api.siliconflow.cn/v1",
+            "model": "BAAI/bge-reranker-v2-m3",
+            "env_has_api_key": bool(settings.embedding_api_key),
+            "status": "enabled",
+            "remark": "记忆检索的精排（同提供商 /rerank）。base_url/key 未填则复用嵌入配置；模型名留空则关闭重排。",
+        },
     }
 
 
@@ -291,6 +312,7 @@ def _data_source_out(row: DataSourceConfig | None, provider: str) -> dict:
         "key_source": "database" if api_key else ("environment" if env_has_api_key else "missing"),
         "status": row.status if row else default["status"],
         "remark": row.remark if row and row.remark else default["remark"],
+        "model": (row.model if row and row.model else default.get("model")),
         "updated_at": row.updated_at.isoformat() if row and row.updated_at else None,
     }
 
@@ -601,8 +623,19 @@ def update_data_source(
     row.remark = payload.remark
     if payload.api_key is not None and payload.api_key.strip():
         row.api_key = payload.api_key.strip()
+    if payload.model is not None:
+        row.model = payload.model.strip() or None
     db.commit()
     db.refresh(row)
+    if provider_key in ("embedding", "rerank"):  # 嵌入/重排配置变更即时生效（清缓存，下次检索按新配置重建）
+        try:
+            from backend.app.ai import memory as _mem
+            _mem._embedding_fn = None
+            _mem._embedding_dim = 0
+            _mem._store = None
+            _mem._store_ready = None
+        except Exception:
+            pass
     return _data_source_out(row, provider_key)
 
 

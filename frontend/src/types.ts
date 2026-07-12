@@ -293,10 +293,11 @@ export type ModelConfig = {
 }
 
 export type DataSourceConfig = {
-  provider: 'tushare' | 'tavily' | string
+  provider: 'tushare' | 'tavily' | 'embedding' | 'rerank' | string
   display_name: string
   provider_type: string
   base_url: string | null
+  model: string | null
   api_key_masked: string | null
   has_api_key: boolean
   key_source: 'database' | 'environment' | 'missing' | string
