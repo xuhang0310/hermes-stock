@@ -49,7 +49,7 @@ def retrieve_chunks(
             .join(Document, Document.id == DocumentChunk.doc_id)
             .where(
                 DocumentChunk.status == "indexed",
-                or_(*[DocumentChunk.content.like(f"%{kw}%") for kw in keywords]),
+                or_(*[DocumentChunk.content.like(f"%{kw}%") for kw in keywords[:5]]),
                 *doc_filters,
             )
             .order_by(DocumentChunk.id.desc())
