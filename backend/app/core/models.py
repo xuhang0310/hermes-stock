@@ -260,6 +260,43 @@ class DocumentSymbol(Base):
     reason: Mapped[str | None] = mapped_column(Text)
 
 
+class DocumentChunk(Base):
+    """RAG 知识库切块：documents 正文切分后的最小检索单元（向量在向量库，正文在此表）。"""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    doc_id: Mapped[int] = mapped_column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    vector_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    embed_model: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="indexed")
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    content_hash: Mapped[str | None] = mapped_column(String(80), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    document: Mapped[Document] = relationship()
+
+
+class KnowledgeUpload(Base):
+    """知识库上传批次（P2 上传解析用，P1 先建表不长逻辑）。"""
+
+    __tablename__ = "knowledge_uploads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(80))
+    size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    doc_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("documents.id"))
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="parsing")
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    uploaded_by: Mapped[str | None] = mapped_column(String(80))
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class Rule(Base):
     __tablename__ = "rules"
 

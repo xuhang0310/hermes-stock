@@ -11,6 +11,7 @@ export type PageKey =
   | 'watchlist'
   | 'digitalHumans'
   | 'rhythm'
+  | 'knowledge'
   | 'settings'
 
 const props = defineProps<{
@@ -29,6 +30,9 @@ defineEmits<{
 const canViewRhythm = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
 )
+const canViewKnowledge = computed(
+  () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
+)
 
 const navItems = computed<Array<{ key: PageKey; label: string }>>(() => [
   { key: 'askStock', label: '问股' },
@@ -37,6 +41,7 @@ const navItems = computed<Array<{ key: PageKey; label: string }>>(() => [
   { key: 'positions', label: '持仓' },
   { key: 'watchlist', label: '自选池' },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),
+  ...(canViewKnowledge.value ? [{ key: 'knowledge' as PageKey, label: '知识库' }] : []),
   { key: 'settings', label: '设置' }
 ])
 </script>

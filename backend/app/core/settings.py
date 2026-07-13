@@ -43,6 +43,13 @@ class Settings:
     vector_backend: str = os.getenv("STOCK_VECTOR_BACKEND", "chroma")
     milvus_uri: str = os.getenv("STOCK_MILVUS_URI", "http://127.0.0.1:19530")
     milvus_token: str = os.getenv("STOCK_MILVUS_TOKEN", "")
+    # RAG 知识库（P1）：切块/检索参数；向量后端沿用 vector_backend/milvus_uri，collection 独立
+    rag_enabled: bool = os.getenv("STOCK_RAG_ENABLED", "true").lower() == "true"
+    rag_milvus_collection: str = os.getenv("STOCK_RAG_MILVUS_COLLECTION", "knowledge_chunks")
+    rag_top_k: int = int(os.getenv("STOCK_RAG_TOP_K", "6"))
+    rag_chunk_size: int = int(os.getenv("STOCK_RAG_CHUNK_SIZE", "700"))
+    rag_chunk_overlap: int = int(os.getenv("STOCK_RAG_OVERLAP", "80"))
+    rag_min_score: float = float(os.getenv("STOCK_RAG_MIN_SCORE", "0.35"))  # P2 注入阈值，先建
     # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号
     admin_username: str = os.getenv("STOCK_ADMIN_USERNAME", "")
     admin_password: str = os.getenv("STOCK_ADMIN_PASSWORD", "")

@@ -322,33 +322,44 @@ def _delete_memory_vector(memory_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _rerank(query: str, memories: list[UserMemory], top_n: int) -> list[UserMemory]:
-    """用 rerank 模型对候选记忆按与 query 的相关性精排；任何失败都回退原融合排序。"""
-    if len(memories) <= 1:
-        return memories[:top_n]
+def _rerank_scores(query: str, texts: list[str], top_n: int) -> list[tuple[int, float]] | None:
+    """调 rerank API 精排：返回 [(原列表下标, 相关性分)]（API 已按相关性降序）。
+
+    未配置 / 候选不足 / 调用失败返回 None，调用方回退融合排序。
+    记忆检索与 RAG 知识库检索（ai/retrieval.py）共用本函数。
+    """
+    if len(texts) <= 1:
+        return None
     base, key, model = _resolve_rerank_cfg()
     if not (base and key and model):
-        return memories[:top_n]
+        return None
     try:
-        docs = [m.content for m in memories]
         b = base.rstrip("/")  # SiliconFlow 用 /rerank；千问 compatible-api 用完整 /reranks 路径
         url = b if b.endswith(("/rerank", "/reranks")) else b + "/rerank"
-        payload = {"model": model, "query": query, "documents": docs, "top_n": top_n}
+        payload = {"model": model, "query": query, "documents": texts, "top_n": top_n}
         headers = {"Authorization": f"Bearer {key}"}
         with httpx.Client(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
             resp = client.post(url, json=payload, headers=headers)
             if resp.status_code != 200:
                 raise RuntimeError(f"rerank {resp.status_code}: {resp.text[:150]}")
             results = resp.json().get("results", [])
-        ordered = [
-            memories[r["index"]]
+        scored = [
+            (r["index"], float(r.get("relevance_score", 0.0)))
             for r in results
-            if isinstance(r.get("index"), int) and 0 <= r["index"] < len(memories)
+            if isinstance(r.get("index"), int) and 0 <= r["index"] < len(texts)
         ]
-        return ordered[:top_n] if ordered else memories[:top_n]
+        return scored or None
     except Exception:
-        log_event("agent", "WARNING", "记忆重排不可用，回退融合排序", to_db=False)
+        log_event("agent", "WARNING", "重排不可用，回退融合排序", to_db=False)
+        return None
+
+
+def _rerank(query: str, memories: list[UserMemory], top_n: int) -> list[UserMemory]:
+    """用 rerank 模型对候选记忆按与 query 的相关性精排；任何失败都回退原融合排序。"""
+    scored = _rerank_scores(query, [m.content for m in memories], top_n)
+    if not scored:
         return memories[:top_n]
+    return [memories[index] for index, _ in scored][:top_n]
 
 
 def retrieve_memories(

@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text, update
+from sqlalchemy import desc, func, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.auth.auth import AuthContext, require_permission
@@ -20,10 +20,15 @@ from backend.app.core.models import (
     AiChatSession,
     DataSourceConfig,
     DigitalHumanProfile,
+    Document,
+    DocumentChunk,
     LlmModelConfig,
     LlmModelPlatform,
 )
+from backend.app.ai import memory as memory_module
+from backend.app.ai import rag_ingest
 from backend.app.ai.memory import retrieve_memories, schedule_memory_digestion
+from backend.app.ai.retrieval import retrieve_chunks
 from backend.app.ai.prompt_recommendations import (
     active_recommendations,
     dismiss_recommendation,
@@ -34,7 +39,7 @@ from backend.app.ai.prompt_recommendations import (
 )
 from backend.app.core.applog import log_event
 from backend.app.agents.stock_agent import run_agent_events
-from backend.app.market.stock_tools import stock_strategy_payload
+from backend.app.market.stock_tools import normalize_a_share_symbol, stock_strategy_payload
 from backend.app.core.settings import settings
 
 
@@ -105,6 +110,16 @@ class AgentChatIn(BaseModel):
 
 class PromptRecommendationRefreshIn(BaseModel):
     digital_human_id: int
+
+
+class KnowledgeSearchIn(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=0, ge=0, le=20)  # 0=用 settings.rag_top_k 默认
+    symbol: str | None = Field(default=None, max_length=24)
+
+
+class KnowledgeReindexIn(BaseModel):
+    doc_id: int | None = Field(default=None, ge=1)  # 空=全量重建
 
 
 def _sse_event(event: dict) -> str:
@@ -778,6 +793,124 @@ def digital_human_capabilities(
         "role_fallback_code": role_fallback_code,
         "write_tools": [meta(n) for n in WRITE_TOOL_NAMES] if profile.can_write_positions else [],
     }
+
+
+# --------------------------------------------------------------------------- RAG 知识库（P1）
+# 端点只做 HTTP 编排：摄取在 rag_ingest、检索在 retrieval（单一职责）。
+
+
+@router.get("/knowledge/stats")
+def knowledge_stats(
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    total_docs = db.scalar(select(func.count()).select_from(Document)) or 0
+    total_chunks = db.scalar(select(func.count()).select_from(DocumentChunk)) or 0
+    indexed_docs = db.scalar(select(func.count(func.distinct(DocumentChunk.doc_id)))) or 0
+    return {
+        "documents": total_docs,
+        "chunks": total_chunks,
+        "indexed_docs": indexed_docs,
+        "indexed_pct": round(indexed_docs / total_docs * 100, 1) if total_docs else 0.0,
+        "backend": settings.vector_backend,
+        "collection": settings.rag_milvus_collection,
+        "dim": memory_module._embedding_dim,
+    }
+
+
+@router.get("/knowledge/documents")
+def knowledge_documents(
+    doc_type: str | None = Query(default=None, max_length=32),
+    trust_level: str | None = Query(default=None, max_length=24),
+    keyword: str | None = Query(default=None, max_length=120),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    chunk_agg = (
+        select(DocumentChunk.doc_id, func.count().label("chunk_count"))
+        .group_by(DocumentChunk.doc_id)
+        .subquery()
+    )
+    query = select(Document, func.coalesce(chunk_agg.c.chunk_count, 0)).outerjoin(
+        chunk_agg, chunk_agg.c.doc_id == Document.id
+    )
+    if doc_type:
+        query = query.where(Document.doc_type == doc_type)
+    if trust_level:
+        query = query.where(Document.trust_level == trust_level)
+    if keyword and keyword.strip():
+        query = query.where(Document.title.like(f"%{keyword.strip()}%"))
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.execute(
+        query.order_by(desc(Document.id)).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "id": doc.id,
+                "title": doc.title,
+                "doc_type": doc.doc_type,
+                "source": doc.source,
+                "source_url": doc.source_url,
+                "trust_level": doc.trust_level,
+                "published_at": doc.published_at.isoformat() if doc.published_at else None,
+                "chunk_count": int(count),
+                "indexed": bool(count),
+            }
+            for doc, count in rows
+        ],
+    }
+
+
+@router.get("/knowledge/documents/{doc_id}/chunks")
+def knowledge_document_chunks(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> list[dict]:
+    rows = db.scalars(
+        select(DocumentChunk).where(DocumentChunk.doc_id == doc_id).order_by(DocumentChunk.chunk_index)
+    ).all()
+    return [
+        {
+            "id": chunk.id,
+            "chunk_index": chunk.chunk_index,
+            "content": chunk.content[:300] + ("…" if len(chunk.content) > 300 else ""),
+            "token_count": chunk.token_count,
+            "status": chunk.status,
+            "hit_count": chunk.hit_count,
+        }
+        for chunk in rows
+    ]
+
+
+@router.post("/knowledge/reindex")
+async def knowledge_reindex(
+    payload: KnowledgeReindexIn,
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    # 后台执行立即返回（全量≈数百次嵌入调用要跑几分钟，同步等会撞网关超时）；进度轮询 /knowledge/stats
+    if payload.doc_id:
+        asyncio.create_task(asyncio.to_thread(rag_ingest.ingest_document, payload.doc_id, force=True))
+    else:
+        asyncio.create_task(asyncio.to_thread(rag_ingest.run_ingest, force=True))
+    return {"started": True, "scope": payload.doc_id or "all"}
+
+
+@router.post("/knowledge/search")
+def knowledge_search(
+    payload: KnowledgeSearchIn,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    symbol = normalize_a_share_symbol(payload.symbol) if payload.symbol else None
+    hits = retrieve_chunks(db, payload.query.strip(), top_k=payload.top_k or None, symbol=symbol)
+    return {"query": payload.query.strip(), "hits": hits}
 
 
 @router.get("/agent/profiles")

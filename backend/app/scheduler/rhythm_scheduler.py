@@ -471,6 +471,10 @@ def _execute_job(job_key: str, run_id: str) -> None:
             output_preview = _run_health_check(ran_at)
         elif snapshot["job_kind"] == "position_price_sync":
             output_preview = _run_position_price_sync(ran_at)
+        elif snapshot["job_kind"] == "rag_ingest":
+            from backend.app.ai.rag_ingest import run_ingest
+
+            output_preview = run_ingest()
         elif snapshot["job_kind"] == "agent_report":
             report_id, notification_id, output_preview = _run_agent_report(snapshot, ran_at)
         else:
@@ -661,6 +665,17 @@ DEFAULT_JOBS = [
         "job_kind": "position_price_sync",
         "schedule_type": "daily",
         "run_time": "15:05",
+        "weekday_mask": "1,2,3,4,5",
+        "trading_day_only": True,
+        "enabled": True,
+    },
+    {
+        "job_key": "rag-ingest-1630",
+        "name": "知识库增量索引",
+        "description": "收盘后把新增文档/报告切块嵌入进知识库（规则任务不经 LLM、不推送；失败自动重试）。",
+        "job_kind": "rag_ingest",
+        "schedule_type": "daily",
+        "run_time": "16:30",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
         "enabled": True,

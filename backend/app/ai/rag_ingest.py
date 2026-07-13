@@ -1,0 +1,305 @@
+"""RAG 知识库摄取管线（P1）：内部语料（documents + agent_reports）→ 切块 → 嵌入 → 向量索引。
+
+单一职责：本模块只负责"入库"（镜像报告 / 切块 / 嵌入 / 写 document_chunks / 写向量库）；
+检索在 ai/retrieval.py，HTTP 编排在 ai/ai_api.py，调度接线在 scheduler/rhythm_scheduler.py。
+
+复用（DRY）：嵌入走 memory 的 _embed/_ensure_embedding/_embedding_dim（与用户记忆同一嵌入
+空间、同一后台数据源配置）；向量后端沿用 settings.vector_backend/milvus_uri，但 collection
+独立（knowledge_chunks，schema 带 doc_id 等业务字段），与 user_memories 互不相扰。
+换嵌入模型 = drop 本 collection 重建（记忆模块同款教训）。
+
+事务纪律：嵌入 HTTP 调用期间不持有数据库事务——每篇文档"短会话读 → 无会话嵌入 →
+短会话写"（调度器价格同步同款教训）。
+
+幂等：按 doc_id 判断（已有切块的文档跳过）；块级 content_hash 只做同文档内去重。
+摄取失败不写行、只记日志，下轮增量自动重试（自愈优于簿记）。
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+from pathlib import Path
+
+from sqlalchemy import func, select
+
+from backend.app.ai import memory as _memory
+from backend.app.core.applog import log_event
+from backend.app.core.database import SessionLocal
+from backend.app.core.models import AgentReport, Document, DocumentChunk, DocumentSymbol
+from backend.app.core.settings import settings
+
+_CHROMA_PATH = Path(__file__).resolve().parents[2] / "chroma_data"  # 与 memory 同库不同 collection
+_MIN_CHUNK_CHARS = 20  # 过短碎块直接丢弃
+_MIN_DOC_CHARS = 30  # 正文短于此的文档不入库
+
+
+# --------------------------------------------------------------------------- 切块（纯函数）
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？；\n])")
+
+
+def chunk_text(text: str, size: int | None = None, overlap: int | None = None) -> list[str]:
+    """中文标点感知切块：按句累积到 size 封块，块间保留 overlap 字尾部重叠；超长无标点段落硬切。"""
+    size = size or settings.rag_chunk_size
+    overlap = settings.rag_chunk_overlap if overlap is None else overlap
+    chunks: list[str] = []
+    buffer = ""
+    for sentence in (s for s in _SENTENCE_SPLIT.split(text or "") if s.strip()):
+        if len(sentence) > size:
+            if buffer.strip():
+                chunks.append(buffer.strip())
+                buffer = ""
+            chunks.extend(sentence[i:i + size] for i in range(0, len(sentence), size))
+            continue
+        if buffer and len(buffer) + len(sentence) > size:
+            chunks.append(buffer.strip())
+            buffer = buffer[-overlap:] if overlap else ""
+        buffer += sentence
+    if buffer.strip():
+        chunks.append(buffer.strip())
+    return [c for c in chunks if len(c) >= _MIN_CHUNK_CHARS]
+
+
+# --------------------------------------------------------------------------- 向量 IO
+class _KnowledgeStore:
+    """知识库向量 IO（唯一职责：upsert/query/delete）。
+
+    照搬 memory 双后端建库模式、schema 换成知识库字段。P1 不做 store 级过滤——
+    过滤统一在 retrieval 的 SQL JOIN 里做（一种过滤语言，奥卡姆）；schema 仍存
+    doc_id/doc_type 等字段，为 P3/P4 免重建。
+    """
+
+    def __init__(self) -> None:
+        if _memory._ensure_embedding() is None or not _memory._embedding_dim:
+            raise RuntimeError("嵌入服务不可用，无法初始化知识库向量库")
+        self._dim = _memory._embedding_dim
+        self._backend = (settings.vector_backend or "chroma").lower()
+        self._name = settings.rag_milvus_collection
+        if self._backend == "milvus":
+            from pymilvus import DataType, MilvusClient
+
+            self._c = MilvusClient(uri=settings.milvus_uri, token=settings.milvus_token or "")
+            if not self._c.has_collection(self._name):
+                schema = self._c.create_schema(auto_id=False, enable_dynamic_field=True)
+                schema.add_field("vector_id", DataType.VARCHAR, is_primary=True, max_length=64)
+                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=self._dim)
+                schema.add_field("doc_id", DataType.INT64)
+                schema.add_field("doc_type", DataType.VARCHAR, max_length=32)
+                schema.add_field("symbol", DataType.VARCHAR, max_length=24)
+                schema.add_field("trust_level", DataType.VARCHAR, max_length=24)
+                schema.add_field("published_at", DataType.INT64)
+                index_params = self._c.prepare_index_params()
+                index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="COSINE")
+                self._c.create_collection(collection_name=self._name, schema=schema, index_params=index_params)
+            self._c.load_collection(self._name)
+        else:
+            import chromadb
+
+            _CHROMA_PATH.mkdir(parents=True, exist_ok=True)
+            client = chromadb.PersistentClient(path=str(_CHROMA_PATH))
+            self._col = client.get_or_create_collection(name=self._name, metadata={"hnsw:space": "cosine"})
+
+    def upsert(self, ids: list[str], vectors: list[list[float]], metadatas: list[dict]) -> None:
+        if self._backend == "milvus":
+            self._c.upsert(
+                collection_name=self._name,
+                data=[
+                    {
+                        "vector_id": vid,
+                        "vector": vec,
+                        "doc_id": int(meta.get("doc_id", 0)),
+                        "doc_type": str(meta.get("doc_type") or ""),
+                        "symbol": str(meta.get("symbol") or ""),
+                        "trust_level": str(meta.get("trust_level") or ""),
+                        "published_at": int(meta.get("published_at", 0)),
+                    }
+                    for vid, vec, meta in zip(ids, vectors, metadatas)
+                ],
+            )
+        else:
+            self._col.upsert(ids=list(ids), embeddings=list(vectors), metadatas=list(metadatas))
+
+    def query(self, vector: list[float], n: int) -> list[tuple[str, float]]:
+        """返回 [(vector_id, 相似度)]，分越高越相关；两后端分数口径与 memory 一致。"""
+        if self._backend == "milvus":
+            res = self._c.search(
+                collection_name=self._name, data=[vector], limit=n,
+                output_fields=[], consistency_level="Strong",  # 刚索引的块需立即可检索
+            )
+            return [(str(hit["id"]), float(hit.get("distance", 0.0))) for hit in (res[0] if res else [])]
+        res = self._col.query(query_embeddings=[vector], n_results=n, include=["distances"])
+        ids = res.get("ids", [[]])[0]
+        dists = res.get("distances", [[]])[0]
+        return [(str(i), max(0.0, 1.0 - float(d) / 2.0)) for i, d in zip(ids, dists)]
+
+    def delete(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        if self._backend == "milvus":
+            self._c.delete(collection_name=self._name, ids=list(ids))
+        else:
+            self._col.delete(ids=list(ids))
+
+
+_store: _KnowledgeStore | None = None
+_store_ready: bool | None = None
+
+
+def get_store() -> _KnowledgeStore | None:
+    """惰性单例；嵌入/向量库不可用时返回 None（摄取与检索优雅降级，不影响主功能）。"""
+    global _store, _store_ready
+    if _store_ready is not None:
+        return _store if _store_ready else None
+    try:
+        _store = _KnowledgeStore()
+        _store_ready = True
+        log_event("rag", "INFO", f"知识库向量库就绪：{settings.vector_backend}/{settings.rag_milvus_collection}", to_db=False)
+    except Exception as exc:  # noqa: BLE001
+        log_event("rag", "ERROR", f"知识库向量库初始化失败: {str(exc)[:160]}")
+        _store, _store_ready = None, False
+    return _store
+
+
+# --------------------------------------------------------------------------- 摄取
+def _report_hash(report_id: str) -> str:
+    """报告镜像文档的稳定唯一键（documents.content_hash）。"""
+    return hashlib.sha256(f"agent_report:{report_id}".encode()).hexdigest()[:64]
+
+
+def mirror_agent_reports() -> int:
+    """把尚未镜像的 agent_reports 转成 documents 行（doc_type=report），统一走文档摄取。"""
+    with SessionLocal() as db:
+        existing = {
+            h for h in db.scalars(select(Document.content_hash).where(Document.doc_type == "report")) if h
+        }
+        created = 0
+        for report in db.scalars(select(AgentReport)).all():
+            digest = _report_hash(report.report_id)
+            if digest in existing or not (report.content or "").strip():
+                continue
+            db.add(
+                Document(
+                    doc_type="report",
+                    title=report.title,
+                    content=report.content,
+                    summary=report.conclusion,
+                    source=f"agent:{report.agent_name}",
+                    published_at=report.created_at,
+                    trust_level="trusted",
+                    is_external_untrusted=False,
+                    content_hash=digest,
+                )
+            )
+            created += 1
+        db.commit()
+    return created
+
+
+def ingest_document(doc_id: int, *, force: bool = False) -> tuple[int, int]:
+    """切块+嵌入+索引一篇文档，返回 (成功块数, 失败块数)。已有切块且非 force 时跳过。"""
+    with SessionLocal() as db:
+        doc = db.get(Document, doc_id)
+        if doc is None:
+            return 0, 0
+        if not force:
+            existing = db.scalar(
+                select(func.count()).select_from(DocumentChunk).where(DocumentChunk.doc_id == doc_id)
+            )
+            if existing:
+                return 0, 0
+        text = (doc.content or doc.summary or "").strip()
+        title = (doc.title or "").strip()
+        if title and title not in text:
+            text = f"{title}。{text}"  # 标题并入正文提升召回（tavily 缓存正文常为摘要片段）
+        meta = {
+            "doc_id": doc.id,
+            "doc_type": doc.doc_type,
+            "trust_level": doc.trust_level,
+            "published_at": int(doc.published_at.timestamp()) if doc.published_at else 0,
+            "symbol": db.scalar(select(DocumentSymbol.symbol).where(DocumentSymbol.doc_id == doc_id).limit(1)) or "",
+        }
+
+    if len(text) < _MIN_DOC_CHARS:
+        return 0, 0
+    pieces = chunk_text(text)
+    if not pieces:
+        return 0, 0
+
+    vectors = _memory._embed(pieces)  # HTTP 调用，此刻不持有任何数据库事务
+    store = get_store()
+    if vectors is None or store is None:
+        return 0, len(pieces)  # 不写行保持可重试（下轮增量自动再来）
+
+    _, _, embed_model = _memory._resolve_embedding_cfg()
+    rows: list[DocumentChunk] = []
+    ids: list[str] = []
+    vecs: list[list[float]] = []
+    seen_hashes: set[str] = set()
+    for index, (piece, vector) in enumerate(zip(pieces, vectors)):
+        digest = hashlib.sha256(piece.encode()).hexdigest()[:64]
+        if digest in seen_hashes:  # 同文档内重复块去重
+            continue
+        seen_hashes.add(digest)
+        vector_id = f"{doc_id}-{index}"
+        rows.append(
+            DocumentChunk(
+                doc_id=doc_id, chunk_index=index, content=piece, token_count=len(piece),
+                vector_id=vector_id, embed_model=embed_model or None, content_hash=digest,
+            )
+        )
+        ids.append(vector_id)
+        vecs.append(vector)
+
+    with SessionLocal() as db:
+        try:
+            if force:
+                old_rows = db.scalars(select(DocumentChunk).where(DocumentChunk.doc_id == doc_id)).all()
+                store.delete([row.vector_id for row in old_rows])
+                for row in old_rows:
+                    db.delete(row)
+                db.flush()
+            store.upsert(ids, vecs, [dict(meta) for _ in ids])
+            db.add_all(rows)
+            db.commit()
+            return len(rows), 0
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log_event("rag", "ERROR", f"文档 {doc_id} 索引失败: {str(exc)[:200]}")
+            return 0, len(rows)
+
+
+def ingest_incremental(*, force: bool = False) -> dict:
+    """镜像新报告 + 摄取所有尚无切块的文档（doc_id 幂等）。force=True 全量重灌。"""
+    mirrored = mirror_agent_reports()
+    with SessionLocal() as db:
+        query = select(Document.id).order_by(Document.id)
+        if not force:
+            query = query.where(Document.id.not_in(select(DocumentChunk.doc_id).distinct()))
+        candidates = list(db.scalars(query))
+    indexed_docs = indexed_chunks = failed_chunks = 0
+    for doc_id in candidates:
+        ok, failed = ingest_document(doc_id, force=force)
+        if ok:
+            indexed_docs += 1
+            indexed_chunks += ok
+        failed_chunks += failed
+    return {
+        "mirrored_reports": mirrored,
+        "candidates": len(candidates),
+        "docs": indexed_docs,
+        "chunks": indexed_chunks,
+        "failed": failed_chunks,
+    }
+
+
+def run_ingest(*, force: bool = False) -> str:
+    """摄取入口（调度任务与 reindex 后台任务共用），返回人读统计。"""
+    if not settings.rag_enabled:
+        return "RAG 已关闭（STOCK_RAG_ENABLED=false），跳过"
+    stats = ingest_incremental(force=force)
+    preview = (
+        f"镜像报告 {stats['mirrored_reports']} 篇；候选 {stats['candidates']} 篇，"
+        f"新索引 {stats['docs']} 篇 / {stats['chunks']} 块"
+    )
+    if stats["failed"]:
+        preview += f"；失败 {stats['failed']} 块（下轮增量自动重试）"
+    return preview

@@ -12,6 +12,10 @@ import type {
   PositionSummary,
   PromptRecommendation,
   DigitalHumanCapabilities,
+  KnowledgeStats,
+  KnowledgeDocumentPage,
+  KnowledgeChunk,
+  KnowledgeSearchHit,
   ReportItem,
   RiskCheck,
   SystemLog,
@@ -326,6 +330,28 @@ export const api = {
     }),
   digitalHumanCapabilities: (id: number) =>
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
+  knowledgeStats: () => request<KnowledgeStats>('/api/knowledge/stats'),
+  knowledgeDocuments: (params: { doc_type?: string; trust_level?: string; keyword?: string; page?: number; page_size?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.doc_type) qs.set('doc_type', params.doc_type)
+    if (params.trust_level) qs.set('trust_level', params.trust_level)
+    if (params.keyword) qs.set('keyword', params.keyword)
+    if (params.page) qs.set('page', String(params.page))
+    if (params.page_size) qs.set('page_size', String(params.page_size))
+    const suffix = qs.toString()
+    return request<KnowledgeDocumentPage>(`/api/knowledge/documents${suffix ? `?${suffix}` : ''}`)
+  },
+  knowledgeChunks: (docId: number) => request<KnowledgeChunk[]>(`/api/knowledge/documents/${docId}/chunks`),
+  knowledgeReindex: (docId?: number) =>
+    request<{ started: boolean; scope: number | string }>('/api/knowledge/reindex', {
+      method: 'POST',
+      body: JSON.stringify(docId ? { doc_id: docId } : {})
+    }),
+  knowledgeSearch: (query: string, topK?: number, symbol?: string) =>
+    request<{ query: string; hits: KnowledgeSearchHit[] }>('/api/knowledge/search', {
+      method: 'POST',
+      body: JSON.stringify({ query, top_k: topK ?? null, symbol: symbol ?? null })
+    }),
   agentSessions: (chatMode?: 'research' | 'stock', digitalHumanId?: number | null) => {
     const params = new URLSearchParams()
     if (chatMode) params.set('chat_mode', chatMode)
