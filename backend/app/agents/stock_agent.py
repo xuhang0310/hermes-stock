@@ -732,7 +732,7 @@ def run_agent_events(
                 result = execute_digital_human_tool(digital_human_code, name, args)
                 yield {"type": "observation", "content": digital_human_observation_preview(name, result)}
             elif write_tool_names and name in write_tool_names:
-                display_name = {"update_my_positions": "更新持仓", "update_position_field": "改持仓字段", "rollback_last_position_batch": "撤销持仓批次"}.get(name, name)
+                display_name = digital_human_tool_display_name(name)
                 yield {"type": "action", "tool": name, "display_name": display_name, "content": json.dumps(args, ensure_ascii=False)}
                 result = _execute_position_write_tool(
                     name, args,

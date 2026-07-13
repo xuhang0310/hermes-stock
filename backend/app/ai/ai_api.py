@@ -655,17 +655,25 @@ def update_data_source(
 
 @router.get("/digital-humans")
 def digital_humans(
+    scope: str | None = Query(default=None),
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> list[dict]:
-    rows = db.scalars(
-        select(DigitalHumanProfile)
-        .where(DigitalHumanProfile.status == "enabled")
-        .order_by(DigitalHumanProfile.sort_order, DigitalHumanProfile.id)
-    ).all()
-    allowed = [row for row in rows if _profile_allowed(row, context)]
-    if not allowed and rows:
-        allowed = [rows[0]]
+    # 管理页传 scope=admin：持 digital_human:manage 时返回全部（含停用、跳过 target_roles），
+    # 避免停用后从列表消失无法重新启用。聊天页不传 scope，走原 enabled + target_roles 过滤。
+    admin_mode = scope == "admin" and (
+        "digital_human:manage" in context.permissions or "all" in context.permissions
+    )
+    query = select(DigitalHumanProfile).order_by(DigitalHumanProfile.sort_order, DigitalHumanProfile.id)
+    if not admin_mode:
+        query = query.where(DigitalHumanProfile.status == "enabled")
+    rows = db.scalars(query).all()
+    if admin_mode:
+        allowed = rows
+    else:
+        allowed = [row for row in rows if _profile_allowed(row, context)]
+        if not allowed and rows:
+            allowed = [rows[0]]
     return [_digital_human_out(row) for row in allowed]
 
 
@@ -681,6 +689,13 @@ def create_digital_human(
     db.add(profile)
     db.commit()
     db.refresh(profile)
+    if profile.can_write_positions:
+        # 新建即开写持仓也落审计（commit 后，避免记录没发生的变更）
+        log_event(
+            "digital_human", "INFO", "can_write_positions 新建开启",
+            digital_human_id=profile.id, digital_human_code=profile.code,
+            operator=_context.user.display_name, new=True,
+        )
     return _digital_human_out(profile)
 
 
@@ -700,15 +715,15 @@ def update_digital_human(
     for key, value in data.items():
         setattr(profile, key, value)
     new_can_write = bool(profile.can_write_positions)
+    db.commit()
+    db.refresh(profile)
     if new_can_write != old_can_write:
-        # 写持仓开关变化落审计：谁、什么时候、把谁的写权限从 X 改成 Y
+        # 写持仓开关变化落审计（commit 后，避免记录没发生的变更）：谁、什么时候、把谁的写权限从 X 改成 Y
         log_event(
             "digital_human", "INFO", "can_write_positions 切换",
             digital_human_id=profile.id, digital_human_code=profile.code,
             operator=_context.user.display_name, old=old_can_write, new=new_can_write,
         )
-    db.commit()
-    db.refresh(profile)
     return _digital_human_out(profile)
 
 
@@ -724,6 +739,7 @@ def digital_human_capabilities(
         raise HTTPException(status_code=404, detail="数字人不存在")
     from backend.app.market.digital_human_tools import (
         COMMON_TOOL_NAMES,
+        DEFAULT_ROLE_CODE,
         ROLE_TOOL_NAMES,
         WRITE_TOOL_NAMES,
         digital_human_tool_display_name,
@@ -745,10 +761,21 @@ def digital_human_capabilities(
             "description": fn.get("description", ""),
         }
 
+    # role_tools 用实际工具集合推导（actual - 公共 - 写工具），与聊天时 _role_code fallback 一致；
+    # 问股助手(ask_stock)等不在 ROLE_TOOL_NAMES 的，实际沿用 stock-pm 工具包，展示 fallback 提示。
+    actual_names = [s["function"]["name"] for s in digital_human_tool_schemas(profile.code)]
+    role_names = [n for n in actual_names if n not in COMMON_TOOL_NAMES and n not in WRITE_TOOL_NAMES]
+    role_fallback_code = (
+        DEFAULT_ROLE_CODE
+        if profile.code not in ROLE_TOOL_NAMES and profile.code != DEFAULT_ROLE_CODE
+        else None
+    )
+
     return {
         "can_write_positions": bool(profile.can_write_positions),
         "common_tools": [meta(n) for n in COMMON_TOOL_NAMES],
-        "role_tools": [meta(n) for n in ROLE_TOOL_NAMES.get(profile.code, [])],
+        "role_tools": [meta(n) for n in role_names],
+        "role_fallback_code": role_fallback_code,
         "write_tools": [meta(n) for n in WRITE_TOOL_NAMES] if profile.can_write_positions else [],
     }
 

@@ -27,7 +27,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    list.value = await api.digitalHumans()
+    list.value = await api.digitalHumans('admin')
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -60,10 +60,30 @@ async function toggleWrite(d: DigitalHuman) {
   const old = d.can_write_positions
   d.can_write_positions = !old // 乐观翻转
   try {
-    await api.saveDigitalHuman(fullPayload(d), d.id)
+    const saved = await api.saveDigitalHuman(fullPayload(d), d.id)
+    const idx = list.value.findIndex((x) => x.id === saved.id)
+    if (idx >= 0) list.value[idx] = saved // 回写服务端返回值
+    delete capabilities.value[d.id] // 缓存失效，write_tools 状态重新拉
   } catch (err) {
     d.can_write_positions = old // 回滚
     error.value = err instanceof Error ? err.message : '切换失败'
+  } finally {
+    togglePending.value = null
+  }
+}
+
+async function toggleStatus(d: DigitalHuman) {
+  if (togglePending.value) return
+  togglePending.value = d.id
+  const old = d.status
+  d.status = d.status === 'enabled' ? 'disabled' : 'enabled'
+  try {
+    const saved = await api.saveDigitalHuman(fullPayload(d), d.id)
+    const idx = list.value.findIndex((x) => x.id === saved.id)
+    if (idx >= 0) list.value[idx] = saved
+  } catch (err) {
+    d.status = old
+    error.value = err instanceof Error ? err.message : '启停失败'
   } finally {
     togglePending.value = null
   }
@@ -169,6 +189,9 @@ onMounted(load)
           <button type="button" :disabled="loadingCaps === d.id" @click="loadCapabilities(d)">
             {{ capabilities[d.id] ? '收起能力' : '能力' }}
           </button>
+          <button type="button" :disabled="!!togglePending" @click="toggleStatus(d)">
+            {{ d.status === 'enabled' ? '停用' : '启用' }}
+          </button>
         </span>
 
         <section v-if="editingId === d.id && editForm" class="dh-edit">
@@ -178,7 +201,7 @@ onMounted(load)
             <input :value="editForm.code" disabled />
           </label>
           <label>风格<input v-model="editForm.avatar_tone" /></label>
-          <label>目标角色<input v-model="editForm.target_roles" /></label>
+          <label>目标角色（* 表全部，或逗号分隔 admin,researcher,viewer）<input v-model="editForm.target_roles" placeholder="* 或 admin,researcher" /></label>
           <label>描述<input v-model="editForm.description" /></label>
           <label>系统提示词<textarea v-model="editForm.system_prompt" rows="6" /></label>
           <label>快捷问题（每行一条）<textarea :value="editForm.quick_prompts.join('\n')" @input="onQuickPromptsInput" rows="4" /></label>
@@ -200,6 +223,7 @@ onMounted(load)
           </div>
           <div class="cap-group">
             <h5>角色专属</h5>
+            <p v-if="capabilities[d.id].role_fallback_code" class="hint">该角色沿用 {{ capabilities[d.id].role_fallback_code }} 工具包</p>
             <ul><li v-for="t in capabilities[d.id].role_tools" :key="t.name"><strong>{{ t.display_name }}</strong> — {{ t.description }}</li></ul>
           </div>
           <div v-if="capabilities[d.id].write_tools.length" class="cap-group">

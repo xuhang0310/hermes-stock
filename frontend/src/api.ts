@@ -317,7 +317,8 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload)
     }),
-  digitalHumans: () => request<DigitalHuman[]>('/api/digital-humans'),
+  digitalHumans: (scope?: 'admin') =>
+    request<DigitalHuman[]>(`/api/digital-humans${scope === 'admin' ? '?scope=admin' : ''}`),
   saveDigitalHuman: (payload: Record<string, unknown>, id?: number) =>
     request<DigitalHuman>(id ? `/api/digital-humans/${id}` : '/api/digital-humans', {
       method: id ? 'PUT' : 'POST',

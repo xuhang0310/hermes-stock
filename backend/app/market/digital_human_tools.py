@@ -180,6 +180,9 @@ TOOL_DISPLAY_NAMES.update(
         "assess_macro_market_backdrop": "评估宏观市场背景",
         "scan_short_term_opportunities": "扫描短线候选",
         "get_hotspot_momentum": "分析热点动量",
+        "update_my_positions": "更新持仓",
+        "update_position_field": "改持仓字段",
+        "rollback_last_position_batch": "撤销持仓批次",
     }
 )
 

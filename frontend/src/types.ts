@@ -430,6 +430,7 @@ export type DigitalHumanCapabilities = {
   can_write_positions: boolean
   common_tools: DigitalHumanToolMeta[]
   role_tools: DigitalHumanToolMeta[]
+  role_fallback_code: string | null
   write_tools: DigitalHumanToolMeta[]
 }
 
