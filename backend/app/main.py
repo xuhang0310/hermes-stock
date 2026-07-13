@@ -22,7 +22,7 @@ from backend.app.auth.auth_api import router as auth_router
 from backend.app.core.database import get_db, initialize_default_database, session_scope
 from backend.app.agents.position_agent import run_position_agent, run_position_agent_events
 from backend.app.agents.position_import import parse_position_screenshot
-from backend.app.ai.prompt_recommendations import start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
+from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
 from backend.app.feishu.feishu_bot_api import router as feishu_bot_router
 from backend.app.data.repository import StockRepository
@@ -131,6 +131,7 @@ def create_app(init_db: bool = True) -> FastAPI:
                 seed_notify_channels(db)
                 seed_position_accounts(db)
                 ensure_default_jobs(db)
+                ensure_ask_stock_profile(db)
             start_prompt_recommendation_scheduler()
             start_rhythm_scheduler()
             start_feishu_bots()

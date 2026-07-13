@@ -333,6 +333,12 @@ export const api = {
     }),
   dismissPromptRecommendation: (id: number) =>
     request<{ ok: boolean }>(`/api/agent/prompt-recommendations/${id}/dismiss`, { method: 'POST' }),
+  stockPromptRecommendations: () =>
+    request<{ items: PromptRecommendation[]; fallback_prompts: string[] }>('/api/agent/stock/prompt-recommendations'),
+  refreshStockPromptRecommendations: () =>
+    request<{ items: PromptRecommendation[]; fallback_prompts: string[] }>('/api/agent/stock/prompt-recommendations/refresh', {
+      method: 'POST'
+    }),
   stockStrategies: () => request<{ skills: StockStrategy[]; default_skill_id: string }>('/api/agent/stock/strategies'),
   streamAgentChat: (
     payload: {
