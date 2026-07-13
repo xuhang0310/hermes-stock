@@ -136,6 +136,21 @@ async function openSession(id: number) {
   }
 }
 
+async function deleteSession(item: AgentSession) {
+  if (sending.value) return
+  const removedId = item.id
+  const wasActive = selectedSessionId.value === removedId
+  // 乐观移除：立即从列表隐藏（逻辑删除，服务端仅置为 deleted、记录仍保留在后台）
+  sessions.value = sessions.value.filter((session) => session.id !== removedId)
+  try {
+    await api.agentDeleteSession(removedId)
+    if (wasActive) newSession()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '删除会话失败'
+    refreshSessions() // 失败则回滚到服务端真实列表
+  }
+}
+
 function newSession() {
   if (sending.value) return
   selectedSessionId.value = null
@@ -489,19 +504,30 @@ onMounted(load)
       </div>
 
       <div class="session-list">
-        <button
+        <div
           v-for="session in sessions"
           :key="session.id"
-          type="button"
-          class="session-item"
-          :class="{ active: selectedSessionId === session.id }"
-          :disabled="sending || loadingSession"
-          @click="openSession(session.id)"
+          class="session-item-wrap"
         >
-          <strong>{{ session.title }}</strong>
-          <span>{{ sessionModelLabel(session) }}</span>
-          <small>{{ session.message_count }} 条 · {{ new Date(session.updated_at).toLocaleString() }}</small>
-        </button>
+          <button
+            type="button"
+            class="session-item"
+            :class="{ active: selectedSessionId === session.id }"
+            :disabled="sending || loadingSession"
+            @click="openSession(session.id)"
+          >
+            <strong>{{ session.title }}</strong>
+            <span>{{ sessionModelLabel(session) }}</span>
+            <small>{{ session.message_count }} 条 · {{ new Date(session.updated_at).toLocaleString() }}</small>
+          </button>
+          <button
+            class="session-delete"
+            type="button"
+            title="删除该会话（从列表移除，记录仍保留在后台）"
+            :disabled="sending || loadingSession"
+            @click.stop="deleteSession(session)"
+          >×</button>
+        </div>
         <div v-if="!sessions.length" class="session-empty">暂无历史问股</div>
       </div>
     </aside>
