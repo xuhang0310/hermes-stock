@@ -281,6 +281,23 @@ def ingest_document(doc_id: int, *, force: bool = False) -> tuple[int, int]:
             return 0, len(rows)
 
 
+# 摄取进度（单一来源：调度任务与 reindex 后台任务都写这里，stats 接口原样透出）。
+# 单写者（同一时刻只有一个摄取线程，见 run_ingest 防重），读者只读快照，无需加锁。
+_progress: dict = {
+    "running": False,
+    "processed": 0,
+    "total": 0,
+    "indexed": 0,
+    "failed": 0,
+    "last_result": "",
+}
+
+
+def get_progress() -> dict:
+    """摄取进度快照（前端进度条/完成判定的数据源）。"""
+    return dict(_progress)
+
+
 def ingest_incremental(*, force: bool = False) -> dict:
     """镜像新报告 + 摄取所有尚无切块的文档（doc_id 幂等）。force=True 全量重灌。"""
     mirrored = mirror_agent_reports()
@@ -289,13 +306,20 @@ def ingest_incremental(*, force: bool = False) -> dict:
         if not force:
             query = query.where(Document.id.not_in(select(DocumentChunk.doc_id).distinct()))
         candidates = list(db.scalars(query))
+    _progress.update(processed=0, total=len(candidates), indexed=0, failed=0)
     indexed_docs = indexed_chunks = failed_chunks = 0
+    embed_failure_logged = False
     for doc_id in candidates:
         ok, failed = ingest_document(doc_id, force=force)
         if ok:
             indexed_docs += 1
             indexed_chunks += ok
+        if failed and not ok and not embed_failure_logged:
+            # 嵌入服务不可用时每篇都会失败——只落一条日志说明原因，避免刷屏（每篇写库失败已各自留痕）
+            log_event("rag", "WARNING", f"文档 {doc_id} 嵌入失败（嵌入服务不可用或向量库未就绪），本轮同类失败不再重复记录")
+            embed_failure_logged = True
         failed_chunks += failed
+        _progress.update(processed=_progress["processed"] + 1, indexed=indexed_docs, failed=failed_chunks)
     return {
         "mirrored_reports": mirrored,
         "candidates": len(candidates),
@@ -306,14 +330,42 @@ def ingest_incremental(*, force: bool = False) -> dict:
 
 
 def run_ingest(*, force: bool = False) -> str:
-    """摄取入口（调度任务与 reindex 后台任务共用），返回人读统计。"""
+    """摄取入口（调度任务与 reindex 后台任务共用），返回人读统计。自带防重（真源头互斥）。"""
     if not settings.rag_enabled:
         return "RAG 已关闭（STOCK_RAG_ENABLED=false），跳过"
-    stats = ingest_incremental(force=force)
-    preview = (
-        f"镜像报告 {stats['mirrored_reports']} 篇；候选 {stats['candidates']} 篇，"
-        f"新索引 {stats['docs']} 篇 / {stats['chunks']} 块"
-    )
-    if stats["failed"]:
-        preview += f"；失败 {stats['failed']} 块（下轮增量自动重试）"
+    if _progress["running"]:
+        return "已有摄取在跑，跳过本次触发"
+    _progress["running"] = True
+    try:
+        stats = ingest_incremental(force=force)
+        preview = (
+            f"镜像报告 {stats['mirrored_reports']} 篇；候选 {stats['candidates']} 篇，"
+            f"新索引 {stats['docs']} 篇 / {stats['chunks']} 块"
+        )
+        if stats["failed"]:
+            preview += f"；失败 {stats['failed']} 块（下轮增量自动重试）"
+    except Exception as exc:  # noqa: BLE001
+        preview = f"摄取异常中断: {str(exc)[:200]}"
+        log_event("rag", "ERROR", preview)
+    finally:
+        _progress["running"] = False
+        _progress["last_result"] = preview
     return preview
+
+
+def disable_document(doc_id: int) -> dict:
+    """文档级禁用：全部切块置 disabled + 从向量库摘除（可用「重灌」恢复，软删口径）。"""
+    with SessionLocal() as db:
+        rows = db.scalars(select(DocumentChunk).where(DocumentChunk.doc_id == doc_id)).all()
+        if not rows:
+            return {"error": "该文档还没有切块，无需禁用"}
+        store = get_store()
+        if store is not None:
+            try:
+                store.delete([row.vector_id for row in rows])
+            except Exception as exc:  # noqa: BLE001
+                return {"error": f"删除向量失败: {str(exc)[:160]}"}
+        for row in rows:
+            row.status = "disabled"
+        db.commit()
+        return {"ok": True, "disabled_chunks": len(rows)}
