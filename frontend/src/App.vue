@@ -17,6 +17,7 @@ import type {
   DashboardPayload,
   HealthPayload,
   ModelConfig,
+  PositionAccount,
   PositionAgentStep,
   PositionAgentStreamEvent,
   PositionItem,
@@ -75,6 +76,7 @@ const positionModels = ref<ModelConfig[]>([])
 const selectedPositionModelId = ref<number | null>(null)
 const selectedChartPosition = ref<PositionItem | null>(null)
 const positionAgentTargetAccount = ref<number | null>(null)
+const positionAgentAccounts = ref<PositionAccount[]>([])
 
 const pageTitle = computed(() => {
   const labels: Record<PageKey, string> = {
@@ -218,7 +220,17 @@ async function openPositionAgent(accountId: number | null = null) {
   } catch (err) {
     positionAgentMessage.value = err instanceof Error ? err.message : '模型列表加载失败'
   }
+  try {
+    positionAgentAccounts.value = await api.positionAccounts()
+  } catch {
+    positionAgentAccounts.value = [] // 账户列表加载失败不阻塞录入，仍可自动识别账户
+  }
   scrollPositionChat(false)
+}
+
+function positionAccountLabel(account: PositionAccount) {
+  const name = account.account_name || account.account_no_masked || `账户#${account.id}`
+  return `${account.broker_name} · ${name}`
 }
 
 function closePositionAgent() {
@@ -582,6 +594,12 @@ onMounted(initialize)
               <input type="file" accept="image/*" :disabled="positionAgentBusy" @change="onPositionImageSelected" />
               <span>上传图片</span>
             </label>
+            <select v-model="positionAgentTargetAccount" :disabled="positionAgentBusy" title="选择这批持仓保存到哪个证券账户">
+              <option :value="null">自动识别账户</option>
+              <option v-for="account in positionAgentAccounts" :key="account.id" :value="account.id">
+                {{ positionAccountLabel(account) }}
+              </option>
+            </select>
             <select v-model.number="selectedPositionModelId" :disabled="positionAgentBusy || !positionModels.length" :title="modelOptionLabel(activePositionModel)">
               <optgroup v-for="group in positionModelGroups" :key="group.platform" :label="group.platform">
                 <option v-for="item in group.rows" :key="item.id" :value="item.id">

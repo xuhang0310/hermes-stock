@@ -289,6 +289,78 @@ def _run_health_check(now: datetime) -> str:
     return "健康检查通过，无异常"
 
 
+def _run_position_price_sync(now: datetime) -> str:
+    """规则任务（不经 LLM）：为全部 open 持仓快照同步行情价，重算市值/浮盈与账户资金。
+
+    录入持仓时不再要求用户提供最新价——行情由本任务每个交易日收盘后自动同步。
+    价格来源复用 stock_tools.get_realtime_quote（TuShare 日线收盘）。失败标的记录到
+    输出预览，不推告警群（零噪音纪律，由次日健康检查汇总失败任务）。
+    """
+    from backend.app.core.models import PositionAccount, PositionHoldingSnapshot
+    from backend.app.data.repository import StockRepository
+    from backend.app.market.stock_tools import get_realtime_quote
+
+    with SessionLocal() as session:
+        latest_ids = (
+            select(func.max(PositionHoldingSnapshot.id))
+            .group_by(PositionHoldingSnapshot.account_id, PositionHoldingSnapshot.symbol)
+        )
+        snaps = [
+            s
+            for s in session.scalars(
+                select(PositionHoldingSnapshot).where(PositionHoldingSnapshot.id.in_(latest_ids))
+            ).all()
+            if (s.status or "open") == "open" and (s.position_quantity or 0) > 0
+        ]
+        if not snaps:
+            return "无 open 持仓，跳过价格同步"
+
+        quotes: dict[str, dict] = {}
+        failures: list[str] = []
+        for symbol in sorted({s.symbol for s in snaps}):
+            quote = get_realtime_quote(symbol)
+            if not isinstance(quote, dict) or "error" in quote or quote.get("price") is None:
+                failures.append(symbol)
+                continue
+            quotes[symbol] = quote
+
+        updated = 0
+        touched_accounts: set[int] = set()
+        for snap in snaps:
+            quote = quotes.get(snap.symbol)
+            if quote is None:
+                continue
+            price = float(quote["price"])
+            qty = float(snap.position_quantity or 0)
+            snap.latest_price = price
+            snap.market_value = round(price * qty, 4)
+            cost_amount = snap.cost_amount
+            if cost_amount is None and snap.cost_price is not None:
+                cost_amount = round(float(snap.cost_price) * qty, 4)
+            if cost_amount is not None:
+                snap.floating_pnl = round(snap.market_value - float(cost_amount), 4)
+                if float(cost_amount):
+                    snap.floating_pnl_pct = round(snap.floating_pnl / float(cost_amount) * 100, 4)
+            pre_close = quote.get("pre_close")
+            if pre_close:
+                snap.day_pnl = round((price - float(pre_close)) * qty, 4)
+            updated += 1
+            if snap.account_id:
+                touched_accounts.add(snap.account_id)
+
+        repo = StockRepository(session)
+        for acc_id in sorted(touched_accounts):
+            account = session.get(PositionAccount, acc_id)
+            if account is not None:
+                repo._recompute_account_funds(account)
+        session.commit()
+
+    preview = f"同步 {len(quotes)} 个标的行情，更新 {updated} 条持仓快照，重算 {len(touched_accounts)} 个账户资金"
+    if failures:
+        preview += f"；{len(failures)} 个标的取价失败: {', '.join(failures[:8])}"
+    return preview
+
+
 # --------------------------------------------------------------------------- #
 # 执行器
 # --------------------------------------------------------------------------- #
@@ -357,6 +429,8 @@ def _execute_job(job_key: str, run_id: str) -> None:
     try:
         if snapshot["job_kind"] == "health_check":
             output_preview = _run_health_check(ran_at)
+        elif snapshot["job_kind"] == "position_price_sync":
+            output_preview = _run_position_price_sync(ran_at)
         elif snapshot["job_kind"] == "agent_report":
             report_id, notification_id, output_preview = _run_agent_report(snapshot, ran_at)
         else:
@@ -536,6 +610,17 @@ DEFAULT_JOBS = [
         "job_kind": "health_check",
         "schedule_type": "daily",
         "run_time": "08:15",
+        "weekday_mask": "1,2,3,4,5",
+        "trading_day_only": True,
+        "enabled": True,
+    },
+    {
+        "job_key": "position-price-sync-1505",
+        "name": "持仓价格同步",
+        "description": "收盘后自动拉取行情，刷新全部持仓的最新价/市值/浮盈并重算账户资金（不经 LLM、不推送）。",
+        "job_kind": "position_price_sync",
+        "schedule_type": "daily",
+        "run_time": "15:05",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
         "enabled": True,
