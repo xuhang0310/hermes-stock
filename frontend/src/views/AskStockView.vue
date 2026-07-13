@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
-import type { AgentSession, AgentStreamEvent, ModelConfig, StockStrategy } from '../types'
+import type { AgentSession, AgentStreamEvent, ModelConfig, PromptRecommendation, StockStrategy } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 
 type ReactStep = {
@@ -45,6 +45,30 @@ const quickQuestions = [
   '600519 支撑位和压力位在哪里',
   '我想做短线，帮我筛一下这个票的风险点'
 ]
+
+const promptRecommendations = ref<PromptRecommendation[]>([])
+const fallbackPrompts = ref<string[]>([])
+const loadingPrompts = ref(false)
+
+const displayedPrompts = computed(() => {
+  const rows: Array<{ id?: number; text: string; reason?: string | null; source: 'dynamic' | 'fallback' }> = []
+  const seen = new Set<string>()
+  for (const item of promptRecommendations.value) {
+    const text = item.prompt_text.trim()
+    if (!text || seen.has(text)) continue
+    seen.add(text)
+    rows.push({ id: item.id, text, reason: item.reason, source: 'dynamic' })
+  }
+  const fallback = fallbackPrompts.value.length ? fallbackPrompts.value : quickQuestions
+  for (const text of fallback) {
+    const normalized = text.trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    rows.push({ text: normalized, source: 'fallback' })
+    if (rows.length >= 6) break
+  }
+  return rows.slice(0, 6)
+})
 
 const models = ref<ModelConfig[]>([])
 const sessions = ref<AgentSession[]>([])
@@ -100,6 +124,7 @@ async function load() {
       ? [strategies.value[0].id]
       : []
   selectedModelId.value = models.value.find((item) => item.is_active)?.id || models.value[0]?.id || null
+  void loadStockRecommendations()
 }
 
 async function refreshSessions() {
@@ -148,6 +173,34 @@ async function deleteSession(item: AgentSession) {
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除会话失败'
     refreshSessions() // 失败则回滚到服务端真实列表
+  }
+}
+
+async function loadStockRecommendations() {
+  loadingPrompts.value = true
+  try {
+    const payload = await api.stockPromptRecommendations()
+    promptRecommendations.value = payload.items
+    fallbackPrompts.value = payload.fallback_prompts
+  } catch {
+    promptRecommendations.value = []
+    fallbackPrompts.value = []
+  } finally {
+    loadingPrompts.value = false
+  }
+}
+
+async function refreshStockRecommendations() {
+  if (sending.value) return
+  loadingPrompts.value = true
+  try {
+    const payload = await api.refreshStockPromptRecommendations()
+    promptRecommendations.value = payload.items
+    fallbackPrompts.value = payload.fallback_prompts
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '刷新推荐失败'
+  } finally {
+    loadingPrompts.value = false
   }
 }
 
@@ -545,13 +598,18 @@ onMounted(load)
         <p>基于行情工具和搜索工具回答，支持多轮追问。缺少数据源 Token 时会直接提示，不会编造数据。</p>
         <div class="quick-prompts">
           <button
-            v-for="prompt in quickQuestions"
-            :key="prompt"
+            v-for="prompt in displayedPrompts"
+            :key="`${prompt.source}-${prompt.id || prompt.text}`"
             type="button"
             :disabled="sending"
-            @click="applyQuickQuestion(prompt)"
+            :class="{ dynamic: prompt.source === 'dynamic' }"
+            :title="prompt.reason || (prompt.source === 'dynamic' ? '根据历史对话和系统数据推荐' : '问股常用提示词')"
+            @click="applyQuickQuestion(prompt.text)"
           >
-            {{ prompt }}
+            {{ prompt.text }}
+          </button>
+          <button type="button" :disabled="sending || loadingPrompts" @click="refreshStockRecommendations">
+            {{ loadingPrompts ? '推荐生成中' : '刷新推荐' }}
           </button>
         </div>
       </section>

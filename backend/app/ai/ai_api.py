@@ -27,7 +27,9 @@ from backend.app.ai.memory import retrieve_memories, schedule_memory_digestion
 from backend.app.ai.prompt_recommendations import (
     active_recommendations,
     dismiss_recommendation,
+    ensure_ask_stock_profile,
     recommendation_out,
+    refresh_recommendations_for_stock,
     refresh_recommendations_for_user_profile,
 )
 from backend.app.core.applog import log_event
@@ -758,6 +760,32 @@ def dismiss_prompt_recommendation(
     if not dismiss_recommendation(db, user_id=context.user.id, recommendation_id=recommendation_id):
         raise HTTPException(status_code=404, detail="推荐不存在或无权操作")
     return {"ok": True}
+
+
+@router.get("/agent/stock/prompt-recommendations")
+def stock_prompt_recommendations(
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """问股（stock 模式）推荐 prompt：复用问股虚拟 profile，会话历史按 chat_mode=stock 过滤。"""
+    profile = ensure_ask_stock_profile(db)
+    rows = active_recommendations(db, context.user.id, profile.id, limit=6)
+    if not rows:
+        rows = refresh_recommendations_for_stock(db, user_id=context.user.id)
+    return {
+        "items": [recommendation_out(row) for row in rows],
+        "fallback_prompts": _quick_prompts(profile),
+    }
+
+
+@router.post("/agent/stock/prompt-recommendations/refresh")
+def refresh_stock_prompt_recommendations(
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    profile = ensure_ask_stock_profile(db)
+    rows = refresh_recommendations_for_stock(db, user_id=context.user.id)
+    return {"items": [recommendation_out(row) for row in rows], "fallback_prompts": _quick_prompts(profile)}
 
 
 @router.get("/agent/stock/strategies")

@@ -36,6 +36,45 @@ RECOMMENDATION_TTL_HOURS = 10
 MAX_RECOMMENDATIONS = 8
 _scheduler_task: asyncio.Task | None = None
 
+# 问股（stock 模式）虚拟 profile：问股会话不绑数字人（agent_chat stock 置 digital_human_id=None），
+# 但 AiPromptRecommendation.digital_human_id NOT NULL，故用此虚拟 profile 作 persona / fallback /
+# 推荐存储锚点。会话历史按 chat_mode=stock 过滤（不依赖 digital_human_id）。
+ASK_STOCK_PROFILE_CODE = "ask_stock"
+ASK_STOCK_QUICK_PROMPTS = [
+    "帮我看看贵州茅台现在能不能买",
+    "分析一下 300750 近期趋势和风险",
+    "比亚迪最近有什么消息面变化",
+    "600519 支撑位和压力位在哪里",
+    "我想做短线，帮我筛一下这个票的风险点",
+]
+ASK_STOCK_SYSTEM_PROMPT = (
+    "你是问股助手，基于 TuShare（日线/财务/资金流/龙虎榜/解禁等）与 Tavily 联网搜索，"
+    "用 ReAct 方式回答 A 股研究问题：趋势/支撑压力/消息面/风险点。不提供投资建议。"
+)
+
+
+def ensure_ask_stock_profile(db: Session) -> DigitalHumanProfile:
+    """启动时确保问股虚拟 profile 存在（code=ask_stock）。upsert by code：已存在不动。"""
+    existing = db.scalar(
+        select(DigitalHumanProfile).where(DigitalHumanProfile.code == ASK_STOCK_PROFILE_CODE).limit(1)
+    )
+    if existing is not None:
+        return existing
+    profile = DigitalHumanProfile(
+        code=ASK_STOCK_PROFILE_CODE,
+        name="问股助手",
+        avatar_tone="analytical",
+        target_roles="*",
+        description="基于 TuShare/Tavily 的 A 股研究助手",
+        system_prompt=ASK_STOCK_SYSTEM_PROMPT,
+        quick_prompts_json=json.dumps(ASK_STOCK_QUICK_PROMPTS, ensure_ascii=False),
+        status="enabled",
+        sort_order=0,
+    )
+    db.add(profile)
+    db.commit()
+    return profile
+
 
 @dataclass(frozen=True)
 class CandidatePrompt:
@@ -130,6 +169,56 @@ def refresh_recommendations_for_user_profile(
     return active_recommendations(db, user_id, profile.id)
 
 
+def refresh_recommendations_for_stock(db: Session, *, user_id: int) -> list[AiPromptRecommendation]:
+    """为问股（stock 模式，会话不绑数字人）刷新推荐。
+
+    复用问股虚拟 profile（code=ask_stock）作 persona / fallback / 存储锚点；会话历史按
+    chat_mode=stock 过滤（不依赖 digital_human_id）。模式与 refresh_recommendations_for_user_profile
+    逐字对齐。
+    """
+    profile = ensure_ask_stock_profile(db)
+    context = _collect_context(db, user_id=user_id, digital_human_id=None, chat_mode="stock")
+    candidates = _build_candidates(profile, context)
+    if not candidates:
+        candidates = _fallback_candidates(profile)
+
+    now = datetime.now()
+    expires_at = now + timedelta(hours=RECOMMENDATION_TTL_HOURS)
+    existing = db.scalars(
+        select(AiPromptRecommendation).where(
+            AiPromptRecommendation.user_id == user_id,
+            AiPromptRecommendation.digital_human_id == profile.id,
+            AiPromptRecommendation.chat_mode == "stock",
+            AiPromptRecommendation.status == "active",
+        )
+    ).all()
+    for row in existing:
+        row.status = "expired"
+
+    rows: list[AiPromptRecommendation] = []
+    for candidate in _dedupe_candidates(candidates)[:MAX_RECOMMENDATIONS]:
+        row = AiPromptRecommendation(
+            user_id=user_id,
+            digital_human_id=profile.id,
+            digital_human_code=profile.code,
+            chat_mode="stock",
+            prompt_text=candidate.text[:500],
+            reason=candidate.reason,
+            source_type=candidate.source_type,
+            score=candidate.score,
+            status="active",
+            expires_at=expires_at,
+        )
+        db.add(row)
+        rows.append(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return active_recommendations(db, user_id, profile.id)
+    return active_recommendations(db, user_id, profile.id)
+
+
 def refresh_all_recommendations(db: Session) -> int:
     users = db.scalars(select(User).where(User.is_enabled.is_(True))).all()
     profiles = db.scalars(
@@ -140,7 +229,10 @@ def refresh_all_recommendations(db: Session) -> int:
     count = 0
     for user in users:
         for profile in profiles:
-            refresh_recommendations_for_user_profile(db, user_id=user.id, profile=profile)
+            if profile.code == ASK_STOCK_PROFILE_CODE:
+                refresh_recommendations_for_stock(db, user_id=user.id)
+            else:
+                refresh_recommendations_for_user_profile(db, user_id=user.id, profile=profile)
             count += 1
     return count
 
@@ -196,18 +288,23 @@ def _refresh_all_in_new_session() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _collect_context(db: Session, *, user_id: int, digital_human_id: int, chat_mode: str) -> dict[str, Any]:
-    """收集用户上下文：对话历史、持仓、自选、风险、事件。"""
+def _collect_context(db: Session, *, user_id: int, digital_human_id: int | None, chat_mode: str) -> dict[str, Any]:
+    """收集用户上下文：对话历史、持仓、自选、风险、事件。
+
+    digital_human_id 为 None 时按 chat_mode 过滤会话（问股 stock 会话不绑 profile）。
+    """
     since = datetime.now() - timedelta(days=30)
+    session_filters = [
+        AiChatSession.user_id == user_id,
+        AiChatSession.chat_mode == chat_mode,
+        AiChatMessage.created_at >= since,
+    ]
+    if digital_human_id is not None:
+        session_filters.append(AiChatSession.digital_human_id == digital_human_id)
     messages = db.execute(
         select(AiChatMessage.role, AiChatMessage.content, AiChatMessage.created_at)
         .join(AiChatSession, AiChatSession.id == AiChatMessage.session_id)
-        .where(
-            AiChatSession.user_id == user_id,
-            AiChatSession.digital_human_id == digital_human_id,
-            AiChatSession.chat_mode == chat_mode,
-            AiChatMessage.created_at >= since,
-        )
+        .where(*session_filters)
         .order_by(AiChatMessage.id.desc())
         .limit(60)
     ).all()
