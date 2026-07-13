@@ -251,14 +251,21 @@ def ingest_document(doc_id: int, *, force: bool = False) -> tuple[int, int]:
 
     with SessionLocal() as db:
         try:
+            old_rows: list[DocumentChunk] = []
             if force:
                 old_rows = db.scalars(select(DocumentChunk).where(DocumentChunk.doc_id == doc_id)).all()
-                store.delete([row.vector_id for row in old_rows])
                 for row in old_rows:
                     db.delete(row)
                 db.flush()
             store.upsert(ids, vecs, [dict(meta) for _ in ids])
             db.add_all(rows)
+            # force 重灌：upsert 成功后再删残留向量（块数减少时旧 vector_id 不在新 ids 的），
+            # 避免"先 delete 不可逆"——upsert 失败时旧向量还在，可再 reindex
+            if force:
+                new_ids = set(ids)
+                residual = [row.vector_id for row in old_rows if row.vector_id not in new_ids]
+                if residual:
+                    store.delete(residual)
             db.commit()
             return len(rows), 0
         except Exception as exc:  # noqa: BLE001
