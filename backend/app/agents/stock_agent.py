@@ -13,6 +13,7 @@ import httpx
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
+from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal, engine
 from backend.app.market.digital_human_tools import (
     digital_human_observation_preview,
@@ -21,9 +22,11 @@ from backend.app.market.digital_human_tools import (
     digital_human_tool_names,
     digital_human_tool_schemas,
     execute_digital_human_tool,
+    write_tool_schemas,
 )
 from backend.app.core.models import LlmModelConfig
 from backend.app.core.settings import settings
+from backend.app.data.repository import StockRepository
 from backend.app.market.stock_tools import (
     STOCK_TOOL_SCHEMAS,
     execute_stock_tool,
@@ -463,6 +466,85 @@ def _observation_preview(result: dict) -> str:
     return "；".join(parts)
 
 
+def _execute_position_write_tool(
+    name: str,
+    args: dict[str, Any],
+    *,
+    user_id: int,
+    user_label: str,
+    default_account_id: int | None,
+    digital_human_code: str | None,
+) -> dict:
+    """数字人写持仓工具：经独立 repository 会话复用 import 链写入（快照式），全程审计。
+
+    不经 execute_digital_human_tool/registry（它们只传 name/args，不带用户/账户/db 上下文）。
+    run_agent_events 跑在后台线程，此处用自己的 SessionLocal，不复用请求 db（线程安全）。
+    """
+    if name != "update_my_positions":
+        return {"error": f"未知写工具: {name}"}
+    rows = args.get("rows") if isinstance(args.get("rows"), list) else []
+    if not rows:
+        return {"error": "没有可保存的持仓明细 rows"}
+    account = args.get("account") if isinstance(args.get("account"), dict) else {}
+    default_account: dict[str, Any] = {**account}
+    if default_account_id and "account_id" not in default_account:
+        default_account["account_id"] = default_account_id
+    if args.get("as_of_date"):
+        default_account["as_of_date"] = args.get("as_of_date")
+    # P2 写前确认（人在环）：confirmed 留空/false 只返回预览，不落库；用户确认后传 true 才写
+    if not bool(args.get("confirmed")):
+        return {
+            "preview": True,
+            "row_count": len(rows),
+            "account": default_account,
+            "rows_preview": rows[:3],
+            "hint": "预览模式未落库。复述给用户确认后，再以 confirmed=true 调用才真正写入。",
+        }
+    source_name = f"digital_human:{digital_human_code or 'unknown'}"
+    started = time.monotonic()
+    try:
+        with SessionLocal() as session:
+            repository = StockRepository(session)
+            batch = repository.create_position_import_batch(
+                source_name=source_name,
+                image_mime_type="",
+                image_sha256=None,
+                raw_text=json.dumps(args, ensure_ascii=False),
+                parsed_json=json.dumps(args, ensure_ascii=False),
+                created_by=user_label,
+            )
+            saved_rows = repository.import_position_rows(rows, batch, default_account)
+            repository.finish_position_import_batch(batch, saved_rows)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log_event("position", "ERROR", "数字人写持仓失败", user_id=user_id, error=str(exc)[:300])
+        return {"error": f"写持仓失败: {str(exc)[:300]}"}
+    ms = int((time.monotonic() - started) * 1000)
+    ok_rows = [row for row in saved_rows if "error" not in row]
+    err_rows = [row for row in saved_rows if "error" in row]
+    log_event(
+        "position", "INFO", "数字人写持仓",
+        user_id=user_id, batch_id=batch.id, saved=len(ok_rows), errors=len(err_rows), ms=ms,
+    )
+    return {
+        "batch_id": batch.id,
+        "saved_count": len(ok_rows),
+        "error_count": len(err_rows),
+        "rows": saved_rows,
+        "ms": ms,
+        "source": source_name,
+    }
+
+
+def _position_write_preview(name: str, result: dict) -> str:
+    if "error" in result:
+        return str(result["error"])
+    return (
+        f"已更新持仓：成功 {result.get('saved_count', 0)} 条，失败 {result.get('error_count', 0)} 条"
+        f"（batch #{result.get('batch_id', '-')}, {result.get('ms', '-')}ms）"
+    )
+
+
 def run_agent_events(
     question: str,
     history: list[dict],
@@ -472,10 +554,23 @@ def run_agent_events(
     skills: list[str] | None = None,
     digital_human_code: str | None = None,
     memory_context: str = "",
+    user_id: int | None = None,
+    user_label: str | None = None,
+    can_write_positions: bool = False,
+    default_account_id: int | None = None,
 ) -> Generator[dict, None, None]:
     stock_mode = chat_mode == "stock"
     digital_tool_names = digital_human_tool_names(digital_human_code) if not stock_mode else set()
-    tools = STOCK_TOOL_SCHEMAS if stock_mode else [*TOOLS, *digital_human_tool_schemas(digital_human_code)]
+    write_tool_names: set[str] = set()
+    if stock_mode:
+        tools = STOCK_TOOL_SCHEMAS
+    else:
+        tools = [*TOOLS, *digital_human_tool_schemas(digital_human_code)]
+        if can_write_positions:
+            w_schemas = write_tool_schemas()
+            if w_schemas:
+                tools = [*tools, *w_schemas]
+                write_tool_names = {s["function"]["name"] for s in w_schemas}
     system_prompt = (
         stock_system_prompt_with_skills(digital_human_context, skills, memory_context)
         if stock_mode
@@ -575,6 +670,17 @@ def run_agent_events(
                 yield {"type": "action", "tool": name, "display_name": display_name, "content": json.dumps(args, ensure_ascii=False)}
                 result = execute_digital_human_tool(digital_human_code, name, args)
                 yield {"type": "observation", "content": digital_human_observation_preview(name, result)}
+            elif write_tool_names and name in write_tool_names:
+                display_name = "更新持仓" if name == "update_my_positions" else name
+                yield {"type": "action", "tool": name, "display_name": display_name, "content": json.dumps(args, ensure_ascii=False)}
+                result = _execute_position_write_tool(
+                    name, args,
+                    user_id=user_id or 0,
+                    user_label=user_label or "unknown",
+                    default_account_id=default_account_id,
+                    digital_human_code=digital_human_code,
+                )
+                yield {"type": "observation", "content": _position_write_preview(name, result)}
             elif name == "run_sql":
                 sql = str(args.get("sql", ""))
                 yield {"type": "action", "tool": "run_sql", "content": sql}

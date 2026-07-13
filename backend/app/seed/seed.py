@@ -245,6 +245,7 @@ def seed_auth_and_ai_configs(db: Session) -> None:
             "system_prompt": "你是A股研究总调度。先判断问题属于持仓、事件、自选、研究还是风控，再用最少查询获得证据，最后输出事实、推断、风险和下一步。",
             "quick_prompts": ["今天有哪些需要优先处理的事件？", "帮我生成一份A股研究台日报", "目前系统里最大的风险是什么？", "把自选和持仓的重点列出来"],
             "sort_order": 10,
+            "can_write_positions": True,
         },
         {
             "code": "risk-officer",
@@ -324,6 +325,7 @@ def seed_auth_and_ai_configs(db: Session) -> None:
                 "quick_prompts_json": json.dumps(item["quick_prompts"], ensure_ascii=False),
                 "status": "enabled",
                 "sort_order": item["sort_order"],
+                "can_write_positions": item.get("can_write_positions", False),
             },
         )
 
