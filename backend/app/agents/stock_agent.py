@@ -187,11 +187,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_schema",
-            "description": "查看 A 股研究系统某张表的业务含义和常用字段。",
+            "description": "查看 A 股研究系统的表结构。不传 table_name 返回所有可用表名清单（含业务标签）；传 table_name 返回该表的业务含义和常用字段。探索数据库结构请用本工具，不要用 run_sql 查 SHOW TABLES 或 information_schema（被沙箱禁止）。",
             "parameters": {
                 "type": "object",
-                "properties": {"table_name": {"type": "string", "description": "表名，例如 positions"}},
-                "required": ["table_name"],
+                "properties": {"table_name": {"type": "string", "description": "可选表名，如 positions。留空返回所有表名清单。"}},
+                "required": [],
             },
         },
     },
@@ -222,7 +222,7 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 工作规则（仅适用于专业研究问题）:
 1. 默认研究范围是系统自己的 open positions 和 active watchlist_items；问题未指定标的时，先分析持仓，再分析自选。用户明确问其它标的、行业或话题时，直接就其问题作答，不必强行绕回持仓。
 2. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
-3. run_sql / get_schema 必须保留，但它们是兜底工具；只有结构化工具信息不足、需要补充字段时才使用。
+3. 探索数据库结构用 get_schema（不传参列所有表名，再传表名查字段）；run_sql 是兜底工具，只能对已知表做 SELECT 查询，禁止查 SHOW TABLES / information_schema / 系统库（会被沙箱拒绝）。
 4. 系统内没有的信息——外部个股、行业、政策、新闻、宏观、突发事件等——用 search_market_intel / search_stock_news 联网搜索补充，再结合内部数据作答；不要以"不在持仓/自选池"为由拒绝，你本职专业之外但用户确实需要的问题也尽力帮忙。
 5. SQL 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询或多语句。
 6. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
@@ -240,10 +240,10 @@ def validate_sql(sql: str) -> str | None:
     if "--" in stripped or "#" in stripped or "/*" in stripped:
         return "不允许包含 SQL 注释。"
     if not stripped.lower().startswith("select"):
-        return "只允许 SELECT 查询。"
+        return "只允许 SELECT 查询；如需了解表结构或表名清单请用 get_schema 工具（不传参可列所有表）。"
     match = FORBIDDEN_SQL.search(stripped)
     if match:
-        return f"包含被禁止的关键字: {match.group(0)}"
+        return f"包含被禁止的关键字: {match.group(0)}；如需了解表结构请用 get_schema 工具。"
     return None
 
 
@@ -301,11 +301,51 @@ def run_sql(sql: str) -> dict:
     return {"columns": columns, "rows": rows, "row_count": len(rows), "truncated": truncated, "ms": elapsed_ms}
 
 
-def get_schema(table_name: str) -> dict:
-    key = table_name.strip()
+# 表名本身非密文，但这几张表存有 webhook / 飞书 App Secret 等，不在 get_schema 列表里暴露
+_SCHEMA_HIDDEN_TABLES: frozenset[str] = frozenset({
+    "notify_channels", "scheduled_jobs", "job_runs", "digital_human_profiles",
+})
+
+
+def get_schema(table_name: str = "") -> dict:
+    """查看表结构。不传 table_name 返回所有可用表名清单（过滤密文表）；
+    传 table_name 返回该表的业务含义与常用字段。让 Agent 用此工具探索 schema，
+    不要用 run_sql 查 SHOW TABLES / information_schema（被只读沙箱禁止）。
+    """
+    key = (table_name or "").strip()
+    if not key:
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = DATABASE() ORDER BY table_name"
+                    )
+                ).scalars().all()
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"读取表清单失败: {str(exc)[:200]}"}
+        tables = [
+            {
+                "name": t,
+                "label": SCHEMA_DICTIONARY.get(t, {}).get("label", "未文档化"),
+                "documented": t in SCHEMA_DICTIONARY,
+            }
+            for t in rows
+            if t not in _SCHEMA_HIDDEN_TABLES
+        ]
+        return {
+            "tables": tables,
+            "count": len(tables),
+            "hint": "传 table_name 查某张表的字段含义；未文档化的表可用 run_sql 做 SELECT 查询。",
+        }
     meta = SCHEMA_DICTIONARY.get(key)
     if not meta:
-        return {"error": f"未找到表 {key}，可用表: {', '.join(SCHEMA_DICTIONARY)}"}
+        return {
+            "error": (
+                f"表 {key} 未在字段字典中。可：1) get_schema() 不传参查看所有表名；"
+                f"2) 该表若确实存在，用 run_sql 做 SELECT 查询（仅 SELECT）。"
+            )
+        }
     return {"table": key, **meta}
 
 
@@ -541,10 +581,14 @@ def run_agent_events(
                 result = run_sql(sql)
                 yield {"type": "observation", "content": _observation_preview(result)}
             elif name == "get_schema":
-                table = str(args.get("table_name", ""))
-                yield {"type": "action", "tool": "get_schema", "content": table}
+                table = str(args.get("table_name") or "")
+                yield {"type": "action", "tool": "get_schema", "content": table or "(全部表清单)"}
                 result = get_schema(table)
-                yield {"type": "observation", "content": f"已返回 {table} 的数据字典" if "error" not in result else result["error"]}
+                if "error" in result:
+                    yield {"type": "observation", "content": result["error"]}
+                else:
+                    label = f"{table} 的数据字典" if table else f"所有表清单（{result.get('count', 0)} 张）"
+                    yield {"type": "observation", "content": f"已返回 {label}"}
             else:
                 result = {"error": f"未知工具 {name}"}
                 yield {"type": "observation", "content": result["error"]}
