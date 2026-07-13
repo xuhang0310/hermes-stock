@@ -513,6 +513,64 @@ class StockRepository:
         )
         self.db.commit()
 
+    def update_position_field(
+        self,
+        symbol: str,
+        field: str,
+        value: Any,
+        account_id: int | None = None,
+    ) -> dict[str, Any]:
+        """字段级微调：更新某标的最新持仓快照的单个字段并同步 Position 摘要。
+
+        仅允许改记录类字段（止损/止盈/持仓逻辑/风险说明/仓位），不碰数量/成本/价格等行情字段。
+        """
+        allowed = {"stop_price", "take_profit_price", "thesis", "risk_note", "position_pct"}
+        if field not in allowed:
+            return {"error": f"不允许修改字段 {field}，仅支持 {', '.join(sorted(allowed))}"}
+        norm = normalize_a_share_symbol(symbol)
+        snap = self.db.scalar(
+            select(PositionHoldingSnapshot)
+            .where(PositionHoldingSnapshot.symbol == norm, _account_eq(account_id))
+            .order_by(desc(PositionHoldingSnapshot.id))
+            .limit(1)
+        )
+        if snap is None:
+            return {"error": f"未找到 {norm} 的持仓快照"}
+        if field in {"stop_price", "take_profit_price", "position_pct"}:
+            try:
+                coerced: Any = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return {"error": f"字段 {field} 需数值: {value!r}"}
+        else:
+            coerced = str(value).strip() if value is not None else None
+        setattr(snap, field, coerced)
+        position = self.db.scalar(
+            select(Position).where(Position.symbol == norm, _account_eq(account_id)).order_by(desc(Position.id)).limit(1)
+        )
+        if position is not None and hasattr(position, field):
+            setattr(position, field, coerced)
+        self.db.commit()
+        return {"symbol": norm, "field": field, "value": coerced, "snapshot_id": snap.id}
+
+    def rollback_last_position_batch(self) -> dict[str, Any]:
+        """撤销最近一次持仓导入批次：删其快照行（物理），批次置 rolled_back。
+
+        Position 摘要不自动回滚（保留，用户可后续 update_position_field 手动修正）。
+        """
+        batch = self.db.scalar(
+            select(PositionImportBatch).order_by(desc(PositionImportBatch.id)).limit(1)
+        )
+        if batch is None:
+            return {"error": "无导入批次可撤销"}
+        snaps = self.db.scalars(
+            select(PositionHoldingSnapshot).where(PositionHoldingSnapshot.import_batch_id == batch.id)
+        ).all()
+        for snap in snaps:
+            self.db.delete(snap)
+        batch.status = "rolled_back"
+        self.db.commit()
+        return {"batch_id": batch.id, "rolled_back_count": len(snaps)}
+
     def _save_position_holding(
         self,
         payload: dict[str, Any],

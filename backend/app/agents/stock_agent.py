@@ -480,6 +480,10 @@ def _execute_position_write_tool(
     不经 execute_digital_human_tool/registry（它们只传 name/args，不带用户/账户/db 上下文）。
     run_agent_events 跑在后台线程，此处用自己的 SessionLocal，不复用请求 db（线程安全）。
     """
+    if name == "update_position_field":
+        return _do_update_position_field(args, user_id=user_id, default_account_id=default_account_id, digital_human_code=digital_human_code)
+    if name == "rollback_last_position_batch":
+        return _do_rollback_last_batch(args, user_id=user_id, digital_human_code=digital_human_code)
     if name != "update_my_positions":
         return {"error": f"未知写工具: {name}"}
     rows = args.get("rows") if isinstance(args.get("rows"), list) else []
@@ -536,13 +540,66 @@ def _execute_position_write_tool(
     }
 
 
+def _do_update_position_field(args: dict[str, Any], *, user_id: int, default_account_id: int | None, digital_human_code: str | None) -> dict:
+    """字段级微调：复用 repository.update_position_field，独立 session，审计。"""
+    symbol = str(args.get("symbol") or "")
+    field = str(args.get("field") or "")
+    value = args.get("value")
+    if not symbol or not field:
+        return {"error": "symbol 和 field 必填"}
+    if not bool(args.get("confirmed")):
+        return {"preview": True, "symbol": symbol, "field": field, "value": value, "hint": "预览未落库，confirmed=true 才改"}
+    started = time.monotonic()
+    try:
+        with SessionLocal() as session:
+            repository = StockRepository(session)
+            result = repository.update_position_field(symbol, field, value, account_id=default_account_id)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log_event("position", "ERROR", "数字人改字段失败", user_id=user_id, error=str(exc)[:300])
+        return {"error": f"改字段失败: {str(exc)[:300]}"}
+    ms = int((time.monotonic() - started) * 1000)
+    if "error" not in result:
+        log_event("position", "INFO", "数字人改持仓字段", user_id=user_id, symbol=symbol, field=field, ms=ms)
+        result["ms"] = ms
+    return result
+
+
+def _do_rollback_last_batch(args: dict[str, Any], *, user_id: int, digital_human_code: str | None) -> dict:
+    """撤销最近一次持仓导入批次：复用 repository.rollback_last_position_batch，独立 session，审计。"""
+    if not bool(args.get("confirmed")):
+        return {"preview": True, "hint": "将撤销最近一次导入批次的快照，confirmed=true 才执行"}
+    started = time.monotonic()
+    try:
+        with SessionLocal() as session:
+            repository = StockRepository(session)
+            result = repository.rollback_last_position_batch()
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log_event("position", "ERROR", "数字人撤销批次失败", user_id=user_id, error=str(exc)[:300])
+        return {"error": f"撤销失败: {str(exc)[:300]}"}
+    ms = int((time.monotonic() - started) * 1000)
+    if "error" not in result:
+        log_event("position", "INFO", "数字人撤销持仓批次", user_id=user_id, ms=ms)
+        result["ms"] = ms
+    return result
+
+
 def _position_write_preview(name: str, result: dict) -> str:
     if "error" in result:
         return str(result["error"])
-    return (
-        f"已更新持仓：成功 {result.get('saved_count', 0)} 条，失败 {result.get('error_count', 0)} 条"
-        f"（batch #{result.get('batch_id', '-')}, {result.get('ms', '-')}ms）"
-    )
+    if result.get("preview"):
+        return f"预览（未落库）：{result.get('hint', '')}"
+    if name == "update_my_positions":
+        return (
+            f"已更新持仓：成功 {result.get('saved_count', 0)} 条，失败 {result.get('error_count', 0)} 条"
+            f"（batch #{result.get('batch_id', '-')}, {result.get('ms', '-')}ms）"
+        )
+    if name == "update_position_field":
+        return f"已改 {result.get('symbol', '-')} 的 {result.get('field', '-')} = {result.get('value', '-')}（快照 #{result.get('snapshot_id', '-')})"
+    if name == "rollback_last_position_batch":
+        return f"已撤销批次 #{result.get('batch_id', '-')}, 删 {result.get('rolled_back_count', 0)} 条快照"
+    return "写持仓完成"
 
 
 def run_agent_events(
@@ -671,7 +728,7 @@ def run_agent_events(
                 result = execute_digital_human_tool(digital_human_code, name, args)
                 yield {"type": "observation", "content": digital_human_observation_preview(name, result)}
             elif write_tool_names and name in write_tool_names:
-                display_name = "更新持仓" if name == "update_my_positions" else name
+                display_name = {"update_my_positions": "更新持仓", "update_position_field": "改持仓字段", "rollback_last_position_batch": "撤销持仓批次"}.get(name, name)
                 yield {"type": "action", "tool": name, "display_name": display_name, "content": json.dumps(args, ensure_ascii=False)}
                 result = _execute_position_write_tool(
                     name, args,
