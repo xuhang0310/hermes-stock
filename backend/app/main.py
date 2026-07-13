@@ -210,6 +210,26 @@ def create_app(init_db: bool = True) -> FastAPI:
     def api_health(repository: StockRepository = Depends(repo)) -> dict:
         return repository.health()
 
+    @app.get("/api/tushare/catalog")
+    def tushare_catalog_list(
+        category: str | None = Query(default=None),
+        scope: str | None = Query(default=None),
+        _context: AuthContext = Depends(require_permission("dashboard:view")),
+    ) -> dict:
+        """TuShare 接口元数据目录（聚焦 A 股核心约 150 接口）。供前端管理页与 LLM 目录查询共用。"""
+        from backend.app.market.tushare_catalog import (
+            TUSHARE_CATALOG,
+            by_category_scope as catalog_by_category_scope,
+            category_index as catalog_category_index,
+        )
+        if not category:
+            return {
+                "categories": catalog_category_index(),
+                "total": len(TUSHARE_CATALOG),
+            }
+        items = catalog_by_category_scope(category, scope)
+        return {"category": category, "scope": scope, "count": len(items), "items": items}
+
     @app.post("/api/dev/seed-demo")
     def api_seed_demo(
         db: Session = Depends(get_db),

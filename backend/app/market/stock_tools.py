@@ -5,6 +5,7 @@ import json
 import re
 import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,6 +13,12 @@ from sqlalchemy import text
 
 from backend.app.core.database import engine
 from backend.app.core.settings import settings
+from backend.app.market.tushare_catalog import (
+    TUSHARE_API_SET,
+    by_api_name,
+    by_category_scope as catalog_by_category_scope,
+    category_index as catalog_category_index,
+)
 
 
 TUSHARE_URL = "https://api.tushare.pro"
@@ -362,6 +369,460 @@ STOCK_TOOL_SCHEMAS = [
                 },
                 "required": ["query"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tushare_query",
+            "description": "通用 TuShare 接口透传：调用聚焦 A 股核心的任一已收录接口（约 150 个，覆盖股票/行情/财务/参考/特色/两融/资金流/打板/指数/宏观/语料/ETF/可转债）。先 list_tushare_apis 查可用接口与参数，再调用本工具。返回行数内部截断到 300 行并标记 truncated。若某接口有专用语义工具（见目录 semantic_tool 字段），优先用专用工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "api_name": {"type": "string", "description": "TuShare 接口标识，如 top_list / margin / share_float / index_daily / cn_cpi。必须是 list_tushare_apis 返回的值。"},
+                    "params": {"type": "object", "description": "接口参数对象，如 {\"ts_code\":\"600519.SH\",\"trade_date\":\"20260711\"}。仅支持标量值。"},
+                    "fields": {"type": "string", "description": "返回字段，逗号分隔，如 \"trade_date,close,pct_chg\"。留空返回全部字段。"},
+                    "limit": {"type": "integer", "description": "最大返回行数，默认 300，上限 500（内部硬截断 300）。"},
+                },
+                "required": ["api_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tushare_apis",
+            "description": "列出可用 TuShare 接口目录。无参时返回分类索引；指定 category 时返回该分类下接口的 api_name/中文名/参数/是否有专用语义工具。用于在调用 tushare_query 前确认接口名与参数。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "分类，如 基础数据/行情数据/财务数据/参考数据/特色数据/两融及转融通/资金流向数据/打板专题数据/指数专题/国内宏观/国际宏观/大模型语料/ETF专题/可转债。留空返回分类索引。"},
+                    "scope": {"type": "string", "description": "可选语义过滤：stock/market/finance/macro/news/etf/cb。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trade_cal",
+            "description": "TuShare 交易日历（trade_cal）：开市/休市标记，判断某日是否交易日、上下一个交易日。时间轴操作基座。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 120 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                    "exchange": {"type": "string", "description": "交易所，如 SSE/SZSE/CFFEX，留空返回全市场。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_suspend",
+            "description": "TuShare 每日停复牌信息（suspend_d）：停牌是交易红线条件，停牌期间行情工具返回空或无意义数据。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A 股代码或 ts_code，如 600519。"},
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "resume_date": {"type": "string", "description": "复牌日 YYYYMMDD。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stk_limit",
+            "description": "TuShare 每日涨跌停价（stk_limit）：科创/创业±20、北交±30、ST±5，计算目标价/止损价用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A 股代码或 ts_code。"},
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD。"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_top_list",
+            "description": "TuShare 龙虎榜每日明细（top_list）：上榜股票、买卖额、净额。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD，不传则取最近。"},
+                    "symbol": {"type": "string", "description": "可选 A 股代码或 ts_code，查该股上榜记录。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_hm_detail",
+            "description": "TuShare 游资交易每日明细（hm_detail）：游资席位买卖明细，配龙虎榜分析。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 10 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_margin",
+            "description": "TuShare 融资融券交易汇总（margin）：融资余额/融券余额等。trade_date 与 start/end 二选一。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "exchange_id": {"type": "string", "description": "交易所代码。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 30 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_moneyflow_hsgt",
+            "description": "TuShare 沪深港通资金流向（moneyflow_hsgt）：北向资金净流入，大势/外资判断。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 30 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_forecast",
+            "description": "TuShare 业绩预告（forecast）：预告类型、变动幅度、净利区间、摘要。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A 股代码或 ts_code。"},
+                    "period": {"type": "string", "description": "报告期 YYYYMMDD，如 20251231。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 540 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_income",
+            "description": "TuShare 利润表（income）：营收/净利润/EBIT/所得税等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A 股代码或 ts_code。"},
+                    "period": {"type": "string", "description": "报告期 YYYYMMDD，如 20251231。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 540 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_index_daily",
+            "description": "TuShare 指数日线行情（index_daily）：ts_code 为指数代码，如 000001.SH 上证综指、399001.SZ 深证成指。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "指数 ts_code，如 000001.SH。"},
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 240 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sw_daily",
+            "description": "TuShare 申万行业日线行情（sw_daily）：ts_code 为申万指数代码，如 801010.SI 综合、801080.SI 电子。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "申万指数 ts_code，如 801010.SI。"},
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD，默认今日前推 240 天。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD，默认今日。"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cn_cpi",
+            "description": "TuShare 居民消费价格指数（cn_cpi）：同比/环比，宏观通胀判断。start_m/end_m 为 YYYYMM 月份。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_m": {"type": "string", "description": "起始月份 YYYYMM，默认今日前推 12 个月。"},
+                    "end_m": {"type": "string", "description": "结束月份 YYYYMM，默认本月。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_tushare_minutes",
+            "description": "TuShare 历史分钟行情（stk_mins）：1/5/15/30/60min 频率，盘中结构分析用。需较高积分。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A 股代码或 ts_code。"},
+                    "freq": {"type": "string", "description": "频率：1min/5min/15min/30min/60min，默认 5min。"},
+                    "start_date": {"type": "string", "description": "起始 YYYYMMDD HH:MM:SS 或 YYYYMMDD。"},
+                    "end_date": {"type": "string", "description": "结束 YYYYMMDD HH:MM:SS 或 YYYYMMDD。"},
+                    "limit": {"type": "integer", "description": "最大行数，默认 800，上限 8000。"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_top_inst",
+            "description": "TuShare 龙虎榜机构交易单（top_inst）：机构席位买卖明细、净买额。",
+            "parameters": {"type": "object", "properties": {"trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "symbol": {"type": "string", "description": "可选 A 股代码或 ts_code。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_limit_list",
+            "description": "TuShare 涨跌停和炸板数据（limit_list_d）：涨跌停状态、炸板次数、首封/最后封板时间。",
+            "parameters": {"type": "object", "properties": {"trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_limit_step",
+            "description": "TuShare 涨停股票连板天梯（limit_step）：连板高度、连板次数。",
+            "parameters": {"type": "object", "properties": {"trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_margin_detail",
+            "description": "TuShare 融资融券交易明细（margin_detail）：个股融资余额/融券余额。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_share_float",
+            "description": "TuShare 限售股解禁（share_float）：解禁日期/股数/金额/股东。默认查近 180 天。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_block_trade",
+            "description": "TuShare 大宗交易（block_trade）：成交价/量/额/买卖方。",
+            "parameters": {"type": "object", "properties": {"trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_top10_holders",
+            "description": "TuShare 前十大股东（top10_holders）：股东名/类型/持股数/比例。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_top10_float_holders",
+            "description": "TuShare 前十大流通股东（top10_floatholders）。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_holdertrade",
+            "description": "TuShare 股东增减持（stk_holdertrade）：变动量/比例、变动后持股。默认近 180 天。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_holdernumber",
+            "description": "TuShare 股东人数（stk_holdernumber）：股东人数及变化。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_repurchase",
+            "description": "TuShare 股票回购（repurchase）：回购进程/金额/数量/价格区间。默认近 365 天。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pledge_stat",
+            "description": "TuShare 股权质押统计（pledge_stat）：质押次数/比例/未平仓。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "end_date": {"type": "string", "description": "截止 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_express",
+            "description": "TuShare 业绩快报（express）：营收/净利润/同比/EPS。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dividend",
+            "description": "TuShare 分红送股（dividend）：送转/现金分红/除权登记派息日。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_balancesheet",
+            "description": "TuShare 资产负债表（balancesheet）：总资产/负债/货币资金/存货等。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "period": {"type": "string", "description": "报告期 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cashflow",
+            "description": "TuShare 现金流量表（cashflow）：经营/投资/筹资现金流、自由现金流。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "period": {"type": "string", "description": "报告期 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fina_mainbz",
+            "description": "TuShare 主营业务构成（fina_mainbz）：按产品/地区拆分收入利润。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "period": {"type": "string", "description": "报告期 YYYYMMDD。"}, "bz_type": {"type": "string", "description": "类型，P 产品/D 地区。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_disclosure_date",
+            "description": "TuShare 财报披露日期表（disclosure_date）：预约/实际/修改披露日。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "end_date": {"type": "string", "description": "报告期 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_index_weight",
+            "description": "TuShare 指数成分和权重（index_weight）：symbol 为指数代码如 000300.SH。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "指数代码，如 000300.SH。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_index_member",
+            "description": "TuShare 申万行业成分（index_member_all）：symbol 为申万指数代码如 801010.SI。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "申万指数代码，如 801010.SI。"}, "level": {"type": "string", "description": "行业分级，如 L1/L2/L3。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_daily_info",
+            "description": "TuShare 沪深市场每日交易统计（daily_info）：总市值/成交/平均 PE/PB。",
+            "parameters": {"type": "object", "properties": {"trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_report_rc",
+            "description": "TuShare 券商盈利预测（report_rc）：分析师/预测值/评级/机构。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "report_date": {"type": "string", "description": "报告日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_anns",
+            "description": "TuShare 上市公司公告（anns_d）：标题/类型/披露时间。默认近 30 天。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_namechange",
+            "description": "TuShare 股票曾用名（namechange）：曾用名/更名日期/原因。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stk_factor",
+            "description": "TuShare 股票技术面因子（stk_factor）：MACD/RSI/布林/CCI/KDJ。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": ["symbol"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ccass_hold",
+            "description": "TuShare 中央结算系统持股统计（ccass_hold）：港股通持股集中度。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
         },
     },
 ]
@@ -1224,6 +1685,756 @@ def _tushare_request(api_name: str, params: dict[str, Any], fields: str) -> dict
     return {"rows": rows, "ms": int((time.monotonic() - started) * 1000)}
 
 
+_TUSHARE_AUDIT_LOG = Path(__file__).resolve().parents[2] / "agent_audit.log"
+_TUSHARE_FIELD_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+_TUSHARE_QUERY_MAX_LIMIT = 500
+_TUSHARE_QUERY_CUT = 300
+
+
+def _tushare_audit(record: dict) -> None:
+    """通用透传 tushare_query 的审计留痕，写同一 agent_audit.log（与 stock_agent._audit 同路径）。
+
+    stock_tools 不能 import stock_agent（反向依赖），故在此独立实现；parents[2] 同样指向 backend/。
+    """
+    try:
+        record["at"] = datetime.now().isoformat(timespec="seconds")
+        with _TUSHARE_AUDIT_LOG.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def tushare_query(
+    api_name: str,
+    params: dict | None = None,
+    fields: str | None = None,
+    limit: int = 300,
+) -> dict:
+    """通用 TuShare 接口透传：白名单（TUSHARE_API_SET）+ 字段名校验 + 行数截断 + 审计。
+
+    聚焦 A 股核心的任一已收录接口都可调用；未收录接口直接拒绝，避免 LLM 乱调。
+    """
+    api_name = (api_name or "").strip()
+    if api_name not in TUSHARE_API_SET:
+        return {
+            "error": (
+                f"未收录的 TuShare 接口: {api_name}"
+                "（仅允许调用目录内聚焦 A 股核心的接口，先 list_tushare_apis 查可用接口）"
+            )
+        }
+    entry = by_api_name(api_name) or {}
+
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return {"error": "params 必须是对象/字典"}
+    clean_params: dict[str, Any] = {}
+    for key, value in params.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            clean_params[key] = value
+        else:
+            return {"error": f"params 字段 {key} 的值类型不被允许（仅支持标量）"}
+
+    field_list: list[str] = []
+    if fields:
+        for chunk in re.split(r"\s*,\s*", str(fields)):
+            name = chunk.strip()
+            if not name:
+                continue
+            if not _TUSHARE_FIELD_RE.fullmatch(name):
+                return {"error": f"字段名非法: {name}"}
+            field_list.append(name)
+    field_str = ",".join(field_list) if field_list else str(entry.get("default_fields") or "")
+
+    try:
+        requested = int(limit) if limit is not None else _TUSHARE_QUERY_CUT
+    except (TypeError, ValueError):
+        requested = _TUSHARE_QUERY_CUT
+    cut = max(1, min(requested, _TUSHARE_QUERY_CUT))
+    started = time.monotonic()
+    response = _tushare_request(api_name, clean_params, field_str)
+    ms = int((time.monotonic() - started) * 1000)
+
+    if "error" in response:
+        _tushare_audit({
+            "tool": "tushare_query", "api_name": api_name, "params": clean_params,
+            "fields": field_str, "ms": ms, "error": response["error"],
+        })
+        response["api_name"] = api_name
+        response["name_cn"] = entry.get("name_cn")
+        return response
+
+    rows = response.get("rows") or []
+    total = len(rows)
+    truncated = total > cut
+    result = {
+        "api_name": api_name,
+        "name_cn": entry.get("name_cn"),
+        "params": clean_params,
+        "fields": field_str,
+        "count": total,
+        "truncated": truncated,
+        "rows": rows[:cut],
+        "ms": ms,
+        "source": f"tushare.{api_name}",
+    }
+    _tushare_audit({
+        "tool": "tushare_query", "api_name": api_name, "params": clean_params,
+        "fields": field_str, "rows": total, "truncated": truncated, "ms": ms,
+    })
+    return result
+
+
+def list_tushare_apis(category: str | None = None, scope: str | None = None) -> dict:
+    """列出 TuShare 接口目录：无参返回分类索引；指定 category 返回该分类精简条目。
+
+    三层分类避免一次返回全量（~150 条）被 OBSERVATION_CHAR_LIMIT 7000 截成碎片。
+    semantic_tool 字段运行时按 skill_registry 已注册工具过滤，避免标注未实现工具。
+    """
+    try:
+        from backend.app.skills.registry import skill_registry
+        is_registered = skill_registry.has_tool
+    except Exception:  # noqa: BLE001
+        def is_registered(_name: str) -> bool:
+            return False
+
+    if not category:
+        return {
+            "categories": catalog_category_index(),
+            "total": len(TUSHARE_API_SET),
+            "tip": "先用 list_tushare_apis(category=...) 查看某分类的接口；"
+            "高价值接口可用专用语义工具（semantic_tool），其余用 tushare_query 通用透传。",
+        }
+
+    entries = catalog_by_category_scope(category, scope)
+    items = []
+    for entry in entries:
+        semantic = entry.get("semantic_tool")
+        if semantic and not is_registered(semantic):
+            semantic = None
+        items.append({
+            "api_name": entry["api_name"],
+            "name_cn": entry["name_cn"],
+            "scope": entry["scope"],
+            "params": entry.get("params") or [],
+            "semantic_tool": semantic,
+            "desc": entry.get("desc") or "",
+        })
+    return {
+        "category": category,
+        "scope": scope,
+        "count": len(items),
+        "items": items,
+    }
+
+
+def _valid_yyyymm(raw: str | None) -> str | None:
+    """校验 YYYYMM 月份串（宏观接口 cn_cpi/cn_gdp/cn_ppi 等用 start_m/end_m）。"""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    return s if re.fullmatch(r"\d{6}", s) else None
+
+
+def _semantic_tushare(
+    api_name: str,
+    params: dict[str, Any],
+    fields: str,
+    limit: int = 200,
+    name_cn: str | None = None,
+    tool_name: str | None = None,
+) -> dict:
+    """语义封装共用底座：调 _tushare_request + 行数截断 + 审计 + 统一返回结构。
+
+    各 get_xxx 封装只负责拼 params 与选 fields，截断/审计/错误透传由此处统一处理。
+    """
+    started = time.monotonic()
+    response = _tushare_request(api_name, params, fields)
+    ms = int((time.monotonic() - started) * 1000)
+    if "error" in response:
+        return response
+    rows = response.get("rows") or []
+    truncated = len(rows) > limit
+    _tushare_audit({
+        "tool": tool_name or api_name, "api_name": api_name, "params": params,
+        "rows": len(rows), "truncated": truncated, "ms": ms,
+    })
+    return {
+        "source": f"tushare.{api_name}",
+        "name_cn": name_cn,
+        "params": params,
+        "count": len(rows),
+        "truncated": truncated,
+        "rows": rows[:limit],
+        "ms": ms,
+    }
+
+
+# -------------------------------------------------------------------- 首批语义封装
+# 每个封装：固定 api_name + 参数校验（个股走 normalize_a_share_symbol、日期 _valid_yyyymmdd、
+# 月份 _valid_yyyymm）+ 默认字段 + 行数截断。字段名取核心通用列，运行时若 tushare 报字段
+# 不存在再据实修正。
+
+def get_trade_cal(start_date: str | None = None, end_date: str | None = None,
+                  exchange: str | None = None) -> dict:
+    """交易日历：开市/休市标记，时间轴操作基座。"""
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=120)).strftime("%Y%m%d")
+    params: dict[str, Any] = {"start_date": start, "end_date": end}
+    if exchange:
+        params["exchange"] = str(exchange).upper()
+    fields = "exchange,cal_date,is_open,pretrade_date"
+    return _semantic_tushare("trade_cal", params, fields, limit=400, name_cn="交易日历", tool_name="get_trade_cal")
+
+
+def get_suspend(ts_code: str | None = None, trade_date: str | None = None,
+                resume_date: str | None = None) -> dict:
+    """每日停复牌信息：交易红线条件。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    rd = _valid_yyyymmdd(resume_date)
+    if rd:
+        params["resume_date"] = rd
+    fields = "ts_code,trade_date,suspend_reason,resume_date,ann_date"
+    return _semantic_tushare("suspend_d", params, fields, name_cn="每日停复牌信息", tool_name="get_suspend")
+
+
+def get_stk_limit(ts_code: str, trade_date: str | None = None,
+                  start_date: str | None = None, end_date: str | None = None) -> dict:
+    """每日涨跌停价：科创/创业±20、北交±30、ST±5。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    sd = _valid_yyyymmdd(start_date)
+    if sd:
+        params["start_date"] = sd
+    ed = _valid_yyyymmdd(end_date)
+    if ed:
+        params["end_date"] = ed
+    fields = "trade_date,ts_code,pre_close,up_limit,down_limit"
+    return _semantic_tushare("stk_limit", params, fields, name_cn="每日涨跌停价格", tool_name="get_stk_limit")
+
+
+def get_top_list(trade_date: str | None = None, ts_code: str | None = None) -> dict:
+    """龙虎榜每日明细。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    fields = "trade_date,ts_code,name,close,pct_chg,change,amount,turnover_rate,net_amount,buy_amount,sell_amount"
+    return _semantic_tushare("top_list", params, fields, name_cn="龙虎榜每日明细", tool_name="get_top_list")
+
+
+def get_hm_detail(trade_date: str | None = None, start_date: str | None = None,
+                  end_date: str | None = None) -> dict:
+    """游资交易每日明细（席位买卖，配龙虎榜）。"""
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=10)).strftime("%Y%m%d")
+    params: dict[str, Any] = {"start_date": start, "end_date": end}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    fields = "trade_date,ts_code,name,close,pct_chg,amount,reason,sm_name,sm_date,buy_amount,sell_amount,net_amount"
+    return _semantic_tushare("hm_detail", params, fields, name_cn="游资交易每日明细", tool_name="get_hm_detail")
+
+
+def get_margin(trade_date: str | None = None, exchange_id: str | None = None,
+               start_date: str | None = None, end_date: str | None = None) -> dict:
+    """融资融券交易汇总。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=30)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    if exchange_id:
+        params["exchange_id"] = str(exchange_id)
+    fields = "trade_date,exchange_id,rzye,rqye,rzmre,rqmcl,rzrqye"
+    return _semantic_tushare("margin", params, fields, name_cn="融资融券交易汇总", tool_name="get_margin")
+
+
+def get_moneyflow_hsgt(trade_date: str | None = None, start_date: str | None = None,
+                       end_date: str | None = None) -> dict:
+    """沪深港通资金流向（北向资金）。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=30)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "trade_date,ggt_ss,ggt_sz,ggt_total,hgt_ss,hgt_sz,hgt_total,north_money,south_money"
+    return _semantic_tushare("moneyflow_hsgt", params, fields, name_cn="沪深港通资金流向", tool_name="get_moneyflow_hsgt")
+
+
+def get_forecast(ts_code: str | None = None, period: str | None = None,
+                 start_date: str | None = None, end_date: str | None = None) -> dict:
+    """业绩预告。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    if period:
+        params["period"] = str(period)
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=540)).strftime("%Y%m%d")
+    params.setdefault("start_date", start)
+    params.setdefault("end_date", end)
+    fields = "ts_code,ann_date,end_date,type,p_change,net_profit,parent_netprofit,summary,change_reason"
+    return _semantic_tushare("forecast", params, fields, name_cn="业绩预告", tool_name="get_forecast")
+
+
+def get_income(ts_code: str, period: str | None = None, start_date: str | None = None,
+               end_date: str | None = None) -> dict:
+    """利润表。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    if period:
+        params["period"] = str(period)
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=540)).strftime("%Y%m%d")
+    params.setdefault("start_date", start)
+    params.setdefault("end_date", end)
+    fields = "ts_code,ann_date,end_date,revenue,n_income,n_income_parent,net_profit_excl_min_int_inc,ebit,ebitda,total_profit,income_tax"
+    return _semantic_tushare("income", params, fields, limit=20, name_cn="利润表", tool_name="get_income")
+
+
+def get_index_daily(ts_code: str, trade_date: str | None = None,
+                    start_date: str | None = None, end_date: str | None = None) -> dict:
+    """指数日线行情（ts_code 为指数代码，如 000001.SH 上证综指）。"""
+    params: dict[str, Any] = {"ts_code": str(ts_code).strip().upper()}
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=240)).strftime("%Y%m%d")
+    params["start_date"] = start
+    params["end_date"] = end
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    fields = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+    return _semantic_tushare("index_daily", params, fields, name_cn="指数日线行情", tool_name="get_index_daily")
+
+
+def get_sw_daily(ts_code: str, trade_date: str | None = None,
+                 start_date: str | None = None, end_date: str | None = None) -> dict:
+    """申万行业日线行情（ts_code 为申万指数代码，如 801010.SI）。"""
+    params: dict[str, Any] = {"ts_code": str(ts_code).strip().upper()}
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=240)).strftime("%Y%m%d")
+    params["start_date"] = start
+    params["end_date"] = end
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    fields = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+    return _semantic_tushare("sw_daily", params, fields, name_cn="申万日线行情", tool_name="get_sw_daily")
+
+
+def get_cn_cpi(start_m: str | None = None, end_m: str | None = None) -> dict:
+    """居民消费价格指数 CPI（start_m/end_m 为 YYYYMM 月份）。"""
+    today = date.today()
+    end = _valid_yyyymm(end_m) or today.strftime("%Y%m")
+    start = _valid_yyyymm(start_m) or (today - timedelta(days=365)).strftime("%Y%m")
+    params: dict[str, Any] = {"start_m": start, "end_m": end}
+    fields = "month,nt_yoy,nt_mom,np_yoy,np_mom"
+    return _semantic_tushare("cn_cpi", params, fields, name_cn="居民消费价格指数CPI", tool_name="get_cn_cpi")
+
+
+# -------------------------------------------------------------------- 二批语义封装
+# 个股/财务/参考/特色/指数/语料等高价值接口的语义封装；字段取核心通用列，运行时若 tushare
+# 报字段不存在再据实修正。个股类走 normalize_a_share_symbol，指数/申万类直接传 ts_code。
+
+def get_top_inst(trade_date: str | None = None, ts_code: str | None = None) -> dict:
+    """龙虎榜机构交易单。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    fields = "trade_date,ts_code,exlain,side,buy_amount,buy_rate,sell_amount,sell_rate,net_buy_amount"
+    return _semantic_tushare("top_inst", params, fields, name_cn="龙虎榜机构交易单", tool_name="get_top_inst")
+
+
+def get_limit_list(trade_date: str | None = None, start_date: str | None = None,
+                   end_date: str | None = None) -> dict:
+    """涨跌停和炸板数据。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=10)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "trade_date,ts_code,name,close,pct_chg,up_limit,down_limit,limit_status,first_break_time,last_break_time,open_times"
+    return _semantic_tushare("limit_list_d", params, fields, name_cn="涨跌停和炸板数据", tool_name="get_limit_list")
+
+
+def get_limit_step(trade_date: str | None = None) -> dict:
+    """涨停股票连板天梯。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    fields = "trade_date,ts_code,name,close,pct_chg,limit_times,up_stat,limit_times_max"
+    return _semantic_tushare("limit_step", params, fields, name_cn="涨停股票连板天梯", tool_name="get_limit_step")
+
+
+def get_margin_detail(ts_code: str | None = None, trade_date: str | None = None,
+                      start_date: str | None = None, end_date: str | None = None) -> dict:
+    """融资融券交易明细。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=30)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "ts_code,trade_date,rzye,rqye,rzmre,rqmcl,rzrqye"
+    return _semantic_tushare("margin_detail", params, fields, name_cn="融资融券交易明细", tool_name="get_margin_detail")
+
+
+def get_share_float(ts_code: str, start_date: str | None = None,
+                    end_date: str | None = None) -> dict:
+    """限售股解禁。"""
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=180)).strftime("%Y%m%d")
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code), "start_date": start, "end_date": end}
+    fields = "ts_code,float_date,float_share,float_amount,holder_name,holder_type"
+    return _semantic_tushare("share_float", params, fields, name_cn="限售股解禁", tool_name="get_share_float")
+
+
+def get_block_trade(trade_date: str | None = None, ts_code: str | None = None,
+                    start_date: str | None = None, end_date: str | None = None) -> dict:
+    """大宗交易。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    if not td:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=30)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "trade_date,ts_code,name,price,vol,amount,buyer,seller"
+    return _semantic_tushare("block_trade", params, fields, name_cn="大宗交易", tool_name="get_block_trade")
+
+
+def get_top10_holders(ts_code: str, trade_date: str | None = None,
+                      start_date: str | None = None, end_date: str | None = None) -> dict:
+    """前十大股东。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=180)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "ts_code,trade_date,holder_name,holder_type,hold_amount,hold_ratio"
+    return _semantic_tushare("top10_holders", params, fields, name_cn="前十大股东", tool_name="get_top10_holders")
+
+
+def get_top10_float_holders(ts_code: str, trade_date: str | None = None,
+                             start_date: str | None = None, end_date: str | None = None) -> dict:
+    """前十大流通股东。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=180)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "ts_code,trade_date,holder_name,hold_amount,hold_ratio"
+    return _semantic_tushare("top10_floatholders", params, fields, name_cn="前十大流通股东", tool_name="get_top10_float_holders")
+
+
+def get_holdertrade(ts_code: str | None = None, start_date: str | None = None,
+                    end_date: str | None = None) -> dict:
+    """股东增减持。"""
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=180)).strftime("%Y%m%d")
+    params: dict[str, Any] = {"start_date": start, "end_date": end}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    fields = "ts_code,trade_date,holder_name,holder_type,change_amount,change_ratio,after_share,after_ratio"
+    return _semantic_tushare("stk_holdertrade", params, fields, name_cn="股东增减持", tool_name="get_holdertrade")
+
+
+def get_holdernumber(ts_code: str | None = None, trade_date: str | None = None,
+                     start_date: str | None = None, end_date: str | None = None) -> dict:
+    """股东人数。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=180)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "ts_code,trade_date,holder_num,holder_num_change"
+    return _semantic_tushare("stk_holdernumber", params, fields, name_cn="股东人数", tool_name="get_holdernumber")
+
+
+def get_repurchase(ts_code: str | None = None, start_date: str | None = None,
+                   end_date: str | None = None) -> dict:
+    """股票回购。"""
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=365)).strftime("%Y%m%d")
+    params: dict[str, Any] = {"start_date": start, "end_date": end}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    fields = "ts_code,ann_date,proc,amount,volume,price_range_low,price_range_high"
+    return _semantic_tushare("repurchase", params, fields, name_cn="股票回购", tool_name="get_repurchase")
+
+
+def get_pledge_stat(ts_code: str, end_date: str | None = None) -> dict:
+    """股权质押统计。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    ed = _valid_yyyymmdd(end_date)
+    if ed:
+        params["end_date"] = ed
+    fields = "ts_code,end_date,pledge_count,pledge_amount,pledge_ratio,unrest_pledge_count,unrest_pledge_amount"
+    return _semantic_tushare("pledge_stat", params, fields, name_cn="股权质押统计", tool_name="get_pledge_stat")
+
+
+def get_express(ts_code: str | None = None, start_date: str | None = None,
+                end_date: str | None = None) -> dict:
+    """业绩快报。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=540)).strftime("%Y%m%d")
+    params.setdefault("start_date", start)
+    params.setdefault("end_date", end)
+    fields = "ts_code,ann_date,end_date,revenue,n_income,total_profit,yoy_sales,yoy_profit,bps,diluted_eps"
+    return _semantic_tushare("express", params, fields, limit=20, name_cn="业绩快报", tool_name="get_express")
+
+
+def get_dividend(ts_code: str) -> dict:
+    """分红送股。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    fields = "ts_code,end_date,ann_date,div_proc,stk_div,stk_boars,cash_div,cash_div_tax,ex_date,record_date,pay_date"
+    return _semantic_tushare("dividend", params, fields, limit=30, name_cn="分红送股", tool_name="get_dividend")
+
+
+def get_balancesheet(ts_code: str, period: str | None = None, start_date: str | None = None,
+                     end_date: str | None = None) -> dict:
+    """资产负债表。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    if period:
+        params["period"] = str(period)
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=540)).strftime("%Y%m%d")
+    params.setdefault("start_date", start)
+    params.setdefault("end_date", end)
+    fields = "ts_code,ann_date,end_date,total_assets,total_liab,total_cur_assets,total_cur_liab,total_nca,total_ncl,money_cap,accounts_rece,inventories"
+    return _semantic_tushare("balancesheet", params, fields, limit=20, name_cn="资产负债表", tool_name="get_balancesheet")
+
+
+def get_cashflow(ts_code: str, period: str | None = None, start_date: str | None = None,
+                 end_date: str | None = None) -> dict:
+    """现金流量表。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    if period:
+        params["period"] = str(period)
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=540)).strftime("%Y%m%d")
+    params.setdefault("start_date", start)
+    params.setdefault("end_date", end)
+    fields = "ts_code,ann_date,end_date,n_cashflow_act,n_cashflow_inv,n_cash_flows_finance,c_cash_equ_end_period,free_cashflow"
+    return _semantic_tushare("cashflow", params, fields, limit=20, name_cn="现金流量表", tool_name="get_cashflow")
+
+
+def get_fina_mainbz(ts_code: str, period: str | None = None, bz_type: str | None = None) -> dict:
+    """主营业务构成（产品/地区）。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    if period:
+        params["period"] = str(period)
+    if bz_type:
+        params["type"] = str(bz_type)
+    fields = "ts_code,period,type,mainbz,bz_profit,bz_item"
+    return _semantic_tushare("fina_mainbz", params, fields, limit=40, name_cn="主营业务构成", tool_name="get_fina_mainbz")
+
+
+def get_disclosure_date(ts_code: str | None = None, end_date: str | None = None) -> dict:
+    """财报披露日期表。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    if end_date:
+        params["end_date"] = str(end_date)
+    fields = "ts_code,name,end_date,pre_date,actual_date,modify_date"
+    return _semantic_tushare("disclosure_date", params, fields, limit=30, name_cn="财报披露日期表", tool_name="get_disclosure_date")
+
+
+def get_index_weight(ts_code: str, trade_date: str | None = None,
+                     start_date: str | None = None, end_date: str | None = None) -> dict:
+    """指数成分和权重。"""
+    params: dict[str, Any] = {"index_code": str(ts_code).strip().upper()}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=180)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "index_code,con_code,trade_date,weight"
+    return _semantic_tushare("index_weight", params, fields, name_cn="指数成分和权重", tool_name="get_index_weight")
+
+
+def get_index_member(ts_code: str, level: str | None = None) -> dict:
+    """申万行业成分（分级）。"""
+    params: dict[str, Any] = {"index_code": str(ts_code).strip().upper()}
+    if level:
+        params["level"] = str(level)
+    fields = "index_code,index_name,member_code,member_name,weight,level"
+    return _semantic_tushare("index_member_all", params, fields, name_cn="申万行业成分", tool_name="get_index_member")
+
+
+def get_daily_info(trade_date: str | None = None, start_date: str | None = None,
+                   end_date: str | None = None) -> dict:
+    """沪深市场每日交易统计。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=30)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "trade_date,total_share,total_value,total_value_trans,avg_pe,avg_pb"
+    return _semantic_tushare("daily_info", params, fields, name_cn="沪深市场每日交易统计", tool_name="get_daily_info")
+
+
+def get_report_rc(ts_code: str | None = None, report_date: str | None = None,
+                   start_date: str | None = None, end_date: str | None = None) -> dict:
+    """券商盈利预测数据。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    rd = _valid_yyyymmdd(report_date)
+    if rd:
+        params["report_date"] = rd
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=365)).strftime("%Y%m%d")
+    params.setdefault("start_date", start)
+    params.setdefault("end_date", end)
+    fields = "ts_code,report_date,analyst,forecast_value,forecast_type,org_name,rating"
+    return _semantic_tushare("report_rc", params, fields, name_cn="券商盈利预测数据", tool_name="get_report_rc")
+
+
+def get_anns(ts_code: str | None = None, start_date: str | None = None,
+             end_date: str | None = None) -> dict:
+    """上市公司公告（标题/摘要）。"""
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=30)).strftime("%Y%m%d")
+    params: dict[str, Any] = {"start_date": start, "end_date": end}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    fields = "ts_code,ann_date,ann_title,ann_type,realtime"
+    return _semantic_tushare("anns_d", params, fields, name_cn="上市公司公告", tool_name="get_anns")
+
+
+def get_namechange(ts_code: str | None = None, start_date: str | None = None,
+                   end_date: str | None = None) -> dict:
+    """股票曾用名/更名。"""
+    today = date.today()
+    end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    start = _valid_yyyymmdd(start_date) or (today - timedelta(days=365)).strftime("%Y%m%d")
+    params: dict[str, Any] = {"start_date": start, "end_date": end}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    fields = "ts_code,name,start_date,end_date,change_reason"
+    return _semantic_tushare("namechange", params, fields, name_cn="股票曾用名", tool_name="get_namechange")
+
+
+def get_stk_factor(ts_code: str, trade_date: str | None = None,
+                   start_date: str | None = None, end_date: str | None = None) -> dict:
+    """股票技术面因子（量化因子）。"""
+    params: dict[str, Any] = {"ts_code": normalize_a_share_symbol(ts_code)}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=60)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "ts_code,trade_date,macd_d,rsi_5,rsi_10,rsi_20,boll_upper,boll_mid,boll_lower,cci,kdj_k,kdj_d,kdj_j"
+    return _semantic_tushare("stk_factor", params, fields, name_cn="股票技术面因子", tool_name="get_stk_factor")
+
+
+def get_ccass_hold(ts_code: str | None = None, trade_date: str | None = None,
+                   start_date: str | None = None, end_date: str | None = None) -> dict:
+    """中央结算系统持股统计。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=30)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    fields = "ts_code,trade_date,name,his_cap,share_rate"
+    return _semantic_tushare("ccass_hold", params, fields, name_cn="中央结算系统持股统计", tool_name="get_ccass_hold")
+
+
 def _data_source_row(provider: str) -> dict[str, Any] | None:
     try:
         with engine.connect() as conn:
@@ -1814,4 +3025,31 @@ def stock_observation_preview(name: str, result: dict) -> str:
     if name in {"search_stock_news", "search_market_intel", "search_comprehensive_intel"}:
         rows = result.get("results") or []
         return f"Tavily 返回 {len(rows)} 条搜索结果。"
+    if name == "tushare_query":
+        rows = result.get("rows") or []
+        head = rows[0] if rows else {}
+        head_keys = "/".join(list(head.keys())[:4]) if head else "-"
+        return (
+            f"TuShare {result.get('api_name', '')}({result.get('name_cn', '')}) 返回 "
+            f"{result.get('count', 0)} 行{'（已截断）' if result.get('truncated') else ''}，"
+            f"{result.get('ms', '-')}ms，字段概览: {head_keys}"
+        )
+    if name == "list_tushare_apis":
+        if result.get("categories"):
+            cats = "、".join(f"{c['category']}({c['count']})" for c in result["categories"][:14])
+            return f"TuShare 目录共 {result.get('total', 0)} 个接口，分类: {cats}"
+        items = result.get("items") or []
+        names = "、".join(f"{i['api_name']}({i['name_cn']})" for i in items[:8])
+        return f"{result.get('category', '')} 分类下 {len(items)} 个接口: {names}"
+    if name == "get_tushare_minutes":
+        bars = result.get("bars") or []
+        return f"TuShare 分钟线 {result.get('freq', '-')} 返回 {len(bars)} 条，{result.get('symbol', '-')}"
+    if str(result.get("source", "")).startswith("tushare.") and "count" in result:
+        rows = result.get("rows") or []
+        head = rows[0] if rows else {}
+        head_keys = "/".join(list(head.keys())[:4]) if head else "-"
+        return (
+            f"TuShare {result.get('name_cn', name)} 返回 {result.get('count', 0)} 行"
+            f"{'（已截断）' if result.get('truncated') else ''}，{result.get('ms', '-')}ms，字段: {head_keys}"
+        )
     return "工具调用完成。"

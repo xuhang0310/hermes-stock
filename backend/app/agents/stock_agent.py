@@ -37,6 +37,71 @@ AUDIT_LOG = Path(__file__).resolve().parents[2] / "agent_audit.log"  # agents/ -
 MAX_ROWS = 100
 OBSERVATION_CHAR_LIMIT = 7000
 
+# stock 模式工具事件分发白名单：run_agent_events 仅对集合内工具 yield tool_start/tool_done/action，
+# 不在集合的工具落到 else 分支返回"未知工具"。新增 stock 工具必须同步加此常量、STOCK_TOOL_SCHEMAS、
+# skills 模块 executor 三处（三源一致）。Phase 2 切 registry 接管分发后可改为从 schema 自动抽取。
+ALLOWED_STOCK_TOOLS: frozenset[str] = frozenset({
+    "resolve_stock",
+    "get_tushare_daily",
+    "get_daily_history",
+    "get_realtime_quote",
+    "analyze_daily_bars",
+    "analyze_trend",
+    "calculate_ma",
+    "get_volume_analysis",
+    "get_chip_distribution",
+    "get_capital_flow",
+    "get_stock_info",
+    "get_analysis_context",
+    "analyze_pattern",
+    "search_stock_news",
+    "search_market_intel",
+    "search_comprehensive_intel",
+    # TuShare 全量接口落地：通用透传 + 目录查询 + 首批语义封装（Phase 0.5 + 1a）
+    "tushare_query",
+    "list_tushare_apis",
+    "get_trade_cal",
+    "get_suspend",
+    "get_stk_limit",
+    "get_top_list",
+    "get_hm_detail",
+    "get_margin",
+    "get_moneyflow_hsgt",
+    "get_forecast",
+    "get_income",
+    "get_index_daily",
+    "get_sw_daily",
+    "get_cn_cpi",
+    "get_tushare_minutes",
+    # 二批语义封装（Phase 1b）
+    "get_top_inst",
+    "get_limit_list",
+    "get_limit_step",
+    "get_margin_detail",
+    "get_share_float",
+    "get_block_trade",
+    "get_top10_holders",
+    "get_top10_float_holders",
+    "get_holdertrade",
+    "get_holdernumber",
+    "get_repurchase",
+    "get_pledge_stat",
+    "get_express",
+    "get_dividend",
+    "get_balancesheet",
+    "get_cashflow",
+    "get_fina_mainbz",
+    "get_disclosure_date",
+    "get_index_weight",
+    "get_index_member",
+    "get_daily_info",
+    "get_report_rc",
+    "get_anns",
+    "get_namechange",
+    "get_stk_factor",
+    "get_ccass_hold",
+})
+
 FORBIDDEN_SQL = re.compile(
     r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|rename|"
     r"call|handler|load_file|lock|unlock|shutdown|kill|outfile|dumpfile|benchmark|sleep|"
@@ -449,24 +514,7 @@ def run_agent_events(
             except json.JSONDecodeError:
                 args = {}
 
-            if stock_mode and name in {
-                "resolve_stock",
-                "get_tushare_daily",
-                "get_daily_history",
-                "get_realtime_quote",
-                "analyze_daily_bars",
-                "analyze_trend",
-                "calculate_ma",
-                "get_volume_analysis",
-                "get_chip_distribution",
-                "get_capital_flow",
-                "get_stock_info",
-                "get_analysis_context",
-                "analyze_pattern",
-                "search_stock_news",
-                "search_market_intel",
-                "search_comprehensive_intel",
-            }:
+            if stock_mode and name in ALLOWED_STOCK_TOOLS:
                 display_name = stock_tool_display_name(name)
                 yield {"type": "tool_start", "tool": name, "display_name": display_name}
                 yield {"type": "action", "tool": name, "content": json.dumps(args, ensure_ascii=False)}
