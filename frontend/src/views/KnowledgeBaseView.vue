@@ -332,31 +332,46 @@ onUnmounted(() => {
     </template>
 
     <template v-else>
-      <div class="kb-search-bar">
-        <input v-model="searchQuery" placeholder="输入检索问句，如：宁德时代盈利能力怎么样" @keyup.enter="runSearch" />
-        <label>top_k <input type="number" v-model.number="searchTopK" min="1" max="20" /></label>
-        <button type="button" :disabled="searching" @click="runSearch">{{ searching ? '检索中' : '检索' }}</button>
-      </div>
-      <div v-if="searched && !searchHits.length" class="kb-empty">无命中。确认索引已建（统计卡切块数 &gt; 0）或换个问法。</div>
-      <div v-for="h in searchHits" :key="h.chunk_id" class="kb-hit">
-        <div class="kb-hit-head">
-          <strong>{{ h.title }}</strong>
-          <span class="kb-pill pill-gray">{{ typeLabel(h.doc_type) }}</span>
-          <span class="muted">{{ h.source }} · 片段 #{{ h.chunk_index }}</span>
-          <a v-if="h.source_url" :href="h.source_url" target="_blank" rel="noopener">原文 ↗</a>
+      <div class="kb-search-wrap">
+        <div class="kb-search-bar">
+          <input
+            v-model="searchQuery"
+            class="kb-search-input"
+            placeholder="输入自然问句，如：宁德时代盈利能力怎么样"
+            @keyup.enter="runSearch"
+          />
+          <label class="kb-topk">top_k<input type="number" v-model.number="searchTopK" min="1" max="20" /></label>
+          <button type="button" class="kb-search-btn" :disabled="searching" @click="runSearch">
+            {{ searching ? '检索中…' : '检 索' }}
+          </button>
         </div>
-        <div class="kb-scores">
-          <span class="kb-score">向量 <i class="kb-bar"><b class="v" :style="{ width: barWidth(h, 'vector_score') + '%' }"></b></i> {{ fmtScore(h.vector_score) }}</span>
-          <span class="kb-score">关键词 <i class="kb-bar"><b class="k" :style="{ width: barWidth(h, 'keyword_score') + '%' }"></b></i> {{ fmtScore(h.keyword_score) }}</span>
-          <span class="kb-score">融合 <i class="kb-bar"><b class="f" :style="{ width: barWidth(h, 'fused_score') + '%' }"></b></i> {{ fmtScore(h.fused_score) }}</span>
-          <span class="kb-score">重排 <i class="kb-bar"><b class="r" :style="{ width: barWidth(h, 'rerank_score') + '%' }"></b></i> {{ fmtScore(h.rerank_score) }}</span>
-        </div>
-        <p
-          class="kb-hit-content"
-          :class="{ clamped: !expandedHits[h.chunk_id] }"
-          :title="expandedHits[h.chunk_id] ? '点击收起' : '点击展开全文'"
-          @click="toggleHit(h.chunk_id)"
-        >{{ cleanContent(h.content) }}</p>
+        <p class="kb-search-hint">向量 + 关键词双路召回 → RRF 融合 → 重排精排；分数条为本次结果内的相对强度。</p>
+
+        <div v-if="searched && !searchHits.length" class="kb-empty">无命中。确认索引已建（统计卡切块数 &gt; 0）或换个问法。</div>
+
+        <article v-for="(h, i) in searchHits" :key="h.chunk_id" class="kb-hit">
+          <div class="kb-hit-head">
+            <span class="kb-rank">{{ i + 1 }}</span>
+            <strong class="kb-hit-title">{{ h.title }}</strong>
+            <span class="kb-pill pill-gray">{{ typeLabel(h.doc_type) }}</span>
+          </div>
+          <div class="kb-hit-meta">
+            <span>{{ h.source }} · 片段 #{{ h.chunk_index }}</span>
+            <a v-if="h.source_url" :href="h.source_url" target="_blank" rel="noopener">原文 ↗</a>
+          </div>
+          <div class="kb-scores">
+            <span class="kb-score">向量 <i class="kb-bar"><b class="v" :style="{ width: barWidth(h, 'vector_score') + '%' }"></b></i> <em>{{ fmtScore(h.vector_score) }}</em></span>
+            <span class="kb-score">关键词 <i class="kb-bar"><b class="k" :style="{ width: barWidth(h, 'keyword_score') + '%' }"></b></i> <em>{{ fmtScore(h.keyword_score) }}</em></span>
+            <span class="kb-score">融合 <i class="kb-bar"><b class="f" :style="{ width: barWidth(h, 'fused_score') + '%' }"></b></i> <em>{{ fmtScore(h.fused_score) }}</em></span>
+            <span class="kb-score">重排 <i class="kb-bar"><b class="r" :style="{ width: barWidth(h, 'rerank_score') + '%' }"></b></i> <em>{{ fmtScore(h.rerank_score) }}</em></span>
+          </div>
+          <p
+            class="kb-hit-content"
+            :class="{ clamped: !expandedHits[h.chunk_id] }"
+            :title="expandedHits[h.chunk_id] ? '点击收起' : '点击展开全文'"
+            @click="toggleHit(h.chunk_id)"
+          >{{ cleanContent(h.content) }}</p>
+        </article>
       </div>
     </template>
   </section>
@@ -388,21 +403,33 @@ onUnmounted(() => {
 .kb-chunk { font-size: 12px; margin: 2px 0; }
 .kb-chunk p { margin: 2px 0 6px; }
 .kb-pager { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; color: var(--muted); }
-.kb-search-bar { display: flex; gap: 8px; align-items: center; padding: 4px 0 10px; }
-.kb-search-bar input[type='number'] { width: 64px; }
-.kb-hit { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; font-size: 12px; }
-.kb-hit-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.kb-hit-head .muted { color: var(--muted); }
-.kb-hit-head a { color: #6ea8d8; text-decoration: none; font-size: 11.5px; }
-.kb-scores { display: flex; gap: 16px; flex-wrap: wrap; margin: 6px 0 2px; color: var(--muted); font-size: 11px; }
-.kb-score { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
-.kb-bar { display: inline-block; width: 72px; height: 5px; border-radius: 3px; background: rgba(213, 180, 106, 0.1); overflow: hidden; }
+.kb-search-wrap { max-width: 940px; }
+.kb-search-bar { display: flex; gap: 10px; align-items: stretch; padding: 6px 0 2px; }
+.kb-search-input { flex: 1; min-width: 0; padding: 10px 14px; font-size: 14px; background: rgba(12, 12, 13, 0.6); border: 1px solid var(--line-strong); border-radius: 8px; color: var(--text); }
+.kb-search-input:focus { border-color: var(--gold-2); outline: none; }
+.kb-topk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 0 4px 0 12px; }
+.kb-topk input { width: 46px; background: transparent; border: 0; color: var(--gold-2); font-size: 14px; text-align: center; }
+.kb-topk input:focus { outline: none; }
+.kb-search-btn { padding: 0 24px; border: 0; border-radius: 8px; background: linear-gradient(135deg, #d5b46a, #b8933f); color: #141414; font-weight: 700; font-size: 13px; letter-spacing: 0.1em; cursor: pointer; }
+.kb-search-btn:disabled { opacity: 0.55; cursor: wait; }
+.kb-search-hint { margin: 8px 0 16px; font-size: 12px; color: var(--muted); }
+.kb-hit { padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; margin: 0 0 12px; font-size: 12px; background: rgba(213, 180, 106, 0.02); transition: border-color 0.15s ease; }
+.kb-hit:hover { border-color: rgba(213, 180, 106, 0.45); }
+.kb-hit-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.kb-rank { flex: none; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--gold-2); border: 1px solid rgba(213, 180, 106, 0.4); border-radius: 6px; padding: 0 7px; line-height: 1.7; }
+.kb-hit-title { font-size: 14.5px; color: var(--text); line-height: 1.45; overflow-wrap: anywhere; }
+.kb-hit-meta { display: flex; align-items: center; gap: 12px; margin: 6px 0 0 34px; font-size: 12px; color: var(--muted); }
+.kb-hit-meta a { color: #6ea8d8; text-decoration: none; }
+.kb-scores { display: flex; gap: 24px; flex-wrap: wrap; margin: 12px 0 0 34px; color: var(--muted); font-size: 11px; }
+.kb-score { display: flex; align-items: center; gap: 7px; }
+.kb-score em { font-style: normal; font-family: ui-monospace, Consolas, monospace; color: var(--text); font-size: 11px; }
+.kb-bar { display: inline-block; width: 96px; height: 6px; border-radius: 3px; background: rgba(213, 180, 106, 0.1); overflow: hidden; }
 .kb-bar b { display: block; height: 100%; border-radius: 3px; }
 .kb-bar .v { background: var(--gold-2); }
 .kb-bar .k { background: #6ea8d8; }
 .kb-bar .f { background: #a89f8a; }
 .kb-bar .r { background: #6db985; }
-.kb-hit-content { margin: 6px 0 0; overflow-wrap: anywhere; cursor: pointer; line-height: 1.6; color: var(--text); }
+.kb-hit-content { margin: 10px 0 0 34px; overflow-wrap: anywhere; cursor: pointer; font-size: 13px; line-height: 1.75; color: var(--text); opacity: 0.88; }
 .kb-hit-content.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .hint { font-size: 12px; color: var(--gold-2); }
 .error-text { color: #e06c6c; font-size: 13px; }
