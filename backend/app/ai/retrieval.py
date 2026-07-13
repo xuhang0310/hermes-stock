@@ -68,7 +68,10 @@ def retrieve_chunks(
         if query_vec:
             try:
                 vector_hits = store.query(query_vec[0], pool)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                from backend.app.core.applog import log_event
+
+                log_event("rag", "WARNING", f"向量召回失败（本次退化为纯关键词）: {str(exc)[:160]}")
                 vector_hits = []
             if vector_hits:
                 rows = db.scalars(
@@ -92,7 +95,19 @@ def retrieve_chunks(
     if not chunk_map:
         return []
 
-    fused = sorted(chunk_map.values(), key=lambda c: rrf_scores.get(c.id, 0.0), reverse=True)[:pool]
+    fused_all = sorted(chunk_map.values(), key=lambda c: rrf_scores.get(c.id, 0.0), reverse=True)
+    # 跨文档去重：同一篇资讯常被搜索缓存多次（不同日期抓同一研报），相同 content_hash 只保留
+    # 融合分最高的一条，避免 top-K 被三条一模一样的内容占满
+    seen_hashes: set[str] = set()
+    fused: list[DocumentChunk] = []
+    for chunk in fused_all:
+        key = chunk.content_hash or f"id-{chunk.id}"
+        if key in seen_hashes:
+            continue
+        seen_hashes.add(key)
+        fused.append(chunk)
+        if len(fused) >= pool:
+            break
 
     # rerank 精排（复用记忆同款 API），失败/未配置回退融合排序
     scored = _memory._rerank_scores(query, [chunk.content for chunk in fused], top_k)
@@ -127,6 +142,7 @@ def _hit_out(
     doc = chunk.document
     return {
         "chunk_id": chunk.id,
+        "chunk_index": chunk.chunk_index,
         "doc_id": chunk.doc_id,
         "title": doc.title if doc else "",
         "source": doc.source if doc else "",

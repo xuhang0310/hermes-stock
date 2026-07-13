@@ -189,6 +189,27 @@ function barWidth(h: KnowledgeSearchHit, key: 'vector_score' | 'keyword_score' |
   return Math.round((value / max) * 100)
 }
 
+// 0 分=该路没召回到，显示 — 而不是 0（向量 0 曾掩盖过向量召回整条腿故障）
+function fmtScore(value: number | null | undefined) {
+  return value ? String(value) : '—'
+}
+
+// 展示层兜底清洗（老切块在重灌前还带 markdown 图片/URL 垃圾）
+function cleanContent(raw: string) {
+  return raw
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[*#`_]{1,}/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+const expandedHits = ref<Record<number, boolean>>({})
+function toggleHit(id: number) {
+  expandedHits.value[id] = !expandedHits.value[id]
+}
+
 onMounted(() => {
   loadStats()
   loadDocuments()
@@ -218,7 +239,7 @@ onUnmounted(() => {
       <div class="kb-card"><b>{{ stats.documents }}</b><span>文档</span></div>
       <div class="kb-card"><b>{{ stats.chunks }}</b><span>切块</span></div>
       <div class="kb-card gold"><b>{{ stats.indexed_pct }}%</b><span>已索引 {{ stats.indexed_docs }} 篇</span></div>
-      <div class="kb-card"><b>{{ stats.backend }}</b><span>{{ stats.collection }} · {{ stats.dim || '—' }}维</span></div>
+      <div class="kb-card"><b>{{ stats.backend }}</b><span>{{ stats.collection }}{{ stats.dim ? ' · ' + stats.dim + '维' : '' }}</span></div>
     </div>
 
     <div v-if="stats?.ingest.running" class="kb-progress">
@@ -321,16 +342,21 @@ onUnmounted(() => {
         <div class="kb-hit-head">
           <strong>{{ h.title }}</strong>
           <span class="kb-pill pill-gray">{{ typeLabel(h.doc_type) }}</span>
-          <span class="muted">{{ h.source }}</span>
+          <span class="muted">{{ h.source }} · 片段 #{{ h.chunk_index }}</span>
           <a v-if="h.source_url" :href="h.source_url" target="_blank" rel="noopener">原文 ↗</a>
         </div>
         <div class="kb-scores">
-          <span class="kb-score">向量 <i class="kb-bar"><b class="v" :style="{ width: barWidth(h, 'vector_score') + '%' }"></b></i> {{ h.vector_score }}</span>
-          <span class="kb-score">关键词 <i class="kb-bar"><b class="k" :style="{ width: barWidth(h, 'keyword_score') + '%' }"></b></i> {{ h.keyword_score }}</span>
-          <span class="kb-score">融合 <i class="kb-bar"><b class="f" :style="{ width: barWidth(h, 'fused_score') + '%' }"></b></i> {{ h.fused_score }}</span>
-          <span class="kb-score">重排 <i class="kb-bar"><b class="r" :style="{ width: barWidth(h, 'rerank_score') + '%' }"></b></i> {{ h.rerank_score ?? '—' }}</span>
+          <span class="kb-score">向量 <i class="kb-bar"><b class="v" :style="{ width: barWidth(h, 'vector_score') + '%' }"></b></i> {{ fmtScore(h.vector_score) }}</span>
+          <span class="kb-score">关键词 <i class="kb-bar"><b class="k" :style="{ width: barWidth(h, 'keyword_score') + '%' }"></b></i> {{ fmtScore(h.keyword_score) }}</span>
+          <span class="kb-score">融合 <i class="kb-bar"><b class="f" :style="{ width: barWidth(h, 'fused_score') + '%' }"></b></i> {{ fmtScore(h.fused_score) }}</span>
+          <span class="kb-score">重排 <i class="kb-bar"><b class="r" :style="{ width: barWidth(h, 'rerank_score') + '%' }"></b></i> {{ fmtScore(h.rerank_score) }}</span>
         </div>
-        <p class="kb-hit-content">{{ h.content }}</p>
+        <p
+          class="kb-hit-content"
+          :class="{ clamped: !expandedHits[h.chunk_id] }"
+          :title="expandedHits[h.chunk_id] ? '点击收起' : '点击展开全文'"
+          @click="toggleHit(h.chunk_id)"
+        >{{ cleanContent(h.content) }}</p>
       </div>
     </template>
   </section>
@@ -376,7 +402,8 @@ onUnmounted(() => {
 .kb-bar .k { background: #6ea8d8; }
 .kb-bar .f { background: #a89f8a; }
 .kb-bar .r { background: #6db985; }
-.kb-hit-content { margin: 6px 0 0; }
+.kb-hit-content { margin: 6px 0 0; overflow-wrap: anywhere; cursor: pointer; line-height: 1.6; color: var(--text); }
+.kb-hit-content.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .hint { font-size: 12px; color: var(--gold-2); }
 .error-text { color: #e06c6c; font-size: 13px; }
 </style>

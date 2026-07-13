@@ -486,6 +486,7 @@ export type KnowledgeChunk = {
 
 export type KnowledgeSearchHit = {
   chunk_id: number
+  chunk_index: number
   doc_id: number
   title: string
   source: string
