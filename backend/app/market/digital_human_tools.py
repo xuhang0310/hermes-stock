@@ -436,7 +436,7 @@ DIGITAL_HUMAN_TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "update_my_positions",
-        "更新/录入当前用户的持仓快照（整仓覆盖式，与截图录入一致）。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；账户事实字段（代码/数量/成本价）缺失才追问，不臆造；最新价/市值/浮盈属行情数据，系统每个交易日自动同步，绝不为此追问用户，用户给了就顺带填、没给留空。只维护记录不替用户下单。首次调用不传 confirmed 返回预览（不落库），复述给用户确认后再以 confirmed=true 调用才真正写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
+        "更新/录入当前用户的持仓快照（整仓覆盖式，与截图录入一致）。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；账户事实字段（代码/数量/成本价）缺失才追问，不臆造；最新价/市值/浮盈属行情数据，系统每个交易日自动同步，绝不为此追问用户，用户给了就顺带填、没给留空。清仓某标的：该标的行传 position_quantity=0（状态自动转 closed）；部分卖出：传卖出后的剩余数量。用户没说账户时系统会自动匹配该标的现有持仓所在账户，不必追问；同一标的在多个账户都有持仓时才先问清是哪个账户。只维护记录不替用户下单。首次调用不传 confirmed 返回预览（不落库），复述给用户确认后再以 confirmed=true 调用才真正写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
         {
             "rows": {"type": "array", "description": "持仓明细数组，每项含 symbol/position_quantity/available_quantity/cost_price/position_pct/stop_price 等；latest_price/market_value/floating_pnl 仅用户主动给出时才填（缺失由系统自动同步行情补齐）。", "items": {"type": "object"}},
             "account": {"type": "object", "description": "账户信息，含 account_id/broker_name/account_name/as_of_date 等。"},

@@ -494,7 +494,9 @@ def _execute_position_write_tool(
     account = args.get("account") if isinstance(args.get("account"), dict) else {}
     default_account: dict[str, Any] = {**account}
     if default_account_id and "account_id" not in default_account:
-        default_account["account_id"] = default_account_id
+        # 弱提示键：repository 先按"该标的现有 open 持仓的账户"自动匹配（清仓/卖出必须命中原持仓），
+        # 匹配不到才落这个默认账户；直接塞 account_id 会把更新写到别的账户、真实持仓纹丝不动。
+        default_account["default_account_id"] = default_account_id
     if args.get("as_of_date"):
         default_account["as_of_date"] = args.get("as_of_date")
     # P2 写前确认（人在环）：confirmed 留空/false 只返回预览，不落库；用户确认后传 true 才写
