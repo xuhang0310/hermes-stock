@@ -35,6 +35,21 @@ _MIN_DOC_CHARS = 30  # 正文短于此的文档不入库
 
 # --------------------------------------------------------------------------- 切块（纯函数）
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？；\n])")
+_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")          # ![Image 13](https://...)
+_MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")           # [文字](url) → 文字
+_BARE_URL = re.compile(r"https?://\S+")                    # 裸 URL（含超长 token 查询串）
+_MD_NOISE = re.compile(r"[*#`_]{1,}")                      # markdown 强调/标题符号
+_SPACES = re.compile(r"[ \t　]{2,}")
+
+
+def _clean_text(text: str) -> str:
+    """摄取前清洗：剥 markdown 图片/链接、裸 URL 与强调符号——URL 垃圾会污染向量也毁展示。"""
+    cleaned = _MD_IMAGE.sub(" ", text or "")
+    cleaned = _MD_LINK.sub(r"\1", cleaned)
+    cleaned = _BARE_URL.sub(" ", cleaned)
+    cleaned = _MD_NOISE.sub("", cleaned)
+    cleaned = _SPACES.sub(" ", cleaned)
+    return cleaned.strip()
 
 
 def chunk_text(text: str, size: int | None = None, overlap: int | None = None) -> list[str]:
@@ -125,7 +140,13 @@ class _KnowledgeStore:
                 collection_name=self._name, data=[vector], limit=n,
                 output_fields=[], consistency_level="Strong",  # 刚索引的块需立即可检索
             )
-            return [(str(hit["id"]), float(hit.get("distance", 0.0))) for hit in (res[0] if res else [])]
+            # 注意：MilvusClient 命中里主键的键名 = 主键字段名（本集合是 vector_id）；
+            # memory 的集合主键恰好叫 id 才能用 hit["id"]，这里两个键都兜住
+            return [
+                (vid, float(hit.get("distance", 0.0)))
+                for hit in (res[0] if res else [])
+                if (vid := str(hit.get("vector_id") or hit.get("id") or ""))
+            ]
         res = self._col.query(query_embeddings=[vector], n_results=n, include=["distances"])
         ids = res.get("ids", [[]])[0]
         dists = res.get("distances", [[]])[0]
@@ -141,21 +162,26 @@ class _KnowledgeStore:
 
 
 _store: _KnowledgeStore | None = None
-_store_ready: bool | None = None
+_store_failed_at: float = 0.0
+_STORE_RETRY_SECONDS = 60  # 初始化失败不永久缓存：冷却后允许重试（Milvus/嵌入服务临时抖动可自愈）
 
 
 def get_store() -> _KnowledgeStore | None:
     """惰性单例；嵌入/向量库不可用时返回 None（摄取与检索优雅降级，不影响主功能）。"""
-    global _store, _store_ready
-    if _store_ready is not None:
-        return _store if _store_ready else None
+    global _store, _store_failed_at
+    if _store is not None:
+        return _store
+    import time as _time
+
+    if _store_failed_at and _time.monotonic() - _store_failed_at < _STORE_RETRY_SECONDS:
+        return None
     try:
         _store = _KnowledgeStore()
-        _store_ready = True
+        _store_failed_at = 0.0
         log_event("rag", "INFO", f"知识库向量库就绪：{settings.vector_backend}/{settings.rag_milvus_collection}", to_db=False)
     except Exception as exc:  # noqa: BLE001
-        log_event("rag", "ERROR", f"知识库向量库初始化失败: {str(exc)[:160]}")
-        _store, _store_ready = None, False
+        log_event("rag", "ERROR", f"知识库向量库初始化失败（{_STORE_RETRY_SECONDS}s 后可重试）: {str(exc)[:160]}")
+        _store_failed_at = _time.monotonic()
     return _store
 
 
@@ -206,7 +232,7 @@ def ingest_document(doc_id: int, *, force: bool = False) -> tuple[int, int]:
             )
             if existing:
                 return 0, 0
-        text = (doc.content or doc.summary or "").strip()
+        text = _clean_text(doc.content or doc.summary or "")
         title = (doc.title or "").strip()
         if title and title not in text:
             text = f"{title}。{text}"  # 标题并入正文提升召回（tavily 缓存正文常为摘要片段）

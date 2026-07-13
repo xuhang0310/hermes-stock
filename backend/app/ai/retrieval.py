@@ -68,7 +68,10 @@ def retrieve_chunks(
         if query_vec:
             try:
                 vector_hits = store.query(query_vec[0], pool)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                from backend.app.core.applog import log_event
+
+                log_event("rag", "WARNING", f"向量召回失败（本次退化为纯关键词）: {str(exc)[:160]}")
                 vector_hits = []
             if vector_hits:
                 rows = db.scalars(
@@ -127,6 +130,7 @@ def _hit_out(
     doc = chunk.document
     return {
         "chunk_id": chunk.id,
+        "chunk_index": chunk.chunk_index,
         "doc_id": chunk.doc_id,
         "title": doc.title if doc else "",
         "source": doc.source if doc else "",
