@@ -434,6 +434,58 @@ export type DigitalHumanCapabilities = {
   write_tools: DigitalHumanToolMeta[]
 }
 
+export type KnowledgeStats = {
+  documents: number
+  chunks: number
+  indexed_docs: number
+  indexed_pct: number
+  backend: string
+  collection: string
+  dim: number
+}
+
+export type KnowledgeDocument = {
+  id: number
+  title: string
+  doc_type: string
+  source: string
+  source_url: string | null
+  trust_level: string
+  published_at: string | null
+  chunk_count: number
+  indexed: boolean
+}
+
+export type KnowledgeDocumentPage = {
+  total: number
+  page: number
+  page_size: number
+  items: KnowledgeDocument[]
+}
+
+export type KnowledgeChunk = {
+  id: number
+  chunk_index: number
+  content: string
+  token_count: number
+  status: string
+  hit_count: number
+}
+
+export type KnowledgeSearchHit = {
+  chunk_id: number
+  doc_id: number
+  title: string
+  source: string
+  doc_type: string
+  source_url: string | null
+  content: string
+  vector_score: number
+  keyword_score: number
+  fused_score: number
+  rerank_score: number | null
+}
+
 export type PromptRecommendation = {
   id: number
   digital_human_id: number
