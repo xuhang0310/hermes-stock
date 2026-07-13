@@ -296,7 +296,7 @@ def _run_position_price_sync(now: datetime) -> str:
     价格来源复用 stock_tools.get_realtime_quote（TuShare 日线收盘）。失败标的记录到
     输出预览，不推告警群（零噪音纪律，由次日健康检查汇总失败任务）。
     """
-    from backend.app.core.models import PositionAccount, PositionHoldingSnapshot
+    from backend.app.core.models import Instrument, Position, PositionAccount, PositionHoldingSnapshot
     from backend.app.data.repository import StockRepository
     from backend.app.market.stock_tools import get_realtime_quote
 
@@ -312,6 +312,35 @@ def _run_position_price_sync(now: datetime) -> str:
             ).all()
             if (s.status or "open") == "open" and (s.position_quantity or 0) > 0
         ]
+
+        # 只在 positions 表、还没有任何快照的 open 持仓（如 seed/历史数据）：补建一条快照，
+        # 否则展示层（读最新快照）的最新价/市值永远是空。
+        covered = {(s.account_id, s.symbol) for s in snaps}
+        orphan_positions = [
+            p
+            for p in session.scalars(select(Position).where(Position.status == "open")).all()
+            if (p.quantity or 0) > 0 and (p.account_id, p.symbol) not in covered
+        ]
+        for pos in orphan_positions:
+            instrument = session.get(Instrument, pos.symbol)
+            snap = PositionHoldingSnapshot(
+                account_id=pos.account_id,
+                symbol=pos.symbol,
+                symbol_name=instrument.name if instrument else pos.symbol,
+                as_of_date=now.date().isoformat(),
+                position_quantity=pos.quantity,
+                cost_price=pos.cost_price,
+                cost_amount=round(float(pos.cost_price) * float(pos.quantity), 4) if pos.cost_price else None,
+                position_pct=pos.position_pct,
+                stop_price=pos.stop_price,
+                source_type="price_sync",
+                status="open",
+            )
+            session.add(snap)
+            snaps.append(snap)
+        if orphan_positions:
+            session.flush()
+
         if not snaps:
             return "无 open 持仓，跳过价格同步"
 
