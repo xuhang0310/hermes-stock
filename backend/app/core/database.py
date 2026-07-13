@@ -83,6 +83,7 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             ("feishu_app_id", "ADD COLUMN feishu_app_id VARCHAR(80) NULL AFTER sort_order"),
             ("feishu_app_secret_cipher", "ADD COLUMN feishu_app_secret_cipher TEXT NULL AFTER feishu_app_id"),
             ("feishu_bot_enabled", "ADD COLUMN feishu_bot_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER feishu_app_secret_cipher"),
+            ("can_write_positions", "ADD COLUMN can_write_positions TINYINT(1) NOT NULL DEFAULT 0 AFTER feishu_bot_enabled"),
         ):
             has_column = connection.execute(
                 text(

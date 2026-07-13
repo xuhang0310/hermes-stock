@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.auth.auth import AuthContext, require_permission
@@ -987,6 +987,17 @@ async def agent_chat(
         final_answer = ""
         final_error: str | None = None
         event_count = 0
+        # 三重门之一/二：数字人开 can_write_positions 且用户有 data:write 权限才注入写工具
+        can_write_positions = bool(
+            profile and profile.can_write_positions
+            and payload.chat_mode == "research"
+            and ("data:write" in context.permissions or "all" in context.permissions)
+        )
+        default_account_id: int | None = None
+        if can_write_positions:
+            default_account_id = db.scalar(
+                text("SELECT id FROM position_accounts WHERE is_default = 1 ORDER BY id LIMIT 1")
+            )
 
         def produce_events() -> None:
             started = time.monotonic()
@@ -1006,6 +1017,10 @@ async def agent_chat(
                     payload.skills,
                     profile.code if profile else None,
                     memory_context,
+                    user_id=context.user.id,
+                    user_label=context.user.display_name,
+                    can_write_positions=can_write_positions,
+                    default_account_id=default_account_id,
                 ):
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
             except Exception as exc:  # noqa: BLE001

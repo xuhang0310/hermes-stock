@@ -80,6 +80,7 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "任务拆解: 先判断问题属于持仓、自选、单票研究、风险还是日报，再选择最少工具。",
             "优先级排序: 优先处理持仓，其次自选池；有止损、L0/L1事件、缺研究证据的标的优先。",
             "统稿输出: 把事实、推断、风险、下一步动作分开，不替用户自动下单。",
+            "持仓写入（若可用 update_my_positions 工具）: 先 get_portfolio_snapshot 读现状；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
         ],
         "output": "输出固定包含: 今日重点、持仓观察、自选池观察、风险/缺口、下一步动作。",
     },
@@ -430,7 +431,29 @@ DIGITAL_HUMAN_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "symbol": {"type": "string", "description": "可选 A股代码或 ts_code。"},
         },
     ),
+    _tool(
+        "update_my_positions",
+        "更新/录入当前用户的持仓快照（整仓覆盖式，与截图录入一致）。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；缺字段先追问不臆造；只维护记录不替用户下单。首次调用不传 confirmed 返回预览（不落库），复述给用户确认后再以 confirmed=true 调用才真正写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
+        {
+            "rows": {"type": "array", "description": "持仓明细数组，每项含 symbol/position_quantity/available_quantity/cost_price/latest_price/market_value/floating_pnl/position_pct/stop_price 等。", "items": {"type": "object"}},
+            "account": {"type": "object", "description": "账户信息，含 account_id/broker_name/account_name/as_of_date 等。"},
+            "as_of_date": {"type": "string", "description": "快照日期 YYYYMMDD。"},
+            "confirmed": {"type": "boolean", "description": "是否真正写入。默认 false 返回预览不落库；用户确认后传 true 才落库。"},
+        },
+        ["rows"],
+    ),
 ]
+
+
+# 写持仓工具（update_my_positions 等）。不进 ROLE_TOOL_NAMES（避免对无写权限用户也注入 schema）；
+# run_agent_events 在 can_write_positions 为真时手动 append write_tool_schemas() 到 tools，
+# 并经独立 repository 会话执行（不经 execute_digital_human_tool/registry，因后者不带用户/账户上下文）。
+WRITE_TOOL_NAMES: list[str] = ["update_my_positions"]
+
+
+def write_tool_schemas() -> list[dict[str, Any]]:
+    """写工具 schema 集合。run_agent_events 在 can_write 时 append 到 tools。"""
+    return [schema for schema in DIGITAL_HUMAN_TOOL_SCHEMAS if schema["function"]["name"] in WRITE_TOOL_NAMES]
 
 
 def get_my_universe() -> dict:
