@@ -11,6 +11,7 @@ import type {
   BrokerPreset,
   PositionSummary,
   PromptRecommendation,
+  DigitalHumanCapabilities,
   ReportItem,
   RiskCheck,
   SystemLog,
@@ -322,6 +323,8 @@ export const api = {
       method: id ? 'PUT' : 'POST',
       body: JSON.stringify(payload)
     }),
+  digitalHumanCapabilities: (id: number) =>
+    request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
   agentSessions: (chatMode?: 'research' | 'stock', digitalHumanId?: number | null) => {
     const params = new URLSearchParams()
     if (chatMode) params.set('chat_mode', chatMode)

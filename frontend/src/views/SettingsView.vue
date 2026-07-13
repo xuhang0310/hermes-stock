@@ -2,12 +2,13 @@
 import { computed, ref } from 'vue'
 import AgentQueue from '../components/AgentQueue.vue'
 import DataSourceSettingsView from './DataSourceSettingsView.vue'
+import DigitalHumanAdminView from './DigitalHumanAdminView.vue'
 import ModelSettingsView from './ModelSettingsView.vue'
 import NotifyChannelSettingsView from './NotifyChannelSettingsView.vue'
 import LogsView from './LogsView.vue'
 import type { AgentItem, HealthPayload, UserPayload } from '../types'
 
-type SettingsTab = 'models' | 'dataSources' | 'notifyChannels' | 'logs' | 'system'
+type SettingsTab = 'models' | 'dataSources' | 'notifyChannels' | 'digitalHumans' | 'logs' | 'system'
 
 const props = defineProps<{
   health: HealthPayload | null
@@ -23,11 +24,15 @@ const canManageChannels = computed(
 const canViewSystem = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
 )
+const canManageDigitalHumans = computed(
+  () => props.user.permissions.includes('all') || props.user.permissions.includes('digital_human:manage')
+)
 
 const tabs = computed<Array<{ key: SettingsTab; label: string }>>(() => [
   { key: 'models', label: '模型与平台' },
   { key: 'dataSources', label: '数据源' },
   ...(canManageChannels.value ? [{ key: 'notifyChannels' as SettingsTab, label: '通知通道' }] : []),
+  ...(canManageDigitalHumans.value ? [{ key: 'digitalHumans' as SettingsTab, label: '数字人管理' }] : []),
   ...(canViewSystem.value ? [{ key: 'logs' as SettingsTab, label: '运行日志' }] : []),
   { key: 'system', label: '系统状态' }
 ])
@@ -50,6 +55,7 @@ const tabs = computed<Array<{ key: SettingsTab; label: string }>>(() => [
     <ModelSettingsView v-if="activeTab === 'models'" />
     <DataSourceSettingsView v-else-if="activeTab === 'dataSources'" />
     <NotifyChannelSettingsView v-else-if="activeTab === 'notifyChannels'" />
+    <DigitalHumanAdminView v-else-if="activeTab === 'digitalHumans'" />
     <LogsView v-else-if="activeTab === 'logs'" />
 
     <section v-else class="page-section settings-grid">
