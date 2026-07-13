@@ -350,7 +350,7 @@ export const api = {
   knowledgeSearch: (query: string, topK?: number, symbol?: string) =>
     request<{ query: string; hits: KnowledgeSearchHit[] }>('/api/knowledge/search', {
       method: 'POST',
-      body: JSON.stringify({ query, top_k: topK ?? null, symbol: symbol ?? null })
+      body: JSON.stringify({ query, top_k: topK ?? 0, symbol: symbol ?? null })
     }),
   agentSessions: (chatMode?: 'research' | 'stock', digitalHumanId?: number | null) => {
     const params = new URLSearchParams()
