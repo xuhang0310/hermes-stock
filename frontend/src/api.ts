@@ -51,6 +51,16 @@ export function getAuthToken() {
   return authToken
 }
 
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -67,7 +77,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const detail = await response.text()
-    throw new Error(detail || `Request failed: ${response.status}`)
+    throw new ApiError(detail || `Request failed: ${response.status}`, response.status)
   }
 
   return response.json() as Promise<T>

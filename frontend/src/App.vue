@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
-import { api, getAuthToken, setAuthToken } from './api'
+import { api, ApiError, getAuthToken, setAuthToken } from './api'
 import AppShell from './components/AppShell.vue'
 import DataTable from './components/DataTable.vue'
 import PositionsWorkbench from './components/PositionsWorkbench.vue'
@@ -47,6 +47,7 @@ type PositionAgentChat = {
 }
 
 const activePage = ref<PageKey>('workbench')
+const bootstrapping = ref(false)
 const loading = ref(false)
 const loginLoading = ref(false)
 const loginError = ref('')
@@ -167,11 +168,29 @@ function logout() {
 
 async function initialize() {
   if (!getAuthToken()) return
+  bootstrapping.value = true
   try {
-    currentUser.value = await api.me()
+    // 只有 401（token 真失效）才清 token 落登录页；连接被拒/5xx（部署重启窗口、
+    // 网络抖动）自动重试 ~16s，期间显示"正在连接"而不是把用户踢去重新登录。
+    for (let attempt = 1; ; attempt++) {
+      try {
+        currentUser.value = await api.me()
+        break
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          logout()
+          return
+        }
+        if (attempt >= 6) throw err
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1500 * attempt, 4000)))
+      }
+    }
     await refreshAll()
   } catch {
-    logout()
+    // 后端长时间不可达：保留 token 落到登录页兜底；服务恢复后刷新即可直接进入
+    currentUser.value = null
+  } finally {
+    bootstrapping.value = false
   }
 }
 
@@ -459,7 +478,12 @@ onMounted(initialize)
 </script>
 
 <template>
-  <LoginView v-if="!currentUser" :loading="loginLoading" :error="loginError" @login="login" />
+  <div v-if="bootstrapping && !currentUser" class="boot-splash">
+    <span class="boot-splash-pulse"></span>
+    正在连接 SixRabbits Stock...
+  </div>
+
+  <LoginView v-else-if="!currentUser" :loading="loginLoading" :error="loginError" @login="login" />
 
   <AppShell
     v-else

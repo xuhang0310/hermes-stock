@@ -1329,6 +1329,30 @@ tbody tr.clickable-row:focus-visible td {
   padding: 12px 14px;
 }
 
+.boot-splash {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 100vh;
+  color: var(--muted);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.boot-splash-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--gold-2);
+  animation: bootPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes bootPulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
 .digital-center-page {
   /* tabs 头占一行、聊天区吃满剩余视口高度——输入框钉底，只有消息区滚动 */
   display: grid;
