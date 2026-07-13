@@ -528,12 +528,23 @@ class StockRepository:
         if field not in allowed:
             return {"error": f"不允许修改字段 {field}，仅支持 {', '.join(sorted(allowed))}"}
         norm = normalize_a_share_symbol(symbol)
+        # 优先命中该标的现有 open 持仓所在账户；无法唯一归属才用调用方传的 account_id
+        matched, matched_id = self._unique_open_account_for(norm)
+        effective_id = matched_id if matched else account_id
         snap = self.db.scalar(
             select(PositionHoldingSnapshot)
-            .where(PositionHoldingSnapshot.symbol == norm, _account_eq(account_id))
+            .where(PositionHoldingSnapshot.symbol == norm, _account_eq(effective_id))
             .order_by(desc(PositionHoldingSnapshot.id))
             .limit(1)
         )
+        if snap is None and matched and effective_id != account_id:
+            effective_id = account_id
+            snap = self.db.scalar(
+                select(PositionHoldingSnapshot)
+                .where(PositionHoldingSnapshot.symbol == norm, _account_eq(effective_id))
+                .order_by(desc(PositionHoldingSnapshot.id))
+                .limit(1)
+            )
         if snap is None:
             return {"error": f"未找到 {norm} 的持仓快照"}
         if field in {"stop_price", "take_profit_price", "position_pct"}:
@@ -545,7 +556,7 @@ class StockRepository:
             coerced = str(value).strip() if value is not None else None
         setattr(snap, field, coerced)
         position = self.db.scalar(
-            select(Position).where(Position.symbol == norm, _account_eq(account_id)).order_by(desc(Position.id)).limit(1)
+            select(Position).where(Position.symbol == norm, _account_eq(effective_id)).order_by(desc(Position.id)).limit(1)
         )
         if position is not None and hasattr(position, field):
             setattr(position, field, coerced)
@@ -591,7 +602,7 @@ class StockRepository:
             instrument.name = symbol_name
             instrument.market = exchange or instrument.market
 
-        account = self._ensure_position_account(payload)
+        account = self._ensure_position_account(payload, symbol=symbol)
         quantity = number_or_none(payload.get("position_quantity") or payload.get("quantity")) or 0.0
         latest_price = number_or_none(payload.get("latest_price") or payload.get("price"))
         cost_price = number_or_none(payload.get("cost_price") or payload.get("avg_cost"))
@@ -691,11 +702,43 @@ class StockRepository:
             self.db.commit()
         return result
 
-    def _ensure_position_account(self, payload: dict[str, Any]) -> PositionAccount | None:
-        # 优先按显式 account_id 直取（前端选定目标账户时透传）
+    def _unique_open_account_for(self, symbol: str) -> tuple[bool, int | None]:
+        """该标的现有 open 持仓归属的账户。恰好一个账户持有 → (True, account_id 可为 None)；否则 (False, None)。"""
+        accounts = {
+            p.account_id
+            for p in self.db.scalars(
+                select(Position).where(Position.symbol == symbol, Position.status == "open")
+            ).all()
+        }
+        if len(accounts) == 1:
+            return True, next(iter(accounts))
+        return False, None
+
+    def _ensure_position_account(self, payload: dict[str, Any], symbol: str | None = None) -> PositionAccount | None:
+        # 1) 显式 account_id 直取（前端选定目标账户 / 用户明说时透传）
         acc_id = payload.get("account_id")
         if acc_id:
             existing = self.db.get(PositionAccount, int(acc_id))
+            if existing is not None:
+                return existing
+        # 2) 未给任何账户信息时，自动匹配该标的现有 open 持仓的账户——清仓/卖出/调仓必须命中
+        #    原持仓，否则会在默认/manual 账户下另起一条记录，真实持仓纹丝不动（数据"没更新"）。
+        has_explicit_account = any(
+            payload.get(key)
+            for key in ("broker_name", "broker", "broker_code", "account_no_masked", "account_no", "account_name")
+        )
+        if not has_explicit_account and symbol:
+            matched, matched_id = self._unique_open_account_for(symbol)
+            if matched:
+                if matched_id is None:
+                    return None  # 原持仓本就未挂账户，跟随之，不落默认/manual 账户
+                existing = self.db.get(PositionAccount, matched_id)
+                if existing is not None:
+                    return existing
+        # 3) 数字人链路注入的默认账户（弱提示）：仅在无法匹配现有持仓时兜底
+        fallback_id = payload.get("default_account_id")
+        if fallback_id:
+            existing = self.db.get(PositionAccount, int(fallback_id))
             if existing is not None:
                 return existing
         broker_code = payload.get("broker_code")

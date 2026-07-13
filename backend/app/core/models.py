@@ -216,6 +216,22 @@ class DailyBar(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class StockLatestPrice(Base):
+    """全体 Agent 共用的最新价缓存：开盘时段按 TTL 从 TuShare 刷新，非开盘时间只读缓存不外呼。"""
+
+    __tablename__ = "stock_latest_prices"
+
+    symbol: Mapped[str] = mapped_column(String(24), primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(120))
+    price: Mapped[float | None] = mapped_column(Float)
+    pre_close: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    trade_date: Mapped[str | None] = mapped_column(String(8))
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tushare")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Document(Base):
     __tablename__ = "documents"
 

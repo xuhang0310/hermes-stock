@@ -20,6 +20,8 @@ COMMON_TOOL_NAMES = [
     # 联网搜索：每个数字人都具备，用于补充系统内没有的外部信息（个股新闻、行业、政策、宏观等）
     "search_market_intel",
     "search_stock_news",
+    # 最新价：每个数字人回答个股问题前必查（stock_latest_prices 缓存表，开盘刷新/收盘走缓存）
+    "get_latest_price",
 ]
 
 ROLE_TOOL_NAMES: dict[str, list[str]] = {
@@ -195,11 +197,12 @@ def digital_human_skill_prompt(profile_code: str | None) -> str:
 - {role["output"]}
 
 工具使用规则:
-1. 研究本系统自己的持仓和自选池时，优先调用 get_my_universe 或对应快照工具，用真实数据说话。
-2. run_sql / get_schema 是通用底座工具，可以兜底探索，但优先使用结构化专属工具。
-3. 用户问系统外的标的、行业、政策、新闻、宏观或突发事件时，用 search_market_intel / search_stock_news 联网搜索补充；可以先说明它是否在系统持仓·自选范围内，再结合搜索结果和你的专业能力作答，绝不因为"不在持仓/自选池"就拒绝回答。
-4. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。
-5. 结论要标注来源（内部数据 / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。"""
+1. 【必做】凡回答涉及具体股票（无论是否在持仓/自选池）的行情、判断、风控问题，先调用 get_latest_price 获取该标的最新价格，回答中标注价格与所属交易日；绝不引用记忆或历史对话里的旧价。
+2. 研究本系统自己的持仓和自选池时，优先调用 get_my_universe 或对应快照工具，用真实数据说话。
+3. run_sql / get_schema 是通用底座工具，可以兜底探索，但优先使用结构化专属工具。
+4. 用户问系统外的标的、行业、政策、新闻、宏观或突发事件时，用 search_market_intel / search_stock_news 联网搜索补充；可以先说明它是否在系统持仓·自选范围内，再结合搜索结果和你的专业能力作答，绝不因为"不在持仓/自选池"就拒绝回答。
+5. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。
+6. 结论要标注来源（内部数据 / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。"""
 
 
 def digital_human_tool_schemas(profile_code: str | None) -> list[dict[str, Any]]:
@@ -433,9 +436,9 @@ DIGITAL_HUMAN_TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "update_my_positions",
-        "更新/录入当前用户的持仓快照（整仓覆盖式，与截图录入一致）。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；缺字段先追问不臆造；只维护记录不替用户下单。首次调用不传 confirmed 返回预览（不落库），复述给用户确认后再以 confirmed=true 调用才真正写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
+        "更新/录入当前用户的持仓快照（整仓覆盖式，与截图录入一致）。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；账户事实字段（代码/数量/成本价）缺失才追问，不臆造；最新价/市值/浮盈属行情数据，系统每个交易日自动同步，绝不为此追问用户，用户给了就顺带填、没给留空。清仓某标的：该标的行传 position_quantity=0（状态自动转 closed）；部分卖出：传卖出后的剩余数量。用户没说账户时系统会自动匹配该标的现有持仓所在账户，不必追问；同一标的在多个账户都有持仓时才先问清是哪个账户。只维护记录不替用户下单。首次调用不传 confirmed 返回预览（不落库），复述给用户确认后再以 confirmed=true 调用才真正写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
         {
-            "rows": {"type": "array", "description": "持仓明细数组，每项含 symbol/position_quantity/available_quantity/cost_price/latest_price/market_value/floating_pnl/position_pct/stop_price 等。", "items": {"type": "object"}},
+            "rows": {"type": "array", "description": "持仓明细数组，每项含 symbol/position_quantity/available_quantity/cost_price/position_pct/stop_price 等；latest_price/market_value/floating_pnl 仅用户主动给出时才填（缺失由系统自动同步行情补齐）。", "items": {"type": "object"}},
             "account": {"type": "object", "description": "账户信息，含 account_id/broker_name/account_name/as_of_date 等。"},
             "as_of_date": {"type": "string", "description": "快照日期 YYYYMMDD。"},
             "confirmed": {"type": "boolean", "description": "是否真正写入。默认 false 返回预览不落库；用户确认后传 true 才落库。"},

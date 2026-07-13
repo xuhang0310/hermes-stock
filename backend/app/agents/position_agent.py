@@ -63,10 +63,10 @@ POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
                                 "today_sell_quantity": {"type": "number", "description": "今日卖出数量"},
                                 "cost_price": {"type": "number", "description": "成本价"},
                                 "cost_amount": {"type": "number", "description": "成本金额"},
-                                "latest_price": {"type": "number", "description": "现价/最新价"},
-                                "market_value": {"type": "number", "description": "持仓市值"},
-                                "floating_pnl": {"type": "number", "description": "浮动盈亏"},
-                                "floating_pnl_pct": {"type": "number", "description": "浮动盈亏比例，单位为百分数"},
+                                "latest_price": {"type": "number", "description": "现价/最新价。截图里有就顺带填，没有绝不要向用户索要——系统会定时自动同步行情价"},
+                                "market_value": {"type": "number", "description": "持仓市值。截图里有才填，缺失由系统按行情自动计算"},
+                                "floating_pnl": {"type": "number", "description": "浮动盈亏。截图里有才填，缺失由系统按行情自动计算"},
+                                "floating_pnl_pct": {"type": "number", "description": "浮动盈亏比例，单位为百分数。截图里有才填"},
                                 "day_pnl": {"type": "number", "description": "当日盈亏"},
                                 "position_pct": {"type": "number", "description": "仓位占比，单位为百分数"},
                                 "stop_price": {"type": "number", "description": "止损价"},
@@ -356,9 +356,10 @@ def _position_agent_prompt() -> str:
 你的职责:
 1. 和用户对话，理解自然语言或截图里的 A 股持仓。
 2. 判断是否需要调用工具。问候、闲聊、能力咨询，不调用保存工具。
-3. 信息不足时先追问，不要保存半截数据。
-4. 识别到真实持仓明细后，调用 save_position_holdings 工具保存。
-5. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失。
+3. 信息不足时先追问，不要保存半截数据。判断"信息是否足够"只看：代码/名称、数量、成本价这类账户事实。
+4. 最新价、市值、浮动盈亏属于行情数据，系统每个交易日会自动同步，**绝不要因为缺这几个字段而追问用户**；截图里有就顺带保存，没有直接留空。
+5. 识别到真实持仓明细后，调用 save_position_holdings 工具保存。
+6. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失（行情类字段缺失不必提醒，说明系统会自动同步即可）。
 
 工具规则:
 - get_position_schema: 用户问字段、格式、需要提供什么信息时调用。
@@ -411,10 +412,12 @@ def _execute_position_tool(
     if name == "get_position_schema":
         return {
             "required": ["symbol", "position_quantity"],
-            "recommended": ["name", "available_quantity", "cost_price", "latest_price", "market_value", "floating_pnl", "position_pct", "stop_price"],
+            "recommended": ["name", "available_quantity", "cost_price", "position_pct", "stop_price"],
+            "auto_synced": ["latest_price", "market_value", "floating_pnl", "floating_pnl_pct"],
+            "note": "最新价/市值/浮盈由系统每个交易日自动同步行情，无需用户提供。",
             "account": ["broker_name", "account_name", "account_no_masked", "account_type"],
             "examples": [
-                "平安银行 000001.SZ，持仓1000股，可用1000股，成本10.2，现价10.8，止损9.89，仓位8%",
+                "平安银行 000001.SZ，持仓1000股，可用1000股，成本10.2，止损9.89，仓位8%",
                 "上传券商 APP 持仓明细截图，并补充截图日期/账户",
             ],
         }

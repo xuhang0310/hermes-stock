@@ -415,7 +415,22 @@ export type DigitalHuman = {
   quick_prompts: string[]
   status: string
   sort_order: number
+  can_write_positions: boolean
+  feishu_bot_enabled: boolean
   updated_at: string | null
+}
+
+export type DigitalHumanToolMeta = {
+  name: string
+  display_name: string
+  description: string
+}
+
+export type DigitalHumanCapabilities = {
+  can_write_positions: boolean
+  common_tools: DigitalHumanToolMeta[]
+  role_tools: DigitalHumanToolMeta[]
+  write_tools: DigitalHumanToolMeta[]
 }
 
 export type PromptRecommendation = {

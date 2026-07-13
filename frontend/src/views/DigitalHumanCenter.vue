@@ -429,6 +429,7 @@ onMounted(load)
 </script>
 
 <template>
+  <div class="digital-center-page">
   <header class="settings-tabs page-section digital-center-tabs">
     <button type="button" :class="{ active: activeCenterTab === 'chat' }" @click="activeCenterTab = 'chat'">
       数字人对话
@@ -576,4 +577,5 @@ onMounted(load)
       <p v-if="error" class="chat-page-error">{{ error }}</p>
     </main>
   </section>
+  </div>
 </template>

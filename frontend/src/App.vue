@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
-import { api, getAuthToken, setAuthToken } from './api'
+import { api, ApiError, getAuthToken, setAuthToken } from './api'
 import AppShell from './components/AppShell.vue'
 import DataTable from './components/DataTable.vue'
 import PositionsWorkbench from './components/PositionsWorkbench.vue'
@@ -17,6 +17,7 @@ import type {
   DashboardPayload,
   HealthPayload,
   ModelConfig,
+  PositionAccount,
   PositionAgentStep,
   PositionAgentStreamEvent,
   PositionItem,
@@ -46,6 +47,7 @@ type PositionAgentChat = {
 }
 
 const activePage = ref<PageKey>('workbench')
+const bootstrapping = ref(false)
 const loading = ref(false)
 const loginLoading = ref(false)
 const loginError = ref('')
@@ -75,6 +77,7 @@ const positionModels = ref<ModelConfig[]>([])
 const selectedPositionModelId = ref<number | null>(null)
 const selectedChartPosition = ref<PositionItem | null>(null)
 const positionAgentTargetAccount = ref<number | null>(null)
+const positionAgentAccounts = ref<PositionAccount[]>([])
 
 const pageTitle = computed(() => {
   const labels: Record<PageKey, string> = {
@@ -165,11 +168,29 @@ function logout() {
 
 async function initialize() {
   if (!getAuthToken()) return
+  bootstrapping.value = true
   try {
-    currentUser.value = await api.me()
+    // 只有 401（token 真失效）才清 token 落登录页；连接被拒/5xx（部署重启窗口、
+    // 网络抖动）自动重试 ~16s，期间显示"正在连接"而不是把用户踢去重新登录。
+    for (let attempt = 1; ; attempt++) {
+      try {
+        currentUser.value = await api.me()
+        break
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          logout()
+          return
+        }
+        if (attempt >= 6) throw err
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1500 * attempt, 4000)))
+      }
+    }
     await refreshAll()
   } catch {
-    logout()
+    // 后端长时间不可达：保留 token 落到登录页兜底；服务恢复后刷新即可直接进入
+    currentUser.value = null
+  } finally {
+    bootstrapping.value = false
   }
 }
 
@@ -218,7 +239,17 @@ async function openPositionAgent(accountId: number | null = null) {
   } catch (err) {
     positionAgentMessage.value = err instanceof Error ? err.message : '模型列表加载失败'
   }
+  try {
+    positionAgentAccounts.value = await api.positionAccounts()
+  } catch {
+    positionAgentAccounts.value = [] // 账户列表加载失败不阻塞录入，仍可自动识别账户
+  }
   scrollPositionChat(false)
+}
+
+function positionAccountLabel(account: PositionAccount) {
+  const name = account.account_name || account.account_no_masked || `账户#${account.id}`
+  return `${account.broker_name} · ${name}`
 }
 
 function closePositionAgent() {
@@ -447,7 +478,12 @@ onMounted(initialize)
 </script>
 
 <template>
-  <LoginView v-if="!currentUser" :loading="loginLoading" :error="loginError" @login="login" />
+  <div v-if="bootstrapping && !currentUser" class="boot-splash">
+    <span class="boot-splash-pulse"></span>
+    正在连接 SixRabbits Stock...
+  </div>
+
+  <LoginView v-else-if="!currentUser" :loading="loginLoading" :error="loginError" @login="login" />
 
   <AppShell
     v-else
@@ -582,6 +618,12 @@ onMounted(initialize)
               <input type="file" accept="image/*" :disabled="positionAgentBusy" @change="onPositionImageSelected" />
               <span>上传图片</span>
             </label>
+            <select v-model="positionAgentTargetAccount" :disabled="positionAgentBusy" title="选择这批持仓保存到哪个证券账户">
+              <option :value="null">自动识别账户</option>
+              <option v-for="account in positionAgentAccounts" :key="account.id" :value="account.id">
+                {{ positionAccountLabel(account) }}
+              </option>
+            </select>
             <select v-model.number="selectedPositionModelId" :disabled="positionAgentBusy || !positionModels.length" :title="modelOptionLabel(activePositionModel)">
               <optgroup v-for="group in positionModelGroups" :key="group.platform" :label="group.platform">
                 <option v-for="item in group.rows" :key="item.id" :value="item.id">

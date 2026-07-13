@@ -11,6 +11,7 @@ import type {
   BrokerPreset,
   PositionSummary,
   PromptRecommendation,
+  DigitalHumanCapabilities,
   ReportItem,
   RiskCheck,
   SystemLog,
@@ -51,6 +52,16 @@ export function getAuthToken() {
   return authToken
 }
 
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -67,7 +78,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const detail = await response.text()
-    throw new Error(detail || `Request failed: ${response.status}`)
+    throw new ApiError(detail || `Request failed: ${response.status}`, response.status)
   }
 
   return response.json() as Promise<T>
@@ -312,6 +323,8 @@ export const api = {
       method: id ? 'PUT' : 'POST',
       body: JSON.stringify(payload)
     }),
+  digitalHumanCapabilities: (id: number) =>
+    request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
   agentSessions: (chatMode?: 'research' | 'stock', digitalHumanId?: number | null) => {
     const params = new URLSearchParams()
     if (chatMode) params.set('chat_mode', chatMode)

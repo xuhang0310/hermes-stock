@@ -75,6 +75,7 @@ class DigitalHumanIn(BaseModel):
     quick_prompts: list[str] = []
     status: str = Field(default="enabled", max_length=24)
     sort_order: int = 0
+    can_write_positions: bool = False
 
 
 class DataSourceConfigIn(BaseModel):
@@ -350,6 +351,8 @@ def _digital_human_out(profile: DigitalHumanProfile) -> dict:
         "quick_prompts": _quick_prompts(profile),
         "status": profile.status,
         "sort_order": profile.sort_order,
+        "can_write_positions": bool(profile.can_write_positions),
+        "feishu_bot_enabled": bool(profile.feishu_bot_enabled),
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
 
@@ -691,13 +694,63 @@ def update_digital_human(
     profile = db.get(DigitalHumanProfile, profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="数字人不存在")
+    old_can_write = bool(profile.can_write_positions)
     data = payload.model_dump()
     data["quick_prompts_json"] = json.dumps(data.pop("quick_prompts"), ensure_ascii=False)
     for key, value in data.items():
         setattr(profile, key, value)
+    new_can_write = bool(profile.can_write_positions)
+    if new_can_write != old_can_write:
+        # 写持仓开关变化落审计：谁、什么时候、把谁的写权限从 X 改成 Y
+        log_event(
+            "digital_human", "INFO", "can_write_positions 切换",
+            digital_human_id=profile.id, digital_human_code=profile.code,
+            operator=_context.user.display_name, old=old_can_write, new=new_can_write,
+        )
     db.commit()
     db.refresh(profile)
     return _digital_human_out(profile)
+
+
+@router.get("/digital-humans/{profile_id}/capabilities")
+def digital_human_capabilities(
+    profile_id: int,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """返回某数字人的工具清单（公共/角色专属/写工具），只读，实时计算不落库。"""
+    profile = db.get(DigitalHumanProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="数字人不存在")
+    from backend.app.market.digital_human_tools import (
+        COMMON_TOOL_NAMES,
+        ROLE_TOOL_NAMES,
+        WRITE_TOOL_NAMES,
+        digital_human_tool_display_name,
+        digital_human_tool_schemas,
+        write_tool_schemas,
+    )
+
+    schemas_by_name = {s["function"]["name"]: s for s in digital_human_tool_schemas(profile.code)}
+    write_schemas = (
+        {s["function"]["name"]: s for s in write_tool_schemas()} if profile.can_write_positions else {}
+    )
+
+    def meta(name: str) -> dict:
+        schema = schemas_by_name.get(name) or write_schemas.get(name) or {}
+        fn = schema.get("function", {}) if schema else {}
+        return {
+            "name": name,
+            "display_name": digital_human_tool_display_name(name),
+            "description": fn.get("description", ""),
+        }
+
+    return {
+        "can_write_positions": bool(profile.can_write_positions),
+        "common_tools": [meta(n) for n in COMMON_TOOL_NAMES],
+        "role_tools": [meta(n) for n in ROLE_TOOL_NAMES.get(profile.code, [])],
+        "write_tools": [meta(n) for n in WRITE_TOOL_NAMES] if profile.can_write_positions else [],
+    }
 
 
 @router.get("/agent/profiles")

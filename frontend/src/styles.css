@@ -1329,12 +1329,49 @@ tbody tr.clickable-row:focus-visible td {
   padding: 12px 14px;
 }
 
+.boot-splash {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 100vh;
+  color: var(--muted);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.boot-splash-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--gold-2);
+  animation: bootPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes bootPulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+.digital-center-page {
+  /* tabs 头占一行、聊天区吃满剩余视口高度——输入框钉底，只有消息区滚动 */
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: calc(100vh - 108px);
+  min-height: 560px;
+}
+
+.digital-center-page > .page-section:not(.digital-center-tabs) {
+  min-height: 0;
+  overflow-y: auto; /* 飞书机器人 Tab 内容超高时自身滚动，不撑破页面 */
+}
+
 .digital-center {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 14px;
-  height: calc(100vh - 108px);
-  min-height: 560px;
+  height: 100%;
+  min-height: 0;
 }
 
 .stock-chat-page {
@@ -2209,6 +2246,10 @@ button.btn-stop:hover {
 
   .model-status-strip {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .digital-center-page {
+    height: auto;
   }
 
   .digital-center {

@@ -45,6 +45,7 @@ OBSERVATION_CHAR_LIMIT = 7000
 # skills 模块 executor 三处（三源一致）。Phase 2 切 registry 接管分发后可改为从 schema 自动抽取。
 ALLOWED_STOCK_TOOLS: frozenset[str] = frozenset({
     "resolve_stock",
+    "get_latest_price",
     "get_tushare_daily",
     "get_daily_history",
     "get_realtime_quote",
@@ -224,14 +225,15 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 
 工作规则（仅适用于专业研究问题）:
 1. 默认研究范围是系统自己的 open positions 和 active watchlist_items；问题未指定标的时，先分析持仓，再分析自选。用户明确问其它标的、行业或话题时，直接就其问题作答，不必强行绕回持仓。
-2. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
-3. 探索数据库结构用 get_schema（不传参列所有表名，再传表名查字段）；run_sql 是兜底工具，只能对已知表做 SELECT 查询，禁止查 SHOW TABLES / information_schema / 系统库（会被沙箱拒绝）。
-4. 系统内没有的信息——外部个股、行业、政策、新闻、宏观、突发事件等——用 search_market_intel / search_stock_news 联网搜索补充，再结合内部数据作答；不要以"不在持仓/自选池"为由拒绝，你本职专业之外但用户确实需要的问题也尽力帮忙。
-5. SQL 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询或多语句。
-6. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
-7. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
-8. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
-9. 最终回答使用中文 Markdown，尽量短、清楚、可执行。{context}"""
+2. 【必做】凡回答涉及具体股票的行情、判断、风控问题，先调用 get_latest_price 获取该标的最新价格（数据库缓存，开盘时段自动刷新、收盘后走缓存不外呼），回答中标注价格与所属交易日；绝不引用记忆里的旧价。
+3. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
+4. 探索数据库结构用 get_schema（不传参列所有表名，再传表名查字段）；run_sql 是兜底工具，只能对已知表做 SELECT 查询，禁止查 SHOW TABLES / information_schema / 系统库（会被沙箱拒绝）。
+5. 系统内没有的信息——外部个股、行业、政策、新闻、宏观、突发事件等——用 search_market_intel / search_stock_news 联网搜索补充，再结合内部数据作答；不要以"不在持仓/自选池"为由拒绝，你本职专业之外但用户确实需要的问题也尽力帮忙。
+6. SQL 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询或多语句。
+7. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
+8. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
+9. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
+10. 最终回答使用中文 Markdown，尽量短、清楚、可执行。{context}"""
 
 
 def validate_sql(sql: str) -> str | None:
@@ -492,7 +494,9 @@ def _execute_position_write_tool(
     account = args.get("account") if isinstance(args.get("account"), dict) else {}
     default_account: dict[str, Any] = {**account}
     if default_account_id and "account_id" not in default_account:
-        default_account["account_id"] = default_account_id
+        # 弱提示键：repository 先按"该标的现有 open 持仓的账户"自动匹配（清仓/卖出必须命中原持仓），
+        # 匹配不到才落这个默认账户；直接塞 account_id 会把更新写到别的账户、真实持仓纹丝不动。
+        default_account["default_account_id"] = default_account_id
     if args.get("as_of_date"):
         default_account["as_of_date"] = args.get("as_of_date")
     # P2 写前确认（人在环）：confirmed 留空/false 只返回预览，不落库；用户确认后传 true 才写
