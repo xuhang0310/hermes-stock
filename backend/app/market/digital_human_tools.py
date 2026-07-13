@@ -442,13 +442,31 @@ DIGITAL_HUMAN_TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
         ["rows"],
     ),
+    _tool(
+        "update_position_field",
+        "字段级微调：只改某标的最新持仓快照的单个字段（止损/止盈/持仓逻辑/风险说明/仓位），不碰数量/成本/价格。首次 confirmed=false 返回预览，true 才改。",
+        {
+            "symbol": {"type": "string", "description": "A股代码或 ts_code。"},
+            "field": {"type": "string", "description": "字段名：stop_price/take_profit_price/thesis/risk_note/position_pct。"},
+            "value": {"type": "string", "description": "新值（数值字段传数字字符串如 '1600'，文本字段传字符串）。"},
+            "confirmed": {"type": "boolean", "description": "是否真正写入，默认 false 预览。"},
+        },
+        ["symbol", "field", "value"],
+    ),
+    _tool(
+        "rollback_last_position_batch",
+        "撤销最近一次持仓导入批次：删其快照行，批次置 rolled_back。Position 摘要不自动回滚（用户可后续手动修正）。confirmed=false 返回预览，true 才执行。",
+        {
+            "confirmed": {"type": "boolean", "description": "是否真正执行，默认 false 预览。"},
+        },
+    ),
 ]
 
 
 # 写持仓工具（update_my_positions 等）。不进 ROLE_TOOL_NAMES（避免对无写权限用户也注入 schema）；
 # run_agent_events 在 can_write_positions 为真时手动 append write_tool_schemas() 到 tools，
 # 并经独立 repository 会话执行（不经 execute_digital_human_tool/registry，因后者不带用户/账户上下文）。
-WRITE_TOOL_NAMES: list[str] = ["update_my_positions"]
+WRITE_TOOL_NAMES: list[str] = ["update_my_positions", "update_position_field", "rollback_last_position_batch"]
 
 
 def write_tool_schemas() -> list[dict[str, Any]]:
