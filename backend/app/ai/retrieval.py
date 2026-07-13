@@ -95,7 +95,19 @@ def retrieve_chunks(
     if not chunk_map:
         return []
 
-    fused = sorted(chunk_map.values(), key=lambda c: rrf_scores.get(c.id, 0.0), reverse=True)[:pool]
+    fused_all = sorted(chunk_map.values(), key=lambda c: rrf_scores.get(c.id, 0.0), reverse=True)
+    # 跨文档去重：同一篇资讯常被搜索缓存多次（不同日期抓同一研报），相同 content_hash 只保留
+    # 融合分最高的一条，避免 top-K 被三条一模一样的内容占满
+    seen_hashes: set[str] = set()
+    fused: list[DocumentChunk] = []
+    for chunk in fused_all:
+        key = chunk.content_hash or f"id-{chunk.id}"
+        if key in seen_hashes:
+            continue
+        seen_hashes.add(key)
+        fused.append(chunk)
+        if len(fused) >= pool:
+            break
 
     # rerank 精排（复用记忆同款 API），失败/未配置回退融合排序
     scored = _memory._rerank_scores(query, [chunk.content for chunk in fused], top_k)
