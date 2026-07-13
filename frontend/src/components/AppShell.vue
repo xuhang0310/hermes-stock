@@ -67,7 +67,7 @@ const navItems = computed<Array<{ key: PageKey; label: string }>>(() => [
           type="button"
           @click="$emit('navigate', item.key)"
         >
-          <img class="nav-icon" :src="`/icons/${item.key}.png`" alt="" aria-hidden="true" />
+          <img class="nav-icon" :src="`/icons/${item.key}.png`" alt="" aria-hidden="true" @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')" />
           <span>{{ item.label }}</span>
         </button>
       </nav>

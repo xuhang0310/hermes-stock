@@ -889,16 +889,32 @@ def knowledge_document_chunks(
     ]
 
 
+_reindex_tasks: set[asyncio.Task] = set()
+_reindex_running = False
+
+
+def _reindex_done(_task: asyncio.Task) -> None:
+    global _reindex_running
+    _reindex_running = False
+
+
 @router.post("/knowledge/reindex")
 async def knowledge_reindex(
     payload: KnowledgeReindexIn,
     _context: AuthContext = Depends(require_permission("model:manage")),
 ) -> dict:
     # 后台执行立即返回（全量≈数百次嵌入调用要跑几分钟，同步等会撞网关超时）；进度轮询 /knowledge/stats
+    global _reindex_running
+    if _reindex_running:
+        raise HTTPException(status_code=409, detail="已有重建任务在跑，请等完成再发起")
     if payload.doc_id:
-        asyncio.create_task(asyncio.to_thread(rag_ingest.ingest_document, payload.doc_id, force=True))
+        task = asyncio.create_task(asyncio.to_thread(rag_ingest.ingest_document, payload.doc_id, force=True))
     else:
-        asyncio.create_task(asyncio.to_thread(rag_ingest.run_ingest, force=True))
+        task = asyncio.create_task(asyncio.to_thread(rag_ingest.run_ingest, force=True))
+    _reindex_tasks.add(task)  # 持引用防 GC；done 回调自动清理
+    task.add_done_callback(_reindex_tasks.discard)
+    task.add_done_callback(_reindex_done)
+    _reindex_running = True
     return {"started": True, "scope": payload.doc_id or "all"}
 
 

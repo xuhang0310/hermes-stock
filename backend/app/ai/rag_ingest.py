@@ -20,7 +20,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from backend.app.ai import memory as _memory
 from backend.app.core.applog import log_event
@@ -271,6 +271,13 @@ def ingest_document(doc_id: int, *, force: bool = False) -> tuple[int, int]:
         except Exception as exc:  # noqa: BLE001
             db.rollback()
             log_event("rag", "ERROR", f"文档 {doc_id} 索引失败: {str(exc)[:200]}")
+            # 补偿：清该 doc 的 chunks 行（独立短会话），下轮增量按 doc_id 幂等会整篇重灌，自愈闭环
+            try:
+                with SessionLocal() as cleanup:
+                    cleanup.execute(text("DELETE FROM document_chunks WHERE doc_id = :d"), {"d": doc_id})
+                    cleanup.commit()
+            except Exception:  # noqa: BLE001
+                pass
             return 0, len(rows)
 
 
