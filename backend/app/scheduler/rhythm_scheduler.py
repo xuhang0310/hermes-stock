@@ -300,6 +300,9 @@ def _run_position_price_sync(now: datetime) -> str:
     from backend.app.data.repository import StockRepository
     from backend.app.market.stock_tools import get_realtime_quote
 
+    # 会话一（短）：确定同步对象并提交。绝不带着未提交事务去做外部 HTTP——
+    # 补建快照的 FK 会给 instruments 父行持共享锁，而行情工具的缓存写入要更新同一行，
+    # 长事务会把对方锁到超时（模块纪律：外部调用期间不持有数据库连接）。
     with SessionLocal() as session:
         latest_ids = (
             select(func.max(PositionHoldingSnapshot.id))
@@ -338,23 +341,31 @@ def _run_position_price_sync(now: datetime) -> str:
             )
             session.add(snap)
             snaps.append(snap)
-        if orphan_positions:
-            session.flush()
+        session.flush()
+        snap_ids = [s.id for s in snaps]
+        symbols = sorted({s.symbol for s in snaps})
+        session.commit()
 
-        if not snaps:
-            return "无 open 持仓，跳过价格同步"
+    if not snap_ids:
+        return "无 open 持仓，跳过价格同步"
 
-        quotes: dict[str, dict] = {}
-        failures: list[str] = []
-        for symbol in sorted({s.symbol for s in snaps}):
-            quote = get_realtime_quote(symbol)
-            if not isinstance(quote, dict) or "error" in quote or quote.get("price") is None:
-                failures.append(symbol)
-                continue
-            quotes[symbol] = quote
+    # 无会话阶段：逐标的拉行情（TuShare 慢/限流都不影响数据库锁）
+    quotes: dict[str, dict] = {}
+    failures: list[str] = []
+    for symbol in symbols:
+        quote = get_realtime_quote(symbol)
+        if not isinstance(quote, dict) or "error" in quote or quote.get("price") is None:
+            failures.append(symbol)
+            continue
+        quotes[symbol] = quote
 
-        updated = 0
-        touched_accounts: set[int] = set()
+    # 会话二（短）：按 id 重载快照写价，并重算账户资金
+    updated = 0
+    touched_accounts: set[int] = set()
+    with SessionLocal() as session:
+        snaps = session.scalars(
+            select(PositionHoldingSnapshot).where(PositionHoldingSnapshot.id.in_(snap_ids))
+        ).all()
         for snap in snaps:
             quote = quotes.get(snap.symbol)
             if quote is None:
