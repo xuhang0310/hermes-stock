@@ -434,6 +434,15 @@ export type DigitalHumanCapabilities = {
   write_tools: DigitalHumanToolMeta[]
 }
 
+export type KnowledgeIngestProgress = {
+  running: boolean
+  processed: number
+  total: number
+  indexed: number
+  failed: number
+  last_result: string
+}
+
 export type KnowledgeStats = {
   documents: number
   chunks: number
@@ -442,6 +451,8 @@ export type KnowledgeStats = {
   backend: string
   collection: string
   dim: number
+  by_type: Record<string, number>
+  ingest: KnowledgeIngestProgress
 }
 
 export type KnowledgeDocument = {
@@ -454,6 +465,7 @@ export type KnowledgeDocument = {
   published_at: string | null
   chunk_count: number
   indexed: boolean
+  status: string
 }
 
 export type KnowledgeDocumentPage = {

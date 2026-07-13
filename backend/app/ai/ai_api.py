@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, func, select, text, update
+from sqlalchemy import case, desc, func, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.auth.auth import AuthContext, require_permission
@@ -807,6 +807,10 @@ def knowledge_stats(
     total_docs = db.scalar(select(func.count()).select_from(Document)) or 0
     total_chunks = db.scalar(select(func.count()).select_from(DocumentChunk)) or 0
     indexed_docs = db.scalar(select(func.count(func.distinct(DocumentChunk.doc_id)))) or 0
+    by_type = {
+        str(doc_type): int(count)
+        for doc_type, count in db.execute(select(Document.doc_type, func.count()).group_by(Document.doc_type))
+    }
     return {
         "documents": total_docs,
         "chunks": total_chunks,
@@ -815,6 +819,8 @@ def knowledge_stats(
         "backend": settings.vector_backend,
         "collection": settings.rag_milvus_collection,
         "dim": memory_module._embedding_dim,
+        "by_type": by_type,
+        "ingest": rag_ingest.get_progress(),  # 摄取进度：前端进度条与完成判定的唯一数据源
     }
 
 
@@ -829,13 +835,19 @@ def knowledge_documents(
     _context: AuthContext = Depends(require_permission("system:view")),
 ) -> dict:
     chunk_agg = (
-        select(DocumentChunk.doc_id, func.count().label("chunk_count"))
+        select(
+            DocumentChunk.doc_id,
+            func.count().label("chunk_count"),
+            func.sum(case((DocumentChunk.status == "indexed", 1), else_=0)).label("indexed_chunks"),
+        )
         .group_by(DocumentChunk.doc_id)
         .subquery()
     )
-    query = select(Document, func.coalesce(chunk_agg.c.chunk_count, 0)).outerjoin(
-        chunk_agg, chunk_agg.c.doc_id == Document.id
-    )
+    query = select(
+        Document,
+        func.coalesce(chunk_agg.c.chunk_count, 0),
+        func.coalesce(chunk_agg.c.indexed_chunks, 0),
+    ).outerjoin(chunk_agg, chunk_agg.c.doc_id == Document.id)
     if doc_type:
         query = query.where(Document.doc_type == doc_type)
     if trust_level:
@@ -860,9 +872,11 @@ def knowledge_documents(
                 "trust_level": doc.trust_level,
                 "published_at": doc.published_at.isoformat() if doc.published_at else None,
                 "chunk_count": int(count),
-                "indexed": bool(count),
+                "indexed": bool(indexed_chunks),
+                # indexed=有可检索切块；disabled=有切块但全部被禁用；pending=尚未索引
+                "status": "indexed" if indexed_chunks else ("disabled" if count else "pending"),
             }
-            for doc, count in rows
+            for doc, count, indexed_chunks in rows
         ],
     }
 
@@ -887,6 +901,17 @@ def knowledge_document_chunks(
         }
         for chunk in rows
     ]
+
+
+@router.post("/knowledge/documents/{doc_id}/disable")
+def knowledge_document_disable(
+    doc_id: int,
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    result = rag_ingest.disable_document(doc_id)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 _reindex_tasks: set[asyncio.Task] = set()

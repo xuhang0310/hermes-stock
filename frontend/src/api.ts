@@ -342,6 +342,8 @@ export const api = {
     return request<KnowledgeDocumentPage>(`/api/knowledge/documents${suffix ? `?${suffix}` : ''}`)
   },
   knowledgeChunks: (docId: number) => request<KnowledgeChunk[]>(`/api/knowledge/documents/${docId}/chunks`),
+  knowledgeDisable: (docId: number) =>
+    request<{ ok: boolean; disabled_chunks: number }>(`/api/knowledge/documents/${docId}/disable`, { method: 'POST' }),
   knowledgeReindex: (docId?: number) =>
     request<{ started: boolean; scope: number | string }>('/api/knowledge/reindex', {
       method: 'POST',
