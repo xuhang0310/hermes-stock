@@ -296,6 +296,20 @@ STOCK_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_latest_price",
+            "description": "Get the latest price of one A-share stock from the stock_latest_prices DB cache (auto-refreshed from TuShare during market hours; cache-only when market is closed). MUST be called first before answering any question about a specific stock.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A-share code or ts_code, e.g. 600519.SH."},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_analysis_context",
             "description": "Read existing local analysis context for a stock from SixRabbits cached daily_bars, including latest cached bars and data coverage.",
             "parameters": {
@@ -882,10 +896,11 @@ def stock_system_prompt_with_skills(extra_context: str | None = None, skills: li
 工作规则（仅适用于专业问股问题）:
 1. 不要编造行情、新闻、财务或估值数据；缺少 Token 或数据源失败时必须明确说明。
 2. 如果用户只给股票名称或不完整代码，先调用 resolve_stock。
-3. 参考 daily_stock_analysis 的问股路径：先 get_analysis_context，再 get_realtime_quote / get_daily_history，然后 analyze_trend / calculate_ma / get_volume_analysis / analyze_pattern；需要筹码、资金、基本面时继续调用 get_chip_distribution / get_capital_flow / get_stock_info。
-4. 用户问消息面、催化、利空、近期发生了什么时，调用 search_stock_news；需要行业、政策、公告、研报、风险的综合情报时调用 search_comprehensive_intel。
-5. 最终回答用中文 Markdown，固定包含：标的识别、数据来源、技术/价格结构、筹码/资金/基本面、消息面、风险、观察动作。
-6. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{context}"""
+3. 【必做】凡回答涉及具体股票的问题，先调用 get_latest_price 拿该标的最新价格（数据库缓存，开盘时段自动刷新、收盘后走缓存），回答中标注价格与所属交易日，绝不引用记忆里的旧价。
+4. 参考 daily_stock_analysis 的问股路径：先 get_analysis_context，再 get_realtime_quote / get_daily_history，然后 analyze_trend / calculate_ma / get_volume_analysis / analyze_pattern；需要筹码、资金、基本面时继续调用 get_chip_distribution / get_capital_flow / get_stock_info。
+5. 用户问消息面、催化、利空、近期发生了什么时，调用 search_stock_news；需要行业、政策、公告、研报、风险的综合情报时调用 search_comprehensive_intel。
+6. 最终回答用中文 Markdown，固定包含：标的识别、数据来源、技术/价格结构、筹码/资金/基本面、消息面、风险、观察动作。
+7. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{context}"""
 
 
 def normalize_a_share_symbol(raw: str) -> str:
@@ -1353,6 +1368,138 @@ def analyze_pattern(symbol: str, days: int = 60) -> dict:
         "patterns_count": len(deduped),
         "patterns": deduped,
         "summary": "、".join(item["pattern"] for item in deduped) if deduped else "未发现明显形态",
+    }
+
+
+PRICE_CACHE_TTL_OPEN_MINUTES = 10       # 开盘时段缓存有效期，超时才实取 TuShare
+PRICE_CACHE_CLOSED_RETRY_MINUTES = 30   # 收盘后缓存缺当日收盘价时的补取限频
+
+
+def _sh_now() -> datetime:
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+
+
+def _is_trading_day(d: date) -> bool:
+    return d.weekday() < 5 and d.isoformat() not in settings.stock_holidays
+
+
+def _in_market_window(now: datetime) -> bool:
+    """A股盘中窗口（含集合竞价与收盘缓冲）：交易日 09:15-15:05。"""
+    if not _is_trading_day(now.date()):
+        return False
+    return (9, 15) <= (now.hour, now.minute) <= (15, 5)
+
+
+def _latest_completed_trade_date(now: datetime) -> str:
+    """最近一个已收盘的交易日（YYYYMMDD）：今天已收盘则为今天，否则回溯上一交易日。"""
+    d = now.date()
+    if _is_trading_day(d) and (now.hour, now.minute) >= (15, 5):
+        return d.strftime("%Y%m%d")
+    d -= timedelta(days=1)
+    while not _is_trading_day(d):
+        d -= timedelta(days=1)
+    return d.strftime("%Y%m%d")
+
+
+def get_latest_price(symbol: str) -> dict:
+    """带数据库缓存的最新价查询（stock_latest_prices 表，全体 Agent 共用）。
+
+    - 开盘时段（交易日 09:15-15:05）：缓存超过 TTL 才实取 TuShare 刷新。
+    - 非开盘时间：缓存已含最近收盘交易日 → 直接用缓存不外呼；缺当日收盘价才限频补取一次。
+    """
+    ts_code = normalize_a_share_symbol(symbol)
+    if "." not in ts_code:
+        return {"error": f"无法识别的A股代码: {symbol}"}
+    now = _sh_now()
+    market_open = _in_market_window(now)
+
+    row: dict | None = None
+    try:
+        with engine.connect() as conn:
+            r = conn.execute(
+                text(
+                    "SELECT symbol, name, price, pre_close, pct_chg, trade_date, fetched_at "
+                    "FROM stock_latest_prices WHERE symbol = :s"
+                ),
+                {"s": ts_code},
+            ).mappings().first()
+            row = dict(r) if r else None
+    except Exception:
+        row = None
+
+    if not _price_needs_refresh(row, now, market_open):
+        return _latest_price_out(row, market_open=market_open, from_cache=True)
+
+    daily = get_tushare_daily(ts_code, limit=2)
+    bars = daily.get("bars") or [] if isinstance(daily, dict) else []
+    if "error" in daily or not bars:
+        if row:  # 实取失败回退缓存，标注 stale
+            out = _latest_price_out(row, market_open=market_open, from_cache=True)
+            out["stale"] = True
+            out["refresh_error"] = str(daily.get("error") or "无行情数据")[:200]
+            return out
+        return {"error": f"获取最新价失败: {daily.get('error') or '无行情数据'}"}
+
+    latest, previous = bars[-1], (bars[-2] if len(bars) >= 2 else {})
+    info = _stock_basic_item(ts_code) or {}
+    price = latest.get("close")
+    pre_close = latest.get("pre_close") or previous.get("close")
+    pct_chg = latest.get("pct_chg")
+    if pct_chg is None and pre_close and price is not None:
+        pct_chg = _pct(float(price), float(pre_close))
+    fresh = {
+        "symbol": ts_code,
+        "name": info.get("name") or (row or {}).get("name"),
+        "price": price,
+        "pre_close": pre_close,
+        "pct_chg": pct_chg,
+        "trade_date": str(latest.get("trade_date") or ""),
+        "fetched_at": now,
+    }
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO stock_latest_prices (symbol, name, price, pre_close, pct_chg, trade_date, source, fetched_at) "
+                    "VALUES (:symbol, :name, :price, :pre_close, :pct_chg, :trade_date, 'tushare', :fetched_at) "
+                    "ON DUPLICATE KEY UPDATE name = VALUES(name), price = VALUES(price), pre_close = VALUES(pre_close), "
+                    "pct_chg = VALUES(pct_chg), trade_date = VALUES(trade_date), source = VALUES(source), fetched_at = VALUES(fetched_at)"
+                ),
+                fresh,
+            )
+    except Exception:
+        pass  # 缓存写入失败不影响本次返回
+    return _latest_price_out(fresh, market_open=market_open, from_cache=False)
+
+
+def _price_needs_refresh(row: dict | None, now: datetime, market_open: bool) -> bool:
+    if not row or row.get("price") is None:
+        return True
+    fetched_at = row.get("fetched_at")
+    if not isinstance(fetched_at, datetime):
+        return True
+    if market_open:
+        return (now - fetched_at) > timedelta(minutes=PRICE_CACHE_TTL_OPEN_MINUTES)
+    if str(row.get("trade_date") or "") >= _latest_completed_trade_date(now):
+        return False  # 非开盘时间且已有最近收盘价：不外呼
+    return (now - fetched_at) > timedelta(minutes=PRICE_CACHE_CLOSED_RETRY_MINUTES)
+
+
+def _latest_price_out(row: dict, *, market_open: bool, from_cache: bool) -> dict:
+    fetched_at = row.get("fetched_at")
+    return {
+        "symbol": row.get("symbol"),
+        "name": row.get("name"),
+        "price": row.get("price"),
+        "pre_close": row.get("pre_close"),
+        "pct_chg": row.get("pct_chg"),
+        "trade_date": row.get("trade_date"),
+        "fetched_at": fetched_at.isoformat(timespec="seconds") if isinstance(fetched_at, datetime) else str(fetched_at or ""),
+        "market_open": market_open,
+        "from_cache": from_cache,
+        "source": "stock_latest_prices(tushare)",
     }
 
 
@@ -2946,6 +3093,7 @@ def _pearson(left: list[float], right: list[float]) -> float | None:
 
 _STOCK_TOOL_DISPLAY_NAMES = {
     "resolve_stock": "识别股票标的",
+    "get_latest_price": "查询最新价格",
     "get_realtime_quote": "获取实时行情",
     "get_tushare_daily": "获取历史K线",
     "get_daily_history": "获取历史K线",
@@ -2971,6 +3119,12 @@ def stock_tool_display_name(name: str) -> str:
 def stock_observation_preview(name: str, result: dict) -> str:
     if "error" in result:
         return str(result["error"])
+    if name == "get_latest_price":
+        origin = "缓存" if result.get("from_cache") else "TuShare 实取"
+        return (
+            f"{result.get('name') or result.get('symbol')} 最新价 {result.get('price')}"
+            f"（交易日 {result.get('trade_date')}，涨跌 {result.get('pct_chg')}%，{origin}）"
+        )
     if name == "resolve_stock":
         items = result.get("candidates") or []
         if not items:

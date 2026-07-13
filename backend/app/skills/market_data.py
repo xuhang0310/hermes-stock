@@ -11,6 +11,7 @@ from backend.app.market.stock_tools import (
     _int_arg,
     _optional_str,
     get_analysis_context,
+    get_latest_price,
     get_realtime_quote,
     get_stock_info,
     get_tushare_daily,
@@ -35,6 +36,7 @@ SKILL = {
     "roles": [],
     "tools": _pick(
         "resolve_stock",
+        "get_latest_price",
         "get_tushare_daily",
         "get_daily_history",
         "get_realtime_quote",
@@ -44,6 +46,7 @@ SKILL = {
     # 参数抽取与 stock_tools.execute_stock_tool 同名分支逐字一致
     "executors": {
         "resolve_stock": lambda a: resolve_stock(str(a.get("query") or "")),
+        "get_latest_price": lambda a: get_latest_price(str(a.get("symbol") or "")),
         "get_tushare_daily": lambda a: get_tushare_daily(
             str(a.get("symbol") or ""),
             start_date=_optional_str(a.get("start_date")),
