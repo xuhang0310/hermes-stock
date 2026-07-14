@@ -22,6 +22,10 @@ COMMON_TOOL_NAMES = [
     "search_stock_news",
     # 最新价：每个数字人回答个股问题前必查（stock_latest_prices 缓存表，开盘刷新/收盘走缓存）
     "get_latest_price",
+    # TuShare 全量数据（179 个 A 股接口）：先 list_tushare_apis 查目录，再 tushare_query 透传调用；
+    # 两个工具即达全目录，语义封装工具留给问股模式，避免撑爆数字人提示词
+    "list_tushare_apis",
+    "tushare_query",
 ]
 
 ROLE_TOOL_NAMES: dict[str, list[str]] = {
@@ -203,9 +207,10 @@ def digital_human_skill_prompt(profile_code: str | None) -> str:
 1. 【必做】凡回答涉及具体股票（无论是否在持仓/自选池）的行情、判断、风控问题，先调用 get_latest_price 获取该标的最新价格，回答中标注价格与所属交易日；绝不引用记忆或历史对话里的旧价。
 2. 研究本系统自己的持仓和自选池时，优先调用 get_my_universe 或对应快照工具，用真实数据说话。
 3. run_sql / get_schema 是通用底座工具，可以兜底探索，但优先使用结构化专属工具。
-4. 用户问系统外的标的、行业、政策、新闻、宏观或突发事件时，用 search_market_intel / search_stock_news 联网搜索补充；可以先说明它是否在系统持仓·自选范围内，再结合搜索结果和你的专业能力作答，绝不因为"不在持仓/自选池"就拒绝回答。
-5. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。
-6. 结论要标注来源（内部数据 / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。"""
+4. 行情、财务、龙虎榜、股东、两融、宏观等结构化数据优先走 TuShare：不确定用哪个接口时先 list_tushare_apis 查目录（分类→接口→参数），再用 tushare_query 透传调用；查过目录仍没有的数据才说没有。
+5. 用户问系统外的标的、行业、政策、新闻、宏观或突发事件时，用 search_market_intel / search_stock_news 联网搜索补充；可以先说明它是否在系统持仓·自选范围内，再结合搜索结果和你的专业能力作答，绝不因为"不在持仓/自选池"就拒绝回答。
+6. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。
+7. 结论要标注来源（内部数据 / TuShare / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。"""
 
 
 def digital_human_tool_schemas(profile_code: str | None) -> list[dict[str, Any]]:

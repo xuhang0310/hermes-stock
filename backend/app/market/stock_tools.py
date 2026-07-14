@@ -3094,6 +3094,8 @@ def _pearson(left: list[float], right: list[float]) -> float | None:
 _STOCK_TOOL_DISPLAY_NAMES = {
     "resolve_stock": "识别股票标的",
     "get_latest_price": "查询最新价格",
+    "tushare_query": "TuShare 数据查询",
+    "list_tushare_apis": "查询数据接口目录",
     "get_realtime_quote": "获取实时行情",
     "get_tushare_daily": "获取历史K线",
     "get_daily_history": "获取历史K线",

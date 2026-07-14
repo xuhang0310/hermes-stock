@@ -213,6 +213,9 @@ function toggleHit(id: number) {
 const uploading = ref<{ id: number; filename: string; status: string; chunk_count: number; error: string | null }[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const uploadPollTimers = new Map<number, ReturnType<typeof setInterval>>()
+const dragOver = ref(false)
+const MAX_UPLOAD_SIZE = 20 * 1024 * 1024  // 20MB，与后端一致
+const ALLOWED_EXTS = ['.pdf', '.docx', '.pptx', '.txt', '.md']
 
 function clearUploadPoll(uploadId: number) {
   const t = uploadPollTimers.get(uploadId)
@@ -225,7 +228,7 @@ function pollUploadStatus(uploadId: number) {
       const s = await api.knowledgeUploadStatus(uploadId)
       const idx = uploading.value.findIndex(u => u.id === uploadId)
       if (idx >= 0) uploading.value[idx] = s
-      if (s.status === 'indexed' || s.status === 'failed') {
+      if (s.status === 'indexed' || s.status === 'failed' || s.status === 'empty') {
         clearUploadPoll(uploadId)
         if (s.status === 'indexed') loadDocuments()
       }
@@ -238,9 +241,21 @@ function pollUploadStatus(uploadId: number) {
 async function handleFiles(files: FileList | null) {
   if (!files || !files.length) return
   for (const file of Array.from(files)) {
+    // 客户端预检：大小
+    if (file.size > MAX_UPLOAD_SIZE) {
+      uploading.value.push({ id: 0, filename: file.name, status: 'failed', chunk_count: 0, error: `文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB > 20MB）` })
+      continue
+    }
+    // 客户端预检：扩展名
+    const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+    if (!ALLOWED_EXTS.includes(ext)) {
+      uploading.value.push({ id: 0, filename: file.name, status: 'failed', chunk_count: 0, error: `不支持的类型 ${ext}，仅限 PDF/Word/PPTX/txt/md` })
+      continue
+    }
     try {
       const res = await api.knowledgeUpload(file)
-      uploading.value.push({ id: res.upload_id, filename: file.name, status: 'parsing', chunk_count: 0, error: null })
+      const entry: { id: number; filename: string; status: string; chunk_count: number; error: string | null } = { id: res.upload_id, filename: file.name, status: 'parsing', chunk_count: 0, error: null }
+      uploading.value.push(entry)
       pollUploadStatus(res.upload_id)
     } catch (err) {
       uploading.value.push({ id: 0, filename: file.name, status: 'failed', chunk_count: 0, error: err instanceof Error ? err.message : '上传失败' })
@@ -250,8 +265,9 @@ async function handleFiles(files: FileList | null) {
 }
 
 function triggerUpload() { fileInput.value?.click() }
-function onDragOver(e: DragEvent) { e.preventDefault(); e.stopPropagation() }
-function onDrop(e: DragEvent) { e.preventDefault(); e.stopPropagation(); handleFiles(e.dataTransfer?.files ?? null) }
+function onDragOver(e: DragEvent) { e.preventDefault(); e.stopPropagation(); dragOver.value = true }
+function onDragLeave() { dragOver.value = false }
+function onDrop(e: DragEvent) { e.preventDefault(); e.stopPropagation(); dragOver.value = false; handleFiles(e.dataTransfer?.files ?? null) }
 function removeUpload(uploadId: number) { clearUploadPoll(uploadId); uploading.value = uploading.value.filter(u => u.id !== uploadId) }
 
 onMounted(() => {
@@ -301,13 +317,14 @@ onUnmounted(() => {
     </div>
 
     <template v-if="activeTab === 'docs'">
-      <div class="kb-upload-zone"
+      <div class="kb-upload-zone" :class="{ 'drag-over': dragOver }"
            @click="triggerUpload"
            @dragover="onDragOver"
+           @dragleave="onDragLeave"
            @drop="onDrop">
-        <input ref="fileInput" type="file" accept=".pdf,.docx,.txt,.md" multiple style="display:none" @change="e => handleFiles((e.target as HTMLInputElement).files)" />
+        <input ref="fileInput" type="file" accept=".pdf,.docx,.pptx,.txt,.md" multiple style="display:none" @change="e => handleFiles((e.target as HTMLInputElement).files)" />
         <span class="kb-upload-icon">⬆</span>
-        <span>拖拽上传 <b>PDF / Word / txt / md</b>（≤20MB），或点击选择文件</span>
+        <span>拖拽上传 <b>PDF / Word / PPTX / txt / md</b>（≤20MB），或点击选择文件</span>
       </div>
       <div v-if="uploading.length" class="kb-upload-list">
         <div v-for="u in uploading" :key="u.id" class="kb-upload-item" :class="u.status">
@@ -315,6 +332,7 @@ onUnmounted(() => {
           <span class="kb-upload-status">
             <template v-if="u.status === 'parsing'">解析中…</template>
             <template v-else-if="u.status === 'indexed'">✓ 已索引 {{ u.chunk_count }} 块</template>
+            <template v-else-if="u.status === 'empty'">⚠ 正文过短，未产生切块</template>
             <template v-else-if="u.status === 'failed'">✗ {{ u.error || '失败' }}</template>
             <template v-else>{{ u.status }}</template>
           </span>
@@ -498,11 +516,13 @@ onUnmounted(() => {
 .error-text { color: #e06c6c; font-size: 13px; }
 .kb-upload-zone { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border: 1px dashed var(--line-strong); border-radius: 10px; background: rgba(12, 12, 13, 0.35); cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
 .kb-upload-zone:hover { border-color: var(--gold-2); background: rgba(213, 180, 106, 0.05); }
+.kb-upload-zone.drag-over { border-color: var(--gold-2); background: rgba(213, 180, 106, 0.1); border-style: solid; }
 .kb-upload-icon { font-size: 18px; }
 .kb-upload-list { margin: 8px 0; display: grid; gap: 4px; }
 .kb-upload-item { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-radius: 8px; font-size: 12px; background: rgba(12, 12, 13, 0.5); }
 .kb-upload-item.parsing { color: var(--gold-2); }
 .kb-upload-item.indexed { color: #6db985; }
+.kb-upload-item.empty { color: #b8a65c; }
 .kb-upload-item.failed { color: #e06c6c; }
 .kb-upload-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kb-upload-status { flex: none; font-size: 11px; }
