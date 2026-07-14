@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
+from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, select, text, update
@@ -22,6 +24,7 @@ from backend.app.core.models import (
     DigitalHumanProfile,
     Document,
     DocumentChunk,
+    KnowledgeUpload,
     LlmModelConfig,
     LlmModelPlatform,
 )
@@ -941,6 +944,117 @@ async def knowledge_reindex(
     task.add_done_callback(_reindex_done)
     _reindex_running = True
     return {"started": True, "scope": payload.doc_id or "all"}
+
+
+_upload_tasks: set[asyncio.Task] = set()
+
+
+def _parse_upload(content: bytes, ext: str) -> str:
+    """解析上传文件为纯文本。PDF/Word 需 pypdf/python-docx（pip install），txt/md 直读多编码兜底。"""
+    if ext == '.pdf':
+        try:
+            from pypdf import PdfReader
+            from io import BytesIO
+            return '\n'.join((page.extract_text() or '') for page in PdfReader(BytesIO(content)).pages)
+        except ImportError:
+            raise RuntimeError("PDF 解析需要 pypdf：请在服务器 venv 执行 pip install pypdf")
+    if ext == '.docx':
+        try:
+            import docx
+            from io import BytesIO
+            return '\n'.join(p.text for p in docx.Document(BytesIO(content)).paragraphs)
+        except ImportError:
+            raise RuntimeError("Word 解析需要 python-docx：请在服务器 venv 执行 pip install python-docx")
+    for enc in ('utf-8', 'gbk', 'gb2312', 'latin-1'):
+        try:
+            return content.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return content.decode('utf-8', errors='replace')
+
+
+def _ingest_upload(upload_id: int, doc_id: int) -> None:
+    """后台摄取上传文档：切块→嵌入→索引，更新 KnowledgeUpload 状态。"""
+    try:
+        ok, failed = rag_ingest.ingest_document(doc_id, force=True)
+        with SessionLocal() as db:
+            upload = db.get(KnowledgeUpload, upload_id)
+            if upload:
+                upload.status = 'failed' if (not ok and failed) else 'indexed'
+                upload.chunk_count = ok
+                upload.error = None
+                db.commit()
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as db:
+            upload = db.get(KnowledgeUpload, upload_id)
+            if upload:
+                upload.status = 'failed'
+                upload.error = str(exc)[:500]
+                db.commit()
+
+
+@router.post("/knowledge/upload")
+async def knowledge_upload(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    allowed_ext = {'.pdf', '.docx', '.txt', '.md'}
+    ext = Path(file.filename or '').suffix.lower()
+    if ext not in allowed_ext:
+        raise HTTPException(400, f"不支持的文件类型: {ext}，仅支持 PDF/Word/txt/md")
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(400, "文件大小超过 20MB")
+    try:
+        text = _parse_upload(content, ext)
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc))
+    if not text or not text.strip():
+        raise HTTPException(400, "文件内容为空或解析失败")
+    doc = Document(
+        doc_type='upload',
+        title=file.filename or '未命名上传',
+        content=text,
+        summary=text[:500],
+        source='admin',
+        trust_level='trusted',
+        is_external_untrusted=False,
+        content_hash=hashlib.sha256(content).hexdigest()[:64],
+    )
+    db.add(doc)
+    db.flush()
+    upload = KnowledgeUpload(
+        filename=file.filename or '',
+        mime_type=file.content_type or f'application/{ext.lstrip(".")}',
+        size=len(content),
+        doc_id=doc.id,
+        status='parsing',
+    )
+    db.add(upload)
+    db.flush()
+    task = asyncio.create_task(asyncio.to_thread(_ingest_upload, upload.id, doc.id))
+    _upload_tasks.add(task)
+    task.add_done_callback(_upload_tasks.discard)
+    return {"upload_id": upload.id, "doc_id": doc.id}
+
+
+@router.get("/knowledge/uploads/{upload_id}")
+def knowledge_upload_status(
+    upload_id: int,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    upload = db.get(KnowledgeUpload, upload_id)
+    if upload is None:
+        raise HTTPException(404, "上传批次不存在")
+    return {
+        "id": upload.id,
+        "filename": upload.filename,
+        "status": upload.status,
+        "chunk_count": upload.chunk_count,
+        "error": upload.error,
+    }
 
 
 @router.post("/knowledge/search")
