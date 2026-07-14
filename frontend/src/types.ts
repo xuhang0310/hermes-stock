@@ -503,7 +503,7 @@ export type PromptRecommendation = {
   id: number
   digital_human_id: number
   digital_human_code: string
-  chat_mode: 'research' | 'stock' | string
+  chat_mode: 'research' | 'stock' | 'knowledge' | string
   prompt_text: string
   reason: string | null
   source_type: string
@@ -516,7 +516,7 @@ export type PromptRecommendation = {
 export type AgentSession = {
   id: number
   title: string
-  chat_mode: 'research' | 'stock' | string
+  chat_mode: 'research' | 'stock' | 'knowledge' | string
   digital_human_id: number | null
   digital_human_name: string | null
   model_config_id: number | null
@@ -537,7 +537,7 @@ export type AgentMessage = {
 export type AgentSessionDetail = {
   id: number
   title: string
-  chat_mode: 'research' | 'stock' | string
+  chat_mode: 'research' | 'stock' | 'knowledge' | string
   digital_human_id: number | null
   digital_human_name: string | null
   model_config_id: number | null

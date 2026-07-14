@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from backend.app.agents.position_import import decode_image_payload
+from backend.app.agents.position_intent import PositionAction, build_intent_hint, detect_position_intent, intent_summary
 from backend.app.data.repository import StockRepository
 from backend.app.agents.stock_agent import _active_llm_config, _stream_chat
 
@@ -113,8 +114,13 @@ def run_position_agent(
         _, clean_base64, image_hash = decode_image_payload(image_base64)
 
     system_prompt = _position_agent_prompt()
-    user_content: str | list[dict[str, Any]]
+    # P1: 意图预处理 — 在 LLM 调用前检测交易动作，注入 system prompt
     text = instruction.strip() or "请识别并录入这张持仓截图。"
+    intent = detect_position_intent(text) if not image_base64 else None
+    intent_hint = build_intent_hint(intent) if intent and intent.action != PositionAction.UNKNOWN else ""
+    if intent_hint:
+        system_prompt += intent_hint
+    user_content: str | list[dict[str, Any]]
     if clean_base64:
         user_content = [
             {"type": "text", "text": text},
@@ -225,6 +231,12 @@ def run_position_agent_events(
         _, clean_base64, image_hash = decode_image_payload(image_base64)
 
     text = instruction.strip() or "请识别并录入这张持仓截图。"
+    # P1: 意图预处理 — 在 LLM 调用前检测交易动作，注入 system prompt
+    intent = detect_position_intent(text) if not image_base64 else None  # 截图不预处理
+    intent_hint = build_intent_hint(intent) if intent and intent.action != PositionAction.UNKNOWN else ""
+    system_prompt = _position_agent_prompt()
+    if intent_hint:
+        system_prompt += intent_hint
     user_content: str | list[dict[str, Any]]
     if clean_base64:
         user_content = [
@@ -241,7 +253,7 @@ def run_position_agent_events(
         "provider_name": llm_config.get("provider_name"),
     }
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _position_agent_prompt()},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
     saved_rows: list[dict[str, Any]] = []
@@ -361,19 +373,48 @@ def _position_agent_prompt() -> str:
 5. 识别到真实持仓明细后，调用 save_position_holdings 工具保存。
 6. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失（行情类字段缺失不必提醒，说明系统会自动同步即可）。
 
-工具规则:
-- get_position_schema: 用户问字段、格式、需要提供什么信息时调用。
-- get_current_positions: 用户问已有持仓、是否重复、当前保存了什么时调用。
-- save_position_holdings: 只有确认有真实持仓明细时调用。不要用它保存问候、测试文本或不完整意图。
+【交易动作识别规则 — 必须严格遵守】
+当用户表达以下意图时，按对应规则处理，不要混淆动作：
+
+1. **买入/建仓**（关键词：买入、买进、建仓、开仓、想买、新开）:
+   用户要新建一个标的的持仓。先确认标的代码和名称（用户只给名称时追问代码），
+   再确认数量和成本价。保存时 rows 中必须同时包含该新标的行和所有已有持仓行
+  （从 get_current_positions 获取完整列表），不能只传新标的导致其他持仓被覆盖。
+   新标的 position_quantity=买入数量，status="open"。
+
+2. **卖出/减仓**（关键词：卖出、减持、减仓、出一部分、抛）:
+   用户要减少某标的的持仓数量。必须先用 get_current_positions 读取该标的
+   当前 quantity，新 quantity = 当前数量 - 卖出数量。保存时 rows 含所有持仓行。
+   若卖出后剩余 quantity=0，则等同于清仓（见第3条）。
+
+3. **清仓**（关键词：清仓、全出、全部卖出、全抛、止损出场、不拿了）:
+   用户要完全退出某标的。先用 get_current_positions 确认该持仓存在，
+   然后 rows 中该标的 position_quantity=0（系统自动将 status 转为 closed）。
+   这是不可逆操作，保存前必须复述确认（"将清仓 XXX 共 N 股，确认吗？"）。
+   绝不要自作主张替用户清仓；用户明确说清仓关键词时才执行。
+
+4. **加仓/补仓**（关键词：加仓、补仓、增持、多买、再买）:
+   用户要对已有持仓增加数量。先用 get_current_positions 获取当前 quantity，
+   新 quantity = 当前数量 + 加仓数量。成本价按全仓加权平均：
+   新成本 = (原成本*原数量 + 新价格*新数量) / (原数量+新数量)。
+   用户没给新成交价时，追问新买入价格。
+
+5. **改止损/止盈/逻辑**（关键词：改止损、设止损、调整止损、修改止盈）:
+   这是字段级微调，用 update_position_field 工具（如果有），
+   或 save_position_holdings 只改该目标的对应字段（保持 quantity 不变）。
+   不需要追问数量，只需要确认新的止损/止盈价格。
+
+6. **查看持仓**（关键词：查看持仓、我的仓位、持有哪些、仓位怎样）:
+   调用 get_current_positions 读取并展示即可，不调用保存工具。
 
 A 股代码规范:
 - 6 开头通常为 .SH，0/3 开头通常为 .SZ，4/8 开头通常为 .BJ。
 - 数值字段传纯数字，例如 8% 传 8，1,000 股传 1000。
+- 不能假装保存；是否保存以工具结果为准。
 
 回复要求:
-- 中文 Markdown。
-- 简短、清楚、有下一步。
-- 不能假装保存；是否保存以工具结果为准。"""
+- 中文 Markdown。简短、清楚、有下一步。
+- 涉及清仓/卖出操作时，必须复述确认后才保存。"""
 
 
 def _chat_completion(messages: list[dict[str, Any]], llm_config: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:

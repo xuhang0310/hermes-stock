@@ -362,7 +362,7 @@ export const api = {
     })
   },
   knowledgeUploadStatus: (id: number) => request<{ id: number; filename: string; status: string; chunk_count: number; error: string | null }>(`/api/knowledge/uploads/${id}`),
-  agentSessions: (chatMode?: 'research' | 'stock', digitalHumanId?: number | null) => {
+  agentSessions: (chatMode?: 'research' | 'stock' | 'knowledge', digitalHumanId?: number | null) => {
     const params = new URLSearchParams()
     if (chatMode) params.set('chat_mode', chatMode)
     if (digitalHumanId) params.set('digital_human_id', String(digitalHumanId))
@@ -397,7 +397,7 @@ export const api = {
       session_id?: number | null
       digital_human_id?: number | null
       model_config_id?: number | null
-      chat_mode?: 'research' | 'stock'
+      chat_mode?: 'research' | 'stock' | 'knowledge'
       skills?: string[]
     },
     onEvent: (event: AgentStreamEvent) => void,

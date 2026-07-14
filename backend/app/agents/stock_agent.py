@@ -27,6 +27,13 @@ from backend.app.market.digital_human_tools import (
 from backend.app.core.models import LlmModelConfig
 from backend.app.core.settings import settings
 from backend.app.data.repository import StockRepository
+from backend.app.agents.position_intent import (
+    PositionAction,
+    build_intent_hint,
+    detect_position_intent,
+    intent_summary,
+)
+from backend.app.ai.retrieval import retrieve_chunks
 from backend.app.market.stock_tools import (
     STOCK_TOOL_SCHEMAS,
     execute_stock_tool,
@@ -170,6 +177,23 @@ SCHEMA_DICTIONARY: dict[str, dict[str, Any]] = {
         "label": "系统运行日志",
         "fields": ["level", "module", "message", "context_json", "created_at"],
     },
+    # 知识库表（检索 agent 可探索）
+    "documents": {
+        "label": "知识库文档表，记录所有已入库的文档元信息",
+        "fields": ["doc_type", "title", "source", "trust_level", "published_at", "fetched_at"],
+    },
+    "document_chunks": {
+        "label": "知识库文档切块表，文档正文经切分后的最小检索单元",
+        "fields": ["doc_id", "chunk_index", "content", "token_count", "status", "content_hash"],
+    },
+    "document_symbols": {
+        "label": "文档-标的关联表（多对多）",
+        "fields": ["doc_id", "symbol", "relevance"],
+    },
+    "knowledge_uploads": {
+        "label": "知识库上传批次表，记录文件上传与解析状态",
+        "fields": ["filename", "mime_type", "size", "doc_id", "status"],
+    },
 }
 
 TOOLS = [
@@ -199,7 +223,59 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge",
+            "description": "在知识库中执行混合检索（向量+关键词召回→RRF融合→重排精排），返回最相关的文档片段。可用 top_k 控制返回条数，用 symbol 限定关联标的，用 doc_types 限定文档类型（news/report/notice/research/upload），用 trust_levels 限定可信度。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索问句，如'新能源政策''芯片行业研报'"},
+                    "top_k": {"type": "integer", "description": "返回条数，默认6，上限20"},
+                    "symbol": {"type": "string", "description": "可选，限定A股标的代码，如600519.SH"},
+                    "doc_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，限定文档类型列表，如['research', 'news']",
+                    },
+                    "trust_levels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，限定可信度列表，如['trusted', 'normal']",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
+
+
+def _knowledge_system_prompt(memory_context: str = "") -> str:
+    """System prompt for chat_mode='knowledge': 知识库检索专家，核心工具 search_knowledge。"""
+    schema_lines = [
+        f"- {table}: {meta['label']}，常用字段 {', '.join(meta['fields'])}"
+        for table, meta in SCHEMA_DICTIONARY.items()
+    ]
+    memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
+    return f"""你是 SixRabbits Stock 的知识库检索专家，采用 ReAct 方式工作。
+今天日期: {date.today().isoformat()}
+
+可查询的数据表（含知识库表）:
+{chr(10).join(schema_lines)}
+
+{memory_block}
+
+工作规则:
+1. 核心工具是 search_knowledge —— 在已索引的文档切块中做混合检索（向量+关键词召回→RRF融合→重排精排），支持按标的(symbol)、文档类型(doc_types)、可信度(trust_levels)过滤。
+2. search_knowledge 返回的每条结果包含 doc_type（news/report/notice/research/upload）、title、source、content 和四路评分（vector/keyword/fused/rerank），要引用相关片段作答，标注来源。
+3. 必要时用 get_schema 探索数据库中的实体关系（如 documents 与 document_chunks 的关联），再用 run_sql 精确查询聚合统计或关联记录。
+4. run_sql 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询。
+5. SQL 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
+6. 所有结论必须标注来源（文档标题、类型、可信度）；不得编造信息。
+7. 对于简单的招呼、闲聊或与知识库搜索无关的话题，简短友好地直接回应，不查数据、不调用工具。
+8. 最终回答使用中文 Markdown，条理清晰、引用准确。"""
 
 
 def _system_prompt(extra_context: str | None = None, digital_human_code: str | None = None, memory_context: str = "") -> str:
@@ -352,6 +428,46 @@ def get_schema(table_name: str = "") -> dict:
             )
         }
     return {"table": key, **meta}
+
+
+def search_knowledge(
+    query: str,
+    top_k: int | None = None,
+    symbol: str | None = None,
+    doc_types: list[str] | None = None,
+    trust_levels: list[str] | None = None,
+) -> dict:
+    """搜索知识库，返回带四路分数的命中切块列表。"""
+    if not query.strip():
+        return {"error": "搜索问句不能为空"}
+    with SessionLocal() as db:
+        try:
+            hits = retrieve_chunks(
+                db,
+                query.strip(),
+                top_k=top_k or None,
+                symbol=symbol,
+                doc_types=doc_types,
+                trust_levels=trust_levels,
+            )
+        except Exception as exc:
+            return {"error": f"知识库检索失败: {str(exc)[:300]}"}
+    return {"query": query, "hits": hits, "hit_count": len(hits)}
+
+
+def _knowledge_search_preview(result: dict) -> str:
+    """格式化 search_knowledge 结果为 observation 预览文本。"""
+    if "error" in result:
+        return str(result["error"])
+    count = result.get("hit_count", 0)
+    if not count:
+        return "无匹配结果"
+    preview_parts = [f"知识库检索返回 {count} 条结果"]
+    for i, hit in enumerate(result.get("hits", [])[:3]):
+        title = hit.get("title", "")
+        content_snippet = hit.get("content", "")[:120]
+        preview_parts.append(f"#{i+1} [{hit.get('doc_type','')}] {title}: {content_snippet}...")
+    return "\n".join(preview_parts)
 
 
 def _active_llm_config(model_config_id: int | None = None) -> dict:
@@ -621,11 +737,17 @@ def run_agent_events(
     default_account_id: int | None = None,
 ) -> Generator[dict, None, None]:
     stock_mode = chat_mode == "stock"
-    digital_tool_names = digital_human_tool_names(digital_human_code) if not stock_mode else set()
+    knowledge_mode = chat_mode == "knowledge"
+    digital_tool_names: set[str] = set()
     write_tool_names: set[str] = set()
     if stock_mode:
         tools = STOCK_TOOL_SCHEMAS
+    elif knowledge_mode:
+        # knowledge mode: 仅 run_sql + get_schema + search_knowledge，无数字人工具
+        tools = list(TOOLS)
     else:
+        # research mode
+        digital_tool_names = digital_human_tool_names(digital_human_code)
         tools = [*TOOLS, *digital_human_tool_schemas(digital_human_code)]
         if can_write_positions:
             w_schemas = write_tool_schemas()
@@ -635,8 +757,20 @@ def run_agent_events(
     system_prompt = (
         stock_system_prompt_with_skills(digital_human_context, skills, memory_context)
         if stock_mode
+        else _knowledge_system_prompt(memory_context)
+        if knowledge_mode
         else _system_prompt(digital_human_context, digital_human_code, memory_context)
     )
+    # P1: 意图预处理 — 在 LLM 调用前检测交易动作，注入 system prompt（仅 research 模式）
+    intent = detect_position_intent(question) if not stock_mode and not knowledge_mode and can_write_positions else None
+    intent_hint = (
+        build_intent_hint(intent)
+        if intent and intent.action != PositionAction.UNKNOWN and intent.confidence >= 0.7
+        else ""
+    )
+    if intent_hint:
+        system_prompt += intent_hint
+    # stock 模式不做持仓写入，不注入交易意图提示
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     for item in (history or [])[-8:]:
         if item.get("role") in {"user", "assistant"} and item.get("content"):
@@ -653,14 +787,17 @@ def run_agent_events(
             "provider_name": llm_config.get("provider_name"),
         },
     }
+    # 向前端推送识别到的交易意图（仅 research 模式 + 写权限开启时）
+    if intent and intent.action != PositionAction.UNKNOWN:
+        yield {"type": "position_intent", **intent_summary(intent)}
 
     run_started = time.monotonic()
     completed_tool_label: str | None = None
-    if stock_mode:
+    if stock_mode or knowledge_mode:
         yield {"type": "stage_start", "stage": "agent_loop", "message": "Starting agent analysis..."}
     for _ in range(llm_config["max_steps"]):
         message: dict | None = None
-        if stock_mode:
+        if stock_mode or knowledge_mode:
             if completed_tool_label:
                 yield {"type": "thinking", "message": f"「{completed_tool_label}」已完成，继续深入分析..."}
                 completed_tool_label = None
@@ -688,10 +825,10 @@ def run_agent_events(
             if not content:
                 yield {"type": "error", "content": "模型未返回内容，请重试。"}
                 return
-            if stock_mode:
+            if stock_mode or knowledge_mode:
                 yield {"type": "generating", "message": "正在生成最终分析..."}
             yield {"type": "content_end", "role": "answer"}
-            if stock_mode:
+            if stock_mode or knowledge_mode:
                 yield {
                     "type": "stage_done",
                     "stage": "agent_loop",
@@ -742,6 +879,16 @@ def run_agent_events(
                     digital_human_code=digital_human_code,
                 )
                 yield {"type": "observation", "content": _position_write_preview(name, result)}
+            elif name == "search_knowledge":
+                query = str(args.get("query", ""))
+                top_k = args.get("top_k")
+                symbol = str(args.get("symbol") or "")
+                doc_types = args.get("doc_types") if isinstance(args.get("doc_types"), list) else None
+                trust_levels = args.get("trust_levels") if isinstance(args.get("trust_levels"), list) else None
+                display = f"搜索知识库: {query[:80]}"
+                yield {"type": "action", "tool": "search_knowledge", "display_name": "知识库检索", "content": display}
+                result = search_knowledge(query, top_k=top_k, symbol=symbol or None, doc_types=doc_types, trust_levels=trust_levels)
+                yield {"type": "observation", "content": _knowledge_search_preview(result)}
             elif name == "run_sql":
                 sql = str(args.get("sql", ""))
                 yield {"type": "action", "tool": "run_sql", "content": sql}

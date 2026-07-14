@@ -107,7 +107,7 @@ class AgentChatIn(BaseModel):
     session_id: int | None = None
     digital_human_id: int | None = None
     model_config_id: int | None = None
-    chat_mode: Literal["research", "stock"] = "research"
+    chat_mode: Literal["research", "stock", "knowledge"] = "research"
     skills: list[str] = []
 
 
@@ -1235,7 +1235,7 @@ def stock_strategies(
 
 @router.get("/agent/sessions")
 def agent_sessions(
-    chat_mode: Literal["research", "stock"] | None = Query(default=None),
+    chat_mode: Literal["research", "stock", "knowledge"] | None = Query(default=None),
     digital_human_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
@@ -1350,7 +1350,7 @@ async def agent_chat(
         profile = next((row for row in allowed_profiles if row.id == payload.digital_human_id), None)
         if profile is None:
             raise HTTPException(status_code=403, detail="当前账号不能使用该数字人")
-    elif payload.chat_mode != "stock" and allowed_profiles:
+    elif payload.chat_mode not in ("stock", "knowledge") and allowed_profiles:
         profile = allowed_profiles[0]
 
     model_config: LlmModelConfig | None = None
@@ -1374,7 +1374,7 @@ async def agent_chat(
             raise HTTPException(status_code=404, detail="会话不存在或无权访问")
         if chat_session.chat_mode != payload.chat_mode:
             raise HTTPException(status_code=400, detail="session mode mismatch")
-        if payload.chat_mode != "stock" and profile is None and chat_session.digital_human_id:
+        if payload.chat_mode not in ("stock", "knowledge") and profile is None and chat_session.digital_human_id:
             profile = db.get(DigitalHumanProfile, chat_session.digital_human_id)
         if model_config is None and chat_session.model_config_id:
             existing_model = db.get(LlmModelConfig, chat_session.model_config_id)
@@ -1393,7 +1393,7 @@ async def agent_chat(
         db.add(chat_session)
         db.flush()
     chat_session.chat_mode = payload.chat_mode
-    if payload.chat_mode == "stock":
+    if payload.chat_mode in ("stock", "knowledge"):
         chat_session.digital_human_id = None
     elif payload.digital_human_id:
         chat_session.digital_human_id = profile.id if profile else None

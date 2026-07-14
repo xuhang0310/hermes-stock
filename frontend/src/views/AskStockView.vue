@@ -485,7 +485,7 @@ async function send() {
       },
       controller.signal
     )
-    await refreshSessions()
+    nextTick(() => { refreshSessions().catch(() => {}) })
   } catch (err) {
     if (controller.signal.aborted) {
       // 用户主动点了“停止”：保留已经收到的内容，不当作错误

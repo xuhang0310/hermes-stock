@@ -156,6 +156,36 @@ button {
   color: var(--gold-2);
 }
 
+/* sub-menu items */
+.nav-list button.nav-sub {
+  padding-left: 44px;
+  font-size: 13px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.nav-list button.nav-sub.active {
+  border-color: rgba(213, 180, 106, 0.52);
+  background: linear-gradient(90deg, rgba(213, 180, 106, 0.16), rgba(213, 180, 106, 0.02));
+  color: var(--gold-2);
+}
+
+/* chevron arrow for expandable menus */
+.nav-chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: transform 0.2s;
+}
+
+.nav-chevron.open {
+  transform: rotate(90deg);
+}
+
+.nav-list button:hover .nav-chevron {
+  opacity: 0.8;
+}
+
 .sidebar-footer {
   display: flex;
   gap: 8px;
@@ -1366,12 +1396,21 @@ tbody tr.clickable-row:focus-visible td {
   overflow-y: auto; /* 飞书机器人 Tab 内容超高时自身滚动，不撑破页面 */
 }
 
-.digital-center {
+.digital-center,
+.knowledge-center {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 14px;
   height: 100%;
   min-height: 0;
+}
+
+/* knowledge center wrapper: full height minus topbar */
+.knowledge-center-page {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  height: calc(100vh - 108px);
+  min-height: 560px;
 }
 
 .stock-chat-page {
@@ -2240,7 +2279,8 @@ button.btn-stop:hover {
   .management-grid,
   .position-agent-panel,
   .stock-chat-page,
-  .digital-center {
+  .digital-center,
+  .knowledge-center {
     grid-template-columns: 1fr;
   }
 
@@ -2248,7 +2288,8 @@ button.btn-stop:hover {
     grid-template-columns: 1fr 1fr;
   }
 
-  .digital-center-page {
+  .digital-center-page,
+  .knowledge-center-page {
     height: auto;
   }
 

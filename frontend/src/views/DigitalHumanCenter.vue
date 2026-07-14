@@ -392,11 +392,13 @@ async function send() {
       reply.error = '未收到最终回答，请重试。'
       reply.streamStatus = 'error'
     }
-    // 不阻塞输入框：会话列表 + 推荐在后台跑，失败只记日志（用户已看到回答，列表/推荐下次打开时再刷新）
-    refreshSessions().catch(() => {})
-    if (selectedProfileId.value) {
-      loadPromptRecommendations(selectedProfileId.value).catch(() => {})
-    }
+    // 不阻塞输入框：推迟到 nextTick 后跑，确保 sending=false 先渲染到 DOM
+    nextTick(() => {
+      refreshSessions().catch(() => {})
+      if (selectedProfileId.value) {
+        loadPromptRecommendations(selectedProfileId.value).catch(() => {})
+      }
+    })
   } catch (err) {
     if (controller.signal.aborted) {
       // 用户主动点了“停止”：保留已经收到的内容，不当作错误
