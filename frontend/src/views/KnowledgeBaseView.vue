@@ -210,6 +210,50 @@ function toggleHit(id: number) {
   expandedHits.value[id] = !expandedHits.value[id]
 }
 
+const uploading = ref<{ id: number; filename: string; status: string; chunk_count: number; error: string | null }[]>([])
+const fileInput = ref<HTMLInputElement | null>(null)
+const uploadPollTimers = new Map<number, ReturnType<typeof setInterval>>()
+
+function clearUploadPoll(uploadId: number) {
+  const t = uploadPollTimers.get(uploadId)
+  if (t) { clearInterval(t); uploadPollTimers.delete(uploadId) }
+}
+
+function pollUploadStatus(uploadId: number) {
+  uploadPollTimers.set(uploadId, setInterval(async () => {
+    try {
+      const s = await api.knowledgeUploadStatus(uploadId)
+      const idx = uploading.value.findIndex(u => u.id === uploadId)
+      if (idx >= 0) uploading.value[idx] = s
+      if (s.status === 'indexed' || s.status === 'failed') {
+        clearUploadPoll(uploadId)
+        if (s.status === 'indexed') loadDocuments()
+      }
+    } catch {
+      clearUploadPoll(uploadId)
+    }
+  }, 3000))
+}
+
+async function handleFiles(files: FileList | null) {
+  if (!files || !files.length) return
+  for (const file of Array.from(files)) {
+    try {
+      const res = await api.knowledgeUpload(file)
+      uploading.value.push({ id: res.upload_id, filename: file.name, status: 'parsing', chunk_count: 0, error: null })
+      pollUploadStatus(res.upload_id)
+    } catch (err) {
+      uploading.value.push({ id: 0, filename: file.name, status: 'failed', chunk_count: 0, error: err instanceof Error ? err.message : '上传失败' })
+    }
+  }
+  if (fileInput.value) fileInput.value.value = ''
+}
+
+function triggerUpload() { fileInput.value?.click() }
+function onDragOver(e: DragEvent) { e.preventDefault(); e.stopPropagation() }
+function onDrop(e: DragEvent) { e.preventDefault(); e.stopPropagation(); handleFiles(e.dataTransfer?.files ?? null) }
+function removeUpload(uploadId: number) { clearUploadPoll(uploadId); uploading.value = uploading.value.filter(u => u.id !== uploadId) }
+
 onMounted(() => {
   loadStats()
   loadDocuments()
@@ -220,6 +264,8 @@ onUnmounted(() => {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  uploadPollTimers.forEach(clearUploadPoll)
+  uploadPollTimers.clear()
 })
 </script>
 
@@ -255,8 +301,25 @@ onUnmounted(() => {
     </div>
 
     <template v-if="activeTab === 'docs'">
-      <div class="kb-upload" title="P2 阶段开放">
-        ⬆ 拖拽上传 <b>PDF / Word / txt / md</b> —— P2 开放；当前自动摄取内部语料（搜索缓存 + 数字人报告）
+      <div class="kb-upload-zone"
+           @click="triggerUpload"
+           @dragover="onDragOver"
+           @drop="onDrop">
+        <input ref="fileInput" type="file" accept=".pdf,.docx,.txt,.md" multiple style="display:none" @change="e => handleFiles((e.target as HTMLInputElement).files)" />
+        <span class="kb-upload-icon">⬆</span>
+        <span>拖拽上传 <b>PDF / Word / txt / md</b>（≤20MB），或点击选择文件</span>
+      </div>
+      <div v-if="uploading.length" class="kb-upload-list">
+        <div v-for="u in uploading" :key="u.id" class="kb-upload-item" :class="u.status">
+          <span class="kb-upload-name">{{ u.filename }}</span>
+          <span class="kb-upload-status">
+            <template v-if="u.status === 'parsing'">解析中…</template>
+            <template v-else-if="u.status === 'indexed'">✓ 已索引 {{ u.chunk_count }} 块</template>
+            <template v-else-if="u.status === 'failed'">✗ {{ u.error || '失败' }}</template>
+            <template v-else>{{ u.status }}</template>
+          </span>
+          <button type="button" class="kb-upload-remove" @click="removeUpload(u.id)" title="移除">×</button>
+        </div>
       </div>
 
       <div class="kb-filters">
@@ -433,4 +496,16 @@ onUnmounted(() => {
 .kb-hit-content.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .hint { font-size: 12px; color: var(--gold-2); }
 .error-text { color: #e06c6c; font-size: 13px; }
+.kb-upload-zone { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border: 1px dashed var(--line-strong); border-radius: 10px; background: rgba(12, 12, 13, 0.35); cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
+.kb-upload-zone:hover { border-color: var(--gold-2); background: rgba(213, 180, 106, 0.05); }
+.kb-upload-icon { font-size: 18px; }
+.kb-upload-list { margin: 8px 0; display: grid; gap: 4px; }
+.kb-upload-item { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-radius: 8px; font-size: 12px; background: rgba(12, 12, 13, 0.5); }
+.kb-upload-item.parsing { color: var(--gold-2); }
+.kb-upload-item.indexed { color: #6db985; }
+.kb-upload-item.failed { color: #e06c6c; }
+.kb-upload-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-upload-status { flex: none; font-size: 11px; }
+.kb-upload-remove { flex: none; background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; line-height: 1; }
+.kb-upload-remove:hover { color: var(--text); }
 </style>

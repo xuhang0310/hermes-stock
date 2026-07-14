@@ -67,10 +67,9 @@ export class ApiError extends Error {
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options?.headers as Record<string, string> | undefined)
-  }
+  const isFormData = options?.body instanceof FormData
+  const headers: Record<string, string> = isFormData ? {} : { 'Content-Type': 'application/json' }
+  if (options?.headers) Object.assign(headers, options.headers as Record<string, string>)
   if (authToken) {
     headers.Authorization = `Bearer ${authToken}`
   }
@@ -354,6 +353,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ query, top_k: topK ?? 0, symbol: symbol ?? null })
     }),
+  knowledgeUpload: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ upload_id: number; doc_id: number }>('/api/knowledge/upload', {
+      method: 'POST',
+      body: form
+    })
+  },
+  knowledgeUploadStatus: (id: number) => request<{ id: number; filename: string; status: string; chunk_count: number; error: string | null }>(`/api/knowledge/uploads/${id}`),
   agentSessions: (chatMode?: 'research' | 'stock', digitalHumanId?: number | null) => {
     const params = new URLSearchParams()
     if (chatMode) params.set('chat_mode', chatMode)
