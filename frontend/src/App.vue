@@ -11,6 +11,7 @@ import PositionChartView from './views/PositionChartView.vue'
 import RhythmView from './views/RhythmView.vue'
 import SettingsView from './views/SettingsView.vue'
 import KnowledgeBaseView from './views/KnowledgeBaseView.vue'
+import KnowledgeSearchView from './views/KnowledgeSearchView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
 import { renderMarkdown } from './utils/markdown'
 import type {
@@ -35,6 +36,7 @@ type PageKey =
   | 'digitalHumans'
   | 'rhythm'
   | 'knowledge'
+  | 'knowledgeSearch'
   | 'settings'
 
 type PositionAgentChat = {
@@ -91,6 +93,7 @@ const pageTitle = computed(() => {
     watchlist: '自选池',
     rhythm: '定时任务',
     knowledge: '知识库',
+    knowledgeSearch: '检索agent',
     settings: '设置'
   }
   return labels[activePage.value]
@@ -558,6 +561,8 @@ onMounted(initialize)
       <RhythmView v-else-if="activePage === 'rhythm'" />
 
       <KnowledgeBaseView v-else-if="activePage === 'knowledge'" />
+
+      <KnowledgeSearchView v-else-if="activePage === 'knowledgeSearch'" />
 
       <SettingsView
         v-else-if="activePage === 'settings'"

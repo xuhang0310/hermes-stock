@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { HealthPayload, UserPayload } from '../types'
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 export type PageKey =
   | 'workbench'
@@ -12,6 +12,7 @@ export type PageKey =
   | 'digitalHumans'
   | 'rhythm'
   | 'knowledge'
+  | 'knowledgeSearch'
   | 'settings'
 
 const props = defineProps<{
@@ -21,11 +22,13 @@ const props = defineProps<{
   user: UserPayload
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   navigate: [page: PageKey]
   refresh: []
   logout: []
 }>()
+
+const expandedMenu = ref<PageKey | null>(null)
 
 const canViewRhythm = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
@@ -34,16 +37,57 @@ const canViewKnowledge = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
 )
 
-const navItems = computed<Array<{ key: PageKey; label: string }>>(() => [
+interface NavItem {
+  key: PageKey
+  label: string
+  children?: NavItem[]
+}
+
+const navItems = computed<NavItem[]>(() => [
   { key: 'askStock', label: '问股' },
   { key: 'workbench', label: '工作台' },
   { key: 'digitalHumans', label: '数字人中心' },
   { key: 'positions', label: '持仓' },
   { key: 'watchlist', label: '自选池' },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),
-  ...(canViewKnowledge.value ? [{ key: 'knowledge' as PageKey, label: '知识库' }] : []),
+  ...(canViewKnowledge.value ? [{
+    key: 'knowledge' as PageKey,
+    label: '知识库',
+    children: [
+      { key: 'knowledge' as PageKey, label: '知识库' },
+      { key: 'knowledgeSearch' as PageKey, label: '检索agent' }
+    ]
+  }] : []),
   { key: 'settings', label: '设置' }
 ])
+
+function isExpanded(item: NavItem): boolean {
+  if (!item.children) return false
+  if (expandedMenu.value === item.key) return true
+  if (item.children.some(c => props.activePage === c.key)) return true
+  return false
+}
+
+function isParentActive(item: NavItem): boolean {
+  if (item.children) {
+    return item.children.some(child => props.activePage === child.key || (props.activePage === 'positionChart' && child.key === 'positions'))
+  }
+  return props.activePage === item.key || (props.activePage === 'positionChart' && item.key === 'positions')
+}
+
+function handleParentClick(item: NavItem) {
+  if (item.children) {
+    expandedMenu.value = expandedMenu.value === item.key ? null : item.key
+    emit('navigate', item.children[0].key)
+  } else {
+    expandedMenu.value = null
+    emit('navigate', item.key)
+  }
+}
+
+function handleChildClick(key: PageKey) {
+  emit('navigate', key)
+}
 </script>
 
 <template>
@@ -60,16 +104,33 @@ const navItems = computed<Array<{ key: PageKey; label: string }>>(() => [
       </div>
 
       <nav class="nav-list">
-        <button
-          v-for="item in navItems"
-          :key="item.key"
-          :class="{ active: activePage === item.key || (activePage === 'positionChart' && item.key === 'positions') }"
-          type="button"
-          @click="$emit('navigate', item.key)"
-        >
-          <img class="nav-icon" :src="`/icons/${item.key}.png`" alt="" aria-hidden="true" @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')" />
-          <span>{{ item.label }}</span>
-        </button>
+        <template v-for="item in navItems" :key="item.key">
+          <!-- parent item -->
+          <button
+            :class="{ active: isParentActive(item), expanded: isExpanded(item) }"
+            type="button"
+            @click="handleParentClick(item)"
+          >
+            <img class="nav-icon" :src="`/icons/${item.children ? 'knowledge' : item.key}.png`" alt="" aria-hidden="true" @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')" />
+            <span>{{ item.label }}</span>
+            <svg v-if="item.children" class="nav-chevron" :class="{ open: isExpanded(item) }" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M4 2.5L7.5 6L4 9.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <!-- sub items -->
+          <template v-if="item.children && isExpanded(item)">
+            <button
+              v-for="child in item.children"
+              :key="child.key"
+              :class="{ active: activePage === child.key }"
+              class="nav-sub"
+              type="button"
+              @click="handleChildClick(child.key)"
+            >
+              <span>{{ child.label }}</span>
+            </button>
+          </template>
+        </template>
       </nav>
 
       <div class="sidebar-footer">
