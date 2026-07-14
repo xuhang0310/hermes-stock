@@ -591,20 +591,35 @@ class StockRepository:
         commit: bool,
     ) -> dict[str, Any]:
         symbol = normalize_a_share_symbol(str(payload.get("symbol") or payload.get("ts_code") or payload.get("code") or ""))
-        symbol_name = str(payload.get("name") or payload.get("symbol_name") or payload.get("stock_name") or symbol).strip()
+        symbol_name = str(payload.get("name") or payload.get("symbol_name") or payload.get("stock_name") or "").strip()
         exchange = str(payload.get("exchange") or exchange_from_symbol(symbol))
         instrument = self.db.get(Instrument, symbol)
         if instrument is None:
-            instrument = Instrument(symbol=symbol, name=symbol_name, market=exchange, type="stock", status="active")
+            instrument = Instrument(symbol=symbol, name=symbol_name or symbol, market=exchange, type="stock", status="active")
             self.db.add(instrument)
             self.db.flush()
-        elif symbol_name and symbol_name != symbol:
-            instrument.name = symbol_name
-            instrument.market = exchange or instrument.market
+        else:
+            if symbol_name and symbol_name != symbol and symbol_name != instrument.name:
+                instrument.name = symbol_name
+            if exchange:
+                instrument.market = exchange
+            # 兜底 name：payload 没传名字时取 instruments 表现有名字（避免显示为代码）
+            if not symbol_name:
+                symbol_name = instrument.name or symbol
 
         account = self._ensure_position_account(payload, symbol=symbol)
         quantity = number_or_none(payload.get("position_quantity") or payload.get("quantity")) or 0.0
         latest_price = number_or_none(payload.get("latest_price") or payload.get("price"))
+        if latest_price is None:
+            # 兜底 latest_price：查 daily_bars 最新 close（API 录入时自动补行情）
+            latest_row = self.db.scalar(
+                select(DailyBar.close)
+                .where(DailyBar.symbol == symbol, DailyBar.close.isnot(None))
+                .order_by(desc(DailyBar.trade_date), desc(DailyBar.id))
+                .limit(1)
+            )
+            if latest_row is not None:
+                latest_price = float(latest_row)
         cost_price = number_or_none(payload.get("cost_price") or payload.get("avg_cost"))
         cost_amount = number_or_none(payload.get("cost_amount"))
         market_value = number_or_none(payload.get("market_value"))

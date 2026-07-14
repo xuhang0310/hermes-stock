@@ -950,21 +950,77 @@ _upload_tasks: set[asyncio.Task] = set()
 
 
 def _parse_upload(content: bytes, ext: str) -> str:
-    """解析上传文件为纯文本。PDF/Word 需 pypdf/python-docx（pip install），txt/md 直读多编码兜底。"""
+    """解析上传文件为纯文本，全链路支持表格提取。
+
+    PDF：pdfplumber 优先（表格/布局远优于 pypdf），不可用时降级 pypdf
+    DOCX：段落 + 表格（python-docx）
+    PPTX：文本框 + 表格（python-pptx）
+    txt/md：多编码兜底直读
+    """
     if ext == '.pdf':
+        # 优先 pdfplumber：表格提取、布局保留远优于 pypdf，财务文档必备
+        try:
+            from pdfplumber import open as pdf_open
+            from io import BytesIO
+
+            parts: list[str] = []
+            with pdf_open(BytesIO(content)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        parts.append(page_text)
+                    tables = page.extract_tables()
+                    for table in tables:
+                        for row in table:
+                            parts.append(' | '.join(c or '' for c in row))
+            text = '\n'.join(parts)
+            if text.strip():
+                return text
+        except ImportError:
+            pass
+        # 降级 pypdf（纯文本，无表格）
         try:
             from pypdf import PdfReader
             from io import BytesIO
+
             return '\n'.join((page.extract_text() or '') for page in PdfReader(BytesIO(content)).pages)
         except ImportError:
-            raise RuntimeError("PDF 解析需要 pypdf：请在服务器 venv 执行 pip install pypdf")
+            raise RuntimeError("PDF 解析需要 pypdf 或 pdfplumber：请在服务器 venv 执行 pip install pypdf pdfplumber")
     if ext == '.docx':
         try:
             import docx
             from io import BytesIO
-            return '\n'.join(p.text for p in docx.Document(BytesIO(content)).paragraphs)
+
+            doc = docx.Document(BytesIO(content))
+            parts: list[str] = []
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    parts.append(p.text)
+            for table in doc.tables:
+                for row in table.rows:
+                    parts.append(' | '.join(cell.text for cell in row.cells))
+            return '\n'.join(parts)
         except ImportError:
             raise RuntimeError("Word 解析需要 python-docx：请在服务器 venv 执行 pip install python-docx")
+    if ext == '.pptx':
+        try:
+            from pptx import Presentation
+            from io import BytesIO
+
+            prs = Presentation(BytesIO(content))
+            parts: list[str] = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            if para.text.strip():
+                                parts.append(para.text)
+                    if shape.has_table:
+                        for row in shape.table.rows:
+                            parts.append(' | '.join(cell.text for cell in row.cells))
+            return '\n'.join(parts)
+        except ImportError:
+            raise RuntimeError("PPTX 解析需要 python-pptx：请在服务器 venv 执行 pip install python-pptx")
     for enc in ('utf-8', 'gbk', 'gb2312', 'latin-1'):
         try:
             return content.decode(enc)
@@ -980,9 +1036,18 @@ def _ingest_upload(upload_id: int, doc_id: int) -> None:
         with SessionLocal() as db:
             upload = db.get(KnowledgeUpload, upload_id)
             if upload:
-                upload.status = 'failed' if (not ok and failed) else 'indexed'
-                upload.chunk_count = ok
-                upload.error = None
+                if ok:
+                    upload.status = 'indexed'
+                    upload.chunk_count = ok
+                    upload.error = None
+                elif failed:
+                    upload.status = 'failed'
+                    upload.chunk_count = 0
+                    upload.error = f'{failed} 块嵌入/索引失败'
+                else:
+                    upload.status = 'empty'
+                    upload.chunk_count = 0
+                    upload.error = '正文过短或为空，未产生切块'
                 db.commit()
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as db:
@@ -999,13 +1064,16 @@ async def knowledge_upload(
     db: Session = Depends(get_db),
     _context: AuthContext = Depends(require_permission("model:manage")),
 ) -> dict:
-    allowed_ext = {'.pdf', '.docx', '.txt', '.md'}
+    allowed_ext = {'.pdf', '.docx', '.pptx', '.txt', '.md'}
     ext = Path(file.filename or '').suffix.lower()
     if ext not in allowed_ext:
-        raise HTTPException(400, f"不支持的文件类型: {ext}，仅支持 PDF/Word/txt/md")
+        raise HTTPException(400, f"不支持的文件类型: {ext}，仅支持 PDF/Word/PPTX/txt/md")
     content = await file.read()
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(400, "文件大小超过 20MB")
+    content_hash = hashlib.sha256(content).hexdigest()[:64]
+    if db.scalar(select(Document).where(Document.content_hash == content_hash).limit(1)):
+        raise HTTPException(409, "该文件已上传过（内容哈希相同），无需重复上传")
     try:
         text = _parse_upload(content, ext)
     except RuntimeError as exc:
@@ -1020,7 +1088,7 @@ async def knowledge_upload(
         source='admin',
         trust_level='trusted',
         is_external_untrusted=False,
-        content_hash=hashlib.sha256(content).hexdigest()[:64],
+        content_hash=content_hash,
     )
     db.add(doc)
     db.flush()
@@ -1030,6 +1098,7 @@ async def knowledge_upload(
         size=len(content),
         doc_id=doc.id,
         status='parsing',
+        uploaded_by=_context.user.display_name,
     )
     db.add(upload)
     db.flush()
