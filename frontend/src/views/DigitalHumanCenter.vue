@@ -392,9 +392,10 @@ async function send() {
       reply.error = '未收到最终回答，请重试。'
       reply.streamStatus = 'error'
     }
-    await refreshSessions()
+    // 不阻塞输入框：会话列表 + 推荐在后台跑，失败只记日志（用户已看到回答，列表/推荐下次打开时再刷新）
+    refreshSessions().catch(() => {})
     if (selectedProfileId.value) {
-      await loadPromptRecommendations(selectedProfileId.value)
+      loadPromptRecommendations(selectedProfileId.value).catch(() => {})
     }
   } catch (err) {
     if (controller.signal.aborted) {
