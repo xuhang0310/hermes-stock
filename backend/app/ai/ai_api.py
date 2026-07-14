@@ -1102,6 +1102,7 @@ async def knowledge_upload(
     )
     db.add(upload)
     db.flush()
+    db.commit()
     task = asyncio.create_task(asyncio.to_thread(_ingest_upload, upload.id, doc.id))
     _upload_tasks.add(task)
     task.add_done_callback(_upload_tasks.discard)
