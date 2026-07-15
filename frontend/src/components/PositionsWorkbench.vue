@@ -120,9 +120,8 @@ const tableRows = computed(() =>
           fmtNum(p.stop_price, 2)
         ]
   )
-  .map((row, idx) => {
-    const pos = filteredPositions.value[idx]
-    const actions = `<button class="wb-trade-btn buy" data-action="buy-${idx}">买入</button><button class="wb-trade-btn sell" data-action="sell-${idx}">卖出</button>`
+  .map((row) => {
+    const actions = `<button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button>`
     return [...row, actions]
   })
 )
@@ -216,15 +215,15 @@ function onRowClick(index: number) {
   if (position) emit('openChart', position)
 }
 
-function onCellClick(rowIndex: number, cellIndex: number) {
+function onCellClick(rowIndex: number, cellIndex: number, target: HTMLElement) {
   const actionCol = tableColumns.value.length - 1
   if (cellIndex !== actionCol) return
   const pos = filteredPositions.value[rowIndex]
   if (!pos) return
-  const target = event?.target as HTMLElement | undefined
-  if (target?.classList.contains('buy')) {
+  const action = target.getAttribute('data-action')
+  if (action === 'buy') {
     openTradeModal(pos, 'buy')
-  } else if (target?.classList.contains('sell')) {
+  } else if (action === 'sell') {
     openTradeModal(pos, 'sell')
   }
 }

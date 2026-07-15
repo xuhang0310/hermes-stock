@@ -7,8 +7,17 @@ defineProps<{
 
 const emit = defineEmits<{
   rowClick: [index: number]
-  cellClick: [rowIndex: number, cellIndex: number]
+  cellClick: [rowIndex: number, cellIndex: number, target: HTMLElement]
 }>()
+
+function onCellClick(e: MouseEvent, rowIndex: number, cellIndex: number) {
+  const target = e.target as HTMLElement
+  // 命中行内按钮（买入/卖出）时阻止冒泡到 rowClick，避免点按钮同时跳图表
+  if (target.closest('button')) {
+    e.stopPropagation()
+    emit('cellClick', rowIndex, cellIndex, target.closest('button') as HTMLElement)
+  }
+}
 </script>
 
 <template>
@@ -35,7 +44,7 @@ const emit = defineEmits<{
             v-for="(cell, cellIndex) in row"
             :key="cellIndex"
             v-html="cell"
-            @click="emit('cellClick', rowIndex, cellIndex)"
+            @click="(e) => onCellClick(e, rowIndex, cellIndex)"
           ></td>
         </tr>
       </tbody>
