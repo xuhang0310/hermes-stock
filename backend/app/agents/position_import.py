@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.llm_config import active_llm_config
+from backend.app.agents.position_import_v2 import parse_with_pydantic_ai
 
 
 KEY_MAP = {
@@ -120,6 +121,24 @@ def parse_position_input(
     if not llm_config["api_key"] or not llm_config["base_url"]:
         log_event("position", "ERROR", "持仓录入失败：模型未配置 API Key / Base URL")
         raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
+
+    # 试点：STOCK_POSITION_AGENT_V2=true 走 Pydantic AI v2 结构化输出+校验重试
+    # （见 position_import_v2.py）；失败随时关回旧路径，零风险回退。
+    from backend.app.agents.position_import_v2 import is_v2_enabled
+    if is_v2_enabled():
+        image_bytes = None
+        if clean_base64:
+            image_bytes = decode_image_payload(image_base64)[0]
+        try:
+            return parse_with_pydantic_ai(
+                instruction=instruction or ("请识别这张持仓截图并保存。" if image_bytes else ""),
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                llm_config=llm_config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log_event("position", "WARNING", "v2 解析失败，回退旧路径", error=str(exc)[:300])
+            # 落到下面旧路径
 
     schema_example = """
 {
