@@ -739,6 +739,66 @@ class StockRepository:
         self.db.commit()
         return {"batch_id": batch.id, "rolled_back_count": len(snaps)}
 
+    def delete_position(self, symbol: str, account_id: int | None = None) -> dict[str, Any]:
+        """物理删除一条持仓记录及其全部历史快照（不可逆，留审计日志）。
+
+        与 sell/close 的区别：sell/close 是逻辑关闭（status=closed，留审计快照）；
+        delete_position 直接从库里删掉 Position 行 + 该 symbol+account 的所有
+        PositionHoldingSnapshot 行，用于"录错了想删掉重来"的场景。instrument
+        基础表不删（可能被自选/其他持仓引用）。删后重算账户资金。
+        """
+        norm = normalize_a_share_symbol(symbol)
+        # 解析账号：优先传入，其次按标的自动匹配
+        if account_id is not None:
+            acc_id: int | None = int(account_id)
+        else:
+            _, acc_id = self._unique_open_account_for(norm)
+
+        # 删该 symbol+account 的所有 Position 行
+        positions = self.db.scalars(
+            select(Position).where(Position.symbol == norm, _account_eq(acc_id))
+        ).all()
+        if not positions:
+            return {"error": f"未找到 {norm} 的持仓记录", "symbol": norm}
+        pos_count = len(positions)
+        for pos in positions:
+            self.db.delete(pos)
+
+        # 删该 symbol+account 的所有快照
+        snaps = self.db.scalars(
+            select(PositionHoldingSnapshot).where(
+                PositionHoldingSnapshot.symbol == norm, _account_eq(acc_id)
+            )
+        ).all()
+        snap_count = len(snaps)
+        for snap in snaps:
+            self.db.delete(snap)
+
+        self.db.add(
+            SystemLog(
+                level="WARNING",
+                module="positions",
+                message="position physically deleted",
+                context_json=json.dumps(
+                    {"symbol": norm, "account_id": acc_id, "positions": pos_count, "snapshots": snap_count},
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        self.db.flush()
+        # 重算受影响账户资金
+        if acc_id is not None:
+            account = self.db.get(PositionAccount, acc_id)
+            if account is not None:
+                self._recompute_account_funds(account)
+        self.db.commit()
+        return {
+            "symbol": norm,
+            "account_id": acc_id,
+            "deleted_positions": pos_count,
+            "deleted_snapshots": snap_count,
+        }
+
     def _save_position_holding(
         self,
         payload: dict[str, Any],

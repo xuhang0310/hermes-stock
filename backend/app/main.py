@@ -356,6 +356,22 @@ def create_app(init_db: bool = True) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.delete("/api/positions/{symbol}")
+    def delete_position(
+        symbol: str,
+        account_id: int | None = Query(default=None),
+        repository: StockRepository = Depends(repo),
+        _context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        """物理删除一条持仓记录及其历史快照（不可逆）。用于录错重来的场景。"""
+        try:
+            result = repository.delete_position(symbol, account_id=account_id)
+            if "error" in result:
+                raise HTTPException(status_code=404, detail=result["error"])
+            return result
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/positions/ai-import")
     def import_positions_from_image(
         payload: PositionAiImportIn,

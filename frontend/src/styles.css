@@ -2775,6 +2775,17 @@ button.btn-stop:hover {
   background: rgba(255, 93, 93, 0.15);
 }
 
+.wb-trade-btn.delete {
+  color: var(--danger);
+  border-color: rgba(255, 93, 93, 0.3);
+  background: transparent;
+}
+
+.wb-trade-btn.delete:hover {
+  border-color: var(--danger);
+  background: rgba(255, 93, 93, 0.18);
+}
+
 .required {
   color: var(--danger);
   font-style: normal;

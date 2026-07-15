@@ -121,7 +121,7 @@ const tableRows = computed(() =>
         ]
   )
   .map((row) => {
-    const actions = `<button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button>`
+    const actions = `<button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button>`
     return [...row, actions]
   })
 )
@@ -225,6 +225,23 @@ function onCellClick(rowIndex: number, cellIndex: number, target: HTMLElement) {
     openTradeModal(pos, 'buy')
   } else if (action === 'sell') {
     openTradeModal(pos, 'sell')
+  } else if (action === 'delete') {
+    void confirmDelete(pos)
+  }
+}
+
+async function confirmDelete(pos: PositionItem) {
+  const label = `${pos.name || pos.symbol}（${pos.symbol}）`
+  if (!window.confirm(`确定物理删除 ${label} 的持仓记录及全部历史快照吗？\n此操作不可逆，卖出请用"卖出"按钮。`)) {
+    return
+  }
+  message.value = ''
+  try {
+    await api.deletePosition(pos.symbol, pos.account_id)
+    await loadAccounts()
+    emit('refresh')
+  } catch (error) {
+    message.value = `删除失败：${error instanceof Error ? error.message : String(error)}`
   }
 }
 

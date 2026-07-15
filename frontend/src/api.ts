@@ -197,6 +197,13 @@ export const api = {
     account_id?: number | null
   }) =>
     request<PositionItem>('/api/positions', { method: 'POST', body: JSON.stringify(payload) }),
+  deletePosition: (symbol: string, accountId?: number | null) => {
+    const q = accountId ? `?account_id=${accountId}` : ''
+    return request<{ symbol: string; deleted_positions: number; deleted_snapshots: number }>(
+      `/api/positions/${encodeURIComponent(symbol)}${q}`,
+      { method: 'DELETE' }
+    )
+  },
   positionBrokers: () => request<BrokerPreset[]>('/api/positions/brokers'),
   positionAccounts: () => request<PositionAccount[]>('/api/positions/accounts'),
   positionsSummary: (accountId?: number | null) =>
