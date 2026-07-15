@@ -2739,6 +2739,78 @@ button.btn-stop:hover {
   color: var(--danger);
 }
 
+/* 持仓表内买入/卖出按钮 */
+.wb-trade-btn {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 2px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.wb-trade-btn.buy {
+  color: var(--ok);
+  border-color: rgba(39, 197, 138, 0.3);
+  background: rgba(39, 197, 138, 0.06);
+}
+
+.wb-trade-btn.buy:hover {
+  border-color: var(--ok);
+  background: rgba(39, 197, 138, 0.15);
+}
+
+.wb-trade-btn.sell {
+  color: var(--danger);
+  border-color: rgba(255, 93, 93, 0.3);
+  background: rgba(255, 93, 93, 0.06);
+}
+
+.wb-trade-btn.sell:hover {
+  border-color: var(--danger);
+  background: rgba(255, 93, 93, 0.15);
+}
+
+.required {
+  color: var(--danger);
+  font-style: normal;
+  margin-left: 2px;
+}
+
+.trade-hint {
+  padding: 6px 10px;
+  border: 1px solid rgba(213, 166, 66, 0.25);
+  border-radius: 6px;
+  background: rgba(213, 166, 66, 0.06);
+  color: #d5c89e;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.trade-estimate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0c0c0d;
+}
+
+.trade-estimate span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trade-estimate strong {
+  font-size: 18px;
+  font-weight: 700;
+}
+
 /* 数字人中心 - 飞书机器人 */
 .digital-center-tabs {
   margin-bottom: 14px;

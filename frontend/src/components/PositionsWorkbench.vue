@@ -216,6 +216,19 @@ function onRowClick(index: number) {
   if (position) emit('openChart', position)
 }
 
+function onCellClick(rowIndex: number, cellIndex: number) {
+  const actionCol = tableColumns.value.length - 1
+  if (cellIndex !== actionCol) return
+  const pos = filteredPositions.value[rowIndex]
+  if (!pos) return
+  const target = event?.target as HTMLElement | undefined
+  if (target?.classList.contains('buy')) {
+    openTradeModal(pos, 'buy')
+  } else if (target?.classList.contains('sell')) {
+    openTradeModal(pos, 'sell')
+  }
+}
+
 function openTradeModal(pos: PositionItem, action: 'buy' | 'sell') {
   tradeForm.symbol = pos.symbol
   tradeForm.name = pos.name || pos.symbol
@@ -304,7 +317,7 @@ onMounted(async () => {
           <button type="button" @click="emit('openAgent', selectedAccountId)">添加持仓</button>
         </div>
       </header>
-      <DataTable :columns="tableColumns" :rows="tableRows" clickable @row-click="onRowClick" />
+      <DataTable :columns="tableColumns" :rows="tableRows" clickable @row-click="onRowClick" @cell-click="onCellClick" />
     </section>
 
     <div v-if="accountModalOpen" class="wb-modal-backdrop" @click.self="accountModalOpen = false">

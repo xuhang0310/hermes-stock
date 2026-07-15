@@ -7,6 +7,7 @@ defineProps<{
 
 const emit = defineEmits<{
   rowClick: [index: number]
+  cellClick: [rowIndex: number, cellIndex: number]
 }>()
 </script>
 
@@ -30,7 +31,12 @@ const emit = defineEmits<{
           @click="clickable && emit('rowClick', rowIndex)"
           @keydown.enter="clickable && emit('rowClick', rowIndex)"
         >
-          <td v-for="(cell, cellIndex) in row" :key="cellIndex" v-html="cell" @click.stop></td>
+          <td
+            v-for="(cell, cellIndex) in row"
+            :key="cellIndex"
+            v-html="cell"
+            @click="emit('cellClick', rowIndex, cellIndex)"
+          ></td>
         </tr>
       </tbody>
     </table>
