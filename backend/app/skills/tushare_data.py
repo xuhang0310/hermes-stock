@@ -1,11 +1,6 @@
 """技能：TuShare 数据 —— 通用透传 + 目录查询 + 39 个语义封装（聚焦 A 股核心约 150 接口）。
 
-Phase 1b：在首批 13 个语义封装基础上，补 26 个二批封装（龙虎榜机构/涨跌停/连板/两融明细/
-解禁/大宗/十大股东/增减持/股东人数/回购/质押/业绩快报/分红/资产负债表/现金流/主营构成/
-披露日期/指数权重/申万成分/市场统计/券商预测/公告/曾用名/技术因子/中央结算）。
-从 stock_tools 引用 schema 与执行器（单一来源、无漂移），注册进 skill_registry；
-run_agent_events 经 ALLOWED_STOCK_TOOLS 分发到此。preview 走 stock_observation_preview
-的通用分支（result.source 以 tushare. 开头且含 count），新增封装不必逐个加 preview 分支。
+Phase 2：registry 接管分发；prompt_instructions 补齐。
 """
 
 from backend.app.market.stock_tools import (
@@ -302,5 +297,8 @@ SKILL = {
             end_date=_optional_str(a.get("end_date")),
         ),
     },
-    "prompt_instructions": [],
+    "prompt_instructions": [
+        "行情、财务、龙虎榜、股东、两融、宏观等结构化数据优先走 TuShare：不确定用哪个接口时先 list_tushare_apis 查目录（分类→接口→参数），再用 tushare_query 透传调用。",
+        "查过目录仍没有的数据才说没有，不要一上来就说'没数据'。",
+    ],
 }

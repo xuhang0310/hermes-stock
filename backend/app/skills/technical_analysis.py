@@ -1,10 +1,7 @@
 """技能：技术分析 —— 日线分析、趋势、均线、量能、筹码、资金流、形态。
 
-Phase 1：从 stock_tools 引用 schema 与执行器（单一来源、无漂移），注册进
-skill_registry；本阶段不接管 run_agent_events 分发。参数抽取须与
-stock_tools.execute_stock_tool 同名分支逐字一致（Phase 2 切换分发后由 registry 调用）。
+Phase 2：registry 接管分发；roles + prompt_instructions 补齐。
 """
-
 from backend.app.market.stock_tools import (
     MAX_DAILY_ROWS,
     STOCK_TOOL_SCHEMAS,
@@ -32,7 +29,7 @@ SKILL = {
     "description": "日线分析、趋势判断、均线、量能、筹码分布、资金流向、形态识别",
     "version": "1.0.0",
     "chat_modes": ["stock", "research"],
-    "roles": [],
+    "roles": ["quant-analyst", "short-term-hunter"],
     "tools": _pick(
         "analyze_daily_bars",
         "analyze_trend",
@@ -73,5 +70,10 @@ SKILL = {
             days=_int_arg(a.get("days"), 60, 120),
         ),
     },
-    "prompt_instructions": [],
+    "prompt_instructions": [
+        "技术分析先调用 analyze_daily_bars 获取趋势概览（方向、MACD、RSI、支撑阻力），再按需深入均线（calculate_ma）、量能（get_volume_analysis）、形态（analyze_pattern）。",
+        "筹码和资金流只做辅助参考（get_chip_distribution / get_capital_flow），不要单独据此下趋势判断。",
+        "指标归因必须用数据说话：标注均线值、量比、换手率、MACD 值；无数据时说明缺口，不编造。",
+        "输出要区分事实（K线数据）、推断（趋势判断）、风险（止损位、追高警告）和下一步观察动作。",
+    ],
 }

@@ -1,10 +1,7 @@
 """技能：新闻与市场情报 —— Tavily/Brave 搜索（个股新闻、市场情报、综合情报）。
 
-Phase 1：从 stock_tools 引用 schema 与执行器（单一来源、无漂移），注册进
-skill_registry；本阶段不接管 run_agent_events 分发。参数抽取须与
-stock_tools.execute_stock_tool 同名分支逐字一致（Phase 2 切换分发后由 registry 调用）。
+Phase 2：registry 接管分发；roles + prompt_instructions 补齐。
 """
-
 from backend.app.market.stock_tools import (
     STOCK_TOOL_SCHEMAS,
     _int_arg,
@@ -27,7 +24,7 @@ SKILL = {
     "description": "个股新闻搜索、市场情报搜索、综合情报（Tavily/Brave 自动择优）",
     "version": "1.0.0",
     "chat_modes": ["stock", "research"],
-    "roles": [],
+    "roles": ["intelligence-officer", "stock-pm"],
     "tools": _pick(
         "search_stock_news",
         "search_market_intel",
@@ -51,5 +48,10 @@ SKILL = {
             max_results=_int_arg(a.get("max_results"), 6, 8),
         ),
     },
-    "prompt_instructions": [],
+    "prompt_instructions": [
+        "消息过滤：先区分内部事件、公告/新闻、政策/行业叙事和未经验证的外部文本。",
+        "可信度分层：对每条情报标注来源、时效、影响方向和是否需要进一步核验。",
+        "面向持仓和自选池输出真正需要行动或转交其他 Agent 的信息。",
+        "遇到系统外的标的、行业、政策、新闻时，用 search_market_intel / search_stock_news 联网搜索补充，绝不因为'不在持仓/自选池'就拒绝回答。",
+    ],
 }

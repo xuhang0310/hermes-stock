@@ -166,6 +166,9 @@ class SkillRegistry:
     def skill_names(self) -> list[str]:
         return list(self._skills.keys())
 
+    def all_tool_names(self) -> frozenset[str]:
+        return frozenset(self._tool_executors.keys())
+
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self._tool_executors
 

@@ -1,15 +1,9 @@
 """技能：数字人工具 —— 组合/自选/证据/风控/研报/情报/量化/宏观/短线等数字人专用工具。
 
-Phase 3：从 digital_human_tools 引用 schema 与执行器（单一来源、无漂移），注册进
-skill_registry；本阶段 execute_digital_human_tool 转发到此执行。工具组装与角色路由
-（ROLE_TOOL_NAMES + COMMON_TOOL_NAMES）仍在 digital_human_tools，行为零变化；roles=空
-仅作 list_skills 展示，不参与路由（Phase 4 配合 DB enabled_skills 再做 per-role 可见性）。
-
-注意：digital_human_tools 有自己的 _optional_str / _int_arg（与 stock_tools 同名但独立），
-本文件必须从 digital_human_tools 导入，以保证参数抽取与 execute_digital_human_tool 同名
-分支逐字一致。
+Phase 3：roles 按 ROLE_TOOL_NAMES 逐角色补齐；prompt_instructions 从 ROLE_SKILLS 迁移。
+注意：role 对应的专属工具绑定在 skills/digital_human.py 的 roles 里统一注册，
+具体枚举见 digital_human_tools.ROLE_TOOL_NAMES。
 """
-
 from backend.app.market.digital_human_tools import (
     DIGITAL_HUMAN_TOOL_SCHEMAS,
     _int_arg,
@@ -53,7 +47,7 @@ SKILL = {
     "description": "数字人专用：组合/自选/证据/风控/研报/情报/量化/宏观/短线工具集",
     "version": "1.0.0",
     "chat_modes": ["research"],
-    "roles": [],
+    "roles": [],  # 空=所有 role 可见；per-role 工具由 digital_human_tool_schemas/digital_human_tool_names 在组装时筛选
     "tools": _pick(
         "get_my_universe",
         "get_portfolio_snapshot",
@@ -136,6 +130,13 @@ SKILL = {
             symbol=_optional_str(a.get("symbol")),
         ),
     },
-    # ROLE_SKILLS 提示词迁移留待后续（涉及 prompt 文案逐字一致，需单独回归）
-    "prompt_instructions": [],
+    "prompt_instructions": [
+        "工具使用规则：",
+        "1. 研究本系统自己的持仓和自选池时，优先调用 get_my_universe 或对应快照工具，用真实数据说话。",
+        "2. run_sql / get_schema 是通用底座工具，可以兜底探索，但优先使用结构化专属工具。",
+        "3. 行情、财务、龙虎榜、股东、两融、宏观等结构化数据优先走 TuShare。",
+        "4. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。",
+        "5. 结论要标注来源（内部数据 / TuShare / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。",
+        "6. 持仓写入（若可用 update_my_positions 工具）：先 get_portfolio_snapshot 读现状；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
+    ],
 }

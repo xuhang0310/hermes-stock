@@ -16,18 +16,15 @@ from sqlalchemy.orm import selectinload
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal, engine
 from backend.app.market.digital_human_tools import (
-    digital_human_observation_preview,
     digital_human_skill_prompt,
     digital_human_tool_display_name,
-    digital_human_tool_names,
-    digital_human_tool_schemas,
-    execute_digital_human_tool,
     write_tool_schemas,
 )
 from backend.app.core.models import LlmModelConfig
 from backend.app.core.llm_config import active_llm_config
 from backend.app.core.settings import settings
 from backend.app.data.repository import StockRepository
+from backend.app.skills.registry import skill_registry
 from backend.app.agents.position_intent import (
     PositionAction,
     build_intent_hint,
@@ -36,10 +33,6 @@ from backend.app.agents.position_intent import (
 )
 from backend.app.ai.retrieval import retrieve_chunks
 from backend.app.market.stock_tools import (
-    STOCK_TOOL_SCHEMAS,
-    execute_stock_tool,
-    stock_tool_display_name,
-    stock_observation_preview,
     stock_system_prompt_with_skills,
 )
 
@@ -47,73 +40,6 @@ from backend.app.market.stock_tools import (
 AUDIT_LOG = Path(__file__).resolve().parents[2] / "agent_audit.log"  # agents/ -> app/ -> backend/
 MAX_ROWS = 100
 OBSERVATION_CHAR_LIMIT = 7000
-
-# stock 模式工具事件分发白名单：run_agent_events 仅对集合内工具 yield tool_start/tool_done/action，
-# 不在集合的工具落到 else 分支返回"未知工具"。新增 stock 工具必须同步加此常量、STOCK_TOOL_SCHEMAS、
-# skills 模块 executor 三处（三源一致）。Phase 2 切 registry 接管分发后可改为从 schema 自动抽取。
-ALLOWED_STOCK_TOOLS: frozenset[str] = frozenset({
-    "resolve_stock",
-    "get_latest_price",
-    "get_tushare_daily",
-    "get_daily_history",
-    "get_realtime_quote",
-    "analyze_daily_bars",
-    "analyze_trend",
-    "calculate_ma",
-    "get_volume_analysis",
-    "get_chip_distribution",
-    "get_capital_flow",
-    "get_stock_info",
-    "get_analysis_context",
-    "analyze_pattern",
-    "search_stock_news",
-    "search_market_intel",
-    "search_comprehensive_intel",
-    # TuShare 全量接口落地：通用透传 + 目录查询 + 首批语义封装（Phase 0.5 + 1a）
-    "tushare_query",
-    "list_tushare_apis",
-    "get_trade_cal",
-    "get_suspend",
-    "get_stk_limit",
-    "get_top_list",
-    "get_hm_detail",
-    "get_margin",
-    "get_moneyflow_hsgt",
-    "get_forecast",
-    "get_income",
-    "get_index_daily",
-    "get_sw_daily",
-    "get_cn_cpi",
-    "get_tushare_minutes",
-    # 二批语义封装（Phase 1b）
-    "get_top_inst",
-    "get_limit_list",
-    "get_limit_step",
-    "get_margin_detail",
-    "get_share_float",
-    "get_block_trade",
-    "get_top10_holders",
-    "get_top10_float_holders",
-    "get_holdertrade",
-    "get_holdernumber",
-    "get_repurchase",
-    "get_pledge_stat",
-    "get_express",
-    "get_dividend",
-    "get_balancesheet",
-    "get_cashflow",
-    "get_fina_mainbz",
-    "get_disclosure_date",
-    "get_index_weight",
-    "get_index_member",
-    "get_daily_info",
-    "get_report_rc",
-    "get_anns",
-    "get_namechange",
-    "get_stk_factor",
-    "get_ccass_hold",
-})
-
 FORBIDDEN_SQL = re.compile(
     r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|rename|"
     r"call|handler|load_file|lock|unlock|shutdown|kill|outfile|dumpfile|benchmark|sleep|"
@@ -703,14 +629,12 @@ def run_agent_events(
     digital_tool_names: set[str] = set()
     write_tool_names: set[str] = set()
     if stock_mode:
-        tools = STOCK_TOOL_SCHEMAS
+        tools = skill_registry.get_tools_for("stock")
     elif knowledge_mode:
-        # knowledge mode: 仅 run_sql + get_schema + search_knowledge，无数字人工具
-        tools = list(TOOLS)
+        tools = list(TOOLS)  # knowledge mode 仍走硬编码：tools 固定且不参与角色筛选
     else:
         # research mode
-        digital_tool_names = digital_human_tool_names(digital_human_code)
-        tools = [*TOOLS, *digital_human_tool_schemas(digital_human_code)]
+        tools = [*TOOLS, *skill_registry.get_tools_for("research", role_code=digital_human_code)]
         if can_write_positions:
             w_schemas = write_tool_schemas()
             if w_schemas:
@@ -809,28 +733,8 @@ def run_agent_events(
             except json.JSONDecodeError:
                 args = {}
 
-            if stock_mode and name in ALLOWED_STOCK_TOOLS:
-                display_name = stock_tool_display_name(name)
-                yield {"type": "tool_start", "tool": name, "display_name": display_name}
-                yield {"type": "action", "tool": name, "content": json.dumps(args, ensure_ascii=False)}
-                tool_started = time.monotonic()
-                result = execute_stock_tool(name, args)
-                duration = round(time.monotonic() - tool_started, 2)
-                yield {"type": "observation", "content": stock_observation_preview(name, result)}
-                yield {
-                    "type": "tool_done",
-                    "tool": name,
-                    "display_name": display_name,
-                    "success": "error" not in result,
-                    "duration": duration,
-                }
-                completed_tool_label = display_name
-            elif not stock_mode and name in digital_tool_names:
-                display_name = digital_human_tool_display_name(name)
-                yield {"type": "action", "tool": name, "display_name": display_name, "content": json.dumps(args, ensure_ascii=False)}
-                result = execute_digital_human_tool(digital_human_code, name, args)
-                yield {"type": "observation", "content": digital_human_observation_preview(name, result)}
-            elif write_tool_names and name in write_tool_names:
+            if name in write_tool_names:
+                # 写持仓工具需要额外上下文，不经过 registry
                 display_name = digital_human_tool_display_name(name)
                 yield {"type": "action", "tool": name, "display_name": display_name, "content": json.dumps(args, ensure_ascii=False)}
                 result = _execute_position_write_tool(
@@ -865,6 +769,24 @@ def run_agent_events(
                 else:
                     label = f"{table} 的数据字典" if table else f"所有表清单（{result.get('count', 0)} 张）"
                     yield {"type": "observation", "content": f"已返回 {label}"}
+            elif skill_registry.has_tool(name):
+                display_name = _tool_display_name(name)
+                if stock_mode:
+                    yield {"type": "tool_start", "tool": name, "display_name": display_name}
+                yield {"type": "action", "tool": name, "content": json.dumps(args, ensure_ascii=False)}
+                tool_started = time.monotonic()
+                result = skill_registry.execute(name, args)
+                duration = round(time.monotonic() - tool_started, 2)
+                yield {"type": "observation", "content": _tool_result_preview(name, result)}
+                if stock_mode:
+                    yield {
+                        "type": "tool_done",
+                        "tool": name,
+                        "display_name": display_name,
+                        "success": "error" not in result,
+                        "duration": duration,
+                    }
+                    completed_tool_label = display_name
             else:
                 result = {"error": f"未知工具 {name}"}
                 yield {"type": "observation", "content": result["error"]}
