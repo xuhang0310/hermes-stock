@@ -24,6 +24,7 @@ const tradeForm = reactive({
   symbol: '',
   name: '',
   action: 'buy' as 'buy' | 'sell',
+  mode: 'row' as 'row' | 'add',
   quantity: null as number | null,
   price: null as number | null,
   account_id: null as number | null,
@@ -32,7 +33,8 @@ const tradeForm = reactive({
 })
 const tradeTitle = computed(() => {
   const act = tradeForm.action === 'buy' ? '买入' : '卖出'
-  return `${act} · ${tradeForm.name || tradeForm.symbol}`
+  const subj = tradeForm.name || tradeForm.symbol
+  return subj ? `${act} · ${subj}` : act
 })
 const tradeEstimate = computed(() => {
   const qty = tradeForm.quantity || 0
@@ -245,22 +247,41 @@ async function confirmDelete(pos: PositionItem) {
   }
 }
 
-function openTradeModal(pos: PositionItem, action: 'buy' | 'sell') {
-  tradeForm.symbol = pos.symbol
-  tradeForm.name = pos.name || pos.symbol
+function openTradeModal(pos: PositionItem | null, action: 'buy' | 'sell', mode: 'row' | 'add' = 'row') {
+  tradeForm.mode = mode
   tradeForm.action = action
   tradeForm.quantity = null
-  tradeForm.price = pos.latest_price ?? pos.cost_price ?? null
-  tradeForm.latest_price = pos.latest_price ?? 0
-  tradeForm.current_quantity = pos.position_quantity ?? pos.quantity ?? 0
   tradeForm.account_id = selectedAccountId.value
   message.value = ''
+  if (mode === 'add') {
+    // 总买入入口：symbol/name 留空由用户填，价格不强预填
+    tradeForm.symbol = ''
+    tradeForm.name = ''
+    tradeForm.price = null
+    tradeForm.latest_price = 0
+    tradeForm.current_quantity = 0
+  } else {
+    tradeForm.symbol = pos!.symbol
+    tradeForm.name = pos!.name || pos!.symbol
+    tradeForm.price = pos!.latest_price ?? pos!.cost_price ?? null
+    tradeForm.latest_price = pos!.latest_price ?? 0
+    tradeForm.current_quantity = pos!.position_quantity ?? pos!.quantity ?? 0
+  }
   tradeModalOpen.value = true
 }
 
 async function submitTrade() {
+  if (tradeForm.mode === 'add' && !tradeForm.symbol.trim()) {
+    message.value = '请输入股票代码'
+    return
+  }
   if (!tradeForm.quantity || tradeForm.quantity <= 0) {
     message.value = '请输入数量'
+    return
+  }
+  // add 模式（总买入入口）价格必填；行内加仓价格可选（不填走最新价兜底）
+  if (tradeForm.mode === 'add' && (!tradeForm.price || tradeForm.price <= 0)) {
+    message.value = '请输入买入价格'
     return
   }
   if (!tradeForm.account_id) {
@@ -271,8 +292,8 @@ async function submitTrade() {
   message.value = ''
   try {
     await api.addPosition({
-      symbol: tradeForm.symbol,
-      name: tradeForm.name,
+      symbol: tradeForm.symbol.trim().toUpperCase(),
+      name: tradeForm.name || undefined,
       position_quantity: tradeForm.quantity,
       cost_price: tradeForm.price || undefined,
       action: tradeForm.action,
@@ -330,6 +351,7 @@ onMounted(async () => {
         <div class="wb-actions">
           <button v-if="selectedAccount" type="button" @click="openFund(selectedAccount)">维护资金</button>
           <button v-if="selectedAccount" type="button" @click="editAccount(selectedAccount)">账户设置</button>
+          <button type="button" class="primary" @click="openTradeModal(null, 'buy', 'add')">买入</button>
           <button type="button" @click="emit('openAgent', selectedAccountId)">添加持仓</button>
         </div>
       </header>
@@ -406,6 +428,14 @@ onMounted(async () => {
     <div v-if="tradeModalOpen" class="wb-modal-backdrop" @click.self="tradeModalOpen = false">
       <div class="wb-modal">
         <h3>{{ tradeTitle }}</h3>
+        <label v-if="tradeForm.mode === 'add'">
+          <span>股票代码 <em class="required">*</em></span>
+          <input v-model="tradeForm.symbol" placeholder="如 600519.SH 或 600519" />
+        </label>
+        <label v-if="tradeForm.mode === 'add'">
+          <span>股票名称（选填）</span>
+          <input v-model="tradeForm.name" placeholder="如 贵州茅台" />
+        </label>
         <label>
           <span>证券账户 <em class="required">*</em></span>
           <select v-model.number="tradeForm.account_id">
@@ -420,7 +450,7 @@ onMounted(async () => {
           <input v-model.number="tradeForm.quantity" type="number" min="0" step="1" placeholder="股数" />
         </label>
         <label>
-          <span>价格（选填，不填用最新价）</span>
+          <span>{{ tradeForm.mode === 'add' ? '买入价格 *' : '价格（选填，不填用最新价）' }}</span>
           <input v-model.number="tradeForm.price" type="number" min="0" step="0.01" placeholder="元/股" />
         </label>
         <div v-if="tradeForm.action === 'sell'" class="trade-hint">
