@@ -23,6 +23,7 @@ from sqlalchemy import desc, or_, select, text
 from sqlalchemy.orm import Session
 
 from backend.app.core.llm_config import active_llm_config
+from backend.app.ai.llm_client import chat_completion
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import AiChatMessage, AiChatSession, UserMemory
@@ -678,24 +679,14 @@ def _call_llm_for_digestion(messages: list[AiChatMessage], user_id: int) -> list
         f'[{{"type":"...","content":"...","confidence":0.8,"importance":0.6}}]'
     )
 
-    url = llm_config["base_url"].rstrip("/") + "/chat/completions"
-    payload: dict[str, Any] = {
-        "model": llm_config["model"],
-        "messages": [
+    data = chat_completion(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
-        "temperature": 0,
-        "stream": False,
-    }
-    headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
-
-    with httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
-        response = client.post(url, json=payload, headers=headers)
-        if response.status_code != 200:
-            raise RuntimeError(f"LLM 返回 {response.status_code}")
-
-    data = response.json()
+        llm_config,
+        temperature=0,
+    )
     content = data["choices"][0]["message"]["content"]
     return _extract_json_array(content)
 

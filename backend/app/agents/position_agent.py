@@ -5,12 +5,11 @@ from collections.abc import Generator
 from datetime import date
 from typing import Any
 
-import httpx
-
 from backend.app.agents.position_import import decode_image_payload
 from backend.app.agents.position_intent import PositionAction, build_intent_hint, detect_position_intent, intent_summary
 from backend.app.data.repository import StockRepository
 from backend.app.agents.stock_agent import _stream_chat
+from backend.app.ai.llm_client import chat_completion
 from backend.app.core.llm_config import active_llm_config
 
 
@@ -433,21 +432,7 @@ A 股代码规范:
 
 
 def _chat_completion(messages: list[dict[str, Any]], llm_config: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
-    url = llm_config["base_url"].rstrip("/") + "/chat/completions"
-    payload = {
-        "model": llm_config["model"],
-        "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
-        "temperature": 0.1,
-        "stream": False,
-    }
-    headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
-    with httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
-        response = client.post(url, json=payload, headers=headers)
-    if response.status_code >= 400:
-        raise RuntimeError(f"持仓 Agent 模型接口返回 {response.status_code}: {response.text[:600]}")
-    body = response.json()
+    body = chat_completion(messages, llm_config, tools=tools, temperature=0.1)
     choices = body.get("choices") or []
     if not choices:
         raise RuntimeError("持仓 Agent 模型没有返回 choices")

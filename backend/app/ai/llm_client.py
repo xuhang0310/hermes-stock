@@ -1,0 +1,144 @@
+"""LLM 调用公共客户端 —— 统一 OpenAI 兼容 ``/chat/completions`` 的 url 拼接、
+Bearer 认证、超时、状态码检查，消灭分散在 stock_agent / position_agent /
+position_import / prompt_recommendations / memory 五处的重复样板。
+
+只收敛"怎么发请求 + 怎么处理错误 + 怎么解析 SSE"，不动调用方的 payload
+构造与结果解析：``temperature`` / ``tools`` / ``tool_choice`` / ``stream``
+均由参数传入，保持各路径原行为不变（重构即净收益，无行为漂移）。
+"""
+from __future__ import annotations
+
+import json
+from collections.abc import Generator, Iterable
+from typing import Any
+
+import httpx
+
+from backend.app.core.applog import log_event
+
+
+def _build_payload(
+    llm_config: dict[str, Any],
+    messages: list[dict],
+    *,
+    tools: list[dict] | None,
+    tool_choice: str | None,
+    temperature: float | None,
+    stream: bool,
+) -> tuple[str, dict[str, Any], dict[str, str]]:
+    """组装 url / payload / headers。temperature=None 时沿用 llm_config 里的值。"""
+    if not llm_config.get("api_key") or not llm_config.get("base_url"):
+        raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在模型平台/模型配置中补齐。")
+    url = llm_config["base_url"].rstrip("/") + "/chat/completions"
+    payload: dict[str, Any] = {
+        "model": llm_config["model"],
+        "messages": messages,
+        "temperature": llm_config["temperature"] if temperature is None else temperature,
+        "stream": stream,
+    }
+    if tools:
+        payload["tools"] = tools
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
+    headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
+    return url, payload, headers
+
+
+def chat_completion(
+    messages: list[dict],
+    llm_config: dict,
+    tools: list[dict] | None = None,
+    *,
+    tool_choice: str | None = "auto",
+    temperature: float | None = None,
+    timeout: float = 120.0,
+    log_module: str | None = None,
+) -> dict:
+    """同步非流式 chat completion，返回 ``response.json()``。
+
+    HTTP 状态 >= 400 时抛 ``RuntimeError``（含响应前 600 字符），并在落库日志里
+    记一条 ERROR（``log_module`` 为 None 则不落库，避免无 ctx 的调用点出错）。
+    """
+    url, payload, headers = _build_payload(
+        llm_config, messages,
+        tools=tools, tool_choice=tool_choice, temperature=temperature, stream=False,
+    )
+    with httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
+        response = client.post(url, json=payload, headers=headers)
+    if response.status_code >= 400:
+        body = response.text[:600]
+        if log_module:
+            log_event(log_module, "ERROR", "LLM 接口错误", status=response.status_code)
+        raise RuntimeError(f"LLM 接口返回 {response.status_code}: {body}")
+    return response.json()
+
+
+def parse_sse_stream(lines: Iterable[str]) -> Generator[tuple[str, Any], None, None]:
+    """解析 OpenAI 兼容 SSE 流，yield ``(kind, payload)``。
+
+    kind 取值：
+    - ``"reasoning"`` —— 推理内容片段（DeepSeek/某些模型带 ``reasoning_content``）
+    - ``"content"`` —— 正文片段
+    - ``"message"`` —— 流结束时一次性 yield 完整 message dict（含累积 content + tool_calls）
+    """
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    for line in lines:
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+        if reasoning:
+            yield "reasoning", reasoning
+        text_piece = delta.get("content")
+        if text_piece:
+            content_parts.append(text_piece)
+            yield "content", text_piece
+        for item in delta.get("tool_calls") or []:
+            slot = tool_calls.setdefault(int(item.get("index", 0)), {"id": "", "function": {"name": "", "arguments": ""}})
+            if item.get("id"):
+                slot["id"] = item["id"]
+            function = item.get("function") or {}
+            if function.get("name"):
+                slot["function"]["name"] = function["name"]
+            if function.get("arguments"):
+                slot["function"]["arguments"] += function["arguments"]
+
+    message: dict = {"content": "".join(content_parts)}
+    if tool_calls:
+        message["tool_calls"] = [
+            {"id": slot["id"] or f"call_{index}", "type": "function", "function": slot["function"]}
+            for index, slot in sorted(tool_calls.items())
+        ]
+    yield "message", message
+
+
+def stream_chat(
+    messages: list[dict],
+    llm_config: dict,
+    tools: list[dict] | None = None,
+    *,
+    temperature: float | None = None,
+    timeout: float = 180.0,
+) -> Generator[tuple[str, Any], None, None]:
+    """流式 chat completion，yield ``(kind, payload)``（见 :func:`parse_sse_stream`）。"""
+    url, payload, headers = _build_payload(
+        llm_config, messages,
+        tools=tools, tool_choice=None, temperature=temperature, stream=True,
+    )
+    with httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
+        with client.stream("POST", url, json=payload, headers=headers) as response:
+            if response.status_code != 200:
+                body = response.read().decode("utf-8", "replace")[:300]
+                raise RuntimeError(f"LLM 接口返回 {response.status_code}: {body}")
+            yield from parse_sse_stream(response.iter_lines())

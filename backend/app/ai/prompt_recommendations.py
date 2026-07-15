@@ -13,6 +13,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from backend.app.ai.llm_client import chat_completion
 from backend.app.core.llm_config import active_llm_config
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
@@ -421,21 +422,7 @@ def _call_llm_for_recommendations(
             return []
 
         messages = _build_llm_messages(profile, context)
-        url = llm_config["base_url"].rstrip("/") + "/chat/completions"
-        payload: dict[str, Any] = {
-            "model": llm_config["model"],
-            "messages": messages,
-            "temperature": 0,
-            "stream": False,
-        }
-        headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
-        with httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
-            response = client.post(url, json=payload, headers=headers)
-            if response.status_code != 200:
-                body = response.text[:300]
-                raise RuntimeError(f"LLM 返回 {response.status_code}: {body}")
-
-        data = response.json()
+        data = chat_completion(messages, llm_config, temperature=0)
         content = data["choices"][0]["message"]["content"]
         parsed = _extract_json(content)
         return _parse_llm_response(parsed)

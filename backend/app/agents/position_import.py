@@ -6,8 +6,7 @@ import json
 import re
 from typing import Any
 
-import httpx
-
+from backend.app.ai.llm_client import chat_completion
 from backend.app.core.llm_config import active_llm_config
 
 
@@ -181,25 +180,15 @@ def parse_position_input(
     else:
         user_content = prompt
 
-    payload = {
-        "model": llm_config["model"],
-        "messages": [
+    body = chat_completion(
+        [
             {"role": "system", "content": "你是严谨的 A 股持仓录入结构化助手，只能返回可解析 JSON。"},
             {"role": "user", "content": user_content},
         ],
-        "temperature": 0,
-        "stream": False,
-    }
-    headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
-    url = llm_config["base_url"].rstrip("/") + "/chat/completions"
-    with httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
-        response = client.post(url, json=payload, headers=headers)
-    if response.status_code >= 400:
-        body = response.text[:600]
-        log_event("position", "ERROR", "持仓录入失败：视觉模型接口错误", status=response.status_code)
-        raise RuntimeError(f"视觉模型接口返回 {response.status_code}: {body}")
-
-    body = response.json()
+        llm_config,
+        temperature=0,
+        log_module="position",
+    )
     content = _extract_message_content(body)
     parsed = _extract_json(content)
     account = _normalize_account(parsed.get("account") if isinstance(parsed, dict) else None)

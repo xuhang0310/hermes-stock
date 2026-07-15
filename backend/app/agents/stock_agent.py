@@ -3,18 +3,18 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Generator, Iterable
+from collections.abc import Generator
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import httpx
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal, engine
+from backend.app.ai.llm_client import stream_chat as _stream_chat
 from backend.app.market.digital_human_tools import (
     digital_human_skill_prompt,
     digital_human_tool_display_name,
@@ -417,69 +417,6 @@ def _knowledge_search_preview(result: dict) -> str:
         content_snippet = hit.get("content", "")[:120]
         preview_parts.append(f"#{i+1} [{hit.get('doc_type','')}] {title}: {content_snippet}...")
     return "\n".join(preview_parts)
-
-
-def _parse_sse_events(lines: Iterable[str]) -> Generator[tuple[str, Any], None, None]:
-    content_parts: list[str] = []
-    tool_calls: dict[int, dict] = {}
-    for line in lines:
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            chunk = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        choices = chunk.get("choices") or []
-        if not choices:
-            continue
-        delta = choices[0].get("delta") or {}
-        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-        if reasoning:
-            yield "reasoning", reasoning
-        text_piece = delta.get("content")
-        if text_piece:
-            content_parts.append(text_piece)
-            yield "content", text_piece
-        for item in delta.get("tool_calls") or []:
-            slot = tool_calls.setdefault(int(item.get("index", 0)), {"id": "", "function": {"name": "", "arguments": ""}})
-            if item.get("id"):
-                slot["id"] = item["id"]
-            function = item.get("function") or {}
-            if function.get("name"):
-                slot["function"]["name"] = function["name"]
-            if function.get("arguments"):
-                slot["function"]["arguments"] += function["arguments"]
-
-    message: dict = {"content": "".join(content_parts)}
-    if tool_calls:
-        message["tool_calls"] = [
-            {"id": slot["id"] or f"call_{index}", "type": "function", "function": slot["function"]}
-            for index, slot in sorted(tool_calls.items())
-        ]
-    yield "message", message
-
-
-def _stream_chat(messages: list[dict], llm_config: dict, tools: list[dict] | None = None) -> Generator[tuple[str, Any], None, None]:
-    if not llm_config["api_key"] or not llm_config["base_url"]:
-        raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在模型平台/模型配置中补齐。")
-    url = llm_config["base_url"].rstrip("/") + "/chat/completions"
-    payload = {
-        "model": llm_config["model"],
-        "messages": messages,
-        "tools": tools or TOOLS,
-        "temperature": llm_config["temperature"],
-        "stream": True,
-    }
-    headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
-    with httpx.Client(timeout=httpx.Timeout(180.0, connect=15.0)) as client:
-        with client.stream("POST", url, json=payload, headers=headers) as response:
-            if response.status_code != 200:
-                body = response.read().decode("utf-8", "replace")[:300]
-                raise RuntimeError(f"LLM 接口返回 {response.status_code}: {body}")
-            yield from _parse_sse_events(response.iter_lines())
 
 
 def _observation_preview(result: dict) -> str:
