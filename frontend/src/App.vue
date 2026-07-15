@@ -150,6 +150,21 @@ async function refreshAll() {
   }
 }
 
+// 静默刷新持仓+自选：买入/卖出/删除后调用，不显示 loading 遮罩，避免页面闪烁
+async function refreshPositions() {
+  if (!currentUser.value) return
+  try {
+    const [positionPayload, watchlistPayload] = await Promise.all([
+      api.positions(),
+      api.watchlist()
+    ])
+    positions.value = positionPayload
+    watchlist.value = watchlistPayload
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '加载失败'
+  }
+}
+
 async function login(payload: { username: string; password: string }) {
   loginLoading.value = true
   loginError.value = ''
@@ -528,6 +543,7 @@ onMounted(initialize)
         v-else-if="activePage === 'positions'"
         :positions="positions"
         @refresh="refreshAll"
+        @refresh-positions="refreshPositions"
         @open-agent="openPositionAgent"
         @open-chart="openChartFromPosition"
       />

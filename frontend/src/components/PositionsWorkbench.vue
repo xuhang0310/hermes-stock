@@ -5,7 +5,7 @@ import DataTable from './DataTable.vue'
 import type { BrokerPreset, PositionAccount, PositionItem, PositionSummary } from '../types'
 
 const props = defineProps<{ positions: PositionItem[] }>()
-const emit = defineEmits<{ refresh: []; openAgent: [accountId: number | null]; openChart: [position: PositionItem] }>()
+const emit = defineEmits<{ refresh: []; refreshPositions: []; openAgent: [accountId: number | null]; openChart: [position: PositionItem] }>()
 
 const accounts = ref<PositionAccount[]>([])
 const brokers = ref<BrokerPreset[]>([])
@@ -204,7 +204,7 @@ async function saveFund() {
     await api.updateAccountFunds(fundForm.account_id, fundForm.total_asset)
     fundModalOpen.value = false
     await loadAccounts()
-    emit('refresh')
+    emit('refreshPositions')
   } catch (error) {
     message.value = `保存失败：${error instanceof Error ? error.message : String(error)}`
   }
@@ -239,7 +239,7 @@ async function confirmDelete(pos: PositionItem) {
   try {
     await api.deletePosition(pos.symbol, pos.account_id)
     await loadAccounts()
-    emit('refresh')
+    emit('refreshPositions')
   } catch (error) {
     message.value = `删除失败：${error instanceof Error ? error.message : String(error)}`
   }
@@ -280,7 +280,7 @@ async function submitTrade() {
     })
     tradeModalOpen.value = false
     await loadAccounts()
-    emit('refresh')
+    emit('refreshPositions')
   } catch (error) {
     message.value = `操作失败：${error instanceof Error ? error.message : String(error)}`
   } finally {

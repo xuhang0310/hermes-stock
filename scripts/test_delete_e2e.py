@@ -82,6 +82,12 @@ def main() -> int:
         page.on("request", on_request)
 
         del_btn.click()
+        # 立刻检查：不应出现全页 loading 遮罩（"正在加载 A股研究台..."）
+        page.wait_for_timeout(200)
+        loading_panel = page.locator('.loading-panel').count()
+        assert loading_panel == 0, f"删除后出现 loading 遮罩（闪烁），count={loading_panel}"
+        print("[不闪烁] 删除后无 loading 遮罩")
+
         page.wait_for_timeout(2000)
 
         # 验证 confirm 弹了
