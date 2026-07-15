@@ -33,13 +33,35 @@ from backend.app.agents.position_intent import (
 )
 from backend.app.ai.retrieval import retrieve_chunks
 from backend.app.market.stock_tools import (
+    stock_observation_preview,
     stock_system_prompt_with_skills,
+    stock_tool_display_name,
 )
 
 
 AUDIT_LOG = Path(__file__).resolve().parents[2] / "agent_audit.log"  # agents/ -> app/ -> backend/
 MAX_ROWS = 100
 OBSERVATION_CHAR_LIMIT = 7000
+
+
+def _registry_display_name(name: str) -> str:
+    """从 registry 注册的工具中取展示名：stock 表 + digital_human 表兜底。"""
+    return stock_tool_display_name(name)
+
+
+def _registry_observation_preview(name: str, result: dict) -> str:
+    """统一 preview：stock_observation_preview 覆盖了 stock + TuShare 语义封装，
+    数字人工具走 digital_human_observation_preview 兜底。
+    """
+    if "error" in result:
+        return str(result["error"])
+    from backend.app.market.digital_human_tools import digital_human_observation_preview
+    stock_preview = stock_observation_preview(name, result)
+    if stock_preview != "工具调用完成。":
+        return stock_preview
+    return digital_human_observation_preview(name, result)
+
+
 FORBIDDEN_SQL = re.compile(
     r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|rename|"
     r"call|handler|load_file|lock|unlock|shutdown|kill|outfile|dumpfile|benchmark|sleep|"
@@ -770,14 +792,14 @@ def run_agent_events(
                     label = f"{table} 的数据字典" if table else f"所有表清单（{result.get('count', 0)} 张）"
                     yield {"type": "observation", "content": f"已返回 {label}"}
             elif skill_registry.has_tool(name):
-                display_name = _tool_display_name(name)
+                display_name = _registry_display_name(name)
                 if stock_mode:
                     yield {"type": "tool_start", "tool": name, "display_name": display_name}
                 yield {"type": "action", "tool": name, "content": json.dumps(args, ensure_ascii=False)}
                 tool_started = time.monotonic()
                 result = skill_registry.execute(name, args)
                 duration = round(time.monotonic() - tool_started, 2)
-                yield {"type": "observation", "content": _tool_result_preview(name, result)}
+                yield {"type": "observation", "content": _registry_observation_preview(name, result)}
                 if stock_mode:
                     yield {
                         "type": "tool_done",
