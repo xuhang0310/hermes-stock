@@ -17,6 +17,11 @@ dependencies = [
     "sentence-transformers>=3.0.0",
 ]
 
+# 可选：position_import v2 试点（STOCK_POSITION_AGENT_V2=true 时才用）。
+# 默认不装，env 关时 position_import 走旧 httpx 路径，零影响。装：pip install -e ".[ai]"
+[project.optional-dependencies]
+ai = ["pydantic-ai>=2.0"]
+
 [project.scripts]
 hermes-api = "backend.app.main:main"
 
