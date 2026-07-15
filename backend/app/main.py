@@ -92,6 +92,7 @@ class PositionHoldingIn(BaseModel):
     thesis: str | None = None
     risk_note: str | None = None
     status: str | None = Field(default=None, max_length=24)
+    action: str | None = Field(default=None, max_length=24, description="交易动作: buy/sell/add/reduce/close/replace/update_field")
 
 
 class PositionAiImportIn(BaseModel):
@@ -349,7 +350,9 @@ def create_app(init_db: bool = True) -> FastAPI:
         _context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
-            return repository.save_position_holding(payload.model_dump(exclude_none=True), source_type="manual")
+            data = payload.model_dump(exclude_none=True)
+            action = data.pop("action", None)
+            return repository.merge_position_holding(data, action=action, source_type="manual", commit=True)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -425,25 +428,52 @@ def create_app(init_db: bool = True) -> FastAPI:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/api/positions/agent-add/stream")
-    def stream_agent_add_positions(
+    async def stream_agent_add_positions(
         payload: PositionAgentAddIn,
+        request: Request,
         repository: StockRepository = Depends(repo),
         context: AuthContext = Depends(require_permission("data:write")),
     ) -> StreamingResponse:
-        def event_stream():
-            try:
-                for event in run_position_agent_events(
-                    repository=repository,
-                    instruction=payload.instruction,
-                    image_base64=payload.image_base64,
-                    mime_type=payload.mime_type,
-                    model_config_id=payload.model_config_id,
-                    created_by=context.user.username,
-                    account_id=payload.account_id,
-                ):
-                    yield _sse_event(event)
-            except Exception as exc:  # noqa: BLE001
-                yield _sse_event({"type": "error", "message": str(exc)})
+        async def event_stream() -> AsyncIterator[str]:
+            yield ": connected\n\n"
+            queue: asyncio.Queue[dict | object] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+            _DONE = object()
+
+            def produce_events() -> None:
+                try:
+                    for event in run_position_agent_events(
+                        repository=repository,
+                        instruction=payload.instruction,
+                        image_base64=payload.image_base64,
+                        mime_type=payload.mime_type,
+                        model_config_id=payload.model_config_id,
+                        created_by=context.user.username,
+                        account_id=payload.account_id,
+                    ):
+                        asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
+                except Exception as exc:  # noqa: BLE001
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put({"type": "error", "message": str(exc)}), loop
+                    ).result()
+                finally:
+                    asyncio.run_coroutine_threadsafe(queue.put(_DONE), loop).result()
+
+            producer = asyncio.create_task(asyncio.to_thread(produce_events))
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=8)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                if event is _DONE:
+                    break
+                yield _sse_event(event)
+                await asyncio.sleep(0)
+            if producer.done():
+                await producer
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 

@@ -10,7 +10,8 @@ import httpx
 from backend.app.agents.position_import import decode_image_payload
 from backend.app.agents.position_intent import PositionAction, build_intent_hint, detect_position_intent, intent_summary
 from backend.app.data.repository import StockRepository
-from backend.app.agents.stock_agent import _active_llm_config, _stream_chat
+from backend.app.agents.stock_agent import _stream_chat
+from backend.app.core.llm_config import active_llm_config
 
 
 POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
@@ -75,6 +76,20 @@ POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
                                 "thesis": {"type": "string", "description": "持仓逻辑"},
                                 "risk_note": {"type": "string", "description": "风险说明"},
                                 "confidence": {"type": "number", "description": "识别置信度 0-1"},
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["buy", "sell", "add", "reduce", "close", "replace", "update_field"],
+                                    "description": (
+                                        "本条持仓的交易动作。根据用户意图选择："
+                                        "buy=买入新股票(累加数量+加权成本+自动加入自选)；"
+                                        "add=加仓已有持仓(同buy)；"
+                                        "sell=全部卖出(清仓关闭)；reduce=减仓(扣减数量)；"
+                                        "close=直接关闭持仓(无交易仅关闭)；"
+                                        "replace=完全替换(覆盖旧数据，未指定时默认)；"
+                                        "update_field=仅修改字段如止损止盈(不改数量)。"
+                                        "用户说'买入/加仓/新增'应选buy/add；'卖出全部/清仓/止损出局'应选sell/close；'减持/卖出部分'应选reduce。"
+                                    ),
+                                },
                             },
                             "required": ["symbol", "position_quantity"],
                         },
@@ -104,7 +119,7 @@ def run_position_agent(
     created_by: str | None = None,
     account_id: int | None = None,
 ) -> dict[str, Any]:
-    llm_config = _active_llm_config(model_config_id)
+    llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
         raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
 
@@ -221,7 +236,7 @@ def run_position_agent_events(
     created_by: str | None = None,
     account_id: int | None = None,
 ) -> Generator[dict[str, Any], None, None]:
-    llm_config = _active_llm_config(model_config_id)
+    llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
         raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
 
@@ -482,7 +497,20 @@ def _execute_position_tool(
             parsed_json=json.dumps(args, ensure_ascii=False),
             created_by=created_by,
         )
-        saved_rows = repository.import_position_rows(rows, batch, default_account)
+        saved_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            merged = {**default_account, **row}
+            action = merged.pop("action", None)
+            try:
+                saved_rows.append(
+                    repository.merge_position_holding(
+                        merged, action=action, source_type="ai_ocr", commit=False
+                    )
+                )
+            except ValueError as exc:
+                saved_rows.append({"error": str(exc), "raw": row})
         repository.finish_position_import_batch(batch, saved_rows)
         errors = [row for row in saved_rows if "error" in row]
         ok_rows = [row for row in saved_rows if "error" not in row]

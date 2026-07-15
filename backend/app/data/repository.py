@@ -454,6 +454,157 @@ class StockRepository:
         saved = self._save_position_holding(payload, source_type=source_type, commit=True)
         return saved
 
+    # ---- merge_position_holding ----
+
+    # 合并动作，不做数量/成本的拆分计算
+    _MERGE_OVERWRITE_ACTIONS: set[str] = {"replace", "update_field"}
+    # 累加动作（买入/加仓），保存后自动加入自选
+    _MERGE_ACCUMULATE_ACTIONS: set[str] = {"buy", "add"}
+    # 扣减动作（卖出/减仓）
+    _MERGE_DECREMENT_ACTIONS: set[str] = {"sell", "reduce"}
+
+    def merge_position_holding(
+        self,
+        payload: dict[str, Any],
+        *,
+        action: str | None = None,
+        source_type: str = "manual",
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """按交易动作合并持仓，买入/加仓自动同步自选。
+
+        与 _save_position_holding 的关系：
+        - replace / None → 直接调 _save_position_holding（向后兼容）
+        - buy / add    → 查现有 open 持仓 → 累加数量 + 加权平均成本 → 调 _save_position_holding
+        - sell / reduce → 查现有 open 持仓 → 扣减数量 → 调 _save_position_holding
+        - close        → status=closed, quantity=0
+        - update_field → 调 update_position_field（不改数量）
+        """
+
+        norm = normalize_a_share_symbol(
+            str(payload.get("symbol") or payload.get("ts_code") or payload.get("code") or "")
+        )
+
+        # ---- update_field 走独立路径 ----
+        if action == "update_field":
+            field = str(payload.get("field") or "").strip()
+            value = payload.get("value")
+            if not field:
+                return {"error": "update_field 必须提供 field"}
+            return self.update_position_field(norm, field, value, account_id=payload.get("account_id"))
+
+        # ---- replace / 无 action → 直接保存（向后兼容）----
+        if not action or action == "replace":
+            return self._save_position_holding(payload, source_type=source_type, commit=commit)
+
+        # ---- close → 强制关仓 ----
+        if action == "close":
+            # 解析账号（与买方/卖方共享逻辑）
+            if "account_id" in payload and payload["account_id"] is not None:
+                acc_id = int(payload["account_id"])
+            else:
+                _, acc_id = self._unique_open_account_for(norm)
+            position = self.db.scalar(
+                select(Position)
+                .where(Position.symbol == norm, Position.status == "open", _account_eq(acc_id))
+                .order_by(desc(Position.id))
+                .limit(1)
+            )
+            if position is None:
+                position = self.db.scalar(
+                    select(Position).where(Position.symbol == norm, _account_eq(acc_id)).order_by(desc(Position.id)).limit(1)
+                )
+            if position is not None:
+                position.status = "closed"
+                position.quantity = 0
+                position.closed_at = datetime.now()
+                self.db.flush()
+                if commit:
+                    self.db.commit()
+                return {"symbol": norm, "action": "close", "closed": True, "position_id": position.id}
+            # 没有持仓也返回成功（幂等）
+            return {"symbol": norm, "action": "close", "closed": False, "note": "无 open 持仓可关闭"}
+
+        # ---- 需要合并的买方/卖方动作 ----
+        new_qty_raw = float(payload.get("position_quantity") or payload.get("quantity") or 0)
+        new_cost_price = float(payload.get("cost_price") or 0) or None
+
+        # 解析账号：优先用 payload 传入的 account_id，其次按标的自动匹配已有持仓的账户
+        if "account_id" in payload and payload["account_id"] is not None:
+            acc_id: int | None = int(payload["account_id"])
+        else:
+            _, acc_id = self._unique_open_account_for(norm)
+        # 让 _ensure_position_account 拿到正确的 account_id，避免重复建账户
+        if acc_id is not None:
+            payload["account_id"] = acc_id
+
+        if action in self._MERGE_ACCUMULATE_ACTIONS:
+            # 查现有 open position 做累加
+            position = self.db.scalar(
+                select(Position)
+                .where(Position.symbol == norm, Position.status == "open", _account_eq(acc_id))
+                .order_by(desc(Position.id))
+                .limit(1)
+            )
+            if position is not None and position.quantity is not None and position.quantity > 0:
+                old_qty = position.quantity
+                old_cost = position.cost_price or 0
+                total_qty = old_qty + new_qty_raw
+                # 加权平均成本
+                if new_cost_price and new_cost_price > 0 and old_cost > 0:
+                    weighted_cost = round((old_qty * old_cost + new_qty_raw * new_cost_price) / total_qty, 4)
+                elif new_cost_price and new_cost_price > 0:
+                    weighted_cost = new_cost_price
+                else:
+                    weighted_cost = old_cost or 0
+                payload["position_quantity"] = total_qty
+                payload["cost_price"] = weighted_cost
+            else:
+                payload["position_quantity"] = new_qty_raw
+                if new_cost_price:
+                    payload["cost_price"] = new_cost_price
+
+            payload["status"] = "open"
+            saved = self._save_position_holding(payload, source_type=source_type, commit=commit)
+
+            # 买入/加仓 → 自动加入自选
+            symbol_name = str(payload.get("name") or "").strip()
+            try:
+                self.add_watchlist_item(
+                    symbol=norm,
+                    group_name="默认",
+                    reason=f"持仓买入 - {symbol_name}" if symbol_name else "持仓买入",
+                )
+            except ValueError:
+                pass  # instrument 不存在时安全跳过
+
+            return saved
+
+        if action in self._MERGE_DECREMENT_ACTIONS:
+            acc_id = payload.get("account_id")
+            position = self.db.scalar(
+                select(Position)
+                .where(Position.symbol == norm, Position.status == "open", _account_eq(acc_id))
+                .order_by(desc(Position.id))
+                .limit(1)
+            )
+            if position is not None and position.quantity is not None and position.quantity > 0:
+                remaining = max(0.0, position.quantity - new_qty_raw)
+                payload["position_quantity"] = remaining
+                payload["status"] = "closed" if remaining == 0 else "open"
+                # 卖出时不重复传成本价就沿用旧成本，避免覆盖成 None
+                if "cost_price" not in payload or not payload["cost_price"]:
+                    payload["cost_price"] = position.cost_price
+            else:
+                # 无持仓可卖
+                return {"error": f"卖出失败: {norm} 无可卖出持仓", "symbol": norm, "action": action}
+
+            saved = self._save_position_holding(payload, source_type=source_type, commit=commit)
+            return saved
+
+        # 未知 action → 退化到覆盖
+        return self._save_position_holding(payload, source_type=source_type, commit=commit)
+
     def import_position_rows(
         self,
         rows: list[dict[str, Any]],
