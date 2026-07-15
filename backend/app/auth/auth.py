@@ -47,9 +47,26 @@ class AuthContext:
     permissions: set[str]
 
 
+_AUTH_SECRET_CACHE: bytes | None = None
+
+
 def _secret_key() -> bytes:
-    material = settings.auth_secret or settings.db_password or settings.llm_api_key or "hermes-stock-dev-secret"
-    return material.encode("utf-8")
+    global _AUTH_SECRET_CACHE
+    if _AUTH_SECRET_CACHE is not None:
+        return _AUTH_SECRET_CACHE
+    if settings.auth_secret:
+        _AUTH_SECRET_CACHE = settings.auth_secret.encode("utf-8")
+        return _AUTH_SECRET_CACHE
+    # 未配置 STOCK_AUTH_SECRET → 本次进程内随机生成，避免回退到 DB 密码或硬编码默认值。
+    # 代价：重启后所有已签发 token 失效（用户需重新登录）。
+    import logging
+    _log = logging.getLogger("hermes.auth")
+    _log.warning(
+        "STOCK_AUTH_SECRET 未设置！已使用随机密钥，重启后所有会话将失效。"
+        "请在 backend/.env 中设置 STOCK_AUTH_SECRET=<至少32字符的随机串> 以保持会话持久化。"
+    )
+    _AUTH_SECRET_CACHE = secrets.token_bytes(32)
+    return _AUTH_SECRET_CACHE
 
 
 def _b64(data: bytes) -> str:

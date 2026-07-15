@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from backend.app.agents.stock_agent import _active_llm_config
+from backend.app.core.llm_config import active_llm_config
 
 
 KEY_MAP = {
@@ -117,7 +117,7 @@ def parse_position_input(
         "position", "INFO", "持仓录入解析开始",
         to_db=False, has_image=bool(clean_base64), instruction=instruction[:60],
     )
-    llm_config = _active_llm_config(model_config_id)
+    llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
         log_event("position", "ERROR", "持仓录入失败：模型未配置 API Key / Base URL")
         raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")

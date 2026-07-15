@@ -22,7 +22,7 @@ import httpx
 from sqlalchemy import desc, or_, select, text
 from sqlalchemy.orm import Session
 
-from backend.app.agents.stock_agent import _active_llm_config
+from backend.app.core.llm_config import active_llm_config
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import AiChatMessage, AiChatSession, UserMemory
@@ -75,7 +75,7 @@ def _resolve_embedding_cfg() -> tuple[str, str, str]:
     key = key or settings.embedding_api_key
     model = model or settings.embedding_model
     if not (base and key):
-        llm = _active_llm_config()
+        llm = active_llm_config()
         base = base or (llm.get("base_url") or "")
         key = key or (llm.get("api_key") or "")
     return base, key, (model or "text-embedding-3-small")
@@ -642,7 +642,7 @@ def _merge_similar(
 
 def _call_llm_for_digestion(messages: list[AiChatMessage], user_id: int) -> list[dict[str, Any]]:
     """调用 LLM 从对话消息中提取结构化记忆。"""
-    llm_config = _active_llm_config()
+    llm_config = active_llm_config()
     if not llm_config["api_key"] or not llm_config["base_url"]:
         raise RuntimeError("LLM 未配置")
 

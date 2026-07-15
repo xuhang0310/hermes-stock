@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 import threading
 import time
 from datetime import datetime
@@ -32,12 +33,27 @@ _rate_lock = threading.Lock()
 _rate_history: dict[str, list[float]] = {}
 
 
+_FERNET_CACHE: Fernet | None = None
+
+
 def _fernet() -> Fernet:
-    material = settings.webhook_enc_key or (
-        f"hermes-stock-webhook::{settings.auth_secret or settings.db_password or 'dev-secret'}"
-    )
+    global _FERNET_CACHE
+    if _FERNET_CACHE is not None:
+        return _FERNET_CACHE
+    if settings.webhook_enc_key:
+        material = settings.webhook_enc_key
+    else:
+        import logging
+        _log = logging.getLogger("hermes.feishu")
+        _log.warning(
+            "STOCK_WEBHOOK_ENC_KEY 未设置！将使用进程内随机密钥加密 webhook。"
+            "重启后所有已加密的 webhook URL 将无法解密，需重新保存。"
+            "请在 backend/.env 中设置 STOCK_WEBHOOK_ENC_KEY=<至少32字符的随机串>。"
+        )
+        material = secrets.token_urlsafe(32)
     digest = hashlib.sha256(material.encode("utf-8")).digest()
-    return Fernet(base64.urlsafe_b64encode(digest))
+    _FERNET_CACHE = Fernet(base64.urlsafe_b64encode(digest))
+    return _FERNET_CACHE
 
 
 def encrypt_value(raw: str | None) -> str | None:

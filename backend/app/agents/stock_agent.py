@@ -25,6 +25,7 @@ from backend.app.market.digital_human_tools import (
     write_tool_schemas,
 )
 from backend.app.core.models import LlmModelConfig
+from backend.app.core.llm_config import active_llm_config
 from backend.app.core.settings import settings
 from backend.app.data.repository import StockRepository
 from backend.app.agents.position_intent import (
@@ -470,45 +471,6 @@ def _knowledge_search_preview(result: dict) -> str:
     return "\n".join(preview_parts)
 
 
-def _active_llm_config(model_config_id: int | None = None) -> dict:
-    fallback = {
-        "id": None,
-        "display_name": "环境变量默认模型",
-        "provider_name": "环境变量",
-        "base_url": settings.llm_base_url,
-        "api_key": settings.llm_api_key,
-        "model": settings.llm_model,
-        "temperature": 0.2,
-        "max_steps": settings.agent_max_steps,
-    }
-    with SessionLocal() as session:
-        query = select(LlmModelConfig).options(selectinload(LlmModelConfig.platform))
-        if model_config_id:
-            row = session.scalar(query.where(LlmModelConfig.id == model_config_id, LlmModelConfig.status != "disabled").limit(1))
-            if row is None:
-                raise RuntimeError("所选模型配置不存在或已停用。")
-        else:
-            row = session.scalar(
-                query.where(LlmModelConfig.is_active.is_(True), LlmModelConfig.status == "enabled")
-                .order_by(LlmModelConfig.updated_at.desc(), LlmModelConfig.id.desc())
-                .limit(1)
-            )
-            if row is None:
-                return fallback
-
-        platform = row.platform
-        return {
-            "id": row.id,
-            "display_name": row.display_name,
-            "provider_name": platform.name if platform else row.provider_name,
-            "base_url": (platform.base_url if platform else row.base_url) or fallback["base_url"],
-            "api_key": (platform.api_key if platform and platform.api_key else row.api_key) or fallback["api_key"],
-            "model": row.model_name or fallback["model"],
-            "temperature": float(row.temperature if row.temperature is not None else fallback["temperature"]),
-            "max_steps": int(row.max_steps or fallback["max_steps"]),
-        }
-
-
 def _parse_sse_events(lines: Iterable[str]) -> Generator[tuple[str, Any], None, None]:
     content_parts: list[str] = []
     tool_calls: dict[int, dict] = {}
@@ -777,7 +739,7 @@ def run_agent_events(
             messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": question})
 
-    llm_config = _active_llm_config(model_config_id)
+    llm_config = active_llm_config(model_config_id)
     yield {
         "type": "model_selected",
         "model": {

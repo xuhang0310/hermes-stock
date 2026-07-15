@@ -13,7 +13,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from backend.app.agents.stock_agent import _active_llm_config
+from backend.app.core.llm_config import active_llm_config
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import (
@@ -415,7 +415,7 @@ def _call_llm_for_recommendations(
 ) -> list[CandidatePrompt]:
     """调用 LLM 分析对话并生成推荐。失败返回空列表。"""
     try:
-        llm_config = _active_llm_config()
+        llm_config = active_llm_config()
         if not llm_config["api_key"] or not llm_config["base_url"]:
             log_event("agent", "WARNING", "LLM 推荐跳过：未配置 API Key/Base URL", to_db=False)
             return []

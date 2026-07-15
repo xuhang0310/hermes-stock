@@ -9,10 +9,12 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]  # core/ -> app/ -> backend/（backend/.env 所在）
-RABBIT_ENV = Path(r"C:\Users\Administrator\Documents\hermes-rabbit\backend\.env")
-
-if RABBIT_ENV.exists():
-    load_dotenv(RABBIT_ENV, override=False)
+# 仅在开发者本机可用作备用值源（存在才加载，不存在就跳过，不阻塞其他机器）
+_RABBIT_ENV = Path(os.getenv("STOCK_RABBIT_ENV_PATH", ""))
+if not _RABBIT_ENV.is_file():
+    _RABBIT_ENV = Path(os.path.expanduser("~/Documents/hermes-rabbit/backend/.env"))
+if _RABBIT_ENV.is_file():
+    load_dotenv(_RABBIT_ENV, override=False)
 load_dotenv(BASE_DIR / ".env", override=True)
 
 
