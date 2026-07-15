@@ -15,9 +15,30 @@ const message = ref('')
 
 const accountModalOpen = ref(false)
 const fundModalOpen = ref(false)
+const tradeModalOpen = ref(false)
+const tradeSaving = ref(false)
 const editingAccountId = ref<number | null>(null)
 const accountForm = reactive({ broker_code: 'manual', account_name: '', account_no_masked: '', is_default: false })
 const fundForm = reactive({ account_id: 0, account_label: '', total_asset: null as number | null, holding_market_value: 0 })
+const tradeForm = reactive({
+  symbol: '',
+  name: '',
+  action: 'buy' as 'buy' | 'sell',
+  quantity: null as number | null,
+  price: null as number | null,
+  account_id: null as number | null,
+  latest_price: 0,
+  current_quantity: 0
+})
+const tradeTitle = computed(() => {
+  const act = tradeForm.action === 'buy' ? '买入' : '卖出'
+  return `${act} · ${tradeForm.name || tradeForm.symbol}`
+})
+const tradeEstimate = computed(() => {
+  const qty = tradeForm.quantity || 0
+  const p = tradeForm.price || tradeForm.latest_price || 0
+  return qty * p
+})
 
 const selectedAccount = computed(() => accounts.value.find((a) => a.id === selectedAccountId.value) || null)
 const filteredPositions = computed(() =>
@@ -65,11 +86,13 @@ const fundCards = computed(() => {
   ]
 })
 
-const tableColumns = computed(() =>
-  selectedAccountId.value === null
-    ? ['账户', '标的', '名称', '持仓', '现价', '市值', '浮盈', '盈亏率', '状态']
-    : ['标的', '名称', '持仓', '可用', '成本', '现价', '市值', '浮盈', '盈亏率', '止损']
-)
+const tableColumns = computed(() => {
+  const base =
+    selectedAccountId.value === null
+      ? ['账户', '标的', '名称', '持仓', '现价', '市值', '浮盈', '盈亏率', '状态']
+      : ['标的', '名称', '持仓', '可用', '成本', '现价', '市值', '浮盈', '盈亏率', '止损']
+  return [...base, '操作']
+})
 const tableRows = computed(() =>
   filteredPositions.value.map((p) =>
     selectedAccountId.value === null
@@ -97,6 +120,11 @@ const tableRows = computed(() =>
           fmtNum(p.stop_price, 2)
         ]
   )
+  .map((row, idx) => {
+    const pos = filteredPositions.value[idx]
+    const actions = `<button class="wb-trade-btn buy" data-action="buy-${idx}">买入</button><button class="wb-trade-btn sell" data-action="sell-${idx}">卖出</button>`
+    return [...row, actions]
+  })
 )
 
 async function loadAccounts() {
@@ -186,6 +214,49 @@ async function saveFund() {
 function onRowClick(index: number) {
   const position = filteredPositions.value[index]
   if (position) emit('openChart', position)
+}
+
+function openTradeModal(pos: PositionItem, action: 'buy' | 'sell') {
+  tradeForm.symbol = pos.symbol
+  tradeForm.name = pos.name || pos.symbol
+  tradeForm.action = action
+  tradeForm.quantity = null
+  tradeForm.price = pos.latest_price ?? pos.cost_price ?? null
+  tradeForm.latest_price = pos.latest_price ?? 0
+  tradeForm.current_quantity = pos.position_quantity ?? pos.quantity ?? 0
+  tradeForm.account_id = selectedAccountId.value
+  message.value = ''
+  tradeModalOpen.value = true
+}
+
+async function submitTrade() {
+  if (!tradeForm.quantity || tradeForm.quantity <= 0) {
+    message.value = '请输入数量'
+    return
+  }
+  if (!tradeForm.account_id) {
+    message.value = '请选择证券账户'
+    return
+  }
+  tradeSaving.value = true
+  message.value = ''
+  try {
+    await api.addPosition({
+      symbol: tradeForm.symbol,
+      name: tradeForm.name,
+      position_quantity: tradeForm.quantity,
+      cost_price: tradeForm.price || undefined,
+      action: tradeForm.action,
+      account_id: tradeForm.account_id
+    })
+    tradeModalOpen.value = false
+    await loadAccounts()
+    emit('refresh')
+  } catch (error) {
+    message.value = `操作失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    tradeSaving.value = false
+  }
 }
 
 onMounted(async () => {
@@ -298,6 +369,46 @@ onMounted(async () => {
           <span class="wb-spacer"></span>
           <button type="button" @click="fundModalOpen = false">取消</button>
           <button type="button" class="primary" @click="saveFund">保存资金</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 买入/卖出弹窗 -->
+    <div v-if="tradeModalOpen" class="wb-modal-backdrop" @click.self="tradeModalOpen = false">
+      <div class="wb-modal">
+        <h3>{{ tradeTitle }}</h3>
+        <label>
+          <span>证券账户 <em class="required">*</em></span>
+          <select v-model.number="tradeForm.account_id">
+            <option :value="null" disabled>— 请选择 —</option>
+            <option v-for="a in accounts" :key="a.id" :value="a.id">
+              {{ a.broker_name }}{{ a.account_name ? ' · ' + a.account_name : '' }}
+            </option>
+          </select>
+        </label>
+        <label>
+          <span>数量 <em class="required">*</em></span>
+          <input v-model.number="tradeForm.quantity" type="number" min="0" step="1" placeholder="股数" />
+        </label>
+        <label>
+          <span>价格（选填，不填用最新价）</span>
+          <input v-model.number="tradeForm.price" type="number" min="0" step="0.01" placeholder="元/股" />
+        </label>
+        <div v-if="tradeForm.action === 'sell'" class="trade-hint">
+          当前持仓 {{ fmtNum(tradeForm.current_quantity) }} 股，
+          填写的数量将从现有持仓中扣减；全部卖出后自动关闭持仓。
+        </div>
+        <div class="trade-estimate">
+          <span>{{ tradeForm.action === 'buy' ? '预计花费' : '预计收回' }}</span>
+          <strong :class="pnlClass(tradeEstimate)">{{ fmtMoney(tradeEstimate) }}</strong>
+        </div>
+        <p v-if="message" class="form-message">{{ message }}</p>
+        <div class="wb-modal-actions">
+          <span class="wb-spacer"></span>
+          <button type="button" :disabled="tradeSaving" @click="tradeModalOpen = false">取消</button>
+          <button type="button" class="primary" :disabled="tradeSaving" @click="submitTrade">
+            {{ tradeSaving ? '提交中' : '确认' + (tradeForm.action === 'buy' ? '买入' : '卖出') }}
+          </button>
         </div>
       </div>
     </div>

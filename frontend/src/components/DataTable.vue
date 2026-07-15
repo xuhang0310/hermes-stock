@@ -30,7 +30,7 @@ const emit = defineEmits<{
           @click="clickable && emit('rowClick', rowIndex)"
           @keydown.enter="clickable && emit('rowClick', rowIndex)"
         >
-          <td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td>
+          <td v-for="(cell, cellIndex) in row" :key="cellIndex" v-html="cell" @click.stop></td>
         </tr>
       </tbody>
     </table>

@@ -188,6 +188,15 @@ export const api = {
   events: () => request<EventItem[]>('/api/events'),
   positions: (accountId?: number | null) =>
     request<PositionItem[]>(`/api/positions${accountId ? `?account_id=${accountId}` : ''}`),
+  addPosition: (payload: {
+    symbol: string
+    name?: string
+    position_quantity: number
+    cost_price?: number
+    action: 'buy' | 'sell' | 'add' | 'reduce' | 'close' | 'replace'
+    account_id?: number | null
+  }) =>
+    request<PositionItem>('/api/positions', { method: 'POST', body: JSON.stringify(payload) }),
   positionBrokers: () => request<BrokerPreset[]>('/api/positions/brokers'),
   positionAccounts: () => request<PositionAccount[]>('/api/positions/accounts'),
   positionsSummary: (accountId?: number | null) =>
