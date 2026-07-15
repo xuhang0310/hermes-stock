@@ -581,7 +581,13 @@ class StockRepository:
             return saved
 
         if action in self._MERGE_DECREMENT_ACTIONS:
-            acc_id = payload.get("account_id")
+            # 账号解析复用买方逻辑（payload 无 account_id 时自动匹配已有持仓的账户）
+            if "account_id" in payload and payload["account_id"] is not None:
+                acc_id = int(payload["account_id"])
+            else:
+                _, acc_id = self._unique_open_account_for(norm)
+            if acc_id is not None:
+                payload["account_id"] = acc_id
             position = self.db.scalar(
                 select(Position)
                 .where(Position.symbol == norm, Position.status == "open", _account_eq(acc_id))
@@ -743,6 +749,11 @@ class StockRepository:
     ) -> dict[str, Any]:
         symbol = normalize_a_share_symbol(str(payload.get("symbol") or payload.get("ts_code") or payload.get("code") or ""))
         symbol_name = str(payload.get("name") or payload.get("symbol_name") or payload.get("stock_name") or "").strip()
+        # 名字只含 ?/?? 等问号占位符的值无效（DbVisualizer/mojibake），不更新 instrument.name
+        if symbol_name and symbol_name.replace("?", "").strip():
+            pass  # valid non-empty name
+        else:
+            symbol_name = ""
         exchange = str(payload.get("exchange") or exchange_from_symbol(symbol))
         instrument = self.db.get(Instrument, symbol)
         if instrument is None:
@@ -750,11 +761,13 @@ class StockRepository:
             self.db.add(instrument)
             self.db.flush()
         else:
+            # 只在 payload 明确传了名字且与现有不同时才更新 instrument.name；
+            # 空名字不再覆盖已有的中文名（防止卖出/减仓不带 name 时把名称清成代码 "?"）。
             if symbol_name and symbol_name != symbol and symbol_name != instrument.name:
                 instrument.name = symbol_name
             if exchange:
                 instrument.market = exchange
-            # 兜底 name：payload 没传名字时取 instruments 表现有名字（避免显示为代码）
+            # 兜底 name：没传名字时沿用 instruments 表已有名字
             if not symbol_name:
                 symbol_name = instrument.name or symbol
 
