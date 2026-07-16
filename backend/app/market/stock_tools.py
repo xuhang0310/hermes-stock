@@ -3111,6 +3111,13 @@ _STOCK_TOOL_DISPLAY_NAMES = {
     "get_capital_flow": "分析资金流向",
     "get_stock_info": "获取股票基本面",
     "get_analysis_context": "获取分析上下文",
+    # Agent 工作区（registry 技能）：展示名的单一来源，聊天双模式 + 能力页共用
+    "ws_read_file": "读工作区文件",
+    "ws_write_file": "写工作区文件",
+    "ws_edit_file": "改工作区文件",
+    "ws_glob": "查找工作区文件",
+    "ws_grep": "搜索工作区内容",
+    "ws_run_python": "执行工作区脚本",
 }
 
 

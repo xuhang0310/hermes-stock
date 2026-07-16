@@ -789,12 +789,31 @@ def digital_human_capabilities(
         else None
     )
 
+    # 技能 registry 驱动的工具（如 Agent 工作区），不在 legacy digital_human_tool_schemas 里，
+    # 需单独从 registry 取，否则能力页看不到实际聊天时可用的工具。
+    from backend.app.skills.registry import skill_registry
+
+    def skill_meta(schema: dict) -> dict:
+        name = schema["function"]["name"]
+        return {
+            "name": name,
+            "display_name": digital_human_tool_display_name(name),
+            "description": schema["function"].get("description", ""),
+        }
+
+    workspace_tools = [
+        skill_meta(s)
+        for s in skill_registry.get_tools_for("research", role_code=profile.code)
+        if s["function"]["name"].startswith("ws_")
+    ]
+
     return {
         "can_write_positions": bool(profile.can_write_positions),
         "common_tools": [meta(n) for n in COMMON_TOOL_NAMES],
         "role_tools": [meta(n) for n in role_names],
         "role_fallback_code": role_fallback_code,
         "write_tools": [meta(n) for n in WRITE_TOOL_NAMES] if profile.can_write_positions else [],
+        "workspace_tools": workspace_tools,
     }
 
 

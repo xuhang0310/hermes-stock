@@ -448,6 +448,7 @@ export type DigitalHumanCapabilities = {
   role_tools: DigitalHumanToolMeta[]
   role_fallback_code: string | null
   write_tools: DigitalHumanToolMeta[]
+  workspace_tools?: DigitalHumanToolMeta[]
 }
 
 export type KnowledgeIngestProgress = {

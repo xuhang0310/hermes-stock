@@ -297,6 +297,9 @@ def digital_human_observation_preview(name: str, result: dict) -> str:
         return f"完成短线扫描：候选 {len(result.get('candidates', []))} 个。"
     if name == "get_hotspot_momentum":
         return f"完成热点动量分析：外部搜索 {len(result.get('external_results', []))} 条。"
+    if name.startswith("ws_"):  # Agent 工作区工具，预览逻辑留在技能内（DRY），此处仅委托
+        from backend.app.skills.agent_workspace import observation_preview as _ws_preview
+        return _ws_preview(name, result)
     return "数字人工具调用完成。"
 
 

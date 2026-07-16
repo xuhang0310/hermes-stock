@@ -230,6 +230,10 @@ onMounted(load)
             <h5>写持仓工具</h5>
             <ul><li v-for="t in capabilities[d.id].write_tools" :key="t.name"><strong>{{ t.display_name }}</strong> — {{ t.description }}</li></ul>
           </div>
+          <div v-if="capabilities[d.id].workspace_tools?.length" class="cap-group">
+            <h5>工作区工具</h5>
+            <ul><li v-for="t in capabilities[d.id].workspace_tools" :key="t.name"><strong>{{ t.display_name }}</strong> — {{ t.description }}</li></ul>
+          </div>
         </section>
       </div>
     </div>

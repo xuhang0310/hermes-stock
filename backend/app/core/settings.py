@@ -52,6 +52,12 @@ class Settings:
     rag_chunk_size: int = int(os.getenv("STOCK_RAG_CHUNK_SIZE", "700"))
     rag_chunk_overlap: int = int(os.getenv("STOCK_RAG_OVERLAP", "80"))
     rag_min_score: float = float(os.getenv("STOCK_RAG_MIN_SCORE", "0.35"))  # P2 注入阈值，先建
+    # Agent 工作区（文件读写/查找/执行）：受控 scratch 目录，与项目代码/.env/DB 物理隔离
+    workspace_enabled: bool = os.getenv("STOCK_WORKSPACE_ENABLED", "true").lower() == "true"
+    # 执行能力独立开关，默认关：开启=给聊天用户放开"以应用用户身份执行 Python"，生产须在独立低权账户/沙箱下才开
+    workspace_exec_enabled: bool = os.getenv("STOCK_WORKSPACE_EXEC_ENABLED", "false").lower() == "true"
+    # 工作区根目录；空=默认 backend/agent_workspace。生产应配到 shared/ 下避免随 release 替换蒸发
+    workspace_dir: str = os.getenv("STOCK_WORKSPACE_DIR", "")
     # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号
     admin_username: str = os.getenv("STOCK_ADMIN_USERNAME", "")
     admin_password: str = os.getenv("STOCK_ADMIN_PASSWORD", "")
