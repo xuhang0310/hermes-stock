@@ -95,6 +95,22 @@ export type PositionSummary = {
   holding_count: number
 }
 
+export type PositionTrade = {
+  id: number
+  symbol: string
+  name: string | null
+  action: 'buy' | 'sell' | 'add' | 'reduce' | 'close'
+  quantity: number | null
+  price: number | null
+  amount: number | null
+  account_id: number | null
+  broker_name: string | null
+  source_type: string | null
+  created_by: string | null
+  position_id: number | null
+  created_at: string
+}
+
 export type ChartResolution = '1D' | '1' | '5' | '15' | '30' | '60'
 
 export type ChartBar = {

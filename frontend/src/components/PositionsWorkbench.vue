@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import DataTable from './DataTable.vue'
-import type { BrokerPreset, PositionAccount, PositionItem, PositionSummary } from '../types'
+import type { BrokerPreset, PositionAccount, PositionItem, PositionSummary, PositionTrade } from '../types'
 
 const props = defineProps<{ positions: PositionItem[] }>()
 const emit = defineEmits<{ refresh: []; refreshPositions: []; openAgent: [accountId: number | null]; openChart: [position: PositionItem] }>()
@@ -12,6 +12,9 @@ const brokers = ref<BrokerPreset[]>([])
 const summary = ref<PositionSummary | null>(null)
 const selectedAccountId = ref<number | null>(null)
 const message = ref('')
+const activeTab = ref<'positions' | 'trades'>('positions')
+const trades = ref<PositionTrade[]>([])
+const tradesLoading = ref(false)
 
 const accountModalOpen = ref(false)
 const fundModalOpen = ref(false)
@@ -19,7 +22,7 @@ const tradeModalOpen = ref(false)
 const tradeSaving = ref(false)
 const editingAccountId = ref<number | null>(null)
 const accountForm = reactive({ broker_code: 'manual', account_name: '', account_no_masked: '', is_default: false })
-const fundForm = reactive({ account_id: 0, account_label: '', total_asset: null as number | null, holding_market_value: 0 })
+const fundForm = reactive({ account_id: 0, account_label: '', available_cash: null as number | null, holding_market_value: 0 })
 const tradeForm = reactive({
   symbol: '',
   name: '',
@@ -91,7 +94,7 @@ const fundCards = computed(() => {
 const tableColumns = computed(() => {
   const base =
     selectedAccountId.value === null
-      ? ['账户', '标的', '名称', '持仓', '现价', '市值', '浮盈', '盈亏率', '状态']
+      ? ['账户', '标的', '名称', '持仓', '成本', '现价', '市值', '浮盈', '盈亏率', '状态']
       : ['标的', '名称', '持仓', '可用', '成本', '现价', '市值', '浮盈', '盈亏率', '止损']
   return [...base, '操作']
 })
@@ -103,6 +106,7 @@ const tableRows = computed(() =>
           p.symbol,
           p.name,
           fmtNum(p.position_quantity ?? p.quantity),
+          fmtNum(p.cost_price, 2),
           fmtNum(p.latest_price, 2),
           fmtNum(p.market_value, 2),
           fmtNum(p.floating_pnl, 2),
@@ -128,6 +132,31 @@ const tableRows = computed(() =>
   })
 )
 
+function tradeActionText(action: PositionTrade['action']) {
+  if (action === 'buy' || action === 'add') return '买入'
+  if (action === 'sell' || action === 'reduce') return '卖出'
+  return '平仓'
+}
+function tradeActionLabel(action: PositionTrade['action']) {
+  if (action === 'buy' || action === 'add') return '<span class="trade-dir buy">买入</span>'
+  if (action === 'sell' || action === 'reduce') return '<span class="trade-dir sell">卖出</span>'
+  return '<span class="trade-dir close">平仓</span>'
+}
+const tradeColumns = ['时间', '标的', '名称', '方向', '数量', '价格', '金额', '来源', '操作']
+const tradeRows = computed(() =>
+  trades.value.map((t) => [
+    (t.created_at || '').replace('T', ' ').slice(0, 16) || '-',
+    t.symbol,
+    t.name || '-',
+    tradeActionLabel(t.action),
+    fmtNum(t.quantity),
+    fmtNum(t.price, 2),
+    fmtNum(t.amount, 2),
+    t.source_type || '-',
+    '<button class="wb-trade-btn delete" data-action="delete-trade">删除</button>'
+  ])
+)
+
 async function loadAccounts() {
   accounts.value = await api.positionAccounts()
   summary.value = await api.positionsSummary(selectedAccountId.value)
@@ -135,6 +164,7 @@ async function loadAccounts() {
 function selectAccount(id: number | null) {
   selectedAccountId.value = id
   void api.positionsSummary(id).then((s) => (summary.value = s))
+  if (activeTab.value === 'trades') void loadTrades()
 }
 
 function openNewAccount() {
@@ -192,18 +222,19 @@ async function setDefault(a: PositionAccount) {
 function openFund(a: PositionAccount) {
   fundForm.account_id = a.id
   fundForm.account_label = a.broker_name + (a.account_name ? ` · ${a.account_name}` : '')
-  fundForm.total_asset = a.total_asset
+  fundForm.available_cash = a.available_cash
   fundForm.holding_market_value = a.holding_market_value || 0
   message.value = ''
   fundModalOpen.value = true
 }
-const previewCash = computed(() =>
-  fundForm.total_asset === null ? null : Number(fundForm.total_asset) - fundForm.holding_market_value
+// 预览总资产 = 可用现金 + 持仓市值（可用现金是用户维护的输入，总资产系统算）
+const previewTotal = computed(() =>
+  fundForm.available_cash === null ? null : Number(fundForm.available_cash) + fundForm.holding_market_value
 )
 async function saveFund() {
   message.value = ''
   try {
-    await api.updateAccountFunds(fundForm.account_id, fundForm.total_asset)
+    await api.updateAccountFunds(fundForm.account_id, fundForm.available_cash)
     fundModalOpen.value = false
     await loadAccounts()
     emit('refreshPositions')
@@ -244,6 +275,43 @@ async function confirmDelete(pos: PositionItem) {
     emit('refreshPositions')
   } catch (error) {
     message.value = `删除失败：${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+async function loadTrades() {
+  tradesLoading.value = true
+  try {
+    trades.value = await api.positionTrades({ account_id: selectedAccountId.value, limit: 200 })
+  } catch {
+    trades.value = []
+  } finally {
+    tradesLoading.value = false
+  }
+}
+function switchTab(tab: 'positions' | 'trades') {
+  activeTab.value = tab
+  if (tab === 'trades') void loadTrades()
+}
+async function confirmDeleteTrade(trade: PositionTrade) {
+  if (!window.confirm(`确定删除该笔交易流水吗？\n${trade.symbol} ${tradeActionText(trade.action)} ${fmtNum(trade.quantity)}股\n（仅删流水，不影响持仓）`)) {
+    return
+  }
+  message.value = ''
+  try {
+    await api.deletePositionTrade(trade.id)
+    await loadTrades()
+    emit('refreshPositions')
+  } catch (error) {
+    message.value = `删除失败：${error instanceof Error ? error.message : String(error)}`
+  }
+}
+function onTradeCellClick(rowIndex: number, cellIndex: number, target: HTMLElement) {
+  const actionCol = tradeColumns.length - 1
+  if (cellIndex !== actionCol) return
+  const action = target.getAttribute('data-action')
+  if (action === 'delete-trade') {
+    const trade = trades.value[rowIndex]
+    if (trade) void confirmDeleteTrade(trade)
   }
 }
 
@@ -302,6 +370,7 @@ async function submitTrade() {
     tradeModalOpen.value = false
     await loadAccounts()
     emit('refreshPositions')
+    if (activeTab.value === 'trades') await loadTrades()
   } catch (error) {
     message.value = `操作失败：${error instanceof Error ? error.message : String(error)}`
   } finally {
@@ -312,6 +381,7 @@ async function submitTrade() {
 onMounted(async () => {
   brokers.value = await api.positionBrokers()
   await loadAccounts()
+  await loadTrades()
 })
 </script>
 
@@ -355,7 +425,13 @@ onMounted(async () => {
           <button type="button" @click="emit('openAgent', selectedAccountId)">添加持仓</button>
         </div>
       </header>
-      <DataTable :columns="tableColumns" :rows="tableRows" clickable @row-click="onRowClick" @cell-click="onCellClick" />
+      <div class="wb-tabs">
+        <button type="button" :class="{ active: activeTab === 'positions' }" @click="switchTab('positions')">持仓</button>
+        <button type="button" :class="{ active: activeTab === 'trades' }" @click="switchTab('trades')">交易记录</button>
+      </div>
+      <DataTable v-if="activeTab === 'positions'" :columns="tableColumns" :rows="tableRows" clickable @row-click="onRowClick" @cell-click="onCellClick" />
+      <div v-else-if="tradesLoading" class="trade-empty">加载中…</div>
+      <DataTable v-else :columns="tradeColumns" :rows="tradeRows" @cell-click="onTradeCellClick" />
     </section>
 
     <div v-if="accountModalOpen" class="wb-modal-backdrop" @click.self="accountModalOpen = false">
@@ -407,14 +483,14 @@ onMounted(async () => {
       <div class="wb-modal">
         <h3>维护资金 · {{ fundForm.account_label }}</h3>
         <label>
-          <span>总资产（券商 App 首页数字）</span>
-          <input v-model.number="fundForm.total_asset" type="number" min="0" step="0.01" placeholder="如 100000" />
+          <span>可用现金（券商 App 现金数）</span>
+          <input v-model.number="fundForm.available_cash" type="number" min="0" step="0.01" placeholder="如 100000" />
         </label>
         <div class="fund-preview">
           <span>当前持仓市值 {{ fmtMoney(fundForm.holding_market_value) }}</span>
-          <span>可用资金（自动推算）<strong :class="pnlClass(previewCash)">{{ fmtMoney(previewCash) }}</strong></span>
+          <span>总资产（自动推算 = 可用现金 + 持仓市值）<strong>{{ fmtMoney(previewTotal) }}</strong></span>
         </div>
-        <p class="fund-hint">可用资金 = 总资产 − 持仓市值，浮盈/当日盈亏由持仓自动汇总。</p>
+        <p class="fund-hint">维护"可用现金"后，总资产随持仓市值自动联动；累计浮盈/当日盈亏由持仓自动汇总。</p>
         <p v-if="message" class="form-message">{{ message }}</p>
         <div class="wb-modal-actions">
           <span class="wb-spacer"></span>
@@ -473,3 +549,30 @@ onMounted(async () => {
     </div>
   </section>
 </template>
+
+<style scoped>
+.wb-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.wb-tabs button {
+  padding: 6px 16px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #6b7280;
+  border-bottom: 2px solid transparent;
+  font-size: 14px;
+}
+.wb-tabs button.active {
+  color: #2563eb;
+  border-bottom-color: #2563eb;
+  font-weight: 600;
+}
+.trade-dir.buy { color: #dc2626; font-weight: 600; }
+.trade-dir.sell { color: #16a34a; font-weight: 600; }
+.trade-dir.close { color: #6b7280; font-weight: 600; }
+.trade-empty { padding: 16px; color: #9ca3af; text-align: center; }
+</style>

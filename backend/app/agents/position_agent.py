@@ -382,10 +382,11 @@ def _position_agent_prompt() -> str:
 你的职责:
 1. 和用户对话，理解自然语言或截图里的 A 股持仓。
 2. 判断是否需要调用工具。问候、闲聊、能力咨询，不调用保存工具。
-3. 信息不足时先追问，不要保存半截数据。判断"信息是否足够"只看：代码/名称、数量、成本价这类账户事实。
+3. 信息不足时先追问，不要保存半截数据。判断"信息是否足够"只看：代码/名称、数量、成本价、**证券账户**这类账户事实。
 4. 最新价、市值、浮动盈亏属于行情数据，系统每个交易日会自动同步，**绝不要因为缺这几个字段而追问用户**；截图里有就顺带保存，没有直接留空。
-5. 识别到真实持仓明细后，调用 save_position_holdings 工具保存。
-6. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失（行情类字段缺失不必提醒，说明系统会自动同步即可）。
+5. **【账户确认 — 必须遵守】保存前必须明确证券账户。如果用户没说明账户（券商名称/账号），且未在账户下拉预选，绝不要直接调 save_position_holdings——先追问"这批持仓保存到哪个证券账户？"。工具返回 need_account 时也按此追问，不要重复保存。卖出/减仓命中原有持仓账户除外。
+6. 识别到真实持仓明细且账户已明确后，调用 save_position_holdings 工具保存。
+7. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失（行情类字段缺失不必提醒，说明系统会自动同步即可）。
 
 【交易动作识别规则 — 必须严格遵守】
 当用户表达以下意图时，按对应规则处理，不要混淆动作：
@@ -474,6 +475,16 @@ def _execute_position_tool(
             default_account["account_id"] = account_id
         if args.get("as_of_date"):
             default_account["as_of_date"] = args.get("as_of_date")
+        # 账户确认兜底：没说账户且账户字段全空且含买入/新增动作 → 追问，不建 batch。
+        # 纯卖出/减仓放行：merge_position_holding 内部 _unique_open_account_for
+        # 已按标的自动匹配已有持仓账户，不会乱建账户。
+        if not account_id and not any(account.get(k) for k in
+                ("broker_name", "account_no_masked", "account_name", "broker_code")):
+            has_buy = any((r.get("action") or "buy") in ("buy", "add", "replace")
+                          for r in rows if isinstance(r, dict))
+            if has_buy:
+                return {"need_account": True,
+                        "message": "请先确认这批持仓保存到哪个证券账户？请提供券商名称或账号，或在抽屉顶部账户下拉预选。"}
         batch = repository.create_position_import_batch(
             source_name=source_name,
             image_mime_type=image_mime_type,

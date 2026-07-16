@@ -176,6 +176,27 @@ class TradeReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class PositionTrade(Base):
+    """买卖交易流水（每次买/卖/加/减/平仓记一条，与持仓状态快照分离）。可删错单，不回滚持仓。"""
+
+    __tablename__ = "position_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("position_accounts.id"))
+    position_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("positions.id"))
+    symbol: Mapped[str] = mapped_column(String(24), ForeignKey("instruments.symbol"), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(120))
+    action: Mapped[str] = mapped_column(String(24), nullable=False)  # buy/sell/add/reduce/close
+    quantity: Mapped[float | None] = mapped_column(Float)  # 本次变动量（正数）
+    price: Mapped[float | None] = mapped_column(Float)  # 本次成交价
+    amount: Mapped[float | None] = mapped_column(Float)  # quantity * price
+    source_type: Mapped[str] = mapped_column(String(40), nullable=False, default="manual")
+    created_by: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    account: Mapped[PositionAccount | None] = relationship()
+
+
 class MarketSnapshot(Base):
     __tablename__ = "market_snapshots"
     __table_args__ = (UniqueConstraint("symbol", "ts", "source", name="uq_market_snapshot_symbol_ts_source"),)

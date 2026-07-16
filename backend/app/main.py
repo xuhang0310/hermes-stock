@@ -61,7 +61,8 @@ class PositionAccountPatchIn(BaseModel):
 
 
 class AccountFundsIn(BaseModel):
-    total_asset: float | None = Field(default=None, ge=0)
+    # 用户维护"可用现金"（券商 App 现金数），系统算 total_asset = 可用现金 + 持仓市值
+    available_cash: float | None = Field(default=None, ge=0)
 
 
 class PositionHoldingIn(BaseModel):
@@ -317,7 +318,7 @@ def create_app(init_db: bool = True) -> FastAPI:
         _context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
-            return repository.update_account_funds(account_id, payload.total_asset)
+            return repository.update_account_funds(account_id, payload.available_cash)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -328,6 +329,29 @@ def create_app(init_db: bool = True) -> FastAPI:
         _context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> dict:
         return repository.positions_summary(account_id)
+
+    @app.get("/api/positions/trades")
+    def position_trades(
+        symbol: str | None = Query(default=None),
+        account_id: int | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+        repository: StockRepository = Depends(repo),
+        _context: AuthContext = Depends(require_permission("dashboard:view")),
+    ) -> list[dict]:
+        """买卖交易流水查询，按时间倒序。"""
+        return repository.position_trades(symbol=symbol, account_id=account_id, limit=limit)
+
+    @app.delete("/api/positions/trades/{trade_id}")
+    def delete_position_trade(
+        trade_id: int,
+        repository: StockRepository = Depends(repo),
+        _context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        """删单条交易流水（不回滚持仓，仅删流水行）。用于删错单。"""
+        result = repository.delete_position_trade(trade_id)
+        if not result.get("deleted"):
+            raise HTTPException(status_code=404, detail="交易流水不存在")
+        return result
 
     @app.get("/api/chart/positions/{symbol}")
     def position_chart(

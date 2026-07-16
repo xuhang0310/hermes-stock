@@ -10,6 +10,7 @@ import type {
   PositionAccount,
   BrokerPreset,
   PositionSummary,
+  PositionTrade,
   PromptRecommendation,
   DigitalHumanCapabilities,
   KnowledgeStats,
@@ -208,14 +209,24 @@ export const api = {
   positionAccounts: () => request<PositionAccount[]>('/api/positions/accounts'),
   positionsSummary: (accountId?: number | null) =>
     request<PositionSummary>(`/api/positions/summary${accountId ? `?account_id=${accountId}` : ''}`),
+  positionTrades: (params: { symbol?: string | null; account_id?: number | null; limit?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.symbol) qs.set('symbol', params.symbol)
+    if (params.account_id) qs.set('account_id', String(params.account_id))
+    if (params.limit) qs.set('limit', String(params.limit))
+    const suffix = qs.toString()
+    return request<PositionTrade[]>(`/api/positions/trades${suffix ? `?${suffix}` : ''}`)
+  },
+  deletePositionTrade: (tradeId: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/positions/trades/${tradeId}`, { method: 'DELETE' }),
   createPositionAccount: (payload: Record<string, unknown>) =>
     request<PositionAccount>('/api/positions/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   updatePositionAccount: (id: number, payload: Record<string, unknown>) =>
     request<PositionAccount>(`/api/positions/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  updateAccountFunds: (id: number, total_asset: number | null) =>
+  updateAccountFunds: (id: number, available_cash: number | null) =>
     request<PositionAccount>(`/api/positions/accounts/${id}/funds`, {
       method: 'PUT',
-      body: JSON.stringify({ total_asset })
+      body: JSON.stringify({ available_cash })
     }),
   positionChart: (symbol: string, options?: { limit?: number; refresh?: boolean; resolution?: ChartResolution }) => {
     const params = new URLSearchParams()
