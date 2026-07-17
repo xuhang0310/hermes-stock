@@ -5,6 +5,7 @@ import FeishuBotPanel from './FeishuBotPanel.vue'
 import type { AgentSession, AgentStreamEvent, DigitalHuman, ModelConfig, PromptRecommendation } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
+import { isWorkspaceSaveworthy } from '../utils/workspace'
 
 const activeCenterTab = ref<'chat' | 'feishuBots'>('chat')
 
@@ -302,6 +303,12 @@ function questionBefore(item: ChatMessage): string {
   return ''
 }
 
+// 只给研究产物挂"存入工作区"，寒暄闲聊不挂（工作区是研究产物层，不是聊天记录）
+function canSaveNote(item: ChatMessage): boolean {
+  if (item.liveContent) return false
+  return isWorkspaceSaveworthy(item.content, item.steps.some((s) => s.type === 'action'))
+}
+
 // 回答一键存工作区：前端已有全文，直接落盘，零 token（借鉴 deepresearch"文件按需物化"）
 async function saveToWorkspace(item: ChatMessage) {
   if (!item.content || item.saving || item.savedPath) return
@@ -590,7 +597,7 @@ onMounted(load)
             <div v-else-if="item.error" class="chat-error">{{ item.error }}</div>
             <div v-else-if="!item.steps.length && !item.liveReasoning" class="chat-typing">正在思考与查询...</div>
 
-            <div v-if="item.content && !item.liveContent" class="msg-actions">
+            <div v-if="canSaveNote(item)" class="msg-actions">
               <button
                 type="button"
                 class="msg-save-btn"
