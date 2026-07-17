@@ -584,4 +584,8 @@ export type AgentStreamEvent = {
   status?: string
   success?: boolean
   duration?: number
+  // tool_progress（工具参数生成进度）：index=第几个工具调用，chars=已生成参数字数，delta=content 明文预览增量
+  index?: number
+  chars?: number
+  delta?: string
 }

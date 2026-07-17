@@ -2010,6 +2010,75 @@ button.btn-stop:hover {
   color: #ffd3d3;
 }
 
+/* 工具参数生成进度（写文件等长参数期的瞬态可视化） */
+.react-step.tool-progress strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-progress-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+  animation: toolProgressPulse 1.1s ease-in-out infinite;
+  flex: none;
+}
+
+@keyframes toolProgressPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+.tool-progress-preview {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 190px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: #a8dede;
+  background: rgba(43, 212, 212, 0.05);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end; /* 只保留尾部可见：新内容始终出现在底部，无需滚动 */
+}
+
+/* 回答一键存工作区 */
+.msg-actions {
+  margin-top: 8px;
+}
+
+.msg-save-btn {
+  border: 1px solid rgba(213, 180, 106, 0.35);
+  background: transparent;
+  color: var(--gold-2);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.msg-save-btn:hover:not(:disabled) {
+  background: rgba(213, 180, 106, 0.12);
+}
+
+.msg-save-btn:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.msg-save-btn.saved {
+  border-color: rgba(39, 197, 138, 0.4);
+  color: var(--ok);
+}
+
 .chat-empty {
   margin: auto;
   display: grid;

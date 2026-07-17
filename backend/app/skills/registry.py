@@ -133,13 +133,21 @@ class SkillRegistry:
 
     def get_prompt_instructions(
         self,
+        chat_mode: str | None = None,
         role_code: str | None = None,
         enabled: set[str] | None = None,
     ) -> list[str]:
-        """收集匹配技能注入系统提示词的行为指令。"""
+        """收集匹配技能注入系统提示词的行为指令。
+
+        过滤条件与 get_tools_for 对称（chat_mode + role + enabled），保证"下发了工具就
+        下发对应规则"：某技能在当前模式/角色不可用时，其规则也不会污染提示词。
+        chat_mode=None 表示不按模式过滤（兼容旧调用）。
+        """
         instructions: list[str] = []
         for name, skill in self._skills.items():
             if enabled is not None and name not in enabled:
+                continue
+            if chat_mode is not None and chat_mode not in skill.get("chat_modes", []):
                 continue
             roles = skill.get("roles", [])
             if roles and role_code not in roles:

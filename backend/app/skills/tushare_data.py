@@ -297,8 +297,6 @@ SKILL = {
             end_date=_optional_str(a.get("end_date")),
         ),
     },
-    "prompt_instructions": [
-        "行情、财务、龙虎榜、股东、两融、宏观等结构化数据优先走 TuShare：不确定用哪个接口时先 list_tushare_apis 查目录（分类→接口→参数），再用 tushare_query 透传调用。",
-        "查过目录仍没有的数据才说没有，不要一上来就说'没数据'。",
-    ],
+    # 留空：TuShare 优先、先查目录再透传等已在基础问股/研究提示词覆盖，避免二次注入。
+    "prompt_instructions": [],
 }

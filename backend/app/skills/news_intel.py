@@ -48,10 +48,6 @@ SKILL = {
             max_results=_int_arg(a.get("max_results"), 6, 8),
         ),
     },
-    "prompt_instructions": [
-        "消息过滤：先区分内部事件、公告/新闻、政策/行业叙事和未经验证的外部文本。",
-        "可信度分层：对每条情报标注来源、时效、影响方向和是否需要进一步核验。",
-        "面向持仓和自选池输出真正需要行动或转交其他 Agent 的信息。",
-        "遇到系统外的标的、行业、政策、新闻时，用 search_market_intel / search_stock_news 联网搜索补充，绝不因为'不在持仓/自选池'就拒绝回答。",
-    ],
+    # 留空：情报官角色技能（ROLE_SKILLS）+ 基础联网搜索规则已覆盖，避免经 registry 二次注入。
+    "prompt_instructions": [],
 }

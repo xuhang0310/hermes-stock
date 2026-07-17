@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -817,6 +819,49 @@ def digital_human_capabilities(
     }
 
 
+# --------------------------------------------------------------------------- Agent 工作区
+# 借鉴 deepresearch 的"报告=聊天正文，文件按需物化"：回答先流式生成（全程可见），
+# 存盘是事后一键动作——前端已有全文，直接落盘，零 token 成本。
+
+
+class WorkspaceNoteIn(BaseModel):
+    content: str = Field(min_length=1)
+    title: str | None = Field(default=None, max_length=120)
+    path: str | None = Field(default=None, max_length=300)
+
+
+def _workspace_note_path(title: str | None) -> str:
+    """默认落 notes/：时间戳保证唯一，标题 slug（保留中英文数字）帮助日后检索。"""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    slug = re.sub(r"[^\w-]", "", (title or "").strip())[:24]
+    return f"notes/{stamp}-{slug}.md" if slug else f"notes/{stamp}.md"
+
+
+@router.post("/workspace/save-note")
+def save_workspace_note(
+    payload: WorkspaceNoteIn,
+    _context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """把聊天回答一键存入 Agent 工作区。
+
+    复用 agent_workspace 技能的 ws_write_file——路径监狱 / 2MB 上限 / 二进制拒写 /
+    审计原样生效；此处只补"谁存的"这层用户审计（技能层没有用户上下文）。
+    """
+    if not settings.workspace_enabled:
+        raise HTTPException(status_code=400, detail="Agent 工作区未启用（STOCK_WORKSPACE_ENABLED=false）")
+    from backend.app.skills.agent_workspace import ws_write_file
+
+    path = (payload.path or "").strip() or _workspace_note_path(payload.title)
+    result = ws_write_file(path, payload.content)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    log_event(
+        "workspace", "INFO", "回答存入工作区",
+        operator=_context.user.display_name, path=result.get("path"), bytes=result.get("bytes"),
+    )
+    return result
+
+
 # --------------------------------------------------------------------------- RAG 知识库（P1）
 # 端点只做 HTTP 编排：摄取在 rag_ingest、检索在 retrieval（单一职责）。
 
@@ -1507,7 +1552,8 @@ async def agent_chat(
                 continue
             if event is _AGENT_STREAM_DONE:
                 break
-            event_count += 1
+            if not (isinstance(event, dict) and event.get("type") == "tool_progress"):
+                event_count += 1  # 进度事件是高频瞬态流，不计入持久化的事件数
             if isinstance(event, dict):
                 if event.get("type") == "content_delta":
                     content_buffer.append(str(event.get("content") or ""))

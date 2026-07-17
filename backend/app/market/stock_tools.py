@@ -879,6 +879,11 @@ def stock_system_prompt_with_skills(extra_context: str | None = None, skills: li
         if selected
         else "- 通用分析: 未激活特定策略，按行情、技术、消息、风险的通用问股框架分析。"
     )
+    # 技能补充规则：registry 汇总问股模式下各激活技能的行为规范（如工作区防注入）。
+    # 懒加载 registry 避免与 skills 包的 import 环；基础规则已覆盖的技能其 prompt_instructions 留空。
+    from backend.app.skills.registry import skill_registry
+    extra_rules = skill_registry.get_prompt_instructions(chat_mode="stock")
+    skill_rules_block = ("\n\n技能补充规则:\n" + "\n".join(f"- {r}" for r in extra_rules)) if extra_rules else ""
     return f"""你是 SixRabbits Stock 的问股助手——既是有温度、会聊天的人，也是严谨的A股问股专家，采用 ReAct 工具调用方式工作。今天日期: {date.today().isoformat()}
 
 可用数据源:
@@ -900,7 +905,7 @@ def stock_system_prompt_with_skills(extra_context: str | None = None, skills: li
 4. 参考 daily_stock_analysis 的问股路径：先 get_analysis_context，再 get_realtime_quote / get_daily_history，然后 analyze_trend / calculate_ma / get_volume_analysis / analyze_pattern；需要筹码、资金、基本面时继续调用 get_chip_distribution / get_capital_flow / get_stock_info。
 5. 用户问消息面、催化、利空、近期发生了什么时，调用 search_stock_news；需要行业、政策、公告、研报、风险的综合情报时调用 search_comprehensive_intel。
 6. 最终回答用中文 Markdown，固定包含：标的识别、数据来源、技术/价格结构、筹码/资金/基本面、消息面、风险、观察动作。
-7. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{context}"""
+7. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{skill_rules_block}{context}"""
 
 
 def normalize_a_share_symbol(raw: str) -> str:
@@ -1692,15 +1697,50 @@ def get_analysis_context(symbol: str, limit: int = 20) -> dict:
 
 
 def search_market_intel(query: str, symbol: str | None = None, max_results: int = 6) -> dict:
-    enriched = query.strip()
+    # 查询改写+多路扩展：口语问句改写成多角度检索句，各自搜索后按 URL 去重合并，提高召回。
+    # 懒加载避免 import 环；关闭/失败时 plan 退化为单查询，走与改造前一致的单次搜索路径。
+    from backend.app.ai.query_rewrite import rewrite_and_expand
+
+    plan = rewrite_and_expand(query)
+    # 实体前缀/情报后缀只解析一次，逐条查询复用
+    prefix, suffix = "", " A股 行业 板块 政策 公告 研报 风险"
     if symbol:
         normalized = normalize_a_share_symbol(symbol)
         info = _stock_basic_item(normalized) or {}
-        name = info.get("name") or normalized
-        enriched = f"{normalized} {name} {enriched} 行业 板块 政策 公告 研报 风险"
-    else:
-        enriched = f"{enriched} A股 行业 板块 政策 公告 研报 风险"
-    return search_stock_news(enriched, symbol=None, max_results=max_results)
+        prefix = f"{normalized} {info.get('name') or normalized} "
+        suffix = " 行业 板块 政策 公告 研报 风险"
+
+    if not plan.expanded:  # 单查询：与改造前逐字一致，省掉合并开销
+        only = plan.queries[0] if plan.queries else query.strip()
+        return search_stock_news(f"{prefix}{only}{suffix}", symbol=None, max_results=max_results)
+
+    # 多查询：每条各搜 → 按 URL（退化用标题）去重合并，总量仍约束在 max_results
+    per_query = max(2, max_results // len(plan.queries) + 1)
+    merged: list[dict] = []
+    seen: set[str] = set()
+    last_error: str | None = None
+    ms_total = 0
+    for sub_query in plan.queries:
+        res = search_stock_news(f"{prefix}{sub_query}{suffix}", symbol=None, max_results=per_query)
+        if "error" in res:
+            last_error = res["error"]
+            continue
+        ms_total += res.get("ms", 0)
+        for item in res.get("results", []):
+            key = item.get("url") or item.get("title")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    if not merged and last_error:
+        return {"error": last_error}
+    return {
+        "query": query,
+        "queries": plan.queries,
+        "source": "multi.search",
+        "results": merged[:max_results],
+        "ms": ms_total,
+    }
 
 
 def search_stock_news(query: str, symbol: str | None = None, max_results: int = 5) -> dict:

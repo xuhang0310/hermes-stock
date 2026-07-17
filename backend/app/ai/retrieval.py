@@ -15,6 +15,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.ai import memory as _memory
+from backend.app.ai.query_rewrite import rewrite_and_expand
 from backend.app.ai.rag_ingest import get_store
 from backend.app.core.models import Document, DocumentChunk, DocumentSymbol
 from backend.app.core.settings import settings
@@ -36,13 +37,16 @@ def retrieve_chunks(
     pool = top_k * 3
     doc_filters = _doc_filters(symbol=symbol, doc_types=doc_types, trust_levels=trust_levels)
 
+    # 查询改写+多路扩展（关闭/失败时 plan.queries == [query]，行为与改造前一致）
+    plan = rewrite_and_expand(query)
+
     chunk_map: dict[int, DocumentChunk] = {}
     rrf_scores: dict[int, float] = {}
     keyword_component: dict[int, float] = {}
     vector_component: dict[int, float] = {}
 
-    # 关键词召回：拆词后逐词 LIKE（整句 LIKE 对中文自然问句必然零命中）
-    keywords = _memory._extract_keywords(query)
+    # 关键词召回：用改写后的检索句拆词（更干净的实体），逐词 LIKE
+    keywords = _memory._extract_keywords(plan.rewritten)
     if keywords:
         keyword_rows = db.scalars(
             select(DocumentChunk)
@@ -61,36 +65,39 @@ def retrieve_chunks(
             rrf_scores[chunk.id] = rrf_scores.get(chunk.id, 0.0) + score
             keyword_component[chunk.id] = score
 
-    # 向量召回：store 出 (vector_id, 相似度)，回表时套同一组 SQL 过滤
+    # 向量召回：多路（改写句+扩展句各嵌入一次），每路 store 出 (vector_id, 相似度)，
+    # 按各自排名并入同一 RRF 池——多路命中同一 chunk 会累计得分（跨查询一致性=更强信号）。
     store = get_store()
     if store is not None:
-        query_vec = _memory._embed([query])
-        if query_vec:
+        query_vecs = _memory._embed(plan.queries)  # _embed 接受 list，一次批量嵌入 N 条
+        for query_vec in query_vecs:
             try:
-                vector_hits = store.query(query_vec[0], pool)
+                vector_hits = store.query(query_vec, pool)
             except Exception as exc:  # noqa: BLE001
                 from backend.app.core.applog import log_event
 
                 log_event("rag", "WARNING", f"向量召回失败（本次退化为纯关键词）: {str(exc)[:160]}")
-                vector_hits = []
-            if vector_hits:
-                rows = db.scalars(
-                    select(DocumentChunk)
-                    .join(Document, Document.id == DocumentChunk.doc_id)
-                    .where(
-                        DocumentChunk.vector_id.in_([vid for vid, _ in vector_hits]),
-                        DocumentChunk.status == "indexed",
-                        *doc_filters,
-                    )
-                ).all()
-                by_vector_id = {chunk.vector_id: chunk for chunk in rows}
-                for rank, (vector_id, similarity) in enumerate(vector_hits):
-                    chunk = by_vector_id.get(vector_id)
-                    if chunk is None:  # 被过滤/已删/已禁用
-                        continue
-                    chunk_map[chunk.id] = chunk
-                    rrf_scores[chunk.id] = rrf_scores.get(chunk.id, 0.0) + _memory.HYBRID_VECTOR_WEIGHT / (_RRF_K + rank + 1)
-                    vector_component[chunk.id] = similarity
+                continue
+            if not vector_hits:
+                continue
+            rows = db.scalars(
+                select(DocumentChunk)
+                .join(Document, Document.id == DocumentChunk.doc_id)
+                .where(
+                    DocumentChunk.vector_id.in_([vid for vid, _ in vector_hits]),
+                    DocumentChunk.status == "indexed",
+                    *doc_filters,
+                )
+            ).all()
+            by_vector_id = {chunk.vector_id: chunk for chunk in rows}
+            for rank, (vector_id, similarity) in enumerate(vector_hits):
+                chunk = by_vector_id.get(vector_id)
+                if chunk is None:  # 被过滤/已删/已禁用
+                    continue
+                chunk_map[chunk.id] = chunk
+                rrf_scores[chunk.id] = rrf_scores.get(chunk.id, 0.0) + _memory.HYBRID_VECTOR_WEIGHT / (_RRF_K + rank + 1)
+                # 同一 chunk 被多路命中时保留最高相似度（展示用；RRF 分已累计）
+                vector_component[chunk.id] = max(vector_component.get(chunk.id, 0.0), similarity)
 
     if not chunk_map:
         return []

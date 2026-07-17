@@ -130,13 +130,8 @@ SKILL = {
             symbol=_optional_str(a.get("symbol")),
         ),
     },
-    "prompt_instructions": [
-        "工具使用规则：",
-        "1. 研究本系统自己的持仓和自选池时，优先调用 get_my_universe 或对应快照工具，用真实数据说话。",
-        "2. run_sql / get_schema 是通用底座工具，可以兜底探索，但优先使用结构化专属工具。",
-        "3. 行情、财务、龙虎榜、股东、两融、宏观等结构化数据优先走 TuShare。",
-        "4. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。",
-        "5. 结论要标注来源（内部数据 / TuShare / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。",
-        "6. 持仓写入（若可用 update_my_positions 工具）：先 get_portfolio_snapshot 读现状；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
-    ],
+    # prompt_instructions 留空：这些规则已在基础系统提示词（_system_prompt 的工作规则 +
+    # digital_human_skill_prompt 的角色技能）逐条覆盖，若在此重复声明会经 registry 通道二次注入。
+    # registry 通道（get_prompt_instructions）现只承载基础提示词未覆盖的新技能规则（如工作区）。
+    "prompt_instructions": [],
 }

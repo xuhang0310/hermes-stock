@@ -61,9 +61,6 @@ SKILL = {
             limit=_int_arg(a.get("limit"), 20, 60),
         ),
     },
-    "prompt_instructions": [
-        "【必做】凡回答涉及具体股票的问题，先调用 resolve_stock 解析代码，再调用 get_latest_price 拿最新价格，回答中标注价格与所属交易日。",
-        "优先使用 get_analysis_context 获取标的多维度汇总；需要历史行情时用 get_tushare_daily/get_daily_history，需要实时行情时用 get_realtime_quote。",
-        "所有行情数据必须通过工具查询获取，绝不引用记忆里的旧价。数据缺失时如实说明缺口。",
-    ],
+    # 留空：get_latest_price 强制、行情走工具等已在基础问股/研究提示词逐条覆盖，避免二次注入。
+    "prompt_instructions": [],
 }

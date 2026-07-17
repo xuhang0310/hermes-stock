@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { AgentSession, AgentStreamEvent, ModelConfig, PromptRecommendation, StockStrategy } from '../types'
 import { renderMarkdown } from '../utils/markdown'
+import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
 
 type ReactStep = {
   type:
@@ -35,7 +36,10 @@ type ChatMessage = {
   steps: ReactStep[]
   liveReasoning: string
   liveContent: string
+  liveTool?: LiveToolProgress | null
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
+  saving?: boolean
+  savedPath?: string
 }
 
 const quickQuestions = [
@@ -382,6 +386,28 @@ function flushReasoning(reply: ChatMessage) {
   reply.liveReasoning = ''
 }
 
+function questionBefore(item: ChatMessage): string {
+  const idx = messages.value.indexOf(item)
+  for (let i = idx - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') return messages.value[i].content
+  }
+  return ''
+}
+
+// 回答一键存工作区：前端已有全文，直接落盘，零 token（借鉴 deepresearch"文件按需物化"）
+async function saveToWorkspace(item: ChatMessage) {
+  if (!item.content || item.saving || item.savedPath) return
+  item.saving = true
+  try {
+    const res = await api.saveWorkspaceNote({ content: item.content, title: questionBefore(item) })
+    item.savedPath = res.path
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '存入工作区失败'
+  } finally {
+    item.saving = false
+  }
+}
+
 function flushThought(reply: ChatMessage) {
   if (reply.liveContent.trim()) {
     pushStep(reply, { type: 'thought', content: reply.liveContent.trim() })
@@ -460,10 +486,15 @@ async function send() {
             flushThought(reply)
             reply.streamStatus = 'tooling'
           }
+        } else if (event.type === 'tool_progress') {
+          // 模型正在生成工具调用参数（写文件内容等长参数期）：瞬态进度，action 到达即清
+          reply.streamStatus = 'tooling'
+          reply.liveTool = applyToolProgress(reply.liveTool, event)
         } else if (isProgressEventType(event.type)) {
           pushProgressEvent(reply, event)
         } else if (event.type === 'action') {
           reply.streamStatus = 'tooling'
+          reply.liveTool = null
           flushReasoning(reply)
           flushThought(reply)
           pushStep(reply, { type: 'action', tool: event.tool, content: event.content || '' })
@@ -474,11 +505,13 @@ async function send() {
         } else if (event.type === 'error') {
           flushReasoning(reply)
           flushThought(reply)
+          reply.liveTool = null
           reply.error = event.content || '问股响应失败'
           reply.streamStatus = 'error'
           pushStep(reply, { type: 'error', content: reply.error })
           error.value = reply.error
         } else if (event.type === 'done') {
+          reply.liveTool = null
           reply.streamStatus = reply.error ? 'error' : 'done'
         }
         scrollChat()
@@ -491,6 +524,7 @@ async function send() {
       // 用户主动点了“停止”：保留已经收到的内容，不当作错误
       flushReasoning(reply)
       flushThought(reply)
+      reply.liveTool = null
       if (reply.liveContent) {
         reply.content = reply.liveContent.trim()
         reply.liveContent = ''
@@ -662,10 +696,27 @@ onMounted(load)
               <span>{{ item.liveReasoning }}</span>
             </div>
 
+            <div v-if="item.liveTool" class="react-step action tool-progress">
+              <strong><span class="tool-progress-pulse"></span>正在生成「{{ item.liveTool.displayName }}」· 已 {{ item.liveTool.chars.toLocaleString() }} 字</strong>
+              <pre v-if="item.liveTool.preview" class="tool-progress-preview">{{ item.liveTool.preview }}</pre>
+            </div>
+
             <div v-if="item.liveContent" class="md-body" v-html="renderMarkdown(item.liveContent)"></div>
             <div v-else-if="item.content" class="md-body" v-html="renderMarkdown(item.content)"></div>
             <div v-else-if="item.error" class="chat-error">{{ item.error }}</div>
             <div v-else-if="!hasVisibleAssistantWork(item)" class="chat-typing">正在理解股票范围...</div>
+
+            <div v-if="item.content && !item.liveContent" class="msg-actions">
+              <button
+                type="button"
+                class="msg-save-btn"
+                :class="{ saved: item.savedPath }"
+                :disabled="item.saving || !!item.savedPath"
+                @click="saveToWorkspace(item)"
+              >
+                {{ item.savedPath ? `✓ 已存入 ${item.savedPath}` : item.saving ? '保存中…' : '存入工作区' }}
+              </button>
+            </div>
           </template>
         </article>
       </section>

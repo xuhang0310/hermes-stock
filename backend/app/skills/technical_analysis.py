@@ -70,10 +70,6 @@ SKILL = {
             days=_int_arg(a.get("days"), 60, 120),
         ),
     },
-    "prompt_instructions": [
-        "技术分析先调用 analyze_daily_bars 获取趋势概览（方向、MACD、RSI、支撑阻力），再按需深入均线（calculate_ma）、量能（get_volume_analysis）、形态（analyze_pattern）。",
-        "筹码和资金流只做辅助参考（get_chip_distribution / get_capital_flow），不要单独据此下趋势判断。",
-        "指标归因必须用数据说话：标注均线值、量比、换手率、MACD 值；无数据时说明缺口，不编造。",
-        "输出要区分事实（K线数据）、推断（趋势判断）、风险（止损位、追高警告）和下一步观察动作。",
-    ],
+    # 留空：量化分析师角色技能（ROLE_SKILLS）+ 基础问股技术分析路径已覆盖，避免二次注入。
+    "prompt_instructions": [],
 }

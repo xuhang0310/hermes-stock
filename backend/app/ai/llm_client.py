@@ -79,7 +79,12 @@ def parse_sse_stream(lines: Iterable[str]) -> Generator[tuple[str, Any], None, N
     kind 取值：
     - ``"reasoning"`` —— 推理内容片段（DeepSeek/某些模型带 ``reasoning_content``）
     - ``"content"`` —— 正文片段
+    - ``"tool_args"`` —— 工具调用参数片段 ``{"index", "name", "delta"}``（模型生成长参数
+      如写文件内容时，正文静默；旁路吐片段供调用方做进度可视化，不影响 message 组装）
     - ``"message"`` —— 流结束时一次性 yield 完整 message dict（含累积 content + tool_calls）
+
+    注意：新增 kind 时消费方必须显式匹配（stock_agent 的 else 分支会把未知 kind 当
+    message 覆盖；position_agent 是显式 elif，天然忽略未知 kind）。
     """
     content_parts: list[str] = []
     tool_calls: dict[int, dict] = {}
@@ -105,7 +110,8 @@ def parse_sse_stream(lines: Iterable[str]) -> Generator[tuple[str, Any], None, N
             content_parts.append(text_piece)
             yield "content", text_piece
         for item in delta.get("tool_calls") or []:
-            slot = tool_calls.setdefault(int(item.get("index", 0)), {"id": "", "function": {"name": "", "arguments": ""}})
+            index = int(item.get("index", 0))
+            slot = tool_calls.setdefault(index, {"id": "", "function": {"name": "", "arguments": ""}})
             if item.get("id"):
                 slot["id"] = item["id"]
             function = item.get("function") or {}
@@ -113,6 +119,12 @@ def parse_sse_stream(lines: Iterable[str]) -> Generator[tuple[str, Any], None, N
                 slot["function"]["name"] = function["name"]
             if function.get("arguments"):
                 slot["function"]["arguments"] += function["arguments"]
+            if function.get("name") or function.get("arguments"):
+                yield "tool_args", {
+                    "index": index,
+                    "name": slot["function"]["name"],
+                    "delta": function.get("arguments") or "",
+                }
 
     message: dict = {"content": "".join(content_parts)}
     if tool_calls:

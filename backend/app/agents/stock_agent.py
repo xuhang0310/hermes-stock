@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal, engine
 from backend.app.ai.llm_client import stream_chat as _stream_chat
+from backend.app.ai.tool_progress import ToolArgsProgressTracker
 from backend.app.market.digital_human_tools import (
     digital_human_skill_prompt,
     digital_human_tool_display_name,
@@ -235,6 +236,11 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
     context = f"\n\n当前数字人职责:\n{extra_context.strip()}" if extra_context and extra_context.strip() else ""
     memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
     skill_block = digital_human_skill_prompt(digital_human_code)
+    # 技能补充规则：基础提示词之外，由 registry 汇总各激活技能声明的行为规范（如工作区防注入）。
+    # 与工具装配同源过滤（chat_mode+role），保证"给了工具就给对应规则"。基础提示词已覆盖的
+    # 技能其 prompt_instructions 留空，不会重复注入。
+    extra_rules = skill_registry.get_prompt_instructions(chat_mode="research", role_code=digital_human_code)
+    skill_rules_block = ("\n\n技能补充规则:\n" + "\n".join(f"- {r}" for r in extra_rules)) if extra_rules else ""
     return f"""你是 SixRabbits Stock A股多智能体研究台的数字人——既是有温度、会聊天的人，也是严谨的A股数据研究专家，采用 ReAct 方式工作。
 今天日期: {date.today().isoformat()}
 
@@ -258,7 +264,7 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 7. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
 8. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
 9. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
-10. 最终回答使用中文 Markdown，尽量短、清楚、可执行。{context}"""
+10. 最终回答使用中文 Markdown，尽量短、清楚、可执行。{skill_rules_block}{context}"""
 
 
 def validate_sql(sql: str) -> str | None:
@@ -417,6 +423,26 @@ def _knowledge_search_preview(result: dict) -> str:
         content_snippet = hit.get("content", "")[:120]
         preview_parts.append(f"#{i+1} [{hit.get('doc_type','')}] {title}: {content_snippet}...")
     return "\n".join(preview_parts)
+
+
+_TOOL_MAX_RETRY = 2  # 同一工具连续失败到此次数后，改为"停止重试、用现有信息作答"引导
+
+
+def _tool_retry_hint(name: str, failures: int) -> str:
+    """工具失败时附加到 observation 的结构化引导（借鉴 deepresearch 反思重试，单 agent 轻量版）。
+
+    未到上限：引导修正后重试一次；到上限：明确要求停止调用该工具、用已有信息收口，
+    避免把有限的 ReAct 步数烧在反复试错上。
+    """
+    if failures >= _TOOL_MAX_RETRY:
+        return (
+            f"\n\n[系统提示] 工具 {name} 已连续失败 {failures} 次，请不要再调用它。"
+            "改用已经获得的信息尽力作答，或如实告诉用户此项数据/操作暂不可用，不要继续空转。"
+        )
+    return (
+        f"\n\n[系统提示] 工具 {name} 本次执行失败（第 {failures} 次）。"
+        "请依据上面的错误信息修正参数后重试一次；若仍不行，改用其他工具或如实告知用户，不要直接放弃。"
+    )
 
 
 def _observation_preview(result: dict) -> str:
@@ -638,10 +664,12 @@ def run_agent_events(
 
     run_started = time.monotonic()
     completed_tool_label: str | None = None
+    tool_failures: dict[str, int] = {}  # 工具连续失败计数（整个 run 内累计），驱动结构化重试引导
     if stock_mode or knowledge_mode:
         yield {"type": "stage_start", "stage": "agent_loop", "message": "Starting agent analysis..."}
     for _ in range(llm_config["max_steps"]):
         message: dict | None = None
+        args_tracker = ToolArgsProgressTracker()  # 每轮新建：工具参数生成期（写文件等长参数）的进度可视化
         if stock_mode or knowledge_mode:
             if completed_tool_label:
                 yield {"type": "thinking", "message": f"「{completed_tool_label}」已完成，继续深入分析..."}
@@ -654,6 +682,11 @@ def run_agent_events(
                     yield {"type": "reasoning_delta", "content": payload}
                 elif kind == "content":
                     yield {"type": "content_delta", "content": payload}
+                elif kind == "tool_args":
+                    progress = args_tracker.feed(payload["index"], payload["name"], payload["delta"])
+                    if progress:
+                        progress["display_name"] = digital_human_tool_display_name(progress["tool"]) if progress["tool"] else ""
+                        yield progress
                 else:
                     message = payload
         except Exception as exc:  # noqa: BLE001
@@ -750,11 +783,16 @@ def run_agent_events(
                 result = {"error": f"未知工具 {name}"}
                 yield {"type": "observation", "content": result["error"]}
 
+            tool_content = json.dumps(result, ensure_ascii=False)[:OBSERVATION_CHAR_LIMIT]
+            if isinstance(result, dict) and "error" in result:
+                # 失败：在塞回模型的 observation 后附结构化引导，治"一次错就放弃"与"反复空转"两头
+                tool_failures[name] = tool_failures.get(name, 0) + 1
+                tool_content += _tool_retry_hint(name, tool_failures[name])
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": call.get("id", ""),
-                    "content": json.dumps(result, ensure_ascii=False)[:OBSERVATION_CHAR_LIMIT],
+                    "content": tool_content,
                 }
             )
 

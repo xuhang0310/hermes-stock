@@ -356,6 +356,11 @@ export const api = {
     }),
   digitalHumanCapabilities: (id: number) =>
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
+  saveWorkspaceNote: (payload: { content: string; title?: string; path?: string }) =>
+    request<{ path: string; bytes: number; overwritten: boolean }>('/api/workspace/save-note', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
   knowledgeStats: () => request<KnowledgeStats>('/api/knowledge/stats'),
   knowledgeDocuments: (params: { doc_type?: string; trust_level?: string; keyword?: string; page?: number; page_size?: number } = {}) => {
     const qs = new URLSearchParams()
