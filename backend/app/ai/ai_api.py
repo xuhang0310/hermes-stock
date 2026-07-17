@@ -11,7 +11,7 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, select, text, update
 from sqlalchemy.orm import Session, selectinload
@@ -29,6 +29,7 @@ from backend.app.core.models import (
     KnowledgeUpload,
     LlmModelConfig,
     LlmModelPlatform,
+    WorkspaceDocument,
 )
 from backend.app.ai import memory as memory_module
 from backend.app.ai import rag_ingest
@@ -828,6 +829,7 @@ class WorkspaceNoteIn(BaseModel):
     content: str = Field(min_length=1)
     title: str | None = Field(default=None, max_length=120)
     path: str | None = Field(default=None, max_length=300)
+    session_id: int | None = None  # 生成该文档的对话，用于"关联对话"展示
 
 
 def _workspace_note_path(title: str | None) -> str:
@@ -837,15 +839,44 @@ def _workspace_note_path(title: str | None) -> str:
     return f"notes/{stamp}-{slug}.md" if slug else f"notes/{stamp}.md"
 
 
+def _register_workspace_doc(
+    db: Session, *, path: str, title: str | None, session_id: int | None, created_by: str | None
+) -> None:
+    """按 path upsert 工作区文档登记行；关联对话的数字人由 session 反查。失败不阻断保存。"""
+    try:
+        dh_code = None
+        if session_id:
+            session_row = db.get(AiChatSession, session_id)
+            if session_row and session_row.digital_human_id:
+                profile = db.get(DigitalHumanProfile, session_row.digital_human_id)
+                dh_code = profile.code if profile else None
+        row = db.scalar(select(WorkspaceDocument).where(WorkspaceDocument.path == path).limit(1))
+        if row is None:
+            db.add(WorkspaceDocument(
+                path=path, title=title, session_id=session_id,
+                digital_human_code=dh_code, created_by=created_by,
+            ))
+        else:  # 覆盖：更新元数据，保留 ingested_doc_id（内容变了需重新入库，交由入库端点 force）
+            row.title = title or row.title
+            if session_id:
+                row.session_id = session_id
+                row.digital_human_code = dh_code
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 —— 登记失败不能影响文件已成功落盘
+        db.rollback()
+        log_event("workspace", "WARNING", "文档登记失败（已忽略）", path=path, error=str(exc)[:200])
+
+
 @router.post("/workspace/save-note")
 def save_workspace_note(
     payload: WorkspaceNoteIn,
+    db: Session = Depends(get_db),
     _context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
-    """把聊天回答一键存入 Agent 工作区。
+    """把聊天回答一键存入 Agent 工作区，并登记（含关联对话）供"生成文档"页管理。
 
     复用 agent_workspace 技能的 ws_write_file——路径监狱 / 2MB 上限 / 二进制拒写 /
-    审计原样生效；此处只补"谁存的"这层用户审计（技能层没有用户上下文）。
+    审计原样生效；此处只补"谁存的 + 哪个对话生成的"元数据（技能层没有这些上下文）。
     """
     if not settings.workspace_enabled:
         raise HTTPException(status_code=400, detail="Agent 工作区未启用（STOCK_WORKSPACE_ENABLED=false）")
@@ -855,11 +886,136 @@ def save_workspace_note(
     result = ws_write_file(path, payload.content)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
+    _register_workspace_doc(
+        db, path=result["path"], title=payload.title,
+        session_id=payload.session_id, created_by=_context.user.display_name,
+    )
     log_event(
         "workspace", "INFO", "回答存入工作区",
         operator=_context.user.display_name, path=result.get("path"), bytes=result.get("bytes"),
     )
     return result
+
+
+_WORKSPACE_TEXT_EXTS = {".md", ".txt", ".csv", ".json", ".py"}
+
+
+@router.get("/workspace/documents")
+def list_workspace_documents(
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("agent:use")),
+) -> list[dict]:
+    """列出工作区里所有生成的文档：文件系统为存在性权威，LEFT JOIN 登记表补关联对话与入库状态。"""
+    if not settings.workspace_enabled:
+        return []
+    from backend.app.skills.agent_workspace import _WORKSPACE_ROOT, _ensure_root
+
+    root = _ensure_root()
+    registry = {row.path: row for row in db.scalars(select(WorkspaceDocument)).all()}
+    sessions = {
+        s.id: s for s in db.scalars(
+            select(AiChatSession).where(AiChatSession.id.in_([r.session_id for r in registry.values() if r.session_id]))
+        ).all()
+    } if registry else {}
+    docs: list[dict] = []
+    for file in root.rglob("*"):
+        if not file.is_file() or file.suffix.lower() not in _WORKSPACE_TEXT_EXTS:
+            continue
+        rel = file.resolve().relative_to(root).as_posix()
+        stat = file.stat()
+        meta = registry.get(rel)
+        session = sessions.get(meta.session_id) if meta and meta.session_id else None
+        docs.append({
+            "path": rel,
+            "name": file.name,
+            "bytes": stat.st_size,
+            "mtime": int(stat.st_mtime),
+            "title": (meta.title if meta else None) or file.stem,
+            "created_by": meta.created_by if meta else None,
+            "digital_human_code": meta.digital_human_code if meta else None,
+            "session": {"id": session.id, "title": session.title, "chat_mode": session.chat_mode} if session else None,
+            "ingested": bool(meta and meta.ingested_doc_id),
+            "ingested_doc_id": meta.ingested_doc_id if meta else None,
+        })
+    docs.sort(key=lambda d: d["mtime"], reverse=True)
+    return docs
+
+
+@router.get("/workspace/documents/download")
+def download_workspace_document(
+    path: str = Query(..., max_length=300),
+    _context: AuthContext = Depends(require_permission("agent:use")),
+) -> FileResponse:
+    """下载工作区文档（路径经监狱校验，只能取工作区内文件）。"""
+    from backend.app.skills.agent_workspace import WorkspaceError, _resolve_in_jail
+
+    try:
+        target = _resolve_in_jail(path)
+    except WorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return FileResponse(str(target), filename=target.name, media_type="application/octet-stream")
+
+
+class WorkspaceIngestIn(BaseModel):
+    path: str = Field(min_length=1, max_length=300)
+
+
+@router.post("/workspace/documents/ingest")
+def ingest_workspace_document(
+    payload: WorkspaceIngestIn,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    """把工作区文档加入知识库：建 Document（复用上传同款）→ 切块嵌入索引 → 回填 ingested_doc_id。"""
+    from backend.app.skills.agent_workspace import WorkspaceError, _resolve_in_jail
+
+    try:
+        target = _resolve_in_jail(payload.path)
+    except WorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="文档不存在")
+    text_content = target.read_text(encoding="utf-8", errors="replace")
+    if not text_content.strip():
+        raise HTTPException(status_code=400, detail="文档内容为空，无法入库")
+
+    content_hash = hashlib.sha256(text_content.encode("utf-8")).hexdigest()[:64]
+    existing = db.scalar(select(Document).where(Document.content_hash == content_hash).limit(1))
+    if existing:
+        doc = existing
+    else:
+        doc = Document(
+            doc_type="workspace",
+            title=target.stem,
+            content=text_content,
+            summary=text_content[:500],
+            source="workspace",
+            trust_level="trusted",
+            is_external_untrusted=False,
+            content_hash=content_hash,
+        )
+        db.add(doc)
+        db.flush()
+    doc_id = doc.id
+    # 登记回填（没有登记行则补建一条，标记已入库）
+    row = db.scalar(select(WorkspaceDocument).where(WorkspaceDocument.path == payload.path).limit(1))
+    if row is None:
+        row = WorkspaceDocument(path=payload.path, title=target.stem, created_by=_context.user.display_name)
+        db.add(row)
+    row.ingested_doc_id = doc_id
+    db.commit()
+
+    try:
+        ok, failed = rag_ingest.ingest_document(doc_id, force=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"入库切块/索引失败: {str(exc)[:200]}")
+    log_event(
+        "workspace", "INFO", "文档加入知识库",
+        operator=_context.user.display_name, path=payload.path, doc_id=doc_id, chunks=ok, failed=failed,
+    )
+    return {"doc_id": doc_id, "chunks": ok, "failed": failed, "path": payload.path}
 
 
 # --------------------------------------------------------------------------- RAG 知识库（P1）

@@ -13,6 +13,7 @@ export type PageKey =
   | 'rhythm'
   | 'knowledge'
   | 'knowledgeSearch'
+  | 'workspaceDocs'
   | 'settings'
 
 const props = defineProps<{
@@ -55,7 +56,8 @@ const navItems = computed<NavItem[]>(() => [
     label: '知识库',
     children: [
       { key: 'knowledge' as PageKey, label: '知识库' },
-      { key: 'knowledgeSearch' as PageKey, label: '检索agent' }
+      { key: 'knowledgeSearch' as PageKey, label: '检索agent' },
+      { key: 'workspaceDocs' as PageKey, label: '生成文档' }
     ]
   }] : []),
   { key: 'settings', label: '设置' }

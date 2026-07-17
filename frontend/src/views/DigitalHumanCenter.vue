@@ -319,7 +319,7 @@ async function saveToWorkspace(item: ChatMessage) {
   if (!item.content || item.saving || item.savedPath) return
   item.saving = true
   try {
-    const res = await api.saveWorkspaceNote({ content: item.content, title: questionBefore(item) })
+    const res = await api.saveWorkspaceNote({ content: item.content, title: questionBefore(item), session_id: selectedSessionId.value })
     item.savedPath = res.path
   } catch (err) {
     error.value = err instanceof Error ? err.message : '存入工作区失败'

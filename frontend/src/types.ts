@@ -451,6 +451,19 @@ export type DigitalHumanCapabilities = {
   workspace_tools?: DigitalHumanToolMeta[]
 }
 
+export type WorkspaceDoc = {
+  path: string
+  name: string
+  bytes: number
+  mtime: number
+  title: string
+  created_by: string | null
+  digital_human_code: string | null
+  session: { id: number; title: string; chat_mode: string } | null
+  ingested: boolean
+  ingested_doc_id: number | null
+}
+
 export type KnowledgeIngestProgress = {
   running: boolean
   processed: number

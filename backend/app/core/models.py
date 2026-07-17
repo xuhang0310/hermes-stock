@@ -318,6 +318,26 @@ class KnowledgeUpload(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class WorkspaceDocument(Base):
+    """Agent 工作区生成文档的登记表：文件系统是存在性权威，本表补"关联对话 + 入库状态"元数据。
+
+    path 唯一（相对工作区根）。session_id 关联生成该文档的对话；ingested_doc_id 非空表示
+    已加入知识库（指向 documents.id）。文件被覆盖时按 path upsert。
+    """
+
+    __tablename__ = "workspace_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    path: Mapped[str] = mapped_column(String(300), nullable=False, unique=True)
+    title: Mapped[str | None] = mapped_column(String(500))
+    session_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"))
+    digital_human_code: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    ingested_doc_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("documents.id"))
+
+
 class Rule(Base):
     __tablename__ = "rules"
 

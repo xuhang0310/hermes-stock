@@ -38,7 +38,8 @@ import type {
   AgentStreamEvent,
   ChartResolution,
   StockStrategy,
-  WatchlistItem
+  WatchlistItem,
+  WorkspaceDoc
 } from './types'
 
 const TOKEN_KEY = 'hermes_stock_token'
@@ -356,11 +357,33 @@ export const api = {
     }),
   digitalHumanCapabilities: (id: number) =>
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
-  saveWorkspaceNote: (payload: { content: string; title?: string; path?: string }) =>
+  saveWorkspaceNote: (payload: { content: string; title?: string; path?: string; session_id?: number | null }) =>
     request<{ path: string; bytes: number; overwritten: boolean }>('/api/workspace/save-note', {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
+  workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
+  ingestWorkspaceDoc: (path: string) =>
+    request<{ doc_id: number; chunks: number; failed: number; path: string }>('/api/workspace/documents/ingest', {
+      method: 'POST',
+      body: JSON.stringify({ path })
+    }),
+  // 下载端点需鉴权（Bearer），故走带 token 的 fetch → blob → 触发浏览器下载
+  downloadWorkspaceDoc: async (path: string, filename: string) => {
+    const res = await fetch(`/api/workspace/documents/download?path=${encodeURIComponent(path)}`, {
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+    })
+    if (!res.ok) throw new Error((await res.text()) || `下载失败: ${res.status}`)
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
   knowledgeStats: () => request<KnowledgeStats>('/api/knowledge/stats'),
   knowledgeDocuments: (params: { doc_type?: string; trust_level?: string; keyword?: string; page?: number; page_size?: number } = {}) => {
     const qs = new URLSearchParams()
