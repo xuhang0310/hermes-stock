@@ -411,16 +411,19 @@ async function send() {
       },
       controller.signal
     )
-    // 流正常结束却没拿到最终答案：服务端干净关闭（重启/断流）时 reader 会正常读完而不抛异常，
-    // 兜底不能只看 steps 是否为空——被斩断时通常已有思考步骤。有半截答案就保留，否则明确提示重试。
-    if (!reply.content && !reply.error) {
-      if (reply.liveContent.trim()) {
-        reply.content = reply.liveContent.trim()
-        reply.liveContent = ''
-        reply.streamStatus = 'done'
-      } else {
-        reply.error = '回复未完成，可能是网络中断或服务重启，请重试。'
+    // 收尾：优先保住已产出内容（有半截答案就转正）；只有从头到尾什么都没收到才提示重试，
+    // 避免把"已完整回答但没收到最后一帧 content_end"误判成失败（并发/网络抖动会触发）。
+    if (!reply.content && reply.liveContent.trim()) {
+      reply.content = reply.liveContent.trim()
+      reply.liveContent = ''
+    }
+    if (!reply.error) {
+      const gotNothing = !reply.content && !reply.liveContent.trim() && !reply.steps.length && !reply.liveReasoning
+      if (gotNothing) {
+        reply.error = '回复未完成，请重试。'
         reply.streamStatus = 'error'
+      } else {
+        reply.streamStatus = 'done'
       }
     }
     // 不阻塞输入框：推迟到 nextTick 后跑，确保 sending=false 先渲染到 DOM
