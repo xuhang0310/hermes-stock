@@ -2049,71 +2049,7 @@ button.btn-stop:hover {
   justify-content: flex-end; /* 只保留尾部可见：新内容始终出现在底部，无需滚动 */
 }
 
-/* 生成文档页 */
-.ws-docs-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 12px;
-}
-.ws-docs-head h3 {
-  margin: 0 0 4px;
-}
-.ws-notice {
-  color: var(--ok);
-  background: rgba(39, 197, 138, 0.08);
-  border: 1px solid rgba(39, 197, 138, 0.25);
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-size: 13px;
-  margin-bottom: 10px;
-}
-.ws-empty {
-  color: #b8b09a;
-  padding: 40px 16px;
-  text-align: center;
-  border: 1px dashed rgba(213, 180, 106, 0.25);
-  border-radius: 8px;
-}
-.ws-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-.ws-table th,
-.ws-table td {
-  text-align: left;
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(213, 180, 106, 0.12);
-  vertical-align: top;
-}
-.ws-table th {
-  color: var(--gold-2);
-  font-weight: 600;
-  font-size: 12px;
-}
-.ws-title {
-  display: block;
-  color: #e8e2d2;
-}
-.ws-path {
-  display: block;
-  color: #8f8a78;
-  font-size: 11px;
-  font-family: "Cascadia Mono", "Consolas", monospace;
-  margin-top: 2px;
-}
-.ws-session {
-  display: block;
-  color: #cfc7b0;
-  margin-bottom: 3px;
-}
-.ws-actions {
-  display: flex;
-  gap: 8px;
-  white-space: nowrap;
-}
+/* 生成文档页样式已迁至 WorkspaceDocsView.vue 的 scoped 块（卡片式重设计） */
 
 /* 回答操作：下载 / 存入工作区 */
 .msg-actions {
