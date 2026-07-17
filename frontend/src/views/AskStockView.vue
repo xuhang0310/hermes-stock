@@ -5,6 +5,7 @@ import type { AgentSession, AgentStreamEvent, ModelConfig, PromptRecommendation,
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
 import { extractGeneratedFiles, type GeneratedFile } from '../utils/workspace'
+import { beijingFromDb } from '../utils/datetime'
 
 type ReactStep = {
   type:
@@ -607,7 +608,7 @@ onMounted(load)
           >
             <strong>{{ session.title }}</strong>
             <span>{{ sessionModelLabel(session) }}</span>
-            <small>{{ session.message_count }} 条 · {{ new Date(session.updated_at).toLocaleString() }}</small>
+            <small>{{ session.message_count }} 条 · {{ beijingFromDb(session.updated_at) }}</small>
           </button>
           <button
             class="session-delete"

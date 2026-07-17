@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import DataTable from './DataTable.vue'
 import type { BrokerPreset, PositionAccount, PositionItem, PositionSummary, PositionTrade } from '../types'
+import { beijingFromDb } from '../utils/datetime'
 
 const props = defineProps<{ positions: PositionItem[] }>()
 const emit = defineEmits<{ refresh: []; refreshPositions: []; openAgent: [accountId: number | null]; openChart: [position: PositionItem] }>()
@@ -145,7 +146,7 @@ function tradeActionLabel(action: PositionTrade['action']) {
 const tradeColumns = ['时间', '标的', '名称', '方向', '数量', '价格', '金额', '来源', '操作']
 const tradeRows = computed(() =>
   trades.value.map((t) => [
-    (t.created_at || '').replace('T', ' ').slice(0, 16) || '-',
+    beijingFromDb(t.created_at),
     t.symbol,
     t.name || '-',
     tradeActionLabel(t.action),

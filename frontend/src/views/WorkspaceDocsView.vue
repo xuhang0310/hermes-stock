@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { WorkspaceDoc } from '../types'
+import { beijingFromEpoch } from '../utils/datetime'
 
 const docs = ref<WorkspaceDoc[]>([])
 const loading = ref(false)
@@ -44,11 +45,7 @@ function fmtBytes(n: number) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
-function fmtTime(epochSec: number) {
-  const d = new Date(epochSec * 1000)
-  const p = (x: number) => String(x).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
+const fmtTime = beijingFromEpoch // 东八区显示，不随浏览器时区漂移
 
 const stats = computed(() => {
   const list = docs.value

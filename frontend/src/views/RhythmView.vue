@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import DataTable from '../components/DataTable.vue'
 import type { JobRun, ScheduleJob, ScheduleStatus } from '../types'
+import { beijingFromDb } from '../utils/datetime'
 
 const jobs = ref<ScheduleJob[]>([])
 const runs = ref<JobRun[]>([])
@@ -342,7 +343,7 @@ onUnmounted(() => {
       <DataTable
         :columns="['时间', '任务', '触发', '状态', '耗时ms', '结果 / 错误']"
         :rows="runs.map((run) => [
-          run.created_at || '-',
+          beijingFromDb(run.created_at),
           run.job_key,
           run.trigger_type,
           statusText(run.status),
