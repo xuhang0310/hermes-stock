@@ -26,14 +26,16 @@ function ext(path: string): string {
   const m = /\.([a-z0-9]+)$/i.exec(path)
   return m ? m[1].toLowerCase() : 'txt'
 }
-// 文档类型 → 图标标签 + 色系（md 金 / py 青 / 其它按扩展名）
-function fileKind(path: string): { label: string; cls: string } {
+// 文档类型 → 文件类型图标（openclaw 生成的 md/py/pdf/csv/txt 图标集）
+function fileIcon(path: string): string {
   const e = ext(path)
-  if (e === 'md') return { label: 'MD', cls: 'md' }
-  if (e === 'py') return { label: 'PY', cls: 'py' }
-  if (e === 'pdf' || e === 'docx') return { label: e.toUpperCase(), cls: 'pdf' }
-  if (e === 'csv' || e === 'json') return { label: e.toUpperCase(), cls: 'data' }
-  return { label: e.toUpperCase().slice(0, 3), cls: 'txt' }
+  const key =
+    e === 'md' ? 'md'
+    : e === 'py' ? 'py'
+    : e === 'pdf' || e === 'docx' ? 'pdf'
+    : e === 'csv' || e === 'json' ? 'csv'
+    : 'txt'
+  return `/icons/filetypes/${key}.png`
 }
 const avatarChar = (code: string | null) => (code ? (DH_NAMES[code] || code).slice(0, 1) : 'A')
 
@@ -121,7 +123,8 @@ onMounted(load)
 
     <div v-else class="wsd-list">
       <article v-for="doc in docs" :key="doc.path" class="wsd-card">
-        <div class="wsd-icon" :class="fileKind(doc.path).cls">{{ fileKind(doc.path).label }}</div>
+        <img class="wsd-ficon" :src="fileIcon(doc.path)" :alt="doc.name" />
+
 
         <div class="wsd-body">
           <div class="wsd-title">{{ doc.title }}</div>
@@ -220,20 +223,7 @@ onMounted(load)
 }
 .wsd-card:hover { transform: translateY(-2px); border-color: var(--line); background: var(--card-hi); }
 
-.wsd-icon {
-  width: 50px; height: 56px; border-radius: 9px; flex: none; position: relative;
-  display: grid; place-items: end center; padding-bottom: 8px;
-  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.5px; border: 1px solid var(--line);
-}
-.wsd-icon::before {
-  content: ''; position: absolute; top: 8px; left: 9px; right: 9px; height: 2px; border-radius: 2px;
-  background: currentColor; opacity: 0.5; box-shadow: 0 5px 0 currentColor, 0 10px 0 currentColor;
-}
-.wsd-icon.md { color: var(--gold); background: rgba(213, 180, 106, 0.09); }
-.wsd-icon.py { color: var(--cyan); background: rgba(43, 212, 212, 0.09); }
-.wsd-icon.pdf { color: var(--danger); background: rgba(255, 93, 93, 0.08); }
-.wsd-icon.data { color: var(--ok); background: rgba(39, 197, 138, 0.08); }
-.wsd-icon.txt { color: var(--ink-soft); background: rgba(184, 176, 154, 0.07); }
+.wsd-ficon { width: 48px; height: 48px; flex: none; object-fit: contain; }
 
 .wsd-body { min-width: 0; }
 .wsd-title { font-size: 14.5px; font-weight: 650; color: var(--ink); letter-spacing: 0.3px; }
