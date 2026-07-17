@@ -5,7 +5,7 @@ import FeishuBotPanel from './FeishuBotPanel.vue'
 import type { AgentSession, AgentStreamEvent, DigitalHuman, ModelConfig, PromptRecommendation } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
-import { downloadMarkdown, isWorkspaceSaveworthy } from '../utils/workspace'
+import { extractGeneratedFiles, type GeneratedFile } from '../utils/workspace'
 
 const activeCenterTab = ref<'chat' | 'feishuBots'>('chat')
 
@@ -27,8 +27,6 @@ type ChatMessage = {
   liveContent: string
   liveTool?: LiveToolProgress | null
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
-  saving?: boolean
-  savedPath?: string
 }
 
 const profiles = ref<DigitalHuman[]>([])
@@ -295,36 +293,16 @@ function flushThought(reply: ChatMessage) {
   reply.liveContent = ''
 }
 
-function questionBefore(item: ChatMessage): string {
-  const idx = messages.value.indexOf(item)
-  for (let i = idx - 1; i >= 0; i--) {
-    if (messages.value[i].role === 'user') return messages.value[i].content
-  }
-  return ''
+// 本次回复真正生成的工作区文件（有 ws_write_file 动作才有），下载的是真实文件
+function generatedFiles(item: ChatMessage): GeneratedFile[] {
+  return extractGeneratedFiles(item.steps)
 }
 
-// 只给研究产物挂"下载/存入工作区"，寒暄闲聊不挂（工作区是研究产物层，不是聊天记录）
-function canSaveNote(item: ChatMessage): boolean {
-  if (item.liveContent) return false
-  return isWorkspaceSaveworthy(item.content, item.steps.some((s) => s.type === 'action'))
-}
-
-// 直接下载回复为 .md 文件（客户端生成，点开即用编辑器/Word 打开）
-function downloadNote(item: ChatMessage) {
-  downloadMarkdown(item.content, questionBefore(item))
-}
-
-// 回答一键存工作区：前端已有全文，直接落盘，零 token（借鉴 deepresearch"文件按需物化"）
-async function saveToWorkspace(item: ChatMessage) {
-  if (!item.content || item.saving || item.savedPath) return
-  item.saving = true
+async function downloadFile(file: GeneratedFile) {
   try {
-    const res = await api.saveWorkspaceNote({ content: item.content, title: questionBefore(item), session_id: selectedSessionId.value })
-    item.savedPath = res.path
+    await api.downloadWorkspaceDoc(file.path, file.name)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '存入工作区失败'
-  } finally {
-    item.saving = false
+    error.value = err instanceof Error ? err.message : '下载失败'
   }
 }
 
@@ -610,16 +588,15 @@ onMounted(load)
             <div v-else-if="item.error" class="chat-error">{{ item.error }}</div>
             <div v-else-if="!item.steps.length && !item.liveReasoning" class="chat-typing">正在思考与查询...</div>
 
-            <div v-if="canSaveNote(item)" class="msg-actions">
-              <button type="button" class="msg-save-btn" @click="downloadNote(item)">⬇ 下载 .md</button>
+            <div v-if="!item.liveContent && generatedFiles(item).length" class="msg-actions">
               <button
+                v-for="file in generatedFiles(item)"
+                :key="file.path"
                 type="button"
                 class="msg-save-btn"
-                :class="{ saved: item.savedPath }"
-                :disabled="item.saving || !!item.savedPath"
-                @click="saveToWorkspace(item)"
+                @click="downloadFile(file)"
               >
-                {{ item.savedPath ? `✓ 已存入 ${item.savedPath}` : item.saving ? '保存中…' : '存入工作区' }}
+                ⬇ 下载 {{ file.name }}
               </button>
             </div>
           </template>

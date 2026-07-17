@@ -357,11 +357,6 @@ export const api = {
     }),
   digitalHumanCapabilities: (id: number) =>
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
-  saveWorkspaceNote: (payload: { content: string; title?: string; path?: string; session_id?: number | null }) =>
-    request<{ path: string; bytes: number; overwritten: boolean }>('/api/workspace/save-note', {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    }),
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
   ingestWorkspaceDoc: (path: string) =>
     request<{ doc_id: number; chunks: number; failed: number; path: string }>('/api/workspace/documents/ingest', {
