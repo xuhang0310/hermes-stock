@@ -2049,9 +2049,12 @@ button.btn-stop:hover {
   justify-content: flex-end; /* 只保留尾部可见：新内容始终出现在底部，无需滚动 */
 }
 
-/* 回答一键存工作区 */
+/* 回答操作：下载 / 存入工作区 */
 .msg-actions {
   margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .msg-save-btn {

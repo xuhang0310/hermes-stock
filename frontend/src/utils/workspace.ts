@@ -15,3 +15,22 @@ export function isWorkspaceSaveworthy(content: string, usedTools: boolean): bool
   const bullets = (c.match(/(^|\n)[ \t]*([-*]|\d+\.)[ \t]/g) || []).length
   return bullets >= 3 // ≥3 条列表 = 像清单/报告
 }
+
+/** 把一段 markdown 文本作为 .md 文件直接下载（客户端 Blob，无需服务端，点开即用编辑器/Word 打开）。 */
+export function downloadMarkdown(content: string, baseName: string): void {
+  const name =
+    (baseName || '')
+      .trim()
+      .slice(0, 40)
+      .replace(/[^\w一-龥-]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'report'
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${name}.md`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}

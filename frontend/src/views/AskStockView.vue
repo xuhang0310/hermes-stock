@@ -4,7 +4,7 @@ import { api } from '../api'
 import type { AgentSession, AgentStreamEvent, ModelConfig, PromptRecommendation, StockStrategy } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
-import { isWorkspaceSaveworthy } from '../utils/workspace'
+import { downloadMarkdown, isWorkspaceSaveworthy } from '../utils/workspace'
 
 type ReactStep = {
   type:
@@ -395,10 +395,15 @@ function questionBefore(item: ChatMessage): string {
   return ''
 }
 
-// 只给研究产物挂"存入工作区"，寒暄闲聊不挂
+// 只给研究产物挂"下载/存入工作区"，寒暄闲聊不挂
 function canSaveNote(item: ChatMessage): boolean {
   if (item.liveContent) return false
   return isWorkspaceSaveworthy(item.content, item.steps.some((s) => s.type === 'action'))
+}
+
+// 直接下载回复为 .md 文件（客户端生成，点开即用编辑器/Word 打开）
+function downloadNote(item: ChatMessage) {
+  downloadMarkdown(item.content, questionBefore(item))
 }
 
 // 回答一键存工作区：前端已有全文，直接落盘，零 token（借鉴 deepresearch"文件按需物化"）
@@ -525,6 +530,18 @@ async function send() {
       },
       controller.signal
     )
+    // 流正常结束却没拿到最终答案：服务端干净关闭（重启/断流）时 reader 正常读完而不抛异常，
+    // 需明确兜底——有半截答案就保留，否则提示重试，避免消息空白卡住。
+    if (!reply.content && !reply.error) {
+      if (reply.liveContent.trim()) {
+        reply.content = reply.liveContent.trim()
+        reply.liveContent = ''
+        reply.streamStatus = 'done'
+      } else {
+        reply.error = '回复未完成，可能是网络中断或服务重启，请重试。'
+        reply.streamStatus = 'error'
+      }
+    }
     nextTick(() => { refreshSessions().catch(() => {}) })
   } catch (err) {
     if (controller.signal.aborted) {
@@ -714,6 +731,7 @@ onMounted(load)
             <div v-else-if="!hasVisibleAssistantWork(item)" class="chat-typing">正在理解股票范围...</div>
 
             <div v-if="canSaveNote(item)" class="msg-actions">
+              <button type="button" class="msg-save-btn" @click="downloadNote(item)">⬇ 下载 .md</button>
               <button
                 type="button"
                 class="msg-save-btn"

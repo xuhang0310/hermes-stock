@@ -5,7 +5,7 @@ import FeishuBotPanel from './FeishuBotPanel.vue'
 import type { AgentSession, AgentStreamEvent, DigitalHuman, ModelConfig, PromptRecommendation } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
-import { isWorkspaceSaveworthy } from '../utils/workspace'
+import { downloadMarkdown, isWorkspaceSaveworthy } from '../utils/workspace'
 
 const activeCenterTab = ref<'chat' | 'feishuBots'>('chat')
 
@@ -303,10 +303,15 @@ function questionBefore(item: ChatMessage): string {
   return ''
 }
 
-// 只给研究产物挂"存入工作区"，寒暄闲聊不挂（工作区是研究产物层，不是聊天记录）
+// 只给研究产物挂"下载/存入工作区"，寒暄闲聊不挂（工作区是研究产物层，不是聊天记录）
 function canSaveNote(item: ChatMessage): boolean {
   if (item.liveContent) return false
   return isWorkspaceSaveworthy(item.content, item.steps.some((s) => s.type === 'action'))
+}
+
+// 直接下载回复为 .md 文件（客户端生成，点开即用编辑器/Word 打开）
+function downloadNote(item: ChatMessage) {
+  downloadMarkdown(item.content, questionBefore(item))
 }
 
 // 回答一键存工作区：前端已有全文，直接落盘，零 token（借鉴 deepresearch"文件按需物化"）
@@ -428,9 +433,17 @@ async function send() {
       },
       controller.signal
     )
-    if (!reply.content && !reply.error && !reply.steps.length) {
-      reply.error = '未收到最终回答，请重试。'
-      reply.streamStatus = 'error'
+    // 流正常结束却没拿到最终答案：服务端干净关闭（重启/断流）时 reader 会正常读完而不抛异常，
+    // 兜底不能只看 steps 是否为空——被斩断时通常已有思考步骤。有半截答案就保留，否则明确提示重试。
+    if (!reply.content && !reply.error) {
+      if (reply.liveContent.trim()) {
+        reply.content = reply.liveContent.trim()
+        reply.liveContent = ''
+        reply.streamStatus = 'done'
+      } else {
+        reply.error = '回复未完成，可能是网络中断或服务重启，请重试。'
+        reply.streamStatus = 'error'
+      }
     }
     // 不阻塞输入框：推迟到 nextTick 后跑，确保 sending=false 先渲染到 DOM
     nextTick(() => {
@@ -598,6 +611,7 @@ onMounted(load)
             <div v-else-if="!item.steps.length && !item.liveReasoning" class="chat-typing">正在思考与查询...</div>
 
             <div v-if="canSaveNote(item)" class="msg-actions">
+              <button type="button" class="msg-save-btn" @click="downloadNote(item)">⬇ 下载 .md</button>
               <button
                 type="button"
                 class="msg-save-btn"
