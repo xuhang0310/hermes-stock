@@ -28,10 +28,11 @@ class PositionAccountMixin:
     def _ensure_position_account(self, payload: dict[str, Any], symbol: str | None = None) -> PositionAccount | None:
         # 1) 显式 account_id 直取（前端选定目标账户 / 用户明说时透传）
         acc_id = payload.get("account_id")
-        if acc_id:
+        if acc_id is not None:
             existing = self.db.get(PositionAccount, int(acc_id))
             if existing is not None:
                 return existing
+            raise ValueError(f"position account not found: {acc_id}")
         # 2) 未给任何账户信息时，自动匹配该标的现有 open 持仓的账户——清仓/卖出/调仓必须命中
         #    原持仓，否则会在默认/manual 账户下另起一条记录，真实持仓纹丝不动（数据"没更新"）。
         has_explicit_account = any(
@@ -89,14 +90,20 @@ class PositionAccountMixin:
         - total_asset = available_cash + holding_market_value（系统算，买入后市值变→总资产联动）
         - day_pnl = Σ (daily_bars 最新 close − pre_close) × 持仓量（今日 vs 昨日收盘）
         """
-        latest_ids = (
-            select(func.max(PositionHoldingSnapshot.id))
+        ordered = self.db.scalars(
+            select(PositionHoldingSnapshot)
             .where(PositionHoldingSnapshot.account_id == account.id)
-            .group_by(PositionHoldingSnapshot.symbol)
-        )
-        snaps = self.db.scalars(
-            select(PositionHoldingSnapshot).where(PositionHoldingSnapshot.id.in_(latest_ids))
+            .order_by(
+                PositionHoldingSnapshot.symbol,
+                desc(PositionHoldingSnapshot.as_of_date),
+                desc(PositionHoldingSnapshot.captured_at),
+                desc(PositionHoldingSnapshot.id),
+            )
         ).all()
+        latest_by_symbol: dict[str, PositionHoldingSnapshot] = {}
+        for snap in ordered:
+            latest_by_symbol.setdefault(snap.symbol, snap)
+        snaps = list(latest_by_symbol.values())
         open_snaps = [s for s in snaps if (s.status or "open") == "open" and (s.position_quantity or 0) > 0]
         hmv = round(sum(s.market_value or 0 for s in open_snaps), 4)
         account.holding_market_value = hmv

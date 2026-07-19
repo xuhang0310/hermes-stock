@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -15,11 +16,11 @@ from sqlalchemy.orm import Session
 
 import time
 
-from backend.app.ai.ai_api import router as ai_router
+from backend.app.ai.ai_api import resume_background_tasks, resume_pending_uploads, router as ai_router
 from backend.app.core.applog import configure_logging, get_logger, log_event, prune_system_logs
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.auth.auth_api import router as auth_router
-from backend.app.core.database import get_db, initialize_default_database, session_scope
+from backend.app.core.database import SessionLocal, get_db, initialize_default_database, session_scope
 from backend.app.agents.position_agent import run_position_agent, run_position_agent_events
 from backend.app.agents.position_import import parse_position_screenshot
 from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
@@ -81,6 +82,7 @@ class PositionHoldingIn(BaseModel):
     today_buy_quantity: float | None = Field(default=None, ge=0)
     today_sell_quantity: float | None = Field(default=None, ge=0)
     cost_price: float | None = Field(default=None, ge=0)
+    execution_price: float | None = Field(default=None, ge=0)
     cost_amount: float | None = Field(default=None, ge=0)
     latest_price: float | None = Field(default=None, ge=0)
     market_value: float | None = Field(default=None, ge=0)
@@ -134,6 +136,8 @@ def create_app(init_db: bool = True) -> FastAPI:
                 seed_position_accounts(db)
                 ensure_default_jobs(db)
                 ensure_ask_stock_profile(db)
+            await resume_pending_uploads()
+            await resume_background_tasks()
             start_prompt_recommendation_scheduler()
             start_rhythm_scheduler()
             start_feishu_bots()
@@ -471,7 +475,6 @@ def create_app(init_db: bool = True) -> FastAPI:
     async def stream_agent_add_positions(
         payload: PositionAgentAddIn,
         request: Request,
-        repository: StockRepository = Depends(repo),
         context: AuthContext = Depends(require_permission("data:write")),
     ) -> StreamingResponse:
         async def event_stream() -> AsyncIterator[str]:
@@ -479,19 +482,26 @@ def create_app(init_db: bool = True) -> FastAPI:
             queue: asyncio.Queue[dict | object] = asyncio.Queue()
             loop = asyncio.get_running_loop()
             _DONE = object()
+            cancel_event = threading.Event()
 
             def produce_events() -> None:
                 try:
-                    for event in run_position_agent_events(
-                        repository=repository,
-                        instruction=payload.instruction,
-                        image_base64=payload.image_base64,
-                        mime_type=payload.mime_type,
-                        model_config_id=payload.model_config_id,
-                        created_by=context.user.username,
-                        account_id=payload.account_id,
-                    ):
-                        asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
+                    # The streaming worker owns its Session for its full lifetime.
+                    with SessionLocal() as worker_db:
+                        worker_repo = StockRepository(worker_db)
+                        for event in run_position_agent_events(
+                            repository=worker_repo,
+                            instruction=payload.instruction,
+                            image_base64=payload.image_base64,
+                            mime_type=payload.mime_type,
+                            model_config_id=payload.model_config_id,
+                            created_by=context.user.username,
+                            account_id=payload.account_id,
+                            cancel_event=cancel_event,
+                        ):
+                            if cancel_event.is_set():
+                                break
+                            asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
                 except Exception as exc:  # noqa: BLE001
                     asyncio.run_coroutine_threadsafe(
                         queue.put({"type": "error", "message": str(exc)}), loop
@@ -500,8 +510,11 @@ def create_app(init_db: bool = True) -> FastAPI:
                     asyncio.run_coroutine_threadsafe(queue.put(_DONE), loop).result()
 
             producer = asyncio.create_task(asyncio.to_thread(produce_events))
+            disconnected = False
             while True:
                 if await request.is_disconnected():
+                    disconnected = True
+                    cancel_event.set()
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=8)
@@ -512,7 +525,7 @@ def create_app(init_db: bool = True) -> FastAPI:
                     break
                 yield _sse_event(event)
                 await asyncio.sleep(0)
-            if producer.done():
+            if not disconnected:
                 await producer
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")

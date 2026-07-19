@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Generator
 from datetime import date
 from typing import Any
@@ -234,6 +235,7 @@ def run_position_agent_events(
     model_config_id: int | None = None,
     created_by: str | None = None,
     account_id: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
@@ -285,9 +287,13 @@ def run_position_agent_events(
     yield {"type": "thinking", "message": "正在判断用户意图和是否需要调用持仓工具..."}
 
     for turn in range(4):
+        if cancel_event and cancel_event.is_set():
+            return
         message: dict[str, Any] | None = None
         streamed_content = []
         for kind, payload in _stream_chat(messages, llm_config, POSITION_AGENT_TOOLS):
+            if cancel_event and cancel_event.is_set():
+                return
             if kind == "reasoning":
                 yield {"type": "thinking", "message": "模型正在分析输入和工具选择..."}
             elif kind == "content":
@@ -318,6 +324,8 @@ def run_position_agent_events(
         messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
 
         for call in tool_calls:
+            if cancel_event and cancel_event.is_set():
+                return
             name = (call.get("function") or {}).get("name") or ""
             args = _json_args((call.get("function") or {}).get("arguments"))
             action_step = {

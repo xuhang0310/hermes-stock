@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from backend.app.core.models import (
     AiChatMessage,
     AiPromptRecommendation,
     AiChatSession,
+    BackgroundTask,
     DataSourceConfig,
     DigitalHumanProfile,
     Document,
@@ -839,21 +841,32 @@ def _workspace_note_path(title: str | None) -> str:
     return f"notes/{stamp}-{slug}.md" if slug else f"notes/{stamp}.md"
 
 
+def _workspace_doc_key(user_id: int, path: str) -> str:
+    return f"users/{user_id}/{path.lstrip('/')}"
+
+
 def _register_workspace_doc(
-    db: Session, *, path: str, title: str | None, session_id: int | None, created_by: str | None
+    db: Session, *, user_id: int, path: str, title: str | None, session_id: int | None, created_by: str | None
 ) -> None:
     """按 path upsert 工作区文档登记行；关联对话的数字人由 session 反查。失败不阻断保存。"""
     try:
         dh_code = None
         if session_id:
-            session_row = db.get(AiChatSession, session_id)
+            session_row = db.scalar(
+                select(AiChatSession).where(AiChatSession.id == session_id, AiChatSession.user_id == user_id).limit(1)
+            )
+            if session_row is None:
+                raise ValueError("会话不存在或无权关联工作区文档")
             if session_row and session_row.digital_human_id:
                 profile = db.get(DigitalHumanProfile, session_row.digital_human_id)
                 dh_code = profile.code if profile else None
-        row = db.scalar(select(WorkspaceDocument).where(WorkspaceDocument.path == path).limit(1))
+        key = _workspace_doc_key(user_id, path)
+        row = db.scalar(
+            select(WorkspaceDocument).where(WorkspaceDocument.user_id == user_id, WorkspaceDocument.path == key).limit(1)
+        )
         if row is None:
             db.add(WorkspaceDocument(
-                path=path, title=title, session_id=session_id,
+                path=key, user_id=user_id, title=title, session_id=session_id,
                 digital_human_code=dh_code, created_by=created_by,
             ))
         else:  # 覆盖：更新元数据，保留 ingested_doc_id（内容变了需重新入库，交由入库端点 force）
@@ -880,14 +893,26 @@ def save_workspace_note(
     """
     if not settings.workspace_enabled:
         raise HTTPException(status_code=400, detail="Agent 工作区未启用（STOCK_WORKSPACE_ENABLED=false）")
-    from backend.app.skills.agent_workspace import ws_write_file
+    from backend.app.skills.agent_workspace import workspace_user_scope, ws_write_file
+
+    if payload.session_id:
+        owned_session = db.scalar(
+            select(AiChatSession).where(
+                AiChatSession.id == payload.session_id,
+                AiChatSession.user_id == _context.user.id,
+                AiChatSession.status != "deleted",
+            ).limit(1)
+        )
+        if owned_session is None:
+            raise HTTPException(status_code=404, detail="会话不存在或无权关联工作区文档")
 
     path = (payload.path or "").strip() or _workspace_note_path(payload.title)
-    result = ws_write_file(path, payload.content)
+    with workspace_user_scope(_context.user.id):
+        result = ws_write_file(path, payload.content)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     _register_workspace_doc(
-        db, path=result["path"], title=payload.title,
+        db, user_id=_context.user.id, path=result["path"], title=payload.title,
         session_id=payload.session_id, created_by=_context.user.display_name,
     )
     log_event(
@@ -908,10 +933,14 @@ def list_workspace_documents(
     """列出工作区里所有生成的文档：文件系统为存在性权威，LEFT JOIN 登记表补关联对话与入库状态。"""
     if not settings.workspace_enabled:
         return []
-    from backend.app.skills.agent_workspace import _WORKSPACE_ROOT, _ensure_root
+    from backend.app.skills.agent_workspace import _ensure_root, workspace_user_scope
 
-    root = _ensure_root()
-    registry = {row.path: row for row in db.scalars(select(WorkspaceDocument)).all()}
+    with workspace_user_scope(_context.user.id):
+        root = _ensure_root()
+    registry = {
+        row.path: row
+        for row in db.scalars(select(WorkspaceDocument).where(WorkspaceDocument.user_id == _context.user.id)).all()
+    }
     sessions = {
         s.id: s for s in db.scalars(
             select(AiChatSession).where(AiChatSession.id.in_([r.session_id for r in registry.values() if r.session_id]))
@@ -923,7 +952,7 @@ def list_workspace_documents(
             continue
         rel = file.resolve().relative_to(root).as_posix()
         stat = file.stat()
-        meta = registry.get(rel)
+        meta = registry.get(_workspace_doc_key(_context.user.id, rel))
         session = sessions.get(meta.session_id) if meta and meta.session_id else None
         docs.append({
             "path": rel,
@@ -947,10 +976,11 @@ def download_workspace_document(
     _context: AuthContext = Depends(require_permission("agent:use")),
 ) -> FileResponse:
     """下载工作区文档（路径经监狱校验，只能取工作区内文件）。"""
-    from backend.app.skills.agent_workspace import WorkspaceError, _resolve_in_jail
+    from backend.app.skills.agent_workspace import WorkspaceError, _resolve_in_jail, workspace_user_scope
 
     try:
-        target = _resolve_in_jail(path)
+        with workspace_user_scope(_context.user.id):
+            target = _resolve_in_jail(path)
     except WorkspaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not target.exists() or not target.is_file():
@@ -969,10 +999,11 @@ def ingest_workspace_document(
     _context: AuthContext = Depends(require_permission("model:manage")),
 ) -> dict:
     """把工作区文档加入知识库：建 Document（复用上传同款）→ 切块嵌入索引 → 回填 ingested_doc_id。"""
-    from backend.app.skills.agent_workspace import WorkspaceError, _resolve_in_jail
+    from backend.app.skills.agent_workspace import WorkspaceError, _resolve_in_jail, workspace_user_scope
 
     try:
-        target = _resolve_in_jail(payload.path)
+        with workspace_user_scope(_context.user.id):
+            target = _resolve_in_jail(payload.path)
     except WorkspaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not target.exists() or not target.is_file():
@@ -1000,9 +1031,14 @@ def ingest_workspace_document(
         db.flush()
     doc_id = doc.id
     # 登记回填（没有登记行则补建一条，标记已入库）
-    row = db.scalar(select(WorkspaceDocument).where(WorkspaceDocument.path == payload.path).limit(1))
+    key = _workspace_doc_key(_context.user.id, payload.path)
+    row = db.scalar(
+        select(WorkspaceDocument).where(WorkspaceDocument.user_id == _context.user.id, WorkspaceDocument.path == key).limit(1)
+    )
     if row is None:
-        row = WorkspaceDocument(path=payload.path, title=target.stem, created_by=_context.user.display_name)
+        row = WorkspaceDocument(
+            path=key, user_id=_context.user.id, title=target.stem, created_by=_context.user.display_name
+        )
         db.add(row)
     row.ingested_doc_id = doc_id
     db.commit()
@@ -1146,7 +1182,7 @@ def _reindex_done(_task: asyncio.Task) -> None:
     _reindex_running = False
 
 
-@router.post("/knowledge/reindex")
+@router.post("/knowledge/reindex-legacy", include_in_schema=False)
 async def knowledge_reindex(
     payload: KnowledgeReindexIn,
     _context: AuthContext = Depends(require_permission("model:manage")),
@@ -1164,6 +1200,80 @@ async def knowledge_reindex(
     task.add_done_callback(_reindex_done)
     _reindex_running = True
     return {"started": True, "scope": payload.doc_id or "all"}
+
+
+def _run_durable_reindex(task_id: int) -> None:
+    with SessionLocal() as db:
+        task = db.get(BackgroundTask, task_id)
+        if task is None or task.status == "completed":
+            return
+        task.status = "running"
+        task.attempts += 1
+        task.error = None
+        payload = json.loads(task.payload_json or "{}")
+        db.commit()
+    try:
+        doc_id = payload.get("doc_id")
+        if doc_id:
+            rag_ingest.ingest_document(int(doc_id), force=True)
+        else:
+            rag_ingest.run_ingest(force=True)
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as db:
+            task = db.get(BackgroundTask, task_id)
+            if task:
+                task.status = "failed"
+                task.error = str(exc)[:500]
+                db.commit()
+        return
+    with SessionLocal() as db:
+        task = db.get(BackgroundTask, task_id)
+        if task:
+            task.status = "completed"
+            db.commit()
+
+
+def _schedule_durable_reindex(task_id: int) -> None:
+    task = asyncio.create_task(asyncio.to_thread(_run_durable_reindex, task_id))
+    _reindex_tasks.add(task)
+    task.add_done_callback(_reindex_tasks.discard)
+
+
+async def resume_background_tasks() -> None:
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(BackgroundTask).where(
+                BackgroundTask.task_type == "knowledge_reindex",
+                BackgroundTask.status.in_(("queued", "running")),
+            )
+        ).all()
+        for row in rows:
+            row.status = "queued"
+        db.commit()
+        task_ids = [row.id for row in rows]
+    for task_id in task_ids:
+        _schedule_durable_reindex(task_id)
+
+
+@router.post("/knowledge/reindex")
+async def knowledge_reindex_durable(
+    payload: KnowledgeReindexIn,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    running = db.scalar(
+        select(BackgroundTask.id).where(
+            BackgroundTask.task_type == "knowledge_reindex",
+            BackgroundTask.status.in_(("queued", "running")),
+        ).limit(1)
+    )
+    if running:
+        raise HTTPException(status_code=409, detail="已有重建任务在运行，请等完成再发起")
+    task_row = BackgroundTask(task_type="knowledge_reindex", payload_json=json.dumps({"doc_id": payload.doc_id}))
+    db.add(task_row)
+    db.commit()
+    _schedule_durable_reindex(task_row.id)
+    return {"started": True, "task_id": task_row.id, "scope": payload.doc_id or "all"}
 
 
 _upload_tasks: set[asyncio.Task] = set()
@@ -1278,6 +1388,23 @@ def _ingest_upload(upload_id: int, doc_id: int) -> None:
                 db.commit()
 
 
+def _schedule_upload_ingest(upload_id: int, doc_id: int) -> None:
+    task = asyncio.create_task(asyncio.to_thread(_ingest_upload, upload_id, doc_id))
+    _upload_tasks.add(task)
+    task.add_done_callback(_upload_tasks.discard)
+
+
+async def resume_pending_uploads() -> None:
+    """Resume committed uploads left in parsing state by a process restart."""
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(KnowledgeUpload).where(KnowledgeUpload.status == "parsing", KnowledgeUpload.doc_id.isnot(None))
+        ).all()
+        pending = [(row.id, row.doc_id) for row in rows if row.doc_id is not None]
+    for upload_id, doc_id in pending:
+        _schedule_upload_ingest(upload_id, doc_id)
+
+
 @router.post("/knowledge/upload")
 async def knowledge_upload(
     file: UploadFile = File(...),
@@ -1323,9 +1450,7 @@ async def knowledge_upload(
     db.add(upload)
     db.flush()
     db.commit()
-    task = asyncio.create_task(asyncio.to_thread(_ingest_upload, upload.id, doc.id))
-    _upload_tasks.add(task)
-    task.add_done_callback(_upload_tasks.discard)
+    _schedule_upload_ingest(upload.id, doc.id)
     return {"upload_id": upload.id, "doc_id": doc.id}
 
 
@@ -1565,13 +1690,31 @@ async def agent_chat(
         .order_by(DigitalHumanProfile.sort_order, DigitalHumanProfile.id)
     ).all()
     allowed_profiles = [row for row in profiles if _profile_allowed(row, context)]
+    chat_session: AiChatSession | None = None
+    if payload.session_id:
+        chat_session = db.scalar(
+            select(AiChatSession)
+            .where(
+                AiChatSession.id == payload.session_id,
+                AiChatSession.user_id == context.user.id,
+                AiChatSession.status != "deleted",
+            )
+            .limit(1)
+        )
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+        if chat_session.chat_mode != payload.chat_mode:
+            raise HTTPException(status_code=400, detail="session mode mismatch")
+
     profile: DigitalHumanProfile | None = None
-    if payload.digital_human_id:
-        profile = next((row for row in allowed_profiles if row.id == payload.digital_human_id), None)
-        if profile is None:
-            raise HTTPException(status_code=403, detail="当前账号不能使用该数字人")
-    elif payload.chat_mode not in ("stock", "knowledge") and allowed_profiles:
-        profile = allowed_profiles[0]
+    if payload.chat_mode not in ("stock", "knowledge"):
+        requested_profile_id = payload.digital_human_id or (chat_session.digital_human_id if chat_session else None)
+        if requested_profile_id:
+            profile = next((row for row in allowed_profiles if row.id == requested_profile_id), None)
+            if profile is None:
+                raise HTTPException(status_code=403, detail="当前账号不能使用该数字人")
+        elif allowed_profiles:
+            profile = allowed_profiles[0]
 
     model_config: LlmModelConfig | None = None
     if payload.model_config_id:
@@ -1582,20 +1725,7 @@ async def agent_chat(
         )
         if model_config is None:
             raise HTTPException(status_code=404, detail="模型配置不存在或已停用")
-
-    chat_session: AiChatSession | None = None
-    if payload.session_id:
-        chat_session = db.scalar(
-            select(AiChatSession)
-            .where(AiChatSession.id == payload.session_id, AiChatSession.user_id == context.user.id)
-            .limit(1)
-        )
-        if chat_session is None:
-            raise HTTPException(status_code=404, detail="会话不存在或无权访问")
-        if chat_session.chat_mode != payload.chat_mode:
-            raise HTTPException(status_code=400, detail="session mode mismatch")
-        if payload.chat_mode not in ("stock", "knowledge") and profile is None and chat_session.digital_human_id:
-            profile = db.get(DigitalHumanProfile, chat_session.digital_human_id)
+    if chat_session is not None:
         if model_config is None and chat_session.model_config_id:
             existing_model = db.get(LlmModelConfig, chat_session.model_config_id)
             if existing_model and existing_model.status != "disabled":
@@ -1620,7 +1750,9 @@ async def agent_chat(
     if payload.model_config_id:
         chat_session.model_config_id = model_config.id if model_config else None
 
-    history = [item.model_dump() for item in payload.history] or _messages_for_history(db, chat_session.id)
+    # A persisted session is the source of truth. Client-provided history is only
+    # used while creating a new session, preventing stale tabs from rewriting context.
+    history = _messages_for_history(db, chat_session.id) if payload.session_id else [item.model_dump() for item in payload.history]
     db.add(AiChatMessage(session_id=chat_session.id, role="user", content=payload.question, event_count=0))
     db.commit()
     session_id = chat_session.id
@@ -1631,7 +1763,7 @@ async def agent_chat(
     # 检索用户长期记忆，注入到 system prompt
     memory_context = retrieve_memories(
         db, user_id=context.user.id, query=payload.question,
-        digital_human_id=payload.digital_human_id,
+        digital_human_id=profile.id if profile else None,
     )
 
     async def event_stream():
@@ -1645,6 +1777,7 @@ async def agent_chat(
         final_answer = ""
         final_error: str | None = None
         event_count = 0
+        cancel_event = threading.Event()
         # 三重门之一/二：数字人开 can_write_positions 且用户有 data:write 权限才注入写工具
         can_write_positions = bool(
             profile and profile.can_write_positions
@@ -1679,6 +1812,7 @@ async def agent_chat(
                     user_label=context.user.display_name,
                     can_write_positions=can_write_positions,
                     default_account_id=default_account_id,
+                    cancel_event=cancel_event,
                 ):
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
             except Exception as exc:  # noqa: BLE001
@@ -1698,8 +1832,11 @@ async def agent_chat(
                 asyncio.run_coroutine_threadsafe(queue.put(_AGENT_STREAM_DONE), loop).result()
 
         producer = asyncio.create_task(asyncio.to_thread(produce_events))
+        disconnected = False
         while True:
             if await request.is_disconnected():
+                disconnected = True
+                cancel_event.set()
                 break
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=8)
@@ -1721,11 +1858,14 @@ async def agent_chat(
                     final_error = str(event.get("content") or "ReAct 响应失败")
             yield _sse_event(event)
             await asyncio.sleep(0)
-        if producer.done():
-            await producer
+        if disconnected:
+            # The worker checks the same flag before every new model/tool step.
+            # Do not persist a partial assistant message or derive memories from it.
+            return
+        await producer
         _store_assistant_message(session_id, final_answer, final_error, event_count)
         # 异步触发记忆消化（不阻塞 SSE 响应）
-        asyncio.create_task(schedule_memory_digestion(session_id, context.user.id, payload.digital_human_id))
+        asyncio.create_task(schedule_memory_digestion(session_id, context.user.id, profile.id if profile else None))
         yield _sse_event({"type": "done"})
 
     return StreamingResponse(

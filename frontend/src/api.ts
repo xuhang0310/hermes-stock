@@ -195,6 +195,7 @@ export const api = {
     name?: string
     position_quantity: number
     cost_price?: number
+    execution_price?: number
     action: 'buy' | 'sell' | 'add' | 'reduce' | 'close' | 'replace'
     account_id?: number | null
   }) =>

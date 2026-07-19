@@ -32,7 +32,9 @@ class WatchlistMixin:
             for item, instrument_name, group_name in rows
         ]
 
-    def add_watchlist_item(self, symbol: str, group_name: str, reason: str | None) -> dict[str, Any]:
+    def add_watchlist_item(
+        self, symbol: str, group_name: str, reason: str | None, *, commit: bool = True
+    ) -> dict[str, Any]:
         normalized_symbol = symbol.strip().upper()
         normalized_group = group_name.strip() or "默认"
         if self.db.get(Instrument, normalized_symbol) is None:
@@ -62,5 +64,8 @@ class WatchlistMixin:
                 context_json=json.dumps({"symbol": normalized_symbol, "group": normalized_group}, ensure_ascii=False),
             )
         )
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return {"symbol": normalized_symbol, "group_name": normalized_group, "reason": reason}

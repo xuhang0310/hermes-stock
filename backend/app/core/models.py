@@ -318,6 +318,21 @@ class KnowledgeUpload(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class BackgroundTask(Base):
+    """Durable state for background work that must survive a process restart."""
+
+    __tablename__ = "background_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    payload_json: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class WorkspaceDocument(Base):
     """Agent 工作区生成文档的登记表：文件系统是存在性权威，本表补"关联对话 + 入库状态"元数据。
 
@@ -328,7 +343,11 @@ class WorkspaceDocument(Base):
     __tablename__ = "workspace_documents"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # path is stored with a user namespace (for example users/42/notes/a.md).
+    # Keeping it globally unique also protects older deployments that already have
+    # a unique index on this column.
     path: Mapped[str] = mapped_column(String(300), nullable=False, unique=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     title: Mapped[str | None] = mapped_column(String(500))
     session_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"))
     digital_human_code: Mapped[str | None] = mapped_column(String(64))

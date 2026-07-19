@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, desc, func, select
 
 from backend.app.core.models import Instrument, Position, PositionAccount, PositionHoldingSnapshot
 from backend.app.data._helpers import dt
@@ -12,23 +12,31 @@ from backend.app.data._helpers import dt
 class PositionQueryMixin:
     def positions(self, account_id: int | None = None) -> list[dict[str, Any]]:
         # 按 (账户, 标的) 取最新快照，使同一 symbol 在不同券商账户各保留一条
-        latest_ids = (
-            select(
-                func.coalesce(PositionHoldingSnapshot.account_id, 0).label("acc"),
-                PositionHoldingSnapshot.symbol,
-                func.max(PositionHoldingSnapshot.id).label("snapshot_id"),
-            )
-            .group_by(func.coalesce(PositionHoldingSnapshot.account_id, 0), PositionHoldingSnapshot.symbol)
-            .subquery()
-        )
+        ranked_snapshots = select(
+            PositionHoldingSnapshot.id.label("snapshot_id"),
+            PositionHoldingSnapshot.account_id.label("account_id"),
+            PositionHoldingSnapshot.symbol.label("symbol"),
+            func.row_number().over(
+                partition_by=(PositionHoldingSnapshot.account_id, PositionHoldingSnapshot.symbol),
+                order_by=(
+                    desc(PositionHoldingSnapshot.as_of_date),
+                    desc(PositionHoldingSnapshot.captured_at),
+                    desc(PositionHoldingSnapshot.id),
+                ),
+            ).label("rank"),
+        ).subquery()
         query = (
             select(Position, Instrument.name, PositionHoldingSnapshot, PositionAccount)
             .join(Instrument, Instrument.symbol == Position.symbol)
             .outerjoin(
-                latest_ids,
-                (latest_ids.c.acc == func.coalesce(Position.account_id, 0)) & (latest_ids.c.symbol == Position.symbol),
+                ranked_snapshots,
+                and_(
+                    ranked_snapshots.c.rank == 1,
+                    ranked_snapshots.c.symbol == Position.symbol,
+                    func.coalesce(ranked_snapshots.c.account_id, 0) == func.coalesce(Position.account_id, 0),
+                ),
             )
-            .outerjoin(PositionHoldingSnapshot, PositionHoldingSnapshot.id == latest_ids.c.snapshot_id)
+            .outerjoin(PositionHoldingSnapshot, PositionHoldingSnapshot.id == ranked_snapshots.c.snapshot_id)
             .outerjoin(PositionAccount, PositionAccount.id == Position.account_id)
             .order_by(
                 Position.status,

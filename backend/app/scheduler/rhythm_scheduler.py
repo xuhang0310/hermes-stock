@@ -56,6 +56,7 @@ _scheduler_task: asyncio.Task | None = None
 _background_tasks: set[asyncio.Task] = set()
 _inflight_runs: set[str] = set()
 _semaphore: asyncio.Semaphore | None = None
+_trade_day_cache: dict[str, bool] = {}
 
 
 def now_sh() -> datetime:
@@ -68,7 +69,28 @@ def now_sh() -> datetime:
 def is_trading_day(day: date) -> bool:
     if day.isoweekday() >= 6:
         return False
-    return day.isoformat() not in settings.stock_holidays
+    day_key = day.isoformat()
+    if day_key in settings.stock_holidays:
+        return False
+    cached = _trade_day_cache.get(day_key)
+    if cached is not None:
+        return cached
+    # TuShare is authoritative for exchange holidays and temporary closures. A
+    # network/configuration failure deliberately falls back to the old weekday
+    # rule so scheduled work remains available in offline development.
+    try:
+        from backend.app.market.stock_tools import get_trade_cal
+
+        result = get_trade_cal(day.strftime("%Y%m%d"), day.strftime("%Y%m%d"))
+        rows = result.get("rows") if isinstance(result, dict) else []
+        if rows:
+            value = rows[0].get("is_open")
+            is_open = str(value).strip().lower() in {"1", "true", "yes"}
+            _trade_day_cache[day_key] = is_open
+            return is_open
+    except Exception:  # noqa: BLE001
+        pass
+    return True
 
 
 def _weekday_ok(job: ScheduledJob, now: datetime) -> bool:

@@ -90,10 +90,24 @@ class PositionWriteMixin:
                 if position.status == "closed":
                     return {"symbol": norm, "action": "close", "closed": False, "note": "持仓已关仓"}
                 close_qty = position.quantity or 0
-                close_price = position.cost_price
+                execution_price = number_or_none(payload.get("execution_price"))
                 position.status = "closed"
                 position.quantity = 0
                 position.closed_at = datetime.now()
+                # Closing must append a zero-quantity snapshot; otherwise reads
+                # and account totals keep using the previous open snapshot.
+                self._save_position_holding(
+                    {
+                        **payload,
+                        "symbol": norm,
+                        "account_id": acc_id,
+                        "position_quantity": 0,
+                        "cost_price": position.cost_price,
+                        "status": "closed",
+                    },
+                    source_type=source_type,
+                    commit=False,
+                )
                 self._record_trade(
                     account_id=acc_id,
                     position_id=position.id,
@@ -101,7 +115,7 @@ class PositionWriteMixin:
                     name=str(payload.get("name") or "").strip(),
                     action="close",
                     quantity=close_qty,
-                    price=close_price,
+                    price=execution_price,
                     source_type=source_type,
                 )
                 self.db.flush()
@@ -112,8 +126,13 @@ class PositionWriteMixin:
             return {"symbol": norm, "action": "close", "closed": False, "note": "无 open 持仓可关闭"}
 
         # ---- 需要合并的买方/卖方动作 ----
-        new_qty_raw = float(payload.get("position_quantity") or payload.get("quantity") or 0)
-        new_cost_price = float(payload.get("cost_price") or 0) or None
+        new_qty_raw = number_or_none(payload.get("position_quantity"))
+        if new_qty_raw is None:
+            new_qty_raw = number_or_none(payload.get("quantity"))
+        if new_qty_raw is None or new_qty_raw <= 0:
+            raise ValueError("trade quantity must be greater than zero")
+        new_cost_price = number_or_none(payload.get("cost_price"))
+        execution_price = number_or_none(payload.get("execution_price"))
 
         # 解析账号：优先用 payload 传入的 account_id，其次按标的自动匹配已有持仓的账户
         if "account_id" in payload and payload["account_id"] is not None:
@@ -157,7 +176,7 @@ class PositionWriteMixin:
                 name=str(payload.get("name") or "").strip(),
                 action=action,
                 quantity=new_qty_raw,
-                price=new_cost_price,
+                price=execution_price,
                 source_type=source_type,
             )
             saved = self._save_position_holding(payload, source_type=source_type, commit=commit)
@@ -169,6 +188,7 @@ class PositionWriteMixin:
                     symbol=norm,
                     group_name="默认",
                     reason=f"持仓买入 - {symbol_name}" if symbol_name else "持仓买入",
+                    commit=commit,
                 )
             except ValueError:
                 pass  # instrument 不存在时安全跳过
@@ -190,6 +210,10 @@ class PositionWriteMixin:
                 .limit(1)
             )
             if position is not None and position.quantity is not None and position.quantity > 0:
+                if new_qty_raw > position.quantity:
+                    raise ValueError(
+                        f"sell quantity {new_qty_raw:g} exceeds current holding {position.quantity:g} for {norm}"
+                    )
                 remaining = max(0.0, position.quantity - new_qty_raw)
                 payload["position_quantity"] = remaining
                 payload["status"] = "closed" if remaining == 0 else "open"
@@ -207,14 +231,14 @@ class PositionWriteMixin:
                 name=str(payload.get("name") or "").strip(),
                 action=action,
                 quantity=new_qty_raw,
-                price=new_cost_price or position.cost_price,
+                price=execution_price,
                 source_type=source_type,
             )
             saved = self._save_position_holding(payload, source_type=source_type, commit=commit)
             return saved
 
         # 未知 action → 退化到覆盖
-        return self._save_position_holding(payload, source_type=source_type, commit=commit)
+        raise ValueError(f"unsupported position action: {action}")
 
     def _record_trade(
         self,
@@ -345,7 +369,9 @@ class PositionWriteMixin:
         self.db.flush()
         return batch
 
-    def finish_position_import_batch(self, batch: PositionImportBatch, saved_rows: list[dict[str, Any]], error: str | None = None) -> None:
+    def finish_position_import_batch(
+        self, batch: PositionImportBatch, saved_rows: list[dict[str, Any]], error: str | None = None, *, commit: bool = True
+    ) -> None:
         batch.status = "failed" if error else ("done" if any("error" not in row for row in saved_rows) else "empty")
         batch.error = error
         if not batch.parsed_json:
@@ -361,7 +387,10 @@ class PositionWriteMixin:
                 ),
             )
         )
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
 
     def update_position_field(
         self,
@@ -380,21 +409,18 @@ class PositionWriteMixin:
         norm = normalize_a_share_symbol(symbol)
         # 优先命中该标的现有 open 持仓所在账户；无法唯一归属才用调用方传的 account_id
         matched, matched_id = self._unique_open_account_for(norm)
-        effective_id = matched_id if matched else account_id
+        if account_id is not None:
+            effective_id = account_id
+        elif matched:
+            effective_id = matched_id
+        else:
+            return {"error": f"multiple or no open accounts for {norm}; specify account_id"}
         snap = self.db.scalar(
             select(PositionHoldingSnapshot)
-            .where(PositionHoldingSnapshot.symbol == norm, _account_eq(effective_id))
-            .order_by(desc(PositionHoldingSnapshot.id))
+            .where(PositionHoldingSnapshot.symbol == norm, _account_eq(effective_id, PositionHoldingSnapshot))
+            .order_by(desc(PositionHoldingSnapshot.as_of_date), desc(PositionHoldingSnapshot.captured_at), desc(PositionHoldingSnapshot.id))
             .limit(1)
         )
-        if snap is None and matched and effective_id != account_id:
-            effective_id = account_id
-            snap = self.db.scalar(
-                select(PositionHoldingSnapshot)
-                .where(PositionHoldingSnapshot.symbol == norm, _account_eq(effective_id))
-                .order_by(desc(PositionHoldingSnapshot.id))
-                .limit(1)
-            )
         if snap is None:
             return {"error": f"未找到 {norm} 的持仓快照"}
         if field in {"stop_price", "take_profit_price", "position_pct"}:
@@ -419,16 +445,53 @@ class PositionWriteMixin:
         Position 摘要不自动回滚（保留，用户可后续 update_position_field 手动修正）。
         """
         batch = self.db.scalar(
-            select(PositionImportBatch).order_by(desc(PositionImportBatch.id)).limit(1)
+            select(PositionImportBatch)
+            .where(PositionImportBatch.status.in_(("done", "failed")))
+            .order_by(desc(PositionImportBatch.id))
+            .limit(1)
         )
         if batch is None:
             return {"error": "无导入批次可撤销"}
         snaps = self.db.scalars(
             select(PositionHoldingSnapshot).where(PositionHoldingSnapshot.import_batch_id == batch.id)
         ).all()
+        affected_accounts = {snap.account_id for snap in snaps}
+        affected_pairs = {(snap.symbol, snap.account_id) for snap in snaps}
         for snap in snaps:
             self.db.delete(snap)
         batch.status = "rolled_back"
+        self.db.flush()
+        for symbol, account_id in affected_pairs:
+            latest = self.db.scalar(
+                select(PositionHoldingSnapshot)
+                .where(PositionHoldingSnapshot.symbol == symbol, PositionHoldingSnapshot.account_id == account_id)
+                .order_by(desc(PositionHoldingSnapshot.as_of_date), desc(PositionHoldingSnapshot.captured_at), desc(PositionHoldingSnapshot.id))
+                .limit(1)
+            )
+            positions = self.db.scalars(select(Position).where(Position.symbol == symbol, _account_eq(account_id))).all()
+            if latest is None:
+                for position in positions:
+                    self.db.delete(position)
+                continue
+            position = positions[0] if positions else Position(
+                symbol=symbol, account_id=account_id, position_pct=latest.position_pct or 0, status=latest.status
+            )
+            if not positions:
+                self.db.add(position)
+            position.position_pct = latest.position_pct or 0
+            position.cost_price = latest.cost_price
+            position.quantity = latest.position_quantity
+            position.stop_price = latest.stop_price
+            position.take_profit_price = latest.take_profit_price
+            position.thesis = latest.thesis
+            position.risk_note = latest.risk_note
+            position.status = latest.status
+            position.closed_at = datetime.now() if latest.status != "open" else None
+        for account_id in affected_accounts:
+            if account_id is not None:
+                account = self.db.get(PositionAccount, account_id)
+                if account is not None:
+                    self._recompute_account_funds(account)
         self.db.commit()
         return {"batch_id": batch.id, "rolled_back_count": len(snaps)}
 
@@ -466,7 +529,7 @@ class PositionWriteMixin:
         # 删该 symbol+account 的所有快照
         snaps = self.db.scalars(
             select(PositionHoldingSnapshot).where(
-                PositionHoldingSnapshot.symbol == norm, _account_eq(acc_id)
+                PositionHoldingSnapshot.symbol == norm, _account_eq(acc_id, PositionHoldingSnapshot)
             )
         ).all()
         snap_count = len(snaps)
@@ -531,8 +594,12 @@ class PositionWriteMixin:
                 symbol_name = instrument.name or symbol
 
         account = self._ensure_position_account(payload, symbol=symbol)
-        quantity = number_or_none(payload.get("position_quantity") or payload.get("quantity")) or 0.0
-        latest_price = number_or_none(payload.get("latest_price") or payload.get("price"))
+        quantity = number_or_none(payload.get("position_quantity"))
+        if quantity is None:
+            quantity = number_or_none(payload.get("quantity")) or 0.0
+        latest_price = number_or_none(payload.get("latest_price"))
+        if latest_price is None:
+            latest_price = number_or_none(payload.get("price"))
         if latest_price is None:
             # 兜底 latest_price：查 daily_bars 最新 close（API 录入时自动补行情）
             latest_row = self.db.scalar(
@@ -594,6 +661,10 @@ class PositionWriteMixin:
             status=status,
         )
         self.db.add(snapshot)
+        # Flush before choosing the authoritative snapshot. Imports can arrive
+        # out of chronological order, so the just-created row is not
+        # necessarily the position state that should drive later trades.
+        self.db.flush()
 
         acc_id = account.id if account else None
         position = self.db.scalar(
@@ -605,23 +676,39 @@ class PositionWriteMixin:
             position = self.db.scalar(
                 select(Position).where(Position.symbol == symbol, _account_eq(acc_id)).order_by(desc(Position.id)).limit(1)
             )
+        latest_snapshot = self.db.scalar(
+            select(PositionHoldingSnapshot)
+            .where(PositionHoldingSnapshot.symbol == symbol, _account_eq(acc_id, PositionHoldingSnapshot))
+            .order_by(
+                desc(PositionHoldingSnapshot.as_of_date),
+                desc(PositionHoldingSnapshot.captured_at),
+                desc(PositionHoldingSnapshot.id),
+            )
+            .limit(1)
+        ) or snapshot
         if position is None:
-            position = Position(symbol=symbol, account_id=acc_id, position_pct=position_pct or 0, status=status, opened_at=datetime.now())
+            position = Position(
+                symbol=symbol,
+                account_id=acc_id,
+                position_pct=latest_snapshot.position_pct or 0,
+                status=latest_snapshot.status,
+                opened_at=datetime.now(),
+            )
             self.db.add(position)
         position.account_id = acc_id
-        position.position_pct = float(position_pct or position.position_pct or 0)
-        position.cost_price = cost_price
-        position.quantity = quantity
-        position.stop_price = snapshot.stop_price
-        position.take_profit_price = snapshot.take_profit_price
-        position.thesis = snapshot.thesis or position.thesis
-        position.risk_note = snapshot.risk_note or position.risk_note
-        position.status = status
-        if status == "open" and not position.opened_at:
+        position.position_pct = float(latest_snapshot.position_pct or position.position_pct or 0)
+        position.cost_price = latest_snapshot.cost_price
+        position.quantity = latest_snapshot.position_quantity
+        position.stop_price = latest_snapshot.stop_price
+        position.take_profit_price = latest_snapshot.take_profit_price
+        position.thesis = latest_snapshot.thesis or position.thesis
+        position.risk_note = latest_snapshot.risk_note or position.risk_note
+        position.status = latest_snapshot.status
+        if latest_snapshot.status == "open" and not position.opened_at:
             position.opened_at = datetime.now()
-        if status == "open":
+        if latest_snapshot.status == "open":
             position.closed_at = None
-        if status != "open":
+        if latest_snapshot.status != "open":
             position.closed_at = datetime.now()
 
         self.db.add(

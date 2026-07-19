@@ -22,6 +22,8 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,7 @@ _WORKSPACE_ROOT = (
     if settings.workspace_dir
     else _BACKEND_DIR / "agent_workspace"
 )
+_WORKSPACE_USER_ID: ContextVar[int | None] = ContextVar("workspace_user_id", default=None)
 
 
 class WorkspaceError(Exception):
@@ -54,10 +57,23 @@ class WorkspaceError(Exception):
 
 
 # --------------------------------------------------------------------------- 路径监狱
+@contextmanager
+def workspace_user_scope(user_id: int | None):
+    """Run workspace tools inside one user's directory."""
+    token = _WORKSPACE_USER_ID.set(user_id)
+    try:
+        yield
+    finally:
+        _WORKSPACE_USER_ID.reset(token)
+
+
 def _ensure_root() -> Path:
     """确保工作区根目录存在并返回其真实路径。惰性创建，避免 import 期副作用。"""
     _WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
-    return _WORKSPACE_ROOT.resolve()
+    user_id = _WORKSPACE_USER_ID.get()
+    root = _WORKSPACE_ROOT / "users" / str(user_id) if user_id is not None else _WORKSPACE_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
 
 
 def _resolve_in_jail(rel_path: str) -> Path:

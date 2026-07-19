@@ -153,6 +153,19 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         ):
             _add_column("position_accounts", column, ddl)
         _add_column("positions", "account_id", "account_id INT NULL")
+        # Workspace documents used to share one global filesystem namespace. New
+        # records are scoped to an application user; legacy rows remain unowned
+        # and are intentionally not exposed through user-facing endpoints.
+        _add_column("workspace_documents", "user_id", "user_id INT NULL")
+        has_workspace_user_index = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = 'workspace_documents' "
+                "AND index_name = 'ix_workspace_documents_user_id'"
+            )
+        ).scalar()
+        if not has_workspace_user_index:
+            connection.execute(text("CREATE INDEX ix_workspace_documents_user_id ON workspace_documents (user_id)"))
         # 数据源配置：embedding/rerank 需要独立 model 字段（后台可配置嵌入/重排模型）
         _add_column("data_source_configs", "model", "model VARCHAR(120) NULL")
 

@@ -12,8 +12,9 @@ CHINA_TZ = ZoneInfo("Asia/Shanghai")
 MINUTE_RESOLUTIONS = {"1": "1min", "5": "5min", "15": "15min", "30": "30min", "60": "60min"}
 
 
-def _account_eq(account_id: int | None):
-    return Position.account_id == account_id if account_id is not None else Position.account_id.is_(None)
+def _account_eq(account_id: int | None, model: type = Position):
+    """Build an account predicate for Position or a snapshot-like model."""
+    return model.account_id == account_id if account_id is not None else model.account_id.is_(None)
 
 
 def parse_json(value: str | None) -> Any:

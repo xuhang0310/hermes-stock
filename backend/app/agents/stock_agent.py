@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import threading
 from collections.abc import Generator
 from datetime import date, datetime
 from decimal import Decimal
@@ -608,6 +609,7 @@ def run_agent_events(
     user_label: str | None = None,
     can_write_positions: bool = False,
     default_account_id: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Generator[dict, None, None]:
     stock_mode = chat_mode == "stock"
     knowledge_mode = chat_mode == "knowledge"
@@ -668,6 +670,8 @@ def run_agent_events(
     if stock_mode or knowledge_mode:
         yield {"type": "stage_start", "stage": "agent_loop", "message": "Starting agent analysis..."}
     for _ in range(llm_config["max_steps"]):
+        if cancel_event and cancel_event.is_set():
+            return
         message: dict | None = None
         args_tracker = ToolArgsProgressTracker()  # 每轮新建：工具参数生成期（写文件等长参数）的进度可视化
         if stock_mode or knowledge_mode:
@@ -719,6 +723,8 @@ def run_agent_events(
         messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls})
 
         for call in tool_calls:
+            if cancel_event and cancel_event.is_set():
+                return
             name = call.get("function", {}).get("name", "")
             try:
                 args = json.loads(call.get("function", {}).get("arguments") or "{}")
@@ -767,7 +773,13 @@ def run_agent_events(
                     yield {"type": "tool_start", "tool": name, "display_name": display_name}
                 yield {"type": "action", "tool": name, "content": json.dumps(args, ensure_ascii=False)}
                 tool_started = time.monotonic()
-                result = skill_registry.execute(name, args)
+                if name.startswith("ws_"):
+                    from backend.app.skills.agent_workspace import workspace_user_scope
+
+                    with workspace_user_scope(user_id):
+                        result = skill_registry.execute(name, args)
+                else:
+                    result = skill_registry.execute(name, args)
                 duration = round(time.monotonic() - tool_started, 2)
                 yield {"type": "observation", "content": _registry_observation_preview(name, result)}
                 if stock_mode:
