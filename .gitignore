@@ -24,3 +24,4 @@ tmp/
 backend/agent_audit.log
 backend/chroma_data/
 backend/agent_workspace/
+backend/chroma_exp_data/
