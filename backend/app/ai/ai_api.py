@@ -36,6 +36,8 @@ from backend.app.core.models import (
 from backend.app.ai import memory as memory_module
 from backend.app.ai import rag_ingest
 from backend.app.ai.memory import retrieve_memories, schedule_memory_digestion
+from backend.app.ai.session_compact import load_and_compact_history
+from backend.app.ai.experience_store import retrieve_experiences
 from backend.app.ai.retrieval import retrieve_chunks
 from backend.app.ai.prompt_recommendations import (
     active_recommendations,
@@ -1752,7 +1754,12 @@ async def agent_chat(
 
     # A persisted session is the source of truth. Client-provided history is only
     # used while creating a new session, preventing stale tabs from rewriting context.
-    history = _messages_for_history(db, chat_session.id) if payload.session_id else [item.model_dump() for item in payload.history]
+    # L1 会话记忆：读历史 + 压缩判断（替代原 limit(12) 硬截断，旧消息压成摘要保主线）
+    if payload.session_id:
+        history, l1_summary = load_and_compact_history(db, chat_session.id)
+    else:
+        history = [item.model_dump() for item in payload.history]
+        l1_summary = ""
     db.add(AiChatMessage(session_id=chat_session.id, role="user", content=payload.question, event_count=0))
     db.commit()
     session_id = chat_session.id
@@ -1765,6 +1772,13 @@ async def agent_chat(
         db, user_id=context.user.id, query=payload.question,
         digital_human_id=profile.id if profile else None,
     )
+    # L1 压缩摘要拼入 system prompt（复用 memory_context 注入通道，不改 history 的 role 结构）
+    if l1_summary:
+        memory_context = f"{memory_context}\n\n{l1_summary}" if memory_context else l1_summary
+    # L2 经验记忆：检索跨用户共享的复盘经验，注入 system prompt（带样本量，统计强度低者审慎）
+    experience_context = retrieve_experiences(db, query=payload.question)
+    if experience_context:
+        memory_context = f"{memory_context}\n\n{experience_context}" if memory_context else experience_context
 
     async def event_stream():
         yield ": connected\n\n"

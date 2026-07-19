@@ -15,6 +15,31 @@ from typing import Any
 import httpx
 
 from backend.app.core.applog import log_event
+import time
+from backend.app.ai.ledger_store import append_llm_call as _append_llm_call
+
+
+def _append_llm_call_safely(
+    llm_config: dict,
+    messages: list[dict],
+    response: dict | None,
+    *,
+    error: str | None = None,
+    usage: dict | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """LLM 调用留档（L3，方案 7.2 全量留档）。fire-and-forget，绝不影响主流程。"""
+    try:
+        _append_llm_call(
+            model=llm_config.get("model", ""),
+            messages=messages,
+            response=response,
+            usage=usage,
+            error=error,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        pass
 
 
 def _build_payload(
@@ -69,8 +94,11 @@ def chat_completion(
         body = response.text[:600]
         if log_module:
             log_event(log_module, "ERROR", "LLM 接口错误", status=response.status_code)
+        _append_llm_call_safely(llm_config, messages, None, error=body)
         raise RuntimeError(f"LLM 接口返回 {response.status_code}: {body}")
-    return response.json()
+    data = response.json()
+    _append_llm_call_safely(llm_config, messages, data, usage=data.get("usage"))
+    return data
 
 
 def parse_sse_stream(lines: Iterable[str]) -> Generator[tuple[str, Any], None, None]:
@@ -148,9 +176,20 @@ def stream_chat(
         llm_config, messages,
         tools=tools, tool_choice=None, temperature=temperature, stream=True,
     )
+    started = time.monotonic()
+    final_message: dict | None = None
     with httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
         with client.stream("POST", url, json=payload, headers=headers) as response:
             if response.status_code != 200:
                 body = response.read().decode("utf-8", "replace")[:300]
+                _append_llm_call_safely(llm_config, messages, None, error=body)
                 raise RuntimeError(f"LLM 接口返回 {response.status_code}: {body}")
-            yield from parse_sse_stream(response.iter_lines())
+            for kind, item in parse_sse_stream(response.iter_lines()):
+                if kind == "message":
+                    final_message = item
+                yield kind, item
+    # 流结束留档（调用方迭代完才到此；中途 break 不记，可接受）
+    _append_llm_call_safely(
+        llm_config, messages, final_message,
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )

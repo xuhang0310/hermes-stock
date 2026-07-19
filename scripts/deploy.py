@@ -89,11 +89,16 @@ def build_frontend() -> None:
 
 
 class Deployer:
-    def __init__(self, args: argparse.Namespace, password: str):
+    def __init__(self, args: argparse.Namespace, password: str | None):
         self.a = args
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect(args.host, port=args.port, username=args.user, password=password, timeout=20)
+        connect_kwargs: dict = {"port": args.port, "username": args.user, "timeout": 20}
+        if getattr(args, "key", None):
+            connect_kwargs["key_filename"] = args.key
+        else:
+            connect_kwargs["password"] = password
+        self.client.connect(args.host, **connect_kwargs)
         self.sftp = self.client.open_sftp()
         self._made: set[str] = set()
 
@@ -209,6 +214,7 @@ def main() -> int:
     p.add_argument("--host", required=True)
     p.add_argument("--user", default="root")
     p.add_argument("--password", default=os.getenv("STOCK_DEPLOY_PASSWORD"))
+    p.add_argument("--key", default=os.getenv("STOCK_DEPLOY_KEY"), help="SSH 私钥路径（与密码二选一）")
     p.add_argument("--port", type=int, default=22)
     p.add_argument("--remote-base", default="/opt/hermes-stock")
     p.add_argument("--service", default="hermes-stock")
@@ -222,9 +228,13 @@ def main() -> int:
     if args.build:
         build_frontend()
 
-    password = args.password or getpass.getpass(f"{args.user}@{args.host} 密码: ")
-    if not password:
-        raise SystemExit("缺少密码：用 --password 或环境变量 STOCK_DEPLOY_PASSWORD。")
+    if args.key:
+        password = None
+        log(f"使用 SSH 私钥: {args.key}")
+    else:
+        password = args.password or getpass.getpass(f"{args.user}@{args.host} 密码: ")
+        if not password:
+            raise SystemExit("缺少密码：用 --password 或环境变量 STOCK_DEPLOY_PASSWORD；或用 --key 指定私钥。")
 
     d = Deployer(args, password)
     try:
