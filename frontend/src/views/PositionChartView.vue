@@ -14,6 +14,8 @@ import type { ChartBar, ChartResolution, PositionChartPayload, PositionItem } fr
 
 const props = defineProps<{
   position: PositionItem | null
+  instrument?: { symbol: string; name: string } | null
+  backLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -49,7 +51,7 @@ const chartTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
   hourCycle: 'h23'
 })
 
-const symbol = computed(() => props.position?.symbol || '')
+const symbol = computed(() => props.position?.symbol || props.instrument?.symbol || '')
 const activeResolution = computed(() => resolutionOptions.find((item) => item.value === selectedResolution.value) || resolutionOptions[0])
 const latestBar = computed(() => {
   const bars = payload.value?.bars || []
@@ -136,7 +138,7 @@ function formatCrosshairTime(time: Time) {
 
 async function loadChart(refresh = false) {
   if (!symbol.value) {
-    error.value = '请选择一个持仓标的'
+    error.value = '请选择一个标的'
     return
   }
   loading.value = true
@@ -308,11 +310,11 @@ onBeforeUnmount(destroyChart)
   <section class="position-chart-page page-section">
     <header class="section-header">
       <div>
-        <h2>{{ payload?.name || position?.name || symbol }} · A股图表</h2>
+        <h2>{{ payload?.name || position?.name || instrument?.name || symbol }} · A股图表</h2>
         <p>{{ symbol }} · {{ activeResolution.label }} · {{ payload?.source || 'TuShare / 本地缓存' }}</p>
       </div>
       <div class="row-actions">
-        <button type="button" @click="emit('back')">返回持仓</button>
+        <button type="button" @click="emit('back')">{{ backLabel || '返回持仓' }}</button>
         <button type="button" :disabled="loading || !symbol" @click="loadChart(true)">
           {{ loading ? '同步中' : '刷新TuShare' }}
         </button>
@@ -384,8 +386,8 @@ onBeforeUnmount(destroyChart)
         <div class="legend-row"><span class="legend ma20"></span>MA20</div>
         <div class="legend-row"><span class="legend cost"></span>成本线</div>
         <div class="legend-row"><span class="legend stop"></span>止损线</div>
-        <h3>持仓备注</h3>
-        <p>{{ position?.thesis || position?.risk_note || '暂无持仓备注。' }}</p>
+        <h3>{{ position ? '持仓备注' : '标的信息' }}</h3>
+        <p>{{ position?.thesis || position?.risk_note || (instrument ? `${instrument.name} · ${instrument.symbol}` : '暂无备注。') }}</p>
       </aside>
     </div>
   </section>

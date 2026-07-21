@@ -21,7 +21,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.database import SessionLocal
-from backend.app.feishu.feishu import send_alert, send_feishu
+from backend.app.feishu.feishu import send_feishu
 from backend.app.core.models import (
     AgentReport,
     DataSourceConfig,
@@ -57,6 +57,16 @@ _background_tasks: set[asyncio.Task] = set()
 _inflight_runs: set[str] = set()
 _semaphore: asyncio.Semaphore | None = None
 _trade_day_cache: dict[str, bool] = {}
+
+_CARD_TEMPLATE_BY_JOB = {
+    "premarket-brief-0830": "wathet",
+    "open-report-0935": "turquoise",
+    "close-review-1530": "blue",
+    "postmarket-research-1900": "indigo",
+    "evening-daily-2200": "indigo",
+    "weekend-review": "purple",
+    "month-end-review": "orange",
+}
 
 
 def now_sh() -> datetime:
@@ -225,7 +235,7 @@ def _consume_agent(question: str, context: str | None, code: str | None) -> tupl
     return answer, model_name, error
 
 
-def _run_agent_report(snap: dict, now: datetime) -> tuple[str, int | None, str]:
+def _run_agent_report(snap: dict, now: datetime) -> tuple[str, int | None, str, str | None]:
     question = _render(snap["prompt_template"], now) or snap["name"]
     context = _build_digital_human_context(snap["digital_human_code"])
     answer, model_name, agent_error = _consume_agent(question, context, snap["digital_human_code"])
@@ -236,9 +246,13 @@ def _run_agent_report(snap: dict, now: datetime) -> tuple[str, int | None, str]:
 
     report_id = f"rhythm-{snap['job_key']}-{now:%Y%m%d}-{uuid4().hex[:8]}"
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
-    title = f"{snap['name']}·{now:%Y-%m-%d}"
+    title = f"{snap['name']} | {now:%Y-%m-%d}"
     notification_id: int | None = None
+    notification_error: str | None = None
     with SessionLocal() as session:
+        profile = session.scalar(
+            select(DigitalHumanProfile).where(DigitalHumanProfile.code == snap["digital_human_code"]).limit(1)
+        )
         session.add(
             AgentReport(
                 report_id=report_id,
@@ -254,12 +268,29 @@ def _run_agent_report(snap: dict, now: datetime) -> tuple[str, int | None, str]:
         )
         session.commit()
         if snap["push_channel_key"]:
-            notification = send_feishu(session, snap["push_channel_key"], title, answer, report_id=report_id)
+            trigger_label = "手动执行" if snap.get("trigger_type") == "manual" else "自动调度"
+            notification = send_feishu(
+                session,
+                snap["push_channel_key"],
+                title,
+                answer,
+                report_id=report_id,
+                card_template=_CARD_TEMPLATE_BY_JOB.get(snap["job_key"], "blue"),
+                card_metadata=[
+                    ("任务", snap["name"]),
+                    ("数字人", profile.name if profile else (snap["digital_human_code"] or "系统")),
+                    ("触发方式", trigger_label),
+                    ("生成时间", now.strftime("%Y-%m-%d %H:%M:%S")),
+                ],
+                card_footer="SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议",
+            )
             notification_id = notification.id
-    return report_id, notification_id, answer[:500]
+            if notification.status != "sent":
+                notification_error = notification.error or "飞书未确认发送成功"
+    return report_id, notification_id, answer[:500], notification_error
 
 
-def _run_health_check(now: datetime) -> str:
+def _run_health_check(now: datetime, push_channel_key: str | None) -> tuple[str, int | None, str | None]:
     problems: list[str] = []
     with SessionLocal() as session:
         try:
@@ -305,10 +336,27 @@ def _run_health_check(now: datetime) -> str:
 
     if problems:
         body = "系统健康检查发现以下异常，请及时处理：\n" + "\n".join(f"- {item}" for item in problems)
+        if not push_channel_key:
+            return f"发现 {len(problems)} 项异常，任务未配置推送通道", None, None
         with SessionLocal() as session:
-            send_alert(session, "【系统健康检查异常】", body)
-        return f"发现 {len(problems)} 项异常，已推送告警群"
-    return "健康检查通过，无异常"
+            notification = send_feishu(
+                session,
+                push_channel_key,
+                "系统健康检查 | 发现异常",
+                body,
+                card_kind="alert",
+                card_template="red",
+                card_metadata=[
+                    ("任务", "系统健康检查"),
+                    ("异常项", str(len(problems))),
+                    ("检查时间", now.strftime("%Y-%m-%d %H:%M:%S")),
+                    ("处理状态", "待核查"),
+                ],
+                card_footer="SixRabbits Stock | 系统告警，请及时核查",
+            )
+            push_error = None if notification.status == "sent" else (notification.error or "飞书未确认发送成功")
+            return f"发现 {len(problems)} 项异常，已尝试推送任务群", notification.id, push_error
+    return "健康检查通过，无异常", None, None
 
 
 def _run_position_price_sync(now: datetime) -> str:
@@ -316,7 +364,7 @@ def _run_position_price_sync(now: datetime) -> str:
 
     录入持仓时不再要求用户提供最新价——行情由本任务每个交易日收盘后自动同步。
     价格来源复用 stock_tools.get_realtime_quote（TuShare 日线收盘）。失败标的记录到
-    输出预览，不推告警群（零噪音纪律，由次日健康检查汇总失败任务）。
+    输出预览，不主动推送（由次日健康检查汇总失败任务）。
     """
     from backend.app.core.models import Instrument, Position, PositionAccount, PositionHoldingSnapshot
     from backend.app.data.repository import StockRepository
@@ -479,6 +527,9 @@ def _execute_job(job_key: str, run_id: str) -> None:
     with SessionLocal() as session:
         job = session.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
         snapshot = _job_snapshot(job) if job else None
+        run = session.scalar(select(JobRun).where(JobRun.run_id == run_id).limit(1))
+        if snapshot is not None:
+            snapshot["trigger_type"] = run.trigger_type if run else "schedule"
     if snapshot is None:
         _finalize_run(run_id, "failed", error="任务不存在")
         return
@@ -490,7 +541,13 @@ def _execute_job(job_key: str, run_id: str) -> None:
     error: str | None = None
     try:
         if snapshot["job_kind"] == "health_check":
-            output_preview = _run_health_check(ran_at)
+            output_preview, notification_id, push_error = _run_health_check(
+                ran_at,
+                snapshot["push_channel_key"],
+            )
+            if push_error:
+                status = "failed"
+                error = f"健康检查已完成，但飞书任务群推送失败: {push_error}"
         elif snapshot["job_kind"] == "position_price_sync":
             output_preview = _run_position_price_sync(ran_at)
         elif snapshot["job_kind"] == "rag_ingest":
@@ -498,14 +555,17 @@ def _execute_job(job_key: str, run_id: str) -> None:
 
             output_preview = run_ingest()
         elif snapshot["job_kind"] == "agent_report":
-            report_id, notification_id, output_preview = _run_agent_report(snapshot, ran_at)
+            report_id, notification_id, output_preview, push_error = _run_agent_report(snapshot, ran_at)
+            if push_error:
+                status = "failed"
+                error = f"报告已生成，但飞书任务群推送失败: {push_error}"
         else:
             status = "skipped"
             output_preview = f"暂不支持的任务类型: {snapshot['job_kind']}"
     except Exception as exc:  # noqa: BLE001
         status = "failed"
         error = str(exc)[:1000]
-        # 任务失败只落日志，不推告警群（守零噪音纪律，由次日健康检查汇总）
+        # 任务失败只落日志，由次日健康检查统一汇总，避免同群刷屏。
         _log("ERROR", f"节律任务 {job_key} 执行失败", {"error": error})
 
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -672,12 +732,13 @@ DEFAULT_JOBS = [
     {
         "job_key": "health-check-0815",
         "name": "系统健康检查",
-        "description": "盘前检查数据库、心跳、错误日志与失败任务；异常才推告警群。",
+        "description": "盘前检查数据库、心跳、错误日志与失败任务；仅发现异常时推送任务群。",
         "job_kind": "health_check",
         "schedule_type": "daily",
         "run_time": "08:15",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
+        "push_channel_key": "feishu-daily",
         "enabled": True,
     },
     {
@@ -757,7 +818,7 @@ DEFAULT_JOBS = [
     {
         "job_key": "evening-daily-2200",
         "name": "晚间日报",
-        "description": "总调度统稿当日各方输入，形成日报推日报群。",
+        "description": "总调度统稿当日各方输入，形成日报推送任务群。",
         "job_kind": "agent_report",
         "schedule_type": "daily",
         "run_time": "22:00",

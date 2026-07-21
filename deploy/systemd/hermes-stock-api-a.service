@@ -1,0 +1,20 @@
+[Unit]
+Description=SixRabbits Stock public API replica A
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-stock/current
+Environment=PYTHONUNBUFFERED=1
+Environment=STOCK_BACKGROUND_SERVICES_ENABLED=false
+ExecStart=/opt/hermes-stock/venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 18080 --timeout-graceful-shutdown 120
+Restart=always
+RestartSec=1
+TimeoutStopSec=130
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

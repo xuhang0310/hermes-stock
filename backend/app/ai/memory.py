@@ -45,7 +45,11 @@ HYBRID_VECTOR_WEIGHT = 0.55  # 语义相似度权重
 HYBRID_KEYWORD_WEIGHT = 0.45  # 关键词匹配权重
 
 # 向量库：chroma（嵌入式，默认）| milvus（服务端），按 STOCK_VECTOR_BACKEND 切换
-_CHROMA_PATH = Path(__file__).resolve().parents[2] / "chroma_data"
+_CHROMA_PATH = (
+    Path(settings.chroma_dir).expanduser()
+    if settings.chroma_dir
+    else Path(__file__).resolve().parents[2] / "chroma_data"
+)
 _COLLECTION = "user_memories"
 
 # 延迟初始化
@@ -260,8 +264,9 @@ class _MilvusStore:
         )
         out = []
         for hit in (res[0] if res else []):
-            try:  # Milvus COSINE 的 distance 即相似度（越大越近）
-                out.append((int(hit["id"]), float(hit.get("distance", 0.0))))
+            try:  # Milvus 返回 cosine∈[-1,1]，归一化到与 Chroma 相同的 [0,1]
+                cosine = float(hit.get("distance", 0.0))
+                out.append((int(hit["id"]), max(0.0, min(1.0, (cosine + 1.0) / 2.0))))
             except (ValueError, TypeError, KeyError):
                 continue
         return out

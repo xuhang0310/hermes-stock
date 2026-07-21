@@ -102,8 +102,7 @@ async function testRow(item: NotifyChannel) {
 }
 
 function purposeLabel(purpose: string) {
-  if (purpose === 'alert') return '告警群 · 零噪音'
-  if (purpose === 'daily') return '日报群 · 可堆积'
+  if (purpose === 'schedule') return '定时任务统一推送'
   return purpose
 }
 
@@ -114,7 +113,7 @@ onMounted(load)
   <section class="management-grid">
     <form class="editor-panel" @submit.prevent="save">
       <header>
-        <h2>通知通道设置</h2>
+        <h2>飞书任务群设置</h2>
       </header>
       <label>
         <span>当前通道</span>
@@ -137,7 +136,7 @@ onMounted(load)
         />
       </label>
       <label>
-        <span>签名密钥（可选）</span>
+        <span>签名校验密钥</span>
         <input v-model="form.secret" type="password" placeholder="机器人安全设置中的签名校验密钥，留空保留已保存值" />
       </label>
       <label>
@@ -165,9 +164,9 @@ onMounted(load)
     <section class="page-section">
       <header class="section-header">
         <div>
-          <h2>飞书推送通道</h2>
+          <h2>飞书群机器人</h2>
           <p>
-            告警群只收 L0 警报与系统故障（零噪音纪律），日报群收简报、快评与晚间日报。
+            所有定时报告与系统异常统一推送到这一个群机器人，并使用交互式消息卡片展示。
             Webhook 与签名密钥加密存储，接口只回传掩码。
           </p>
         </div>

@@ -108,6 +108,8 @@ TOOL_DISPLAY_NAMES = {
     "save_position_holdings": "保存持仓明细",
 }
 
+POSITION_AGENT_PROFILE_CODE = "position-entry-agent"
+
 
 def run_position_agent(
     *,
@@ -236,6 +238,7 @@ def run_position_agent_events(
     created_by: str | None = None,
     account_id: int | None = None,
     cancel_event: threading.Event | None = None,
+    history: list[dict[str, str]] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
@@ -268,10 +271,13 @@ def run_position_agent_events(
         "model_name": llm_config.get("model"),
         "provider_name": llm_config.get("provider_name"),
     }
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for item in (history or [])[-8:]:
+        role = item.get("role")
+        content = str(item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_content})
     saved_rows: list[dict[str, Any]] = []
     saved_count = 0
     final_reply = ""

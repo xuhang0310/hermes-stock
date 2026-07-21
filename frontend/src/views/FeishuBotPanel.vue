@@ -20,20 +20,25 @@ const onlineCount = computed(() => bindings.value.filter((item) => item.runtime.
 const boundCount = computed(() => bindings.value.filter((item) => item.app_id_masked).length)
 const todayTotal = computed(() => bindings.value.reduce((sum, item) => sum + (item.runtime.today_count || 0), 0))
 const featureEnabled = computed(() => bindings.value[0]?.feature_enabled ?? true)
+const managerRunning = computed(() => bindings.value[0]?.runtime.manager_running ?? false)
 
 function statusText(item: FeishuBotBinding) {
   if (!item.app_id_masked) return '未绑定'
   if (item.cipher_invalid) return '密文失效'
   if (!item.enabled) return '已停用'
-  if (item.runtime.error) return '异常'
-  return item.runtime.running ? '在线' : '连接中'
+  if (item.runtime.state === 'online') return '在线'
+  if (item.runtime.state === 'connecting') return '连接中'
+  if (item.runtime.state === 'error') return '异常'
+  return '未启动'
 }
 
 function statusClass(item: FeishuBotBinding) {
   if (!item.app_id_masked) return 'none'
-  if (item.cipher_invalid || item.runtime.error) return 'failed'
+  if (item.cipher_invalid || item.runtime.state === 'error') return 'failed'
   if (!item.enabled) return 'none'
-  return item.runtime.running ? 'success' : 'running'
+  if (item.runtime.state === 'online') return 'success'
+  if (item.runtime.state === 'connecting') return 'running'
+  return 'none'
 }
 
 async function load() {
@@ -155,8 +160,10 @@ onUnmounted(() => {
       </div>
     </header>
     <div class="rhythm-status">
-      <span class="status-pill" :class="featureEnabled ? 'ok' : 'danger'">
-        {{ featureEnabled ? '长连接管理器 运行中' : '功能未启用（STOCK_FEISHU_BOT_ENABLED=false）' }}
+      <span class="status-pill" :class="featureEnabled && managerRunning ? 'ok' : 'danger'">
+        {{ !featureEnabled
+          ? '功能未启用（STOCK_FEISHU_BOT_ENABLED=false）'
+          : managerRunning ? '长连接管理器 运行中' : '长连接管理器 未运行' }}
       </span>
       <span class="status-pill">机器人在线 {{ onlineCount }} / 已绑定 {{ boundCount }}</span>
       <span class="status-pill">今日消息 {{ todayTotal }}</span>
@@ -182,7 +189,7 @@ onUnmounted(() => {
           </tr>
           <tr v-for="item in bindings" :key="item.profile_id" :class="{ 'row-active': item.profile_id === editingId }">
             <td>
-              <span class="job-dot" :class="item.runtime.running ? 'on' : 'off'"></span>
+              <span class="job-dot" :class="item.runtime.state === 'online' ? 'on' : 'off'"></span>
               {{ item.name }}
               <span v-if="item.runtime.error" class="err-flag" :title="item.runtime.error">!</span>
             </td>

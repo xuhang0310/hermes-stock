@@ -365,11 +365,18 @@ function streamStatusText(message: ChatMessage) {
   return '等待响应'
 }
 
-function scrollChat(smooth = true) {
-  nextTick(() => {
-    chatScroll.value?.scrollTo({
-      top: chatScroll.value.scrollHeight,
-      behavior: smooth ? 'smooth' : 'auto'
+let scrollQueued = false
+
+function scrollChat(smooth = false) {
+  if (scrollQueued) return
+  scrollQueued = true
+  requestAnimationFrame(() => {
+    scrollQueued = false
+    nextTick(() => {
+      chatScroll.value?.scrollTo({
+        top: chatScroll.value.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto'
+      })
     })
   })
 }

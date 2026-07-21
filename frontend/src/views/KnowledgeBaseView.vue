@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../api'
 import type { KnowledgeStats, KnowledgeDocument, KnowledgeChunk, KnowledgeSearchHit } from '../types'
+import { beijingFromDb } from '../utils/datetime'
 
 const stats = ref<KnowledgeStats | null>(null)
 const documents = ref<KnowledgeDocument[]>([])
@@ -36,6 +37,12 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   indexed: { label: '✓ 已索引', cls: 'pill-green' },
   disabled: { label: '已禁用', cls: 'pill-red' },
   pending: { label: '未索引', cls: 'pill-gray' }
+}
+
+const TITLE_DISPLAY_LIMIT = 80
+
+function displayTitle(title: string) {
+  return title.length > TITLE_DISPLAY_LIMIT ? `${title.slice(0, TITLE_DISPLAY_LIMIT)}...` : title
 }
 
 function typeLabel(t: string) {
@@ -300,7 +307,9 @@ onUnmounted(() => {
     <div v-if="stats" class="kb-cards">
       <div class="kb-card"><b>{{ stats.documents }}</b><span>文档</span></div>
       <div class="kb-card"><b>{{ stats.chunks }}</b><span>切块</span></div>
-      <div class="kb-card gold"><b>{{ stats.indexed_pct }}%</b><span>已索引 {{ stats.indexed_docs }} 篇</span></div>
+      <div class="kb-card gold" :class="{ 'vector-error': !stats.vector_healthy }" :title="stats.vector_error || undefined">
+        <b>{{ stats.vector_pct }}%</b><span>向量 {{ stats.vector_count }}/{{ stats.searchable_chunks }} 块</span>
+      </div>
       <div class="kb-card"><b>{{ stats.backend }}</b><span>{{ stats.collection }}{{ stats.dim ? ' · ' + stats.dim + '维' : '' }}</span></div>
     </div>
 
@@ -367,19 +376,30 @@ onUnmounted(() => {
 
       <div v-if="!documents.length && !loading" class="kb-empty">暂无文档，点右上「重建索引」摄取内部语料。</div>
       <div v-else class="table-wrap">
-        <table class="list-table">
+        <table class="list-table kb-documents-table">
+          <colgroup>
+            <col class="kb-col-title" />
+            <col class="kb-col-type" />
+            <col class="kb-col-source" />
+            <col class="kb-col-trust" />
+            <col class="kb-col-time" />
+            <col class="kb-col-chunks" />
+            <col class="kb-col-status" />
+            <col class="kb-col-actions" />
+          </colgroup>
           <thead>
             <tr>
-              <th>标题</th><th>类型</th><th>来源</th><th>可信度</th><th>切块</th><th>状态</th><th>操作</th>
+              <th>标题</th><th>类型</th><th>来源</th><th>可信度</th><th>入库时间</th><th>切块</th><th>状态</th><th>操作</th>
             </tr>
           </thead>
           <tbody>
             <template v-for="d in documents" :key="d.id">
               <tr>
-                <td><strong>{{ d.title }}</strong></td>
+                <td class="kb-doc-title-cell"><strong class="kb-doc-title" :title="d.title">{{ displayTitle(d.title) }}</strong></td>
                 <td class="nowrap">{{ typeLabel(d.doc_type) }}</td>
                 <td class="nowrap">{{ d.source }}</td>
                 <td class="nowrap"><span class="kb-pill" :class="trustMeta(d.trust_level).cls">{{ trustMeta(d.trust_level).label }}</span></td>
+                <td class="nowrap">{{ beijingFromDb(d.fetched_at) }}</td>
                 <td class="nowrap">{{ d.chunk_count }}</td>
                 <td class="nowrap"><span class="kb-pill" :class="statusMeta(d.status).cls">{{ statusMeta(d.status).label }}</span></td>
                 <td>
@@ -393,7 +413,7 @@ onUnmounted(() => {
                 </td>
               </tr>
               <tr v-if="chunks[d.id]">
-                <td colspan="7" class="kb-chunks-cell">
+                <td colspan="8" class="kb-chunks-cell">
                   <div v-for="c in chunks[d.id]" :key="c.id" class="kb-chunk">
                     <span>#{{ c.chunk_index }} · {{ c.token_count }}字 · 命中{{ c.hit_count }} · {{ c.status }}</span>
                     <p>{{ c.content }}</p>
@@ -528,4 +548,16 @@ onUnmounted(() => {
 .kb-upload-status { flex: none; font-size: 11px; }
 .kb-upload-remove { flex: none; background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; line-height: 1; }
 .kb-upload-remove:hover { color: var(--text); }
+.kb-documents-table { min-width: 1060px; table-layout: fixed; }
+.kb-col-title { width: 40%; }
+.kb-col-type { width: 6%; }
+.kb-col-source { width: 8%; }
+.kb-col-trust { width: 7%; }
+.kb-col-time { width: 12%; }
+.kb-col-chunks { width: 5%; }
+.kb-col-status { width: 7%; }
+.kb-col-actions { width: 15%; }
+.kb-doc-title-cell { min-width: 0; }
+.kb-doc-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-card.vector-error { border-color: var(--danger); }
 </style>

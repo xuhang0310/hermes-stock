@@ -77,6 +77,9 @@ def collect_files() -> list[str]:
     for fn in ("pyproject.toml", "README.md"):
         if (ROOT / fn).exists():
             files.append(fn)
+    for dp, _dns, fns in os.walk(ROOT / "deploy"):
+        for fn in fns:
+            files.append(str(Path(dp, fn).relative_to(ROOT)))
     return files
 
 
@@ -86,6 +89,15 @@ def build_frontend() -> None:
     r = subprocess.run([npm, "run", "build"], cwd=str(ROOT / "frontend"))
     if r.returncode != 0:
         raise SystemExit("前端构建失败，终止部署。")
+
+
+def api_upstream_command(ports: list[int]) -> str:
+    lines = "\n".join(f"server 127.0.0.1:{port} max_fails=2 fail_timeout=10s;" for port in ports)
+    return (
+        "cat > /etc/nginx/hermes-stock-upstream-servers.conf <<'EOF'\n"
+        f"{lines}\nEOF\n"
+        "nginx -t && systemctl reload nginx"
+    )
 
 
 class Deployer:
@@ -110,6 +122,43 @@ class Deployer:
     def http_code(self, url: str) -> str:
         _, o, _ = self.run(f"curl -s -m 6 -o /dev/null -w '%{{http_code}}' {url} || echo 000")
         return o.strip()
+
+    def _ha_enabled(self) -> bool:
+        rc, _, _ = self.run("test -f /etc/systemd/system/hermes-stock-api-a.service && test -f /etc/systemd/system/hermes-stock-api-b.service")
+        return rc == 0
+
+    def _wait_health(self, port: int) -> bool:
+        health = f"http://127.0.0.1:{port}/api/health"
+        for _ in range(30):
+            if self.http_code(health) == "200":
+                return True
+            time.sleep(1)
+        return False
+
+    def _set_api_upstream(self, ports: list[int]) -> None:
+        command = api_upstream_command(ports)
+        rc, out, err = self.run(command)
+        if rc != 0:
+            raise RuntimeError(f"更新 Nginx 上游失败: {out} {err}")
+
+    def _rolling_restart(self) -> bool:
+        replicas = (("hermes-stock-api-a", 18080, [18082]), ("hermes-stock-api-b", 18082, [18080]))
+        for service, port, remaining in replicas:
+            self._set_api_upstream(remaining)
+            rc, out, err = self.run(f"systemctl restart {service}")
+            if rc != 0 or not self._wait_health(port):
+                log(f"副本 {service} 重启或健康检查失败: {out} {err}")
+                self._set_api_upstream([18080, 18082])
+                return False
+            self._set_api_upstream([18080, 18082])
+        return True
+
+    def _restart_background(self) -> bool:
+        rc, out, err = self.run("systemctl restart hermes-stock-background")
+        if rc != 0 or not self._wait_health(18084):
+            log(f"后台实例重启或健康检查失败: {out} {err}")
+            return False
+        return True
 
     def _mkdir(self, rdir: str) -> None:
         if rdir in self._made or rdir in ("", "/"):
@@ -156,7 +205,6 @@ grep -q '^STOCK_SCHEDULER_ENABLED=' "$NEW/backend/.env" || echo 'STOCK_SCHEDULER
 chmod 600 "$NEW/backend/.env"
 chown -R {a.owner} "$NEW"
 ln -sfn "$NEW" "$CUR"
-systemctl restart {a.service}
 echo SWITCHED
 """
         rc, out, err = self.run(server)
@@ -165,6 +213,17 @@ echo SWITCHED
             self._rollback(cur, old)
             return 1
         log(f"已切换 current -> {new}，重启服务，验证中...")
+
+        if self._ha_enabled() and not a.defer_restart:
+            if not self._restart_background() or not self._rolling_restart():
+                self._rollback(cur, old)
+                return 1
+        elif not a.defer_restart:
+            rc, out, err = self.run(f"systemctl restart {a.service}")
+            if rc != 0:
+                log(f"服务重启失败: {out} {err}")
+                self._rollback(cur, old)
+                return 1
 
         health = f"http://127.0.0.1:{a.backend_port}/api/health"
         route = f"http://127.0.0.1:{a.backend_port}/api/notify-channels"
@@ -193,7 +252,12 @@ echo SWITCHED
         if not old:
             log("无旧版本可回滚（首次部署失败），请手动检查服务。")
             return
-        self.run(f"ln -sfn {old} {cur} && systemctl restart {self.a.service} && sleep 3")
+        self.run(f"ln -sfn {old} {cur}")
+        if self._ha_enabled():
+            self._restart_background()
+            self._rolling_restart()
+        else:
+            self.run(f"systemctl restart {self.a.service} && sleep 3")
         code = self.http_code(f"http://127.0.0.1:{self.a.backend_port}/api/health")
         log(f"已回滚到 {old}，health={code}")
 
@@ -220,9 +284,10 @@ def main() -> int:
     p.add_argument("--service", default="hermes-stock")
     p.add_argument("--owner", default="hermes:hermes")
     p.add_argument("--backend-port", type=int, default=18080)
-    p.add_argument("--nginx-port", type=int, default=18088)
+    p.add_argument("--nginx-port", type=int, default=80)
     p.add_argument("--keep", type=int, default=5, help="保留最近 N 个 release")
     p.add_argument("--build", action="store_true", help="部署前本地 npm run build")
+    p.add_argument("--defer-restart", action="store_true", help="switch release without restarting a legacy single-instance service")
     args = p.parse_args()
 
     if args.build:

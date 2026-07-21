@@ -5,15 +5,27 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from backend.app.core.models import Base, Position, PositionAccount, PositionHoldingSnapshot, PositionImportBatch, PositionTrade
+from backend.app.agents.watchlist_agent import _execute_watchlist_tool
+from backend.app.core.models import (
+    Base,
+    Instrument,
+    Position,
+    PositionAccount,
+    PositionHoldingSnapshot,
+    PositionImportBatch,
+    PositionTrade,
+)
 from backend.app.data.repository import StockRepository
+from backend.app.feishu import feishu_bot
 from backend.app.scheduler import rhythm_scheduler
 from backend.app.skills import agent_workspace
+from scripts.deploy import api_upstream_command
 
 
 class WorkspaceIsolationTests(unittest.TestCase):
@@ -27,6 +39,48 @@ class WorkspaceIsolationTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(first.name, "101")
         self.assertEqual(second.name, "202")
+
+
+class DeploymentCommandTests(unittest.TestCase):
+    def test_api_upstream_command_uses_real_newlines(self) -> None:
+        command = api_upstream_command([18080, 18082])
+
+        self.assertIn("<<'EOF'\nserver 127.0.0.1:18080", command)
+        self.assertIn(";\nserver 127.0.0.1:18082", command)
+        self.assertIn("\nEOF\nnginx -t", command)
+        self.assertNotIn("\\nserver", command)
+
+    def test_feishu_bot_management_is_routed_to_the_runtime_owner(self) -> None:
+        config = Path("deploy/nginx/hermes-stock.conf").read_text(encoding="utf-8")
+
+        route = "location ^~ /api/feishu-bots"
+        self.assertIn(route, config)
+        self.assertIn("proxy_pass http://127.0.0.1:18084;", config[config.index(route):])
+        self.assertLess(config.index(route), config.index("location /api/"))
+
+
+class FeishuBotRuntimeTests(unittest.TestCase):
+    def test_missing_worker_is_stopped_instead_of_connecting(self) -> None:
+        with patch.object(feishu_bot, "_workers", {}), patch.object(feishu_bot, "_spawn_errors", {}):
+            runtime = feishu_bot.bot_runtime(42)
+
+        self.assertEqual(runtime["state"], "stopped")
+        self.assertFalse(runtime["running"])
+
+    def test_connected_worker_is_reported_online(self) -> None:
+        worker = SimpleNamespace(
+            running=True,
+            started_at=None,
+            today_key="",
+            today_count=0,
+            last_event_at=None,
+            error="旧的非连接错误",
+        )
+        with patch.object(feishu_bot, "_workers", {42: worker}):
+            runtime = feishu_bot.bot_runtime(42)
+
+        self.assertEqual(runtime["state"], "online")
+        self.assertTrue(runtime["running"])
 
 
 class TradingDayTests(unittest.TestCase):
@@ -114,6 +168,57 @@ class PositionReliabilityTests(unittest.TestCase):
         self.assertEqual(restored.position_quantity, 100)
         self.assertEqual(self.db.get(PositionImportBatch, batch.id).status, "rolled_back")
         self.assertIn("error", self.repo.rollback_last_position_batch())
+
+
+class WatchlistReliabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.db = Session(self.engine)
+        self.repo = StockRepository(self.db)
+        self.db.add_all(
+            [
+                Instrument(symbol="600036.SH", name="招商银行", market="SSE", type="stock", status="active"),
+                Instrument(symbol="000001.SZ", name="平安银行", market="SZSE", type="stock", status="active"),
+            ]
+        )
+        self.db.commit()
+
+    def tearDown(self) -> None:
+        self.db.close()
+        self.engine.dispose()
+
+    def test_add_normalizes_symbol_delete_hides_and_readd_restores(self) -> None:
+        created = self.repo.add_watchlist_item("600036", "default", "银行板块", added_by="tester")
+        self.assertEqual(created["symbol"], "600036.SH")
+        self.assertEqual([row["symbol"] for row in self.repo.watchlist()], ["600036.SH"])
+
+        deleted = self.repo.remove_watchlist_item(created["id"], removed_by="tester")
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(self.repo.watchlist(), [])
+
+        restored = self.repo.add_watchlist_item("600036.SH", "default", "重新跟踪", added_by="tester")
+        self.assertEqual(restored["id"], created["id"])
+        self.assertEqual(self.repo.watchlist()[0]["reason"], "重新跟踪")
+
+    def test_watchlist_agent_tools_add_by_name_and_remove_by_symbol(self) -> None:
+        added = _execute_watchlist_tool(
+            self.repo,
+            "add_watchlist_items",
+            {"rows": [{"name": "平安银行", "reason": "测试 Agent"}]},
+            created_by="feishu:test",
+        )
+        self.assertEqual(added["changed_count"], 1)
+        self.assertEqual(added["watchlist"][0]["symbol"], "000001.SZ")
+
+        removed = _execute_watchlist_tool(
+            self.repo,
+            "remove_watchlist_items",
+            {"rows": [{"symbol": "000001"}]},
+            created_by="feishu:test",
+        )
+        self.assertEqual(removed["changed_count"], 1)
+        self.assertEqual(removed["watchlist"], [])
 
 
 if __name__ == "__main__":

@@ -26,8 +26,7 @@ const DIGITAL_HUMANS: Array<{ code: string; label: string }> = [
 
 const CHANNELS: Array<{ key: string; label: string }> = [
   { key: '', label: '不推送' },
-  { key: 'feishu-daily', label: '飞书日报群' },
-  { key: 'feishu-alert', label: '飞书告警群' }
+  { key: 'feishu-daily', label: '飞书任务群' }
 ]
 
 const form = reactive({
@@ -54,9 +53,10 @@ function humanLabel(code: string | null) {
   return DIGITAL_HUMANS.find((item) => item.code === code)?.label || code
 }
 
-function channelLabel(key: string | null) {
-  if (!key) return '不推送'
-  return CHANNELS.find((item) => item.key === key)?.label || key
+function channelLabel(job: ScheduleJob) {
+  if (!job.push_channel_key) return '不推送'
+  if (job.job_kind === 'health_check') return '飞书任务群（仅异常）'
+  return CHANNELS.find((item) => item.key === job.push_channel_key)?.label || job.push_channel_key
 }
 
 function scheduleText(job: ScheduleJob) {
@@ -205,6 +205,13 @@ onUnmounted(() => {
       <span class="status-pill">今日成功 {{ status.today.success }}</span>
       <span class="status-pill" :class="status.today.failed ? 'danger' : ''">今日失败 {{ status.today.failed }}</span>
       <span class="status-pill">运行中 {{ status.today.running }}</span>
+      <span
+        class="status-pill"
+        :class="status.notify_channel?.configured && status.notify_channel?.enabled ? 'ok' : 'danger'"
+        :title="status.notify_channel?.last_error || ''"
+      >
+        飞书任务群 {{ status.notify_channel?.configured && status.notify_channel?.enabled ? '已启用' : '未配置' }}
+      </span>
       <span class="status-muted">心跳 {{ status.heartbeat_at || '-' }}</span>
     </div>
   </section>
@@ -266,7 +273,7 @@ onUnmounted(() => {
         </select>
       </label>
       <label>
-        <span>推送通道</span>
+        <span>群消息推送</span>
         <select v-model="form.push_channel_key">
           <option v-for="item in CHANNELS" :key="item.key" :value="item.key">{{ item.label }}</option>
         </select>
@@ -314,7 +321,7 @@ onUnmounted(() => {
               </td>
               <td>{{ scheduleText(job) }}</td>
               <td>{{ humanLabel(job.digital_human_code) }}</td>
-              <td>{{ channelLabel(job.push_channel_key) }}</td>
+              <td>{{ channelLabel(job) }}</td>
               <td class="nowrap">{{ job.last_run_at || '-' }}</td>
               <td><span class="job-status" :class="job.last_status || 'none'">{{ statusText(job.last_status) }}</span></td>
               <td>

@@ -23,6 +23,7 @@ from backend.app.core.models import (
     Position,
     PositionAccount,
     RiskCheck,
+    ScheduledJob,
     SystemLog,
     TradeReport,
     User,
@@ -74,25 +75,48 @@ def _upsert(db: Session, model: type, lookup: dict, defaults: dict):
 
 
 def seed_notify_channels(db: Session) -> None:
-    """预置飞书告警群/日报群两条内置通道。只补缺行，绝不覆盖用户已改配置。"""
-    builtin_rows = [
-        {
-            "channel_key": "feishu-alert",
-            "name": "飞书告警群",
-            "purpose": "alert",
-            "remark": "零噪音纪律：只发 L0 警报、心跳异常和系统故障，不发日报。",
-        },
-        {
-            "channel_key": "feishu-daily",
-            "name": "飞书日报群",
-            "purpose": "daily",
-            "remark": "盘前简报、开盘快报、收盘快评和晚间日报的推送通道，可堆积可回溯。",
-        },
-    ]
-    for row in builtin_rows:
-        existing = db.scalar(select(NotifyChannel).where(NotifyChannel.channel_key == row["channel_key"]).limit(1))
-        if existing is None:
-            db.add(NotifyChannel(**row, channel_type="feishu_webhook", status="disabled"))
+    """确保唯一飞书任务群存在，并把旧双通道配置平滑收敛到该通道。"""
+    channel = db.scalar(select(NotifyChannel).where(NotifyChannel.channel_key == "feishu-daily").limit(1))
+    legacy = db.scalar(select(NotifyChannel).where(NotifyChannel.channel_key == "feishu-alert").limit(1))
+    if channel is None:
+        channel = NotifyChannel(
+            channel_key="feishu-daily",
+            name="飞书任务群",
+            channel_type="feishu_webhook",
+            purpose="schedule",
+            status="disabled",
+            remark="所有定时报告与系统异常统一推送到这一个飞书群机器人。",
+        )
+        db.add(channel)
+        db.flush()
+    else:
+        if channel.name in {"飞书日报群", "飞书告警群"}:
+            channel.name = "飞书任务群"
+        channel.purpose = "schedule"
+        if not channel.remark or "日报群" in channel.remark:
+            channel.remark = "所有定时报告与系统异常统一推送到这一个飞书群机器人。"
+
+    # 旧告警通道如已有凭据且新通道为空，先迁移密文，再停用旧通道；绝不解密或覆盖新配置。
+    if legacy is not None:
+        if not channel.webhook_url_cipher and legacy.webhook_url_cipher:
+            channel.webhook_url_cipher = legacy.webhook_url_cipher
+            channel.secret_cipher = legacy.secret_cipher
+            channel.status = legacy.status
+        legacy.status = "disabled"
+
+    db.execute(
+        update(ScheduledJob)
+        .where(ScheduledJob.push_channel_key == "feishu-alert")
+        .values(push_channel_key="feishu-daily")
+    )
+    db.execute(
+        update(ScheduledJob)
+        .where(
+            ScheduledJob.job_key == "health-check-0815",
+            ScheduledJob.push_channel_key.is_(None),
+        )
+        .values(push_channel_key="feishu-daily")
+    )
     db.flush()
 
 
@@ -114,6 +138,46 @@ def seed_position_accounts(db: Session) -> None:
                 )
             )
     db.flush()
+
+
+def seed_position_agent_profile(db: Session) -> None:
+    """Ensure the Feishu-only binding target for the position-entry agent exists."""
+    _upsert(
+        db,
+        DigitalHumanProfile,
+        {"code": "position-entry-agent"},
+        {
+            "name": "持仓录入 Agent",
+            "avatar_tone": "严谨、逐项确认、先账户后写入",
+            "target_roles": "feishu_bot",
+            "description": "飞书专用持仓录入助手，按账户确认规则解析并保存持仓。",
+            "system_prompt": "此档案仅作为飞书持仓录入机器人绑定目标。",
+            "quick_prompts_json": "[]",
+            "status": "enabled",
+            "sort_order": 900,
+            "can_write_positions": True,
+        },
+    )
+
+
+def seed_watchlist_agent_profile(db: Session) -> None:
+    """Ensure the Feishu-only binding target for the watchlist-entry agent exists."""
+    _upsert(
+        db,
+        DigitalHumanProfile,
+        {"code": "watchlist-entry-agent"},
+        {
+            "name": "自选录入 Agent",
+            "avatar_tone": "简洁、先核对标的、写入可追溯",
+            "target_roles": "feishu_bot",
+            "description": "飞书专用自选录入助手，可查询、增加和删除自选标的。",
+            "system_prompt": "此档案仅作为飞书自选录入机器人绑定目标。",
+            "quick_prompts_json": "[]",
+            "status": "enabled",
+            "sort_order": 910,
+            "can_write_positions": False,
+        },
+    )
 
 
 def seed_auth_and_ai_configs(db: Session) -> None:

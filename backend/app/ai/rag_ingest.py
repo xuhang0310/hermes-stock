@@ -28,7 +28,11 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.models import AgentReport, Document, DocumentChunk, DocumentSymbol
 from backend.app.core.settings import settings
 
-_CHROMA_PATH = Path(__file__).resolve().parents[2] / "chroma_data"  # 与 memory 同库不同 collection
+_CHROMA_PATH = (
+    Path(settings.chroma_dir).expanduser()
+    if settings.chroma_dir
+    else Path(__file__).resolve().parents[2] / "chroma_data"
+)  # 与 memory 同库不同 collection
 _MIN_CHUNK_CHARS = 20  # 过短碎块直接丢弃
 _MIN_DOC_CHARS = 30  # 正文短于此的文档不入库
 
@@ -142,11 +146,14 @@ class _KnowledgeStore:
             )
             # 注意：MilvusClient 命中里主键的键名 = 主键字段名（本集合是 vector_id）；
             # memory 的集合主键恰好叫 id 才能用 hit["id"]，这里两个键都兜住
-            return [
-                (vid, float(hit.get("distance", 0.0)))
-                for hit in (res[0] if res else [])
-                if (vid := str(hit.get("vector_id") or hit.get("id") or ""))
-            ]
+            out: list[tuple[str, float]] = []
+            for hit in (res[0] if res else []):
+                vid = str(hit.get("vector_id") or hit.get("id") or "")
+                if not vid:
+                    continue
+                cosine = float(hit.get("distance", 0.0))
+                out.append((vid, max(0.0, min(1.0, (cosine + 1.0) / 2.0))))
+            return out
         res = self._col.query(query_embeddings=[vector], n_results=n, include=["distances"])
         ids = res.get("ids", [[]])[0]
         dists = res.get("distances", [[]])[0]
@@ -183,6 +190,36 @@ def get_store() -> _KnowledgeStore | None:
         log_event("rag", "ERROR", f"知识库向量库初始化失败（{_STORE_RETRY_SECONDS}s 后可重试）: {str(exc)[:160]}")
         _store_failed_at = _time.monotonic()
     return _store
+
+
+def vector_store_status() -> dict[str, object]:
+    """轻量探测真实集合条数，不触发嵌入 API，也不把 SQL 切块误报成向量。"""
+    backend = (settings.vector_backend or "chroma").lower()
+    try:
+        if backend == "milvus":
+            from pymilvus import MilvusClient
+
+            client = MilvusClient(uri=settings.milvus_uri, token=settings.milvus_token or "")
+            try:
+                if not client.has_collection(settings.rag_milvus_collection, timeout=3):
+                    return {"healthy": True, "count": 0, "error": "集合尚未创建"}
+                stats = client.get_collection_stats(settings.rag_milvus_collection, timeout=3)
+                count = int(stats.get("row_count") or stats.get("num_entities") or 0)
+                return {"healthy": True, "count": count, "error": ""}
+            finally:
+                client.close()
+
+        import chromadb
+
+        client = chromadb.PersistentClient(path=str(_CHROMA_PATH))
+        client.heartbeat()
+        try:
+            count = int(client.get_collection(settings.rag_milvus_collection).count())
+        except Exception:  # collection 尚未创建，但 Chroma 服务本身正常
+            count = 0
+        return {"healthy": True, "count": count, "error": ""}
+    except Exception as exc:  # noqa: BLE001
+        return {"healthy": False, "count": 0, "error": str(exc)[:160]}
 
 
 # --------------------------------------------------------------------------- 摄取
