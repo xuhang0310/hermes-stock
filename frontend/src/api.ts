@@ -40,7 +40,8 @@ import type {
   StockStrategy,
   WatchlistAgentStreamEvent,
   WatchlistItem,
-  WorkspaceDoc
+  WorkspaceDoc,
+  WorkspaceStatus
 } from './types'
 import { readSseStream } from './utils/sse'
 
@@ -334,6 +335,7 @@ export const api = {
     }),
   digitalHumanCapabilities: (id: number) =>
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
+  workspaceStatus: () => request<WorkspaceStatus>('/api/workspace/status'),
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
   ingestWorkspaceDoc: (path: string) =>
     request<{ doc_id: number; chunks: number; failed: number; path: string }>('/api/workspace/documents/ingest', {
@@ -426,6 +428,7 @@ export const api = {
       model_config_id?: number | null
       chat_mode?: 'research' | 'stock' | 'knowledge'
       skills?: string[]
+      allow_code_execution?: boolean
     },
     onEvent: (event: AgentStreamEvent) => void,
     signal?: AbortSignal
@@ -437,6 +440,7 @@ export const api = {
       session_id?: number | null
       model_config_id?: number | null
       skills?: string[]
+      allow_code_execution?: boolean
     },
     onEvent: (event: AgentStreamEvent) => void,
     signal?: AbortSignal

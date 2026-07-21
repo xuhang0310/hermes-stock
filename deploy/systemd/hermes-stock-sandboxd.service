@@ -1,0 +1,50 @@
+[Unit]
+Description=SixRabbits Stock workspace sandbox broker
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=hermes-sandbox
+Group=hermes
+SupplementaryGroups=docker
+WorkingDirectory=/opt/hermes-stock/current
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/run/hermes-stock-sandbox
+Environment=DOCKER_CONFIG=/run/hermes-stock-sandbox/docker-config
+Environment=SANDBOX_ENABLED=true
+Environment=SANDBOX_WORKSPACE_DIR=/opt/hermes-stock/workspace
+Environment=SANDBOX_IMAGE=hermes-stock-python-sandbox:latest
+Environment=SANDBOX_MEMORY=1g
+Environment=SANDBOX_CPUS=2
+Environment=SANDBOX_PIDS_LIMIT=128
+Environment=SANDBOX_TMPFS_BYTES=268435456
+Environment=SANDBOX_FILE_BYTES=67108864
+Environment=SANDBOX_WORKSPACE_BYTES=268435456
+Environment=SANDBOX_WORKSPACE_FILES=2000
+Environment=SANDBOX_MAX_CONCURRENCY=4
+RuntimeDirectory=hermes-stock-sandbox
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStartPre=/usr/bin/docker image inspect --format={{.Id}} hermes-stock-python-sandbox:latest
+ExecStart=/opt/hermes-stock/venv/bin/uvicorn backend.app.execution.broker:app --uds /run/hermes-stock-sandbox/sandbox.sock --workers 1 --timeout-graceful-shutdown 15
+ExecStartPost=/bin/sh -c 'while [ ! -S /run/hermes-stock-sandbox/sandbox.sock ]; do sleep 0.05; done; chmod 0660 /run/hermes-stock-sandbox/sandbox.sock'
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/run/hermes-stock-sandbox
+
+[Install]
+WantedBy=multi-user.target

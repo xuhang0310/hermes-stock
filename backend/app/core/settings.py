@@ -10,8 +10,9 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[2]  # core/ -> app/ -> backend/（backend/.env 所在）
 # 仅在开发者本机可用作备用值源（存在才加载，不存在就跳过，不阻塞其他机器）
-_RABBIT_ENV = Path(os.getenv("STOCK_RABBIT_ENV_PATH", ""))
-if not _RABBIT_ENV.is_file():
+_RABBIT_ENV_RAW = os.getenv("STOCK_RABBIT_ENV_PATH", "").strip()
+_RABBIT_ENV = Path(_RABBIT_ENV_RAW).expanduser() if _RABBIT_ENV_RAW else Path("__missing_rabbit_env__")
+if not _RABBIT_ENV_RAW or not _RABBIT_ENV.is_file():
     _RABBIT_ENV = Path(os.path.expanduser("~/Documents/hermes-rabbit/backend/.env"))
 if _RABBIT_ENV.is_file():
     load_dotenv(_RABBIT_ENV, override=False)
@@ -62,6 +63,24 @@ class Settings:
     workspace_enabled: bool = os.getenv("STOCK_WORKSPACE_ENABLED", "true").lower() == "true"
     # 执行能力独立开关，默认关：开启=给聊天用户放开"以应用用户身份执行 Python"，生产须在独立低权账户/沙箱下才开
     workspace_exec_enabled: bool = os.getenv("STOCK_WORKSPACE_EXEC_ENABLED", "false").lower() == "true"
+    # 执行后端：生产固定用 docker；local 仅供受信任的开发环境显式启用。
+    workspace_exec_backend: str = os.getenv("STOCK_WORKSPACE_EXEC_BACKEND", "docker")
+    workspace_exec_socket: str = os.getenv(
+        "STOCK_WORKSPACE_EXEC_SOCKET", "/run/hermes-stock-sandbox/sandbox.sock"
+    )
+    workspace_exec_image: str = os.getenv(
+        "STOCK_WORKSPACE_EXEC_IMAGE", "hermes-stock-python-sandbox:latest"
+    )
+    workspace_exec_memory: str = os.getenv("STOCK_WORKSPACE_EXEC_MEMORY", "1g")
+    workspace_exec_cpus: float = float(os.getenv("STOCK_WORKSPACE_EXEC_CPUS", "2"))
+    workspace_exec_pids_limit: int = int(os.getenv("STOCK_WORKSPACE_EXEC_PIDS_LIMIT", "128"))
+    workspace_exec_tmpfs_bytes: int = int(os.getenv("STOCK_WORKSPACE_EXEC_TMPFS_BYTES", str(256 * 1024 * 1024)))
+    workspace_exec_file_bytes: int = int(os.getenv("STOCK_WORKSPACE_EXEC_FILE_BYTES", str(64 * 1024 * 1024)))
+    workspace_exec_workspace_bytes: int = int(
+        os.getenv("STOCK_WORKSPACE_EXEC_WORKSPACE_BYTES", str(256 * 1024 * 1024))
+    )
+    workspace_exec_workspace_files: int = int(os.getenv("STOCK_WORKSPACE_EXEC_WORKSPACE_FILES", "2000"))
+    workspace_exec_max_concurrency: int = int(os.getenv("STOCK_WORKSPACE_EXEC_MAX_CONCURRENCY", "4"))
     # 工作区根目录；空=默认 backend/agent_workspace。生产应配到 shared/ 下避免随 release 替换蒸发
     workspace_dir: str = os.getenv("STOCK_WORKSPACE_DIR", "")
     # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号

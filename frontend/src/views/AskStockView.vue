@@ -39,6 +39,7 @@ type ChatMessage = {
   liveReasoning: string
   liveContent: string
   liveTool?: LiveToolProgress | null
+  files: GeneratedFile[]
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
 }
 
@@ -82,6 +83,8 @@ const selectedModelId = ref<number | null>(null)
 const selectedSessionId = ref<number | null>(null)
 const messages = ref<ChatMessage[]>([])
 const question = ref('')
+const allowCodeExecution = ref(false)
+const workspaceExecAvailable = ref(false)
 const sending = ref(false)
 const abortController = ref<AbortController | null>(null)
 const loadingSession = ref(false)
@@ -114,11 +117,13 @@ const modelGroups = computed(() => {
 })
 
 async function load() {
-  const [modelPayload, strategyPayload, sessionPayload] = await Promise.all([
+  const [modelPayload, strategyPayload, sessionPayload, workspaceStatus] = await Promise.all([
     api.modelConfigs(),
     api.stockStrategies(),
-    api.agentSessions('stock')
+    api.agentSessions('stock'),
+    api.workspaceStatus().catch(() => null)
   ])
+  workspaceExecAvailable.value = Boolean(workspaceStatus?.exec_enabled && workspaceStatus.exec_available)
   models.value = modelPayload.filter((item) => item.status !== 'disabled')
   strategies.value = strategyPayload.skills
   sessions.value = sessionPayload
@@ -155,6 +160,7 @@ async function openSession(id: number) {
       steps: [],
       liveReasoning: '',
       liveContent: '',
+      files: [],
       streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined
     }))
     scrollChat(false)
@@ -401,7 +407,8 @@ function flushReasoning(reply: ChatMessage) {
 
 // 本次回复真正生成的工作区文件（有 ws_write_file 动作才有），下载的是真实文件
 function generatedFiles(item: ChatMessage): GeneratedFile[] {
-  return extractGeneratedFiles(item.steps)
+  const rows = [...extractGeneratedFiles(item.steps), ...item.files]
+  return rows.filter((file, index) => rows.findIndex((candidate) => candidate.path === file.path) === index)
 }
 
 async function downloadFile(file: GeneratedFile) {
@@ -427,6 +434,8 @@ async function send() {
     .filter((item) => item.content)
     .map((item) => ({ role: item.role, content: item.content }))
     .slice(-8)
+  const executionGranted = workspaceExecAvailable.value && allowCodeExecution.value
+  allowCodeExecution.value = false
 
   sending.value = true
   error.value = ''
@@ -437,7 +446,8 @@ async function send() {
     content: text,
     steps: [],
     liveReasoning: '',
-    liveContent: ''
+    liveContent: '',
+    files: []
   })
   messages.value.push({
     id: Date.now() + 1,
@@ -446,6 +456,7 @@ async function send() {
     steps: [],
     liveReasoning: '',
     liveContent: '',
+    files: [],
     streamStatus: 'connecting'
   })
   const reply = messages.value[messages.value.length - 1]
@@ -460,7 +471,8 @@ async function send() {
         history,
         session_id: selectedSessionId.value,
         model_config_id: selectedModelId.value,
-        skills: selectedStrategyIds.value
+        skills: selectedStrategyIds.value,
+        allow_code_execution: executionGranted
       },
       (event: AgentStreamEvent) => {
         if (event.type === 'session') {
@@ -506,6 +518,11 @@ async function send() {
           reply.streamStatus = 'tooling'
           flushReasoning(reply)
           pushStep(reply, { type: 'observation', content: event.content || '' })
+        } else if (event.type === 'artifact') {
+          const path = event.path?.trim()
+          if (path && !reply.files.some((file) => file.path === path)) {
+            reply.files.push({ path, name: event.name || path.split('/').pop() || path, bytes: event.bytes })
+          }
         } else if (event.type === 'error') {
           flushReasoning(reply)
           flushThought(reply)
@@ -740,7 +757,7 @@ onMounted(load)
         </article>
       </section>
 
-      <form class="chat-input stock-chat-input" @submit.prevent="send">
+      <form class="chat-input stock-chat-input sandbox-chat-input" @submit.prevent="send">
         <input
           v-model="question"
           type="text"
@@ -754,6 +771,15 @@ onMounted(load)
             </option>
           </optgroup>
         </select>
+        <label
+          class="exec-toggle"
+          :class="{ active: allowCodeExecution }"
+          :title="workspaceExecAvailable ? '仅授权当前这一条消息在隔离容器中执行 Python' : 'Python 沙箱当前不可用'"
+        >
+          <input v-model="allowCodeExecution" type="checkbox" :disabled="sending || !workspaceExecAvailable" />
+          <span class="exec-toggle-track"><i></i></span>
+          <strong>本次执行 Python</strong>
+        </label>
         <button type="button" :disabled="sending" @click="newSession">新会话</button>
         <button
           :type="sending ? 'button' : 'submit'"

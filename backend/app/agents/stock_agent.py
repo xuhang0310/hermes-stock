@@ -609,6 +609,7 @@ def run_agent_events(
     user_label: str | None = None,
     can_write_positions: bool = False,
     default_account_id: int | None = None,
+    allow_code_execution: bool = False,
     cancel_event: threading.Event | None = None,
 ) -> Generator[dict, None, None]:
     stock_mode = chat_mode == "stock"
@@ -627,6 +628,8 @@ def run_agent_events(
             if w_schemas:
                 tools = [*tools, *w_schemas]
                 write_tool_names = {s["function"]["name"] for s in w_schemas}
+    if not allow_code_execution:
+        tools = [schema for schema in tools if schema.get("function", {}).get("name") != "ws_run_python"]
     system_prompt = (
         stock_system_prompt_with_skills(digital_human_context, skills, memory_context)
         if stock_mode
@@ -774,14 +777,18 @@ def run_agent_events(
                 yield {"type": "action", "tool": name, "content": json.dumps(args, ensure_ascii=False)}
                 tool_started = time.monotonic()
                 if name.startswith("ws_"):
-                    from backend.app.skills.agent_workspace import workspace_user_scope
+                    from backend.app.skills.agent_workspace import workspace_execution_scope, workspace_user_scope
 
-                    with workspace_user_scope(user_id):
+                    with workspace_user_scope(user_id), workspace_execution_scope(allow_code_execution):
                         result = skill_registry.execute(name, args)
                 else:
                     result = skill_registry.execute(name, args)
                 duration = round(time.monotonic() - tool_started, 2)
                 yield {"type": "observation", "content": _registry_observation_preview(name, result)}
+                if isinstance(result, dict):
+                    for artifact in result.get("artifacts") or []:
+                        if isinstance(artifact, dict) and artifact.get("path"):
+                            yield {"type": "artifact", **artifact}
                 if stock_mode:
                     yield {
                         "type": "tool_done",

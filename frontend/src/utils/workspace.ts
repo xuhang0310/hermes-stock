@@ -4,7 +4,7 @@
  * 下载按钮只在"确实生成了文件"时出现，且下载的是工作区里的真实文件——
  * 不是把聊天正文打包。普通问答没有 ws_write_file 动作，自然无按钮。
  */
-export type GeneratedFile = { path: string; name: string }
+export type GeneratedFile = { path: string; name: string; bytes?: number }
 
 export function extractGeneratedFiles(steps: Array<{ type: string; tool?: string; content: string }>): GeneratedFile[] {
   const files: GeneratedFile[] = []

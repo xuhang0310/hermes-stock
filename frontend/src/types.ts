@@ -488,6 +488,15 @@ export type WorkspaceDoc = {
   session: { id: number; title: string; chat_mode: string } | null
   ingested: boolean
   ingested_doc_id: number | null
+  ingestable: boolean
+}
+
+export type WorkspaceStatus = {
+  enabled: boolean
+  exec_enabled: boolean
+  exec_available: boolean
+  exec_backend: string
+  isolated: boolean
 }
 
 export type KnowledgeIngestProgress = {
@@ -633,4 +642,8 @@ export type AgentStreamEvent = {
   index?: number
   chars?: number
   delta?: string
+  path?: string
+  name?: string
+  bytes?: number
+  mtime?: number
 }

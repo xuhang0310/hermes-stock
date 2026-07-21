@@ -33,8 +33,8 @@ function fileIcon(path: string): string {
   const key =
     e === 'md' ? 'md'
     : e === 'py' ? 'py'
-    : e === 'pdf' || e === 'docx' ? 'pdf'
-    : e === 'csv' || e === 'json' ? 'csv'
+    : e === 'pdf' || e === 'docx' || e === 'pptx' ? 'pdf'
+    : e === 'csv' || e === 'json' || e === 'xlsx' ? 'csv'
     : 'txt'
   return `/icons/filetypes/${key}.png`
 }
@@ -141,11 +141,12 @@ onMounted(load)
             <span class="tm">{{ fmtTime(doc.mtime) }}</span>
           </div>
           <span v-if="doc.ingested" class="wsd-kb in">✓ 已入库</span>
-          <span v-else class="wsd-kb out">未入库</span>
+          <span v-else-if="doc.ingestable" class="wsd-kb out">未入库</span>
+          <span v-else class="wsd-kb out">仅下载</span>
           <div class="wsd-actions">
             <button class="wsd-btn primary" :disabled="busyPath === doc.path" @click="download(doc)">↓ 下载</button>
             <button
-              v-if="!doc.ingested"
+              v-if="!doc.ingested && doc.ingestable"
               class="wsd-btn"
               :disabled="busyPath === doc.path"
               @click="ingest(doc)"

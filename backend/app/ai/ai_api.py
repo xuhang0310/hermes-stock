@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import mimetypes
 import re
 import threading
 import time
@@ -117,6 +118,9 @@ class AgentChatIn(BaseModel):
     model_config_id: int | None = None
     chat_mode: Literal["research", "stock", "knowledge"] = "research"
     skills: list[str] = []
+    # One-shot capability grant. The frontend resets it after every message;
+    # non-interactive callers (Feishu/scheduler) omit it and remain denied.
+    allow_code_execution: bool = False
 
 
 class PromptRecommendationRefreshIn(BaseModel):
@@ -916,7 +920,40 @@ def save_workspace_note(
     return result
 
 
-_WORKSPACE_TEXT_EXTS = {".md", ".txt", ".csv", ".json", ".py"}
+_WORKSPACE_DOCUMENT_EXTS = {
+    ".md", ".txt", ".csv", ".json", ".py", ".html",
+    ".pdf", ".docx", ".xlsx", ".pptx",
+    ".png", ".jpg", ".jpeg", ".svg",
+}
+_WORKSPACE_INGEST_EXTS = {
+    ".md", ".txt", ".csv", ".json", ".py", ".html",
+    ".pdf", ".docx", ".xlsx", ".pptx",
+}
+
+
+@router.get("/workspace/status")
+def workspace_status(
+    _context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """Return effective workspace and isolated execution availability."""
+    status = {
+        "enabled": settings.workspace_enabled,
+        "exec_enabled": settings.workspace_exec_enabled,
+        "exec_available": False,
+        "exec_backend": settings.workspace_exec_backend,
+        "isolated": settings.workspace_exec_backend == "docker",
+    }
+    if not settings.workspace_exec_enabled:
+        return status
+    try:
+        from backend.app.execution.backends import get_execution_backend
+
+        health = get_execution_backend().health()
+        status["exec_available"] = bool(health.get("ok"))
+        status["isolated"] = bool(health.get("isolated"))
+    except (OSError, RuntimeError):
+        pass
+    return status
 
 
 @router.get("/workspace/documents")
@@ -942,7 +979,7 @@ def list_workspace_documents(
     } if registry else {}
     docs: list[dict] = []
     for file in root.rglob("*"):
-        if not file.is_file() or file.suffix.lower() not in _WORKSPACE_TEXT_EXTS:
+        if file.is_symlink() or not file.is_file() or file.suffix.lower() not in _WORKSPACE_DOCUMENT_EXTS:
             continue
         rel = file.resolve().relative_to(root).as_posix()
         stat = file.stat()
@@ -959,6 +996,7 @@ def list_workspace_documents(
             "session": {"id": session.id, "title": session.title, "chat_mode": session.chat_mode} if session else None,
             "ingested": bool(meta and meta.ingested_doc_id),
             "ingested_doc_id": meta.ingested_doc_id if meta else None,
+            "ingestable": file.suffix.lower() in _WORKSPACE_INGEST_EXTS,
         })
     docs.sort(key=lambda d: d["mtime"], reverse=True)
     return docs
@@ -979,7 +1017,8 @@ def download_workspace_document(
         raise HTTPException(status_code=400, detail=str(exc))
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="文档不存在")
-    return FileResponse(str(target), filename=target.name, media_type="application/octet-stream")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(str(target), filename=target.name, media_type=media_type)
 
 
 class WorkspaceIngestIn(BaseModel):
@@ -1002,11 +1041,20 @@ def ingest_workspace_document(
         raise HTTPException(status_code=400, detail=str(exc))
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="文档不存在")
-    text_content = target.read_text(encoding="utf-8", errors="replace")
+    ext = target.suffix.lower()
+    if ext not in _WORKSPACE_INGEST_EXTS:
+        raise HTTPException(status_code=400, detail=f"{ext or '该文件'} 只支持下载，不能加入知识库")
+    content = target.read_bytes()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文档大小超过 20MB，无法加入知识库")
+    try:
+        text_content = _parse_upload(content, ext)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="文档内容为空，无法入库")
 
-    content_hash = hashlib.sha256(text_content.encode("utf-8")).hexdigest()[:64]
+    content_hash = hashlib.sha256(content).hexdigest()[:64]
     existing = db.scalar(select(Document).where(Document.content_hash == content_hash).limit(1))
     if existing:
         doc = existing
@@ -1290,6 +1338,7 @@ def _parse_upload(content: bytes, ext: str) -> str:
     PDF：pdfplumber 优先（表格/布局远优于 pypdf），不可用时降级 pypdf
     DOCX：段落 + 表格（python-docx）
     PPTX：文本框 + 表格（python-pptx）
+    XLSX：工作表 + 单元格值（openpyxl，只读模式）
     txt/md：多编码兜底直读
     """
     if ext == '.pdf':
@@ -1356,6 +1405,27 @@ def _parse_upload(content: bytes, ext: str) -> str:
             return '\n'.join(parts)
         except ImportError:
             raise RuntimeError("PPTX 解析需要 python-pptx：请在服务器 venv 执行 pip install python-pptx")
+    if ext == '.xlsx':
+        try:
+            from io import BytesIO
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+            parts: list[str] = []
+            cell_count = 0
+            for sheet in workbook.worksheets:
+                parts.append(f"## {sheet.title}")
+                for row in sheet.iter_rows(values_only=True):
+                    values = [str(value) if value is not None else "" for value in row]
+                    if any(values):
+                        parts.append(" | ".join(values))
+                    cell_count += len(values)
+                    if cell_count >= 100_000:
+                        parts.append("[表格内容过多，已截取前 100000 个单元格]")
+                        return "\n".join(parts)
+            return "\n".join(parts)
+        except ImportError:
+            raise RuntimeError("XLSX 解析需要 openpyxl：请在服务器 venv 执行 pip install openpyxl")
     for enc in ('utf-8', 'gbk', 'gb2312', 'latin-1'):
         try:
             return content.decode(enc)
@@ -1416,10 +1486,10 @@ async def knowledge_upload(
     db: Session = Depends(get_db),
     _context: AuthContext = Depends(require_permission("model:manage")),
 ) -> dict:
-    allowed_ext = {'.pdf', '.docx', '.pptx', '.txt', '.md'}
+    allowed_ext = {'.pdf', '.docx', '.pptx', '.xlsx', '.txt', '.md'}
     ext = Path(file.filename or '').suffix.lower()
     if ext not in allowed_ext:
-        raise HTTPException(400, f"不支持的文件类型: {ext}，仅支持 PDF/Word/PPTX/txt/md")
+        raise HTTPException(400, f"不支持的文件类型: {ext}，仅支持 PDF/Word/PPTX/Excel/txt/md")
     content = await file.read()
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(400, "文件大小超过 20MB")
@@ -1801,6 +1871,11 @@ async def agent_chat(
             and payload.chat_mode == "research"
             and ("data:write" in context.permissions or "all" in context.permissions)
         )
+        allow_code_execution = bool(
+            settings.workspace_exec_enabled
+            and payload.allow_code_execution
+            and payload.chat_mode in ("research", "stock")
+        )
         default_account_id: int | None = None
         if can_write_positions:
             default_account_id = db.scalar(
@@ -1829,6 +1904,7 @@ async def agent_chat(
                     user_label=context.user.display_name,
                     can_write_positions=can_write_positions,
                     default_account_id=default_account_id,
+                    allow_code_execution=allow_code_execution,
                     cancel_event=cancel_event,
                 ):
                     asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()

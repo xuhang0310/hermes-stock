@@ -2349,6 +2349,79 @@ button.btn-stop:hover {
   grid-template-columns: minmax(0, 1fr) minmax(190px, 260px) 86px 92px;
 }
 
+.sandbox-chat-input {
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 260px) 150px 92px;
+}
+
+.stock-chat-input.sandbox-chat-input {
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 240px) 150px 86px 92px;
+}
+
+.exec-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #09090a;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.exec-toggle.active {
+  border-color: rgba(39, 197, 138, 0.6);
+  color: var(--ok);
+}
+
+.exec-toggle:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.exec-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.exec-toggle strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.exec-toggle-track {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #17171a;
+}
+
+.exec-toggle-track i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted-2);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.exec-toggle input:checked + .exec-toggle-track i {
+  transform: translateX(12px);
+  background: var(--ok);
+}
+
 @keyframes pulse {
   0%,
   100% {
@@ -2490,6 +2563,11 @@ button.btn-stop:hover {
   }
 
   .chat-input {
+    grid-template-columns: 1fr;
+  }
+
+  .sandbox-chat-input,
+  .stock-chat-input.sandbox-chat-input {
     grid-template-columns: 1fr;
   }
 

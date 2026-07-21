@@ -160,6 +160,26 @@ class Deployer:
             return False
         return True
 
+    def _sandbox_enabled(self) -> bool:
+        rc, _, _ = self.run("test -f /etc/systemd/system/hermes-stock-sandboxd.service")
+        return rc == 0
+
+    def _restart_sandbox(self) -> bool:
+        rc, out, err = self.run("systemctl restart hermes-stock-sandboxd")
+        if rc != 0:
+            log(f"沙箱 broker 重启失败: {out} {err}")
+            return False
+        for _ in range(20):
+            rc, out, _ = self.run(
+                "curl --silent --max-time 2 --unix-socket /run/hermes-stock-sandbox/sandbox.sock "
+                "http://sandboxd/health"
+            )
+            if rc == 0 and '"ok":true' in out.replace(" ", "").lower():
+                return True
+            time.sleep(1)
+        log("沙箱 broker 健康检查超时")
+        return False
+
     def _mkdir(self, rdir: str) -> None:
         if rdir in self._made or rdir in ("", "/"):
             return
@@ -202,12 +222,22 @@ else
 fi
 grep -q '^STOCK_WEBHOOK_ENC_KEY=' "$NEW/backend/.env" || echo 'STOCK_WEBHOOK_ENC_KEY={enc_key}' >> "$NEW/backend/.env"
 grep -q '^STOCK_SCHEDULER_ENABLED=' "$NEW/backend/.env" || echo 'STOCK_SCHEDULER_ENABLED=true' >> "$NEW/backend/.env"
+grep -q '^STOCK_WORKSPACE_EXEC_BACKEND=' "$NEW/backend/.env" || echo 'STOCK_WORKSPACE_EXEC_BACKEND=docker' >> "$NEW/backend/.env"
+grep -q '^STOCK_WORKSPACE_EXEC_SOCKET=' "$NEW/backend/.env" || echo 'STOCK_WORKSPACE_EXEC_SOCKET=/run/hermes-stock-sandbox/sandbox.sock' >> "$NEW/backend/.env"
+grep -q '^STOCK_WORKSPACE_EXEC_IMAGE=' "$NEW/backend/.env" || echo 'STOCK_WORKSPACE_EXEC_IMAGE=hermes-stock-python-sandbox:latest' >> "$NEW/backend/.env"
 chmod 600 "$NEW/backend/.env"
 chown -R {a.owner} "$NEW"
+/opt/hermes-stock/venv/bin/pip install --disable-pip-version-check -q -r "$NEW/backend/requirements.txt" || exit 31
+docker build --quiet -f "$NEW/deploy/sandbox/Dockerfile" -t hermes-stock-python-sandbox:latest "$NEW" || exit 32
+id -u hermes-sandbox >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin hermes-sandbox
+usermod -aG docker hermes-sandbox
+install -m 0644 "$NEW/deploy/systemd/hermes-stock-sandboxd.service" /etc/systemd/system/hermes-stock-sandboxd.service
+systemctl daemon-reload
+systemctl enable hermes-stock-sandboxd >/dev/null 2>&1
 ln -sfn "$NEW" "$CUR"
 echo SWITCHED
 """
-        rc, out, err = self.run(server)
+        rc, out, err = self.run(server, timeout=1800)
         if "SWITCHED" not in out:
             log(f"切换/重启失败: {out} {err}")
             self._rollback(cur, old)
@@ -215,7 +245,7 @@ echo SWITCHED
         log(f"已切换 current -> {new}，重启服务，验证中...")
 
         if self._ha_enabled() and not a.defer_restart:
-            if not self._restart_background() or not self._rolling_restart():
+            if not self._restart_sandbox() or not self._restart_background() or not self._rolling_restart():
                 self._rollback(cur, old)
                 return 1
         elif not a.defer_restart:
@@ -253,6 +283,10 @@ echo SWITCHED
             log("无旧版本可回滚（首次部署失败），请手动检查服务。")
             return
         self.run(f"ln -sfn {old} {cur}")
+        if self._sandbox_enabled() and self.run(f"test -f {old}/backend/app/execution/broker.py")[0] == 0:
+            self._restart_sandbox()
+        elif self._sandbox_enabled():
+            self.run("systemctl stop hermes-stock-sandboxd")
         if self._ha_enabled():
             self._restart_background()
             self._rolling_restart()
