@@ -255,6 +255,8 @@ button {
 .position-agent-drawer-header button,
 .position-agent-composer button,
 .position-agent-upload,
+.watchlist-row-actions button,
+.watchlist-agent-actions button,
 .editor-panel button,
 .chat-input button,
 .session-rail button,
@@ -276,6 +278,8 @@ button {
 .position-agent-drawer-header button:hover,
 .position-agent-composer button:hover,
 .position-agent-upload:hover,
+.watchlist-row-actions button:hover,
+.watchlist-agent-actions button:hover,
 .editor-panel button:hover,
 .chat-input button:hover,
 .session-rail button:hover,
@@ -340,6 +344,13 @@ button:disabled {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .summary-strip {
@@ -774,6 +785,7 @@ tbody tr.clickable-row:focus-visible td {
 .position-agent-card textarea:focus,
 .position-agent-composer textarea:focus,
 .position-agent-composer select:focus,
+.watchlist-agent-actions select:focus,
 .editor-panel input:focus,
 .editor-panel select:focus,
 .editor-panel textarea:focus,
@@ -786,6 +798,42 @@ tbody tr.clickable-row:focus-visible td {
   align-self: center;
   color: var(--muted);
   font-size: 12px;
+}
+
+.watchlist-table {
+  min-width: 920px;
+}
+
+.watchlist-table td {
+  vertical-align: middle;
+}
+
+.watchlist-symbol {
+  color: var(--gold-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-reason {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watchlist-row-actions {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.watchlist-row-actions .danger-button {
+  border-color: rgba(255, 93, 93, 0.42);
+  color: #ff9696;
+}
+
+.watchlist-row-actions .danger-button:hover {
+  border-color: var(--danger);
+  background: rgba(255, 93, 93, 0.1);
 }
 
 .position-agent-panel {
@@ -1008,6 +1056,23 @@ tbody tr.clickable-row:focus-visible td {
   grid-template-columns: 104px minmax(0, 1fr) 82px;
   gap: 8px;
   align-items: center;
+}
+
+.watchlist-agent-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  gap: 8px;
+  align-items: center;
+}
+
+.watchlist-agent-actions select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #09090a;
+  color: var(--text);
+  padding: 8px 10px;
 }
 
 .position-agent-upload {
@@ -1383,7 +1448,7 @@ tbody tr.clickable-row:focus-visible td {
   50% { opacity: 1; transform: scale(1.15); }
 }
 
-.digital-center-page {
+.digital-center-page--chat {
   /* tabs 头占一行、聊天区吃满剩余视口高度——输入框钉底，只有消息区滚动 */
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -1391,7 +1456,7 @@ tbody tr.clickable-row:focus-visible td {
   min-height: 560px;
 }
 
-.digital-center-page > .page-section:not(.digital-center-tabs) {
+.digital-center-page--chat > .page-section:not(.digital-center-tabs) {
   min-height: 0;
   overflow-y: auto; /* 飞书机器人 Tab 内容超高时自身滚动，不撑破页面 */
 }
@@ -2296,7 +2361,8 @@ button.btn-stop:hover {
 
 @media (max-width: 1100px) {
   .app-shell {
-    grid-template-columns: 1fr;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .sidebar {
@@ -2428,6 +2494,10 @@ button.btn-stop:hover {
   }
 
   .position-agent-composer-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .watchlist-agent-actions {
     grid-template-columns: 1fr;
   }
 

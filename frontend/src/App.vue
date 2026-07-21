@@ -2,7 +2,6 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api, ApiError, getAuthToken, setAuthToken } from './api'
 import AppShell from './components/AppShell.vue'
-import DataTable from './components/DataTable.vue'
 import PositionsWorkbench from './components/PositionsWorkbench.vue'
 import AskStockView from './views/AskStockView.vue'
 import DigitalHumanCenter from './views/DigitalHumanCenter.vue'
@@ -14,6 +13,7 @@ import KnowledgeBaseView from './views/KnowledgeBaseView.vue'
 import WorkspaceDocsView from './views/WorkspaceDocsView.vue'
 import KnowledgeSearchView from './views/KnowledgeSearchView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
+import WatchlistView from './views/WatchlistView.vue'
 import { renderMarkdown } from './utils/markdown'
 import type {
   AgentItem,
@@ -66,9 +66,6 @@ const positions = ref<PositionItem[]>([])
 const watchlist = ref<WatchlistItem[]>([])
 const agents = ref<AgentItem[]>([])
 
-const newWatchSymbol = ref('')
-const newWatchReason = ref('')
-const watchlistMessage = ref('')
 const positionAgentInstruction = ref('')
 const positionAgentImageBase64 = ref('')
 const positionAgentMimeType = ref('image/png')
@@ -82,16 +79,22 @@ const positionChatScroll = ref<HTMLElement | null>(null)
 const positionModels = ref<ModelConfig[]>([])
 const selectedPositionModelId = ref<number | null>(null)
 const selectedChartPosition = ref<PositionItem | null>(null)
+const selectedChartInstrument = ref<{ symbol: string; name: string } | null>(null)
+const chartReturnPage = ref<'positions' | 'watchlist'>('positions')
+const digitalHumanInitialTab = ref<'chat' | 'feishuBots'>('chat')
 const positionAgentTargetAccount = ref<number | null>(null)
 const positionAgentAccounts = ref<PositionAccount[]>([])
 
 const pageTitle = computed(() => {
+  if (activePage.value === 'positionChart') {
+    return chartReturnPage.value === 'watchlist' ? '自选行情图表' : '持仓图表'
+  }
   const labels: Record<PageKey, string> = {
     askStock: '问股',
     workbench: '今日工作台',
     digitalHumans: '数字人中心',
     positions: '持仓',
-    positionChart: '持仓图表',
+    positionChart: '行情图表',
     watchlist: '自选池',
     rhythm: '定时任务',
     knowledge: '知识库',
@@ -215,28 +218,6 @@ async function initialize() {
     currentUser.value = null
   } finally {
     bootstrapping.value = false
-  }
-}
-
-async function addWatchlistItem() {
-  watchlistMessage.value = ''
-  if (!newWatchSymbol.value.trim()) {
-    watchlistMessage.value = '请输入标的代码'
-    return
-  }
-
-  try {
-    await api.addWatchlist({
-      symbol: newWatchSymbol.value.trim().toUpperCase(),
-      group_name: 'default',
-      reason: newWatchReason.value || undefined
-    })
-    newWatchSymbol.value = ''
-    newWatchReason.value = ''
-    watchlistMessage.value = '已加入自选池'
-    await refreshAll()
-  } catch (err) {
-    watchlistMessage.value = err instanceof Error ? err.message : '加入失败'
   }
 }
 
@@ -486,11 +467,30 @@ function formatNumber(value: number | null | undefined, digits = 2) {
 
 function openChartFromPosition(position: PositionItem) {
   selectedChartPosition.value = position
+  selectedChartInstrument.value = null
+  chartReturnPage.value = 'positions'
   activePage.value = 'positionChart'
 }
 
-function backToPositions() {
-  activePage.value = 'positions'
+function openChartFromWatchlist(item: WatchlistItem) {
+  selectedChartPosition.value = null
+  selectedChartInstrument.value = { symbol: item.symbol, name: item.name }
+  chartReturnPage.value = 'watchlist'
+  activePage.value = 'positionChart'
+}
+
+function backFromChart() {
+  activePage.value = chartReturnPage.value
+}
+
+function navigate(page: PageKey) {
+  if (page === 'digitalHumans') digitalHumanInitialTab.value = 'chat'
+  activePage.value = page
+}
+
+function openFeishuBindings() {
+  digitalHumanInitialTab.value = 'feishuBots'
+  activePage.value = 'digitalHumans'
 }
 
 async function seedDemo() {
@@ -511,11 +511,11 @@ onMounted(initialize)
 
   <AppShell
     v-else
-    :active-page="activePage"
+    :active-page="activePage === 'positionChart' ? chartReturnPage : activePage"
     :page-title="pageTitle"
     :health="health"
     :user="currentUser"
-    @navigate="activePage = $event"
+    @navigate="navigate"
     @refresh="refreshAll"
     @logout="logout"
   >
@@ -534,12 +534,17 @@ onMounted(initialize)
       />
 
       <AskStockView v-else-if="activePage === 'askStock'" />
-      <DigitalHumanCenter v-else-if="activePage === 'digitalHumans'" />
+      <DigitalHumanCenter
+        v-else-if="activePage === 'digitalHumans'"
+        :initial-tab="digitalHumanInitialTab"
+      />
 
       <PositionChartView
         v-else-if="activePage === 'positionChart'"
         :position="selectedChartPosition"
-        @back="backToPositions"
+        :instrument="selectedChartInstrument"
+        :back-label="chartReturnPage === 'watchlist' ? '返回自选池' : '返回持仓'"
+        @back="backFromChart"
       />
 
       <PositionsWorkbench
@@ -551,31 +556,13 @@ onMounted(initialize)
         @open-chart="openChartFromPosition"
       />
 
-      <section v-else-if="activePage === 'watchlist'" class="page-section">
-        <header class="section-header">
-          <div>
-            <h2>自选池</h2>
-            <p>第一阶段建议不超过 30 只，新增标的必须先存在于标的基础表。</p>
-          </div>
-        </header>
-        <form class="inline-form" @submit.prevent="addWatchlistItem">
-          <input v-model="newWatchSymbol" placeholder="代码，例如 600519.SH" />
-          <input v-model="newWatchReason" placeholder="入池理由" />
-          <button type="submit">加入自选</button>
-          <span class="form-message">{{ watchlistMessage }}</span>
-        </form>
-        <DataTable
-          :columns="['标的', '名称', '分组', '状态', '理由', '更新时间']"
-          :rows="watchlist.map((item) => [
-            item.symbol,
-            item.name,
-            item.group_name,
-            item.status,
-            item.reason ?? '-',
-            item.updated_at
-          ])"
-        />
-      </section>
+      <WatchlistView
+        v-else-if="activePage === 'watchlist'"
+        :watchlist="watchlist"
+        @refresh="refreshAll"
+        @open-chart="openChartFromWatchlist"
+        @manage-feishu="openFeishuBindings"
+      />
 
       <RhythmView v-else-if="activePage === 'rhythm'" />
 

@@ -218,6 +218,21 @@ export type WatchlistItem = {
   updated_at: string
 }
 
+export type WatchlistAgentStreamEvent = {
+  type: string
+  model?: Partial<ModelConfig> | null
+  intent?: string | null
+  should_save?: boolean
+  reply?: string | null
+  summary?: string | null
+  content?: string
+  message?: string
+  tool?: string
+  display_name?: string
+  success?: boolean
+  step?: PositionAgentStep
+}
+
 export type ReportItem = {
   report_id: string
   agent_name: string
@@ -323,10 +338,10 @@ export type DataSourceConfig = {
 }
 
 export type NotifyChannel = {
-  channel_key: 'feishu-alert' | 'feishu-daily' | string
+  channel_key: 'feishu-daily' | string
   name: string
   channel_type: string
-  purpose: 'alert' | 'daily' | string
+  purpose: 'schedule' | string
   webhook_masked: string | null
   has_webhook: boolean
   cipher_invalid: boolean
@@ -347,7 +362,10 @@ export type NotifyChannelTestResult = {
 }
 
 export type FeishuBotRuntime = {
+  state: 'online' | 'connecting' | 'stopped' | 'error'
   running: boolean
+  manager_running: boolean
+  started_at: string | null
   today_count: number
   last_event_at: string | null
   error: string | null
@@ -418,6 +436,14 @@ export type ScheduleStatus = {
   is_trading_day: boolean
   server_time: string
   today: { success: number; failed: number; running: number }
+  notify_channel?: {
+    name: string
+    configured: boolean
+    signed: boolean
+    enabled: boolean
+    last_ok_at: string | null
+    last_error: string | null
+  }
 }
 
 export type DigitalHuman = {
@@ -478,6 +504,11 @@ export type KnowledgeStats = {
   chunks: number
   indexed_docs: number
   indexed_pct: number
+  searchable_chunks: number
+  vector_count: number
+  vector_pct: number
+  vector_healthy: boolean
+  vector_error: string
   backend: string
   collection: string
   dim: number
@@ -493,6 +524,7 @@ export type KnowledgeDocument = {
   source_url: string | null
   trust_level: string
   published_at: string | null
+  fetched_at: string | null
   chunk_count: number
   indexed: boolean
   status: string

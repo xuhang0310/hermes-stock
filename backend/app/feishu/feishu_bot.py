@@ -153,6 +153,16 @@ class _WsLoop:
             raise RuntimeError("飞书长连接事件循环未就绪")
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
+    @property
+    def running(self) -> bool:
+        return bool(
+            self.loop is not None
+            and self.loop.is_running()
+            and not self.loop.is_closed()
+            and self._thread is not None
+            and self._thread.is_alive()
+        )
+
 
 _ws_loop = _WsLoop()
 
@@ -355,8 +365,21 @@ class BotWorker:
                 if self.stopping:
                     return
                 try:
-                    context = _build_digital_human_context(self.code)
-                    answer, _model, error = _consume_agent_with_history(question, history, context, self.code)
+                    if self.code == "position-entry-agent":
+                        answer, error = _consume_position_agent_with_history(
+                            question,
+                            history,
+                            created_by=f"feishu:{chat_id[:48]}",
+                        )
+                    elif self.code == "watchlist-entry-agent":
+                        answer, error = _consume_watchlist_agent_with_history(
+                            question,
+                            history,
+                            created_by=f"feishu:{chat_id[:48]}",
+                        )
+                    else:
+                        context = _build_digital_human_context(self.code)
+                        answer, _model, error = _consume_agent_with_history(question, history, context, self.code)
                 except Exception as exc:  # noqa: BLE001
                     answer, error = "", str(exc)[:500]
             if error or not answer:
@@ -369,11 +392,20 @@ class BotWorker:
                 bucket = self._history.setdefault(chat_id, deque(maxlen=_HISTORY_TURNS * 2))
                 bucket.append({"role": "user", "content": question})
                 bucket.append({"role": "assistant", "content": answer})
+                note = (
+                    "持仓写入会先校验证券账户与字段完整性。"
+                    if self.code == "position-entry-agent"
+                    else (
+                        "自选增删会核对 A 股标的并记录操作日志。"
+                        if self.code == "watchlist-entry-agent"
+                        else "仅供研究与复盘，不构成投资建议。"
+                    )
+                )
                 final = _card(
                     f"{self.name} · {date.today().isoformat()}",
                     answer,
                     "blue",
-                    note="仅供研究与复盘 · 不构成投资建议",
+                    note=note,
                 )
             if placeholder_id:
                 if not self._patch_card(placeholder_id, final):
@@ -385,6 +417,20 @@ class BotWorker:
                 _inflight -= 1
 
     # -------------------------------------------------------------- 生命周期
+    def _on_reconnecting(self) -> None:
+        if self.stopping:
+            return
+        self.connected = False
+        self.error = None
+        _log("WARNING", f"机器人[{self.name}] 长连接已断开，正在自动重连")
+
+    def _on_reconnected(self) -> None:
+        if self.stopping:
+            return
+        self.connected = True
+        self.error = None
+        _log("INFO", f"机器人[{self.name}] 长连接已恢复")
+
     def start(self) -> str | None:
         """在共享 ws 循环上建立长连接。返回错误文案（None=已提交连接）。"""
         if not _ws_loop.ensure():
@@ -403,6 +449,11 @@ class BotWorker:
             log_level=lark.LogLevel.INFO,
             auto_reconnect=True,
         )
+        # 线上 SDK 暴露了重连生命周期钩子；兼容未带钩子的官方 1.7.1。
+        if hasattr(self._client, "on_reconnecting"):
+            self._client.on_reconnecting = self._on_reconnecting
+        if hasattr(self._client, "on_reconnected"):
+            self._client.on_reconnected = self._on_reconnected
         try:
             future = _ws_loop.submit(self._client._connect())  # noqa: SLF001 —— 见文件头运行时设计
         except Exception as exc:  # noqa: BLE001
@@ -486,6 +537,66 @@ def _consume_agent_with_history(question: str, history: list[dict], context: str
     return answer, model_name, error
 
 
+def _consume_position_agent_with_history(question: str, history: list[dict], created_by: str):
+    """Run the position-entry agent for a Feishu chat and retain its text reply."""
+    from backend.app.agents.position_agent import run_position_agent_events
+    from backend.app.data.repository import StockRepository
+
+    answer_parts: list[str] = []
+    answer = ""
+    error = None
+    with SessionLocal() as session:
+        generator = run_position_agent_events(
+            repository=StockRepository(session),
+            instruction=question,
+            created_by=created_by,
+            history=history,
+        )
+        try:
+            for event in generator:
+                kind = event.get("type")
+                if kind == "answer_delta":
+                    answer_parts.append(str(event.get("content") or ""))
+                elif kind == "done":
+                    answer = str(event.get("reply") or "").strip()
+                elif kind == "error":
+                    error = str(event.get("message") or event.get("content") or "持仓录入失败")
+                    break
+        finally:
+            generator.close()
+    return answer or "".join(answer_parts).strip(), error
+
+
+def _consume_watchlist_agent_with_history(question: str, history: list[dict], created_by: str):
+    """Run the watchlist-entry agent for a Feishu chat and retain its text reply."""
+    from backend.app.agents.watchlist_agent import run_watchlist_agent_events
+    from backend.app.data.repository import StockRepository
+
+    answer_parts: list[str] = []
+    answer = ""
+    error = None
+    with SessionLocal() as session:
+        generator = run_watchlist_agent_events(
+            repository=StockRepository(session),
+            instruction=question,
+            created_by=created_by,
+            history=history,
+        )
+        try:
+            for event in generator:
+                kind = event.get("type")
+                if kind == "answer_delta":
+                    answer_parts.append(str(event.get("content") or ""))
+                elif kind == "done":
+                    answer = str(event.get("reply") or "").strip()
+                elif kind == "error":
+                    error = str(event.get("message") or event.get("content") or "自选录入失败")
+                    break
+        finally:
+            generator.close()
+    return answer or "".join(answer_parts).strip(), error
+
+
 # ------------------------------------------------------------------ 管理器
 _workers: dict[int, BotWorker] = {}
 _spawn_errors: dict[int, str] = {}  # 最近一次 spawn 失败原因（worker 不存在时前端可见）
@@ -527,7 +638,7 @@ def _spawn(profile: DigitalHumanProfile) -> str | None:
 
 def start_feishu_bots() -> None:
     """lifespan 入口：后台线程拉起全部启用绑定（首次 import lark 较慢，不能阻塞 uvicorn 启动）。"""
-    if not settings.feishu_bot_enabled:
+    if not settings.feishu_bot_enabled or not settings.background_services_enabled:
         return
     if not _sdk_available():
         _log("ERROR", "未安装 lark-oapi，飞书机器人未启动（pip install lark-oapi）")
@@ -556,6 +667,8 @@ def restart_bot(profile_id: int) -> str | None:
     """绑定配置变更后重启对应 worker；返回错误文案（None=成功或已按停用处理）。"""
     if not settings.feishu_bot_enabled:
         return "飞书机器人功能未启用（STOCK_FEISHU_BOT_ENABLED=false）"
+    if not settings.background_services_enabled:
+        return "当前 API 进程不是飞书长连接管理进程，请检查 /api/feishu-bots 的 Nginx 路由"
     if not _sdk_available():
         return "服务器未安装 lark-oapi"
     with _manager_lock:
@@ -576,9 +689,22 @@ def restart_bot(profile_id: int) -> str | None:
 def bot_runtime(profile_id: int) -> dict:
     worker = _workers.get(profile_id)
     if worker is None:
-        return {"running": False, "today_count": 0, "last_event_at": None, "error": _spawn_errors.get(profile_id)}
+        error = _spawn_errors.get(profile_id)
+        return {
+            "state": "error" if error else "stopped",
+            "running": False,
+            "manager_running": _ws_loop.running,
+            "started_at": None,
+            "today_count": 0,
+            "last_event_at": None,
+            "error": error,
+        }
+    running = worker.running
     return {
-        "running": worker.running,
+        "state": "online" if running else ("error" if worker.error else "connecting"),
+        "running": running,
+        "manager_running": _ws_loop.running,
+        "started_at": worker.started_at.isoformat() if worker.started_at else None,
         "today_count": worker.today_count if worker.today_key == date.today().isoformat() else 0,
         "last_event_at": worker.last_event_at.isoformat() if worker.last_event_at else None,
         "error": worker.error,

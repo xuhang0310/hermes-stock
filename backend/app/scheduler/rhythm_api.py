@@ -12,6 +12,7 @@ from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.core.database import get_db
 from backend.app.feishu.feishu import (
     BUILTIN_CHANNEL_KEYS,
+    SCHEDULE_CHANNEL_KEY,
     decrypt_value,
     encrypt_value,
     get_channel,
@@ -69,9 +70,11 @@ def notify_channels(
     db: Session = Depends(get_db),
     _context: AuthContext = Depends(require_permission("system:view")),
 ) -> list[dict]:
-    rows = {row.channel_key: row for row in db.scalars(select(NotifyChannel)).all()}
+    rows = {
+        row.channel_key: row
+        for row in db.scalars(select(NotifyChannel).where(NotifyChannel.channel_key.in_(BUILTIN_CHANNEL_KEYS))).all()
+    }
     ordered = [rows[key] for key in BUILTIN_CHANNEL_KEYS if key in rows]
-    ordered.extend(row for key, row in rows.items() if key not in BUILTIN_CHANNEL_KEYS)
     return [_channel_out(row) for row in ordered]
 
 
@@ -84,7 +87,7 @@ def update_notify_channel(
 ) -> dict:
     key = channel_key.strip().lower()
     if key not in BUILTIN_CHANNEL_KEYS:
-        raise HTTPException(status_code=404, detail="通道不存在，当前仅支持内置的告警群/日报群两条通道")
+        raise HTTPException(status_code=404, detail="通道不存在，当前仅支持一个飞书任务群机器人")
     row = get_channel(db, key)
     if row is None:
         raise HTTPException(status_code=404, detail="通道未初始化，请先执行数据库种子")
@@ -145,6 +148,46 @@ class ScheduleJobIn(BaseModel):
     push_channel_key: str | None = Field(default=None, max_length=80)
     enabled: bool = True
     sort_order: int = 0
+
+
+def _looks_like_utf8_mojibake(value: str | None) -> bool:
+    """Detect UTF-8 text that was decoded as Latin-1 before being submitted."""
+    if not value:
+        return False
+    if "\ufffd" in value or any("\x80" <= char <= "\x9f" for char in value):
+        return True
+    try:
+        repaired = value.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return False
+    return repaired != value and any("\u3400" <= char <= "\u9fff" for char in repaired)
+
+
+def _validate_schedule_text_encoding(payload: ScheduleJobIn) -> None:
+    values = (payload.name, payload.description, payload.prompt_template)
+    if any(_looks_like_utf8_mojibake(value) for value in values):
+        raise HTTPException(
+            status_code=422,
+            detail="检测到任务文本编码异常，请刷新页面后重试，勿回写乱码内容",
+        )
+
+
+def _activate_agent_report_jobs(db: Session) -> list[ScheduledJob]:
+    """Enable report jobs without round-tripping their human-readable fields."""
+    jobs = list(
+        db.scalars(
+            select(ScheduledJob)
+            .where(ScheduledJob.job_kind == "agent_report")
+            .order_by(ScheduledJob.sort_order, ScheduledJob.id)
+        ).all()
+    )
+    for job in jobs:
+        job.enabled = True
+        job.push_channel_key = SCHEDULE_CHANNEL_KEY
+    db.commit()
+    for job in jobs:
+        db.refresh(job)
+    return jobs
 
 
 def _job_out(job: ScheduledJob) -> dict:
@@ -211,11 +254,9 @@ def update_schedule_job(
         raise HTTPException(status_code=404, detail="任务不存在")
     if payload.digital_human_code and payload.digital_human_code not in VALID_DIGITAL_HUMAN_CODES:
         raise HTTPException(status_code=400, detail="数字人 code 无效")
-    # 三线纪律：LLM 生成内容不允许推入告警群（purpose=alert）
-    if job.job_kind in ("agent_report", "l1_digest") and payload.push_channel_key:
-        channel = get_channel(db, payload.push_channel_key)
-        if channel is not None and channel.purpose == "alert":
-            raise HTTPException(status_code=400, detail="LLM 生成内容不允许推入告警群，请改推日报群")
+    if payload.push_channel_key and payload.push_channel_key not in BUILTIN_CHANNEL_KEYS:
+        raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
+    _validate_schedule_text_encoding(payload)
 
     job.name = payload.name
     job.description = payload.description
@@ -235,6 +276,15 @@ def update_schedule_job(
     db.commit()
     db.refresh(job)
     return _job_out(job)
+
+
+@router.post("/schedule/jobs/agent-reports/activate")
+def activate_agent_report_jobs(
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    jobs = _activate_agent_report_jobs(db)
+    return {"updated": len(jobs), "jobs": [_job_out(job) for job in jobs]}
 
 
 @router.post("/schedule/jobs/{job_key}/toggle")
@@ -301,6 +351,8 @@ def schedule_status(
         .group_by(JobRun.status)
     ).all():
         counts[status_value] = total
+    channel = get_channel(db, SCHEDULE_CHANNEL_KEY)
+    channel_configured = bool(channel and decrypt_value(channel.webhook_url_cipher))
     return {
         "scheduler_enabled": settings.scheduler_enabled,
         "scheduler_alive": alive,
@@ -308,4 +360,12 @@ def schedule_status(
         "is_trading_day": is_trading_day(now.date()),
         "server_time": now.isoformat(),
         "today": counts,
+        "notify_channel": {
+            "name": channel.name if channel else "飞书任务群",
+            "configured": channel_configured,
+            "signed": bool(channel and decrypt_value(channel.secret_cipher)),
+            "enabled": bool(channel and channel.status == "enabled"),
+            "last_ok_at": channel.last_ok_at.isoformat() if channel and channel.last_ok_at else None,
+            "last_error": channel.last_error if channel else None,
+        },
     }

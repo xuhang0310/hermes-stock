@@ -19,13 +19,19 @@ from backend.app.core.models import Notification, NotifyChannel, SystemLog
 from backend.app.core.settings import settings
 
 
-ALERT_CHANNEL_KEY = "feishu-alert"
-DAILY_CHANNEL_KEY = "feishu-daily"
-BUILTIN_CHANNEL_KEYS = (ALERT_CHANNEL_KEY, DAILY_CHANNEL_KEY)
+SCHEDULE_CHANNEL_KEY = "feishu-daily"
+ALERT_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
+DAILY_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
+LEGACY_CHANNEL_KEYS = ("feishu-alert",)
+BUILTIN_CHANNEL_KEYS = (SCHEDULE_CHANNEL_KEY,)
 
 FEISHU_CONTENT_LIMIT = 4000
 RATE_LIMIT_PER_MINUTE = 20
 _RETRYABLE_STATUS = {500, 502, 503, 504}
+_CARD_TEMPLATES = {
+    "blue", "wathet", "turquoise", "green", "yellow", "orange", "red",
+    "carmine", "violet", "purple", "indigo", "grey",
+}
 # 只允许飞书/Lark 官方 webhook 域名，防止 test/保存端点被用作 SSRF 探测
 ALLOWED_WEBHOOK_HOSTS = {"open.feishu.cn", "open.larksuite.com"}
 
@@ -106,19 +112,58 @@ def _gen_sign(secret: str, timestamp: int) -> str:
     return base64.b64encode(digest).decode("ascii")
 
 
-def _build_payload(title: str, content: str, secret: str | None, purpose: str) -> dict:
-    text = content.strip()
+def _compact_text(value: object, limit: int) -> str:
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _build_payload(
+    title: str,
+    content: str,
+    secret: str | None,
+    purpose: str,
+    *,
+    metadata: list[tuple[str, str]] | None = None,
+    footer: str | None = None,
+    template: str | None = None,
+) -> dict:
+    text = content.strip() or "本次任务未返回正文。"
     if len(text) > FEISHU_CONTENT_LIMIT:
         text = text[:FEISHU_CONTENT_LIMIT] + "\n……内容过长已截断，全文见系统内记录"
+    card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
+    elements: list[dict] = []
+    fields = []
+    for label, value in (metadata or [])[:6]:
+        compact_label = _compact_text(label, 20)
+        compact_value = _compact_text(value, 100) or "-"
+        fields.append(
+            {
+                "is_short": True,
+                "text": {"tag": "lark_md", "content": f"**{compact_label}**\n{compact_value}"},
+            }
+        )
+    if fields:
+        elements.extend([{"tag": "div", "fields": fields}, {"tag": "hr"}])
+    elements.append({"tag": "markdown", "content": text})
+    footer_text = footer or (
+        "SixRabbits Stock | 系统告警，请及时核查"
+        if purpose == "alert"
+        else "SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议"
+    )
+    elements.extend(
+        [
+            {"tag": "hr"},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": footer_text[:200]}]},
+        ]
+    )
     payload: dict = {
         "msg_type": "interactive",
         "card": {
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title[:120]},
-                "template": "red" if purpose == "alert" else "blue",
+                "template": card_template,
             },
-            "elements": [{"tag": "markdown", "content": text}],
+            "elements": elements,
         },
     }
     if secret:
@@ -187,6 +232,10 @@ def send_feishu(
     *,
     event_id: str | None = None,
     report_id: str | None = None,
+    card_metadata: list[tuple[str, str]] | None = None,
+    card_footer: str | None = None,
+    card_template: str | None = None,
+    card_kind: str | None = None,
 ) -> Notification:
     """向指定通道推送消息。先落 pending 审计记录再发送，任何失败都不抛异常、只写 failed。"""
     notification = Notification(
@@ -221,12 +270,20 @@ def send_feishu(
         return notification
 
     secret = decrypt_value(channel.secret_cipher)
-    purpose = channel.purpose
+    purpose = card_kind or channel.purpose
     # 先提交 pending 审计行并释放数据库连接，再做外部 HTTP 调用：
     # 避免重试窗口（最长约 33 秒）占用连接池，且进程中途崩溃也能留下审计痕迹
     db.commit()
 
-    payload = _build_payload(title, content, secret, purpose)
+    payload = _build_payload(
+        title,
+        content,
+        secret,
+        purpose,
+        metadata=card_metadata,
+        footer=card_footer,
+        template=card_template,
+    )
     ok, status_code, error = _post_with_retry(webhook_url, payload)
     if ok:
         notification.status = "sent"
@@ -248,13 +305,32 @@ def send_feishu(
 
 
 def send_alert(db: Session, title: str, content: str, *, event_id: str | None = None) -> Notification:
-    """告警群直推。规则引擎 L0 走这里，纯模板字符串，天然不经 LLM。"""
-    return send_feishu(db, ALERT_CHANNEL_KEY, title, content, event_id=event_id)
+    """系统异常推到唯一任务群；使用红色告警卡片，纯模板字符串不经 LLM。"""
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return send_feishu(
+        db,
+        ALERT_CHANNEL_KEY,
+        title,
+        content,
+        event_id=event_id,
+        card_kind="alert",
+        card_template="red",
+        card_metadata=[("消息类型", "系统告警"), ("发送时间", now_text)],
+        card_footer="SixRabbits Stock | 系统告警，请及时核查",
+    )
 
 
 def send_daily(db: Session, title: str, content: str, *, report_id: str | None = None) -> Notification:
-    """日报群推送：简报、快评、日报等 Agent 产出。"""
-    return send_feishu(db, DAILY_CHANNEL_KEY, title, content, report_id=report_id)
+    """唯一任务群推送：简报、快评、日报等 Agent 产出。"""
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return send_feishu(
+        db,
+        DAILY_CHANNEL_KEY,
+        title,
+        content,
+        report_id=report_id,
+        card_metadata=[("消息类型", "定时任务"), ("生成时间", now_text)],
+    )
 
 
 def test_channel(
@@ -281,10 +357,13 @@ def test_channel(
 
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     payload = _build_payload(
-        "【测试】SixRabbits Stock 通道连通性验证",
-        f"这是一条测试消息，发送时间 {now_text}。收到即代表通道配置正确。",
+        "SixRabbits Stock | 飞书任务群连接测试",
+        "配置校验已经完成。收到这张卡片，代表 Webhook、签名密钥和交互式卡片格式均可正常使用。",
         resolved_secret,
         purpose,
+        metadata=[("消息类型", "连接测试"), ("发送时间", now_text), ("卡片格式", "Interactive Card")],
+        footer="SixRabbits Stock | 定时任务统一推送通道",
+        template="turquoise",
     )
     started = time.monotonic()
     ok, status_code, error = _post_with_retry(resolved_url, payload, attempts=1)
@@ -295,6 +374,12 @@ def test_channel(
         f"飞书通道测试{'成功' if ok else '失败'}：{channel_key or '未保存表单'}",
         {"status_code": status_code, "error": error[:200] if error else None, "latency_ms": latency_ms},
     )
+    if channel is not None:
+        if ok:
+            channel.last_ok_at = datetime.now()
+            channel.last_error = None
+        else:
+            channel.last_error = error
     db.commit()
     if ok:
         return {"ok": True, "message": "测试消息已发送，请到群里确认", "status_code": status_code, "latency_ms": latency_ms}

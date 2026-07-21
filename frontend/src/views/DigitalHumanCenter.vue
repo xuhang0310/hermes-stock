@@ -7,7 +7,13 @@ import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
 import { extractGeneratedFiles, type GeneratedFile } from '../utils/workspace'
 
-const activeCenterTab = ref<'chat' | 'feishuBots'>('chat')
+const props = withDefaults(defineProps<{
+  initialTab?: 'chat' | 'feishuBots'
+}>(), {
+  initialTab: 'chat'
+})
+
+const activeCenterTab = ref<'chat' | 'feishuBots'>(props.initialTab)
 
 type ReactStep = {
   type: 'model' | 'reasoning' | 'thought' | 'action' | 'observation' | 'error'
@@ -265,11 +271,18 @@ function streamStatusText(message: ChatMessage) {
   return '等待响应'
 }
 
-function scrollChat(smooth = true) {
-  nextTick(() => {
-    chatScroll.value?.scrollTo({
-      top: chatScroll.value.scrollHeight,
-      behavior: smooth ? 'smooth' : 'auto'
+let scrollQueued = false
+
+function scrollChat(smooth = false) {
+  if (scrollQueued) return
+  scrollQueued = true
+  requestAnimationFrame(() => {
+    scrollQueued = false
+    nextTick(() => {
+      chatScroll.value?.scrollTo({
+        top: chatScroll.value.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto'
+      })
     })
   })
 }
@@ -467,7 +480,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="digital-center-page">
+  <div class="digital-center-page" :class="{ 'digital-center-page--chat': activeCenterTab === 'chat' }">
   <header class="settings-tabs page-section digital-center-tabs">
     <button type="button" :class="{ active: activeCenterTab === 'chat' }" @click="activeCenterTab = 'chat'">
       数字人对话

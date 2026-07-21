@@ -38,9 +38,11 @@ import type {
   AgentStreamEvent,
   ChartResolution,
   StockStrategy,
+  WatchlistAgentStreamEvent,
   WatchlistItem,
   WorkspaceDoc
 } from './types'
+import { readSseStream } from './utils/sse'
 
 const TOKEN_KEY = 'hermes_stock_token'
 let authToken = localStorage.getItem(TOKEN_KEY) || ''
@@ -110,29 +112,10 @@ async function streamRequest(
     throw new Error(detail || `Request failed: ${response.status}`)
   }
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const events = buffer.split('\n\n')
-    buffer = events.pop() || ''
-    for (const raw of events) {
-      const dataLine = raw.split('\n').find((line) => line.startsWith('data: '))
-      if (!dataLine) continue
-      const event = JSON.parse(dataLine.slice(6)) as AgentStreamEvent
-      onEvent(event)
-      if (event.type === 'done') {
-        await reader.cancel()
-        return
-      }
-    }
-  }
+  await readSseStream(response.body, onEvent)
 }
 
-async function streamJsonRequest<T>(
+async function streamJsonRequest<T extends { type?: string }>(
   url: string,
   payload: unknown,
   onEvent: (event: T) => void
@@ -151,26 +134,7 @@ async function streamJsonRequest<T>(
     throw new Error(detail || `Request failed: ${response.status}`)
   }
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const events = buffer.split('\n\n')
-    buffer = events.pop() || ''
-    for (const raw of events) {
-      const dataLine = raw.split('\n').find((line) => line.startsWith('data: '))
-      if (!dataLine) continue
-      const event = JSON.parse(dataLine.slice(6)) as T
-      onEvent(event)
-      if ((event as { type?: string }).type === 'done') {
-        await reader.cancel()
-        return
-      }
-    }
-  }
+  await readSseStream(response.body, onEvent)
 }
 
 export const api = {
@@ -259,10 +223,22 @@ export const api = {
   ) => streamJsonRequest<PositionAgentStreamEvent>('/api/positions/agent-add/stream', payload, onEvent),
   watchlist: () => request<WatchlistItem[]>('/api/watchlist'),
   addWatchlist: (payload: { symbol: string; group_name: string; reason?: string }) =>
-    request<{ symbol: string; group_name: string; reason: string | null }>('/api/watchlist', {
+    request<WatchlistItem>('/api/watchlist', {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
+  deleteWatchlist: (itemId: number) =>
+    request<{ deleted: boolean; id: number; symbol: string; group_name: string }>(`/api/watchlist/${itemId}`, {
+      method: 'DELETE'
+    }),
+  streamWatchlistAgent: (
+    payload: {
+      instruction: string
+      model_config_id?: number | null
+      history?: Array<{ role: 'user' | 'assistant'; content: string }>
+    },
+    onEvent: (event: WatchlistAgentStreamEvent) => void
+  ) => streamJsonRequest<WatchlistAgentStreamEvent>('/api/watchlist/agent/stream', payload, onEvent),
   agents: () => request<AgentItem[]>('/api/agents'),
   reports: () => request<ReportItem[]>('/api/reports'),
   riskChecks: () => request<RiskCheck[]>('/api/risk-checks'),

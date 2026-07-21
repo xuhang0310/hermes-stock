@@ -14,13 +14,13 @@
   - 新条目观察模式(observing)，期满激活；长期无效自动 archived
   - market_env 标签防跨环境错配（牛市经验不注入熊市）
 
-MVP 后端：ChromaDB（嵌入式）。生产切 Milvus 见 TODO。
+开发环境默认使用 ChromaDB；生产环境可通过 STOCK_VECTOR_BACKEND 切换到 Milvus。
 """
 
 from __future__ import annotations
 
 import json
-import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,9 +28,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.ai import memory as _memory
 from backend.app.ai.memory import _embed, _rerank_scores, _resolve_rerank_cfg
 from backend.app.core.applog import log_event
 from backend.app.core.models import ExperienceEntry, ExperienceInjection
+from backend.app.core.settings import settings
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -44,37 +46,147 @@ ARCHIVE_INJECT_THRESHOLD = 5         # 注入次数达到此值且平均回报�
 ARCHIVE_NEG_RETURN = -0.02          # 平均注入回报低于此视为无效
 
 # 独立向量库路径（与 user_memories 的 chroma_data 隔离；生产放 shared 防止 release 替换丢失）
-_EXP_CHROMA_PATH = Path(os.getenv("STOCK_EXP_CHROMA_DIR") or str(Path(__file__).resolve().parents[2] / "chroma_exp_data"))
-_EXP_COLLECTION = "experience_entries"
+_EXP_CHROMA_PATH = (
+    Path(settings.experience_chroma_dir).expanduser()
+    if settings.experience_chroma_dir
+    else Path(__file__).resolve().parents[2] / "chroma_exp_data"
+)
 
 _exp_col: Any = None
 _exp_ready: bool | None = None
+_exp_failed_at = 0.0
+_STORE_RETRY_SECONDS = 60
 
 
 # ---------------------------------------------------------------------------
-# 向量库后端（ChromaDB 独立 collection；TODO: 生产切 Milvus，接口形状保持一致）
+# 向量库后端
 # ---------------------------------------------------------------------------
+
+
+class _ChromaExperienceStore:
+    def __init__(self) -> None:
+        import chromadb
+
+        _EXP_CHROMA_PATH.mkdir(parents=True, exist_ok=True)
+        client = chromadb.PersistentClient(path=str(_EXP_CHROMA_PATH))
+        self._col = client.get_or_create_collection(
+            name=settings.experience_milvus_collection,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+    def upsert(self, ids, embeddings, metadatas, documents) -> None:
+        self._col.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+
+    def delete_ids(self, ids: list[str]) -> None:
+        self._col.delete(ids=ids)
+
+    def delete_status(self, status: str) -> None:
+        self._col.delete(where={"status": status})
+
+    def query(self, embeddings: list[list[float]], n: int, status: str) -> list[tuple[int, float]]:
+        res = self._col.query(
+            query_embeddings=embeddings,
+            n_results=n,
+            where={"status": status},
+            include=["distances"],
+        )
+        ids = res.get("ids", [[]])[0]
+        dists = res.get("distances", [[]])[0]
+        out: list[tuple[int, float]] = []
+        for entry_id, distance in zip(ids, dists):
+            try:
+                out.append((int(entry_id), max(0.0, 1.0 - float(distance) / 2.0)))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+
+class _MilvusExperienceStore:
+    def __init__(self) -> None:
+        from pymilvus import DataType, MilvusClient
+
+        if _memory._ensure_embedding() is None or not _memory._embedding_dim:
+            raise RuntimeError("嵌入维度未知，无法创建经验集合")
+        self._name = settings.experience_milvus_collection
+        self._c = MilvusClient(uri=settings.milvus_uri, token=settings.milvus_token or "")
+        if not self._c.has_collection(self._name):
+            schema = self._c.create_schema(auto_id=False, enable_dynamic_field=False)
+            schema.add_field("id", DataType.INT64, is_primary=True)
+            schema.add_field("vector", DataType.FLOAT_VECTOR, dim=_memory._embedding_dim)
+            schema.add_field("status", DataType.VARCHAR, max_length=24)
+            schema.add_field("tags", DataType.VARCHAR, max_length=4096)
+            schema.add_field("market_env", DataType.VARCHAR, max_length=4096)
+            index_params = self._c.prepare_index_params()
+            index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="COSINE")
+            self._c.create_collection(
+                collection_name=self._name,
+                schema=schema,
+                index_params=index_params,
+                consistency_level="Strong",
+            )
+        self._c.load_collection(self._name)
+
+    def upsert(self, ids, embeddings, metadatas, documents) -> None:
+        data = [
+            {
+                "id": int(entry_id),
+                "vector": vector,
+                "status": str((meta or {}).get("status") or ""),
+                "tags": str((meta or {}).get("tags") or "")[:4096],
+                "market_env": str((meta or {}).get("market_env") or "")[:4096],
+            }
+            for entry_id, vector, meta in zip(ids, embeddings, metadatas)
+        ]
+        self._c.upsert(collection_name=self._name, data=data)
+
+    def delete_ids(self, ids: list[str]) -> None:
+        self._c.delete(collection_name=self._name, ids=[int(entry_id) for entry_id in ids])
+
+    def delete_status(self, status: str) -> None:
+        if status not in {"active", "observing", "archived"}:
+            raise ValueError("不支持的经验状态")
+        self._c.delete(collection_name=self._name, filter=f'status == "{status}"')
+
+    def query(self, embeddings: list[list[float]], n: int, status: str) -> list[tuple[int, float]]:
+        if status not in {"active", "observing", "archived"}:
+            return []
+        res = self._c.search(
+            collection_name=self._name,
+            data=embeddings,
+            limit=n,
+            filter=f'status == "{status}"',
+            output_fields=[],
+            consistency_level="Strong",
+        )
+        out: list[tuple[int, float]] = []
+        for hit in (res[0] if res else []):
+            try:
+                cosine = float(hit.get("distance", 0.0))
+                out.append((int(hit["id"]), max(0.0, min(1.0, (cosine + 1.0) / 2.0))))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
 
 
 def _get_exp_store() -> Any:
-    """惰性初始化经验库向量 collection。失败优雅降级返回 None。"""
-    global _exp_col, _exp_ready
-    if _exp_ready is not None:
-        return _exp_col if _exp_ready else None
+    """惰性初始化经验库；临时故障冷却后自动重试。"""
+    global _exp_col, _exp_ready, _exp_failed_at
+    if _exp_ready is True:
+        return _exp_col
+    if _exp_ready is False and time.monotonic() - _exp_failed_at < _STORE_RETRY_SECONDS:
+        return None
+    backend = (settings.vector_backend or "chroma").lower()
     try:
-        import chromadb  # noqa: WPS433
-        _EXP_CHROMA_PATH.mkdir(parents=True, exist_ok=True)
-        client = chromadb.PersistentClient(path=str(_EXP_CHROMA_PATH))
-        _exp_col = client.get_or_create_collection(
-            name=_EXP_COLLECTION, metadata={"hnsw:space": "cosine"}
-        )
+        _exp_col = _MilvusExperienceStore() if backend == "milvus" else _ChromaExperienceStore()
         _exp_ready = True
-        log_event("agent", "INFO", "经验库向量后端就绪：chroma(exp)", to_db=False)
+        _exp_failed_at = 0.0
+        log_event("agent", "INFO", f"经验库向量后端就绪：{backend}", to_db=False)
     except Exception as exc:  # noqa: BLE001
-        log_event("agent", "ERROR", f"经验库向量后端初始化失败：{str(exc)[:160]}", to_db=False)
+        log_event("agent", "ERROR", f"经验库向量后端初始化失败（{backend}）：{str(exc)[:160]}", to_db=False)
         _exp_col = None
         _exp_ready = False
-    return _exp_col
+        _exp_failed_at = time.monotonic()
+    return _exp_col if _exp_ready else None
 
 
 def _index_experience(entry: ExperienceEntry) -> None:
@@ -87,9 +199,9 @@ def _index_experience(entry: ExperienceEntry) -> None:
         return
     try:
         col.upsert(
-            ids=[str(entry.id)], embeddings=vec,
-            metadatas=[{"status": entry.status, "tags": entry.tags_json or "", "market_env": entry.market_env_json or ""}],
-            documents=[entry.content],
+            [str(entry.id)], vec,
+            [{"status": entry.status, "tags": entry.tags_json or "", "market_env": entry.market_env_json or ""}],
+            [entry.content],
         )
     except Exception:  # noqa: BLE001
         pass
@@ -100,7 +212,7 @@ def _delete_experience_vector(entry_id: int) -> None:
     if col is None:
         return
     try:
-        col.delete(ids=[str(entry_id)])
+        col.delete_ids([str(entry_id)])
     except Exception:  # noqa: BLE001
         pass
 
@@ -114,19 +226,7 @@ def _vector_search_entries(query: str, n: int) -> list[tuple[int, float]]:
     if vec is None:
         return []
     try:
-        res = col.query(
-            query_embeddings=vec, n_results=n,
-            where={"status": "active"}, include=["distances"],
-        )
-        ids = res.get("ids", [[]])[0]
-        dists = res.get("distances", [[]])[0]
-        out: list[tuple[int, float]] = []
-        for did, dist in zip(ids, dists):
-            try:  # cosine distance ∈ [0,2] → similarity ∈ [0,1]
-                out.append((int(did), max(0.0, 1.0 - float(dist) / 2.0)))
-            except (ValueError, TypeError):
-                continue
-        return out
+        return col.query(vec, n, "active")
     except Exception:  # noqa: BLE001
         return []
 
@@ -358,8 +458,8 @@ def rebuild_experience_index(db: Session) -> int:
     if not entries:
         return 0
     try:
-        col.delete(where={"status": "active"})  # 清 active 的
-        col.delete(where={"status": "observing"})
+        col.delete_status("active")
+        col.delete_status("observing")
     except Exception:  # noqa: BLE001
         pass
     batch = 32
@@ -371,9 +471,9 @@ def rebuild_experience_index(db: Session) -> int:
             continue
         try:
             col.upsert(
-                ids=[str(e.id) for e in chunk], embeddings=vecs,
-                metadatas=[{"status": e.status, "tags": e.tags_json or "", "market_env": e.market_env_json or ""} for e in chunk],
-                documents=[e.content for e in chunk],
+                [str(e.id) for e in chunk], vecs,
+                [{"status": e.status, "tags": e.tags_json or "", "market_env": e.market_env_json or ""} for e in chunk],
+                [e.content for e in chunk],
             )
             total += len(chunk)
         except Exception:  # noqa: BLE001

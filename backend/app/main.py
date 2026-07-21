@@ -22,6 +22,7 @@ from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.auth.auth_api import router as auth_router
 from backend.app.core.database import SessionLocal, get_db, initialize_default_database, session_scope
 from backend.app.agents.position_agent import run_position_agent, run_position_agent_events
+from backend.app.agents.watchlist_agent import run_watchlist_agent_events
 from backend.app.agents.position_import import parse_position_screenshot
 from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
@@ -30,7 +31,13 @@ from backend.app.data.repository import StockRepository
 from backend.app.scheduler.rhythm_api import router as rhythm_router
 from backend.app.scheduler.rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
 from backend.app.skills.registry import skill_registry
-from backend.app.seed.seed import seed_demo, seed_notify_channels, seed_position_accounts
+from backend.app.seed.seed import (
+    seed_demo,
+    seed_notify_channels,
+    seed_position_accounts,
+    seed_position_agent_profile,
+    seed_watchlist_agent_profile,
+)
 from backend.app.core.settings import settings
 
 
@@ -38,6 +45,12 @@ class WatchlistCreate(BaseModel):
     symbol: str = Field(min_length=2, max_length=16)
     group_name: str = "default"
     reason: str | None = None
+
+
+class WatchlistAgentIn(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
+    model_config_id: int | None = None
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=8)
 
 
 class PositionAccountIn(BaseModel):
@@ -126,7 +139,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # 技能系统：启动时自动发现并注册所有技能（Phase 1：仅注册，不接管分发链）
         skill_registry.discover()
-        if init_db:
+        if init_db and settings.background_services_enabled:
             # 建表前不入库（system_logs 尚不存在），只落进程日志
             log_event("system", "INFO", "应用启动：初始化数据库与后台组件", to_db=False)
             initialize_default_database()
@@ -134,6 +147,8 @@ def create_app(init_db: bool = True) -> FastAPI:
             with session_scope() as db:
                 seed_notify_channels(db)
                 seed_position_accounts(db)
+                seed_position_agent_profile(db)
+                seed_watchlist_agent_profile(db)
                 ensure_default_jobs(db)
                 ensure_ask_stock_profile(db)
             await resume_pending_uploads()
@@ -144,10 +159,12 @@ def create_app(init_db: bool = True) -> FastAPI:
             log_event("system", "INFO", "后台组件已启动：调度器 + 飞书机器人 + 推荐刷新")
             # 启动时清理一次过期日志（每日健康检查还会再清理），控制表体积
             await asyncio.to_thread(prune_system_logs)
+        elif init_db:
+            log_event("system", "INFO", "API replica started; background services run separately", to_db=False)
         try:
             yield
         finally:
-            if init_db:
+            if init_db and settings.background_services_enabled:
                 log_event("system", "INFO", "应用关闭：停止后台组件", to_db=False)
                 stop_feishu_bots()
                 await stop_rhythm_scheduler()
@@ -541,12 +558,83 @@ def create_app(init_db: bool = True) -> FastAPI:
     def add_watchlist_item(
         payload: WatchlistCreate,
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("data:write")),
+        context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
-            return repository.add_watchlist_item(payload.symbol, payload.group_name, payload.reason)
+            return repository.add_watchlist_item(
+                payload.symbol,
+                payload.group_name,
+                payload.reason,
+                added_by=context.user.username,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/watchlist/{item_id}")
+    def delete_watchlist_item(
+        item_id: int,
+        repository: StockRepository = Depends(repo),
+        context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        try:
+            return repository.remove_watchlist_item(item_id, removed_by=context.user.username)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/watchlist/agent/stream")
+    async def stream_watchlist_agent(
+        payload: WatchlistAgentIn,
+        request: Request,
+        context: AuthContext = Depends(require_permission("data:write")),
+    ) -> StreamingResponse:
+        async def event_stream() -> AsyncIterator[str]:
+            yield ": connected\n\n"
+            queue: asyncio.Queue[dict | object] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+            done = object()
+            cancel_event = threading.Event()
+
+            def produce_events() -> None:
+                try:
+                    with SessionLocal() as worker_db:
+                        for event in run_watchlist_agent_events(
+                            repository=StockRepository(worker_db),
+                            instruction=payload.instruction,
+                            model_config_id=payload.model_config_id,
+                            created_by=context.user.username,
+                            cancel_event=cancel_event,
+                            history=payload.history,
+                        ):
+                            if cancel_event.is_set():
+                                break
+                            asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
+                except Exception as exc:  # noqa: BLE001
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put({"type": "error", "message": str(exc)}), loop
+                    ).result()
+                finally:
+                    asyncio.run_coroutine_threadsafe(queue.put(done), loop).result()
+
+            producer = asyncio.create_task(asyncio.to_thread(produce_events))
+            disconnected = False
+            while True:
+                if await request.is_disconnected():
+                    disconnected = True
+                    cancel_event.set()
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=8)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                if event is done:
+                    break
+                yield _sse_event(event)
+                await asyncio.sleep(0)
+            if not disconnected:
+                await producer
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.get("/api/agents")
     def agents(

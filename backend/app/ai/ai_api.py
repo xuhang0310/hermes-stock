@@ -1067,7 +1067,12 @@ def knowledge_stats(
 ) -> dict:
     total_docs = db.scalar(select(func.count()).select_from(Document)) or 0
     total_chunks = db.scalar(select(func.count()).select_from(DocumentChunk)) or 0
+    searchable_chunks = db.scalar(
+        select(func.count()).select_from(DocumentChunk).where(DocumentChunk.status == "indexed")
+    ) or 0
     indexed_docs = db.scalar(select(func.count(func.distinct(DocumentChunk.doc_id)))) or 0
+    vector_status = rag_ingest.vector_store_status()
+    vector_count = int(vector_status["count"])
     by_type = {
         str(doc_type): int(count)
         for doc_type, count in db.execute(select(Document.doc_type, func.count()).group_by(Document.doc_type))
@@ -1077,6 +1082,11 @@ def knowledge_stats(
         "chunks": total_chunks,
         "indexed_docs": indexed_docs,
         "indexed_pct": round(indexed_docs / total_docs * 100, 1) if total_docs else 0.0,
+        "searchable_chunks": searchable_chunks,
+        "vector_count": vector_count,
+        "vector_pct": round(vector_count / searchable_chunks * 100, 1) if searchable_chunks else 0.0,
+        "vector_healthy": bool(vector_status["healthy"]),
+        "vector_error": str(vector_status["error"]),
         "backend": settings.vector_backend,
         "collection": settings.rag_milvus_collection,
         "dim": memory_module._embedding_dim,
@@ -1132,6 +1142,7 @@ def knowledge_documents(
                 "source_url": doc.source_url,
                 "trust_level": doc.trust_level,
                 "published_at": doc.published_at.isoformat() if doc.published_at else None,
+                "fetched_at": doc.fetched_at.isoformat() if doc.fetched_at else None,
                 "chunk_count": int(count),
                 "indexed": bool(indexed_chunks),
                 # indexed=有可检索切块；disabled=有切块但全部被禁用；pending=尚未索引

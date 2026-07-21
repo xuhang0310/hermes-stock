@@ -43,11 +43,14 @@ class Settings:
     rerank_model: str = os.getenv("STOCK_RERANK_MODEL", "")
     # 向量库后端：chroma（嵌入式，默认，本地/Windows）| milvus（服务端）
     vector_backend: str = os.getenv("STOCK_VECTOR_BACKEND", "chroma")
+    chroma_dir: str = os.getenv("STOCK_CHROMA_DIR", "")
+    experience_chroma_dir: str = os.getenv("STOCK_EXP_CHROMA_DIR", "")
     milvus_uri: str = os.getenv("STOCK_MILVUS_URI", "http://127.0.0.1:19530")
     milvus_token: str = os.getenv("STOCK_MILVUS_TOKEN", "")
     # RAG 知识库（P1）：切块/检索参数；向量后端沿用 vector_backend/milvus_uri，collection 独立
     rag_enabled: bool = os.getenv("STOCK_RAG_ENABLED", "true").lower() == "true"
     rag_milvus_collection: str = os.getenv("STOCK_RAG_MILVUS_COLLECTION", "knowledge_chunks")
+    experience_milvus_collection: str = os.getenv("STOCK_EXP_MILVUS_COLLECTION", "experience_entries")
     rag_top_k: int = int(os.getenv("STOCK_RAG_TOP_K", "6"))
     rag_chunk_size: int = int(os.getenv("STOCK_RAG_CHUNK_SIZE", "700"))
     rag_chunk_overlap: int = int(os.getenv("STOCK_RAG_OVERLAP", "80"))
@@ -66,6 +69,7 @@ class Settings:
     admin_password: str = os.getenv("STOCK_ADMIN_PASSWORD", "")
     scheduler_enabled: bool = os.getenv("STOCK_SCHEDULER_ENABLED", "true").lower() == "true"
     feishu_bot_enabled: bool = os.getenv("STOCK_FEISHU_BOT_ENABLED", "true").lower() == "true"
+    background_services_enabled: bool = os.getenv("STOCK_BACKGROUND_SERVICES_ENABLED", "true").lower() == "true"
     log_level: str = os.getenv("STOCK_LOG_LEVEL", "INFO")
     log_dir: str = os.getenv("STOCK_LOG_DIR", "logs")
     log_retention_days: int = int(os.getenv("STOCK_LOG_RETENTION_DAYS", "90"))
