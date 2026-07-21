@@ -36,6 +36,7 @@ SCHEDULER_INTERVAL_SECONDS = 30 * 60
 RECOMMENDATION_TTL_HOURS = 10
 MAX_RECOMMENDATIONS = 8
 _scheduler_task: asyncio.Task | None = None
+_refresh_tasks: set[asyncio.Task[None]] = set()
 
 # 问股（stock 模式）虚拟 profile：问股会话不绑数字人（agent_chat stock 置 digital_human_id=None），
 # 但 AiPromptRecommendation.digital_human_id NOT NULL，故用此虚拟 profile 作 persona / fallback /
@@ -168,6 +169,42 @@ def refresh_recommendations_for_user_profile(
         db.rollback()
         return active_recommendations(db, user_id, profile.id)
     return active_recommendations(db, user_id, profile.id)
+
+
+def schedule_recommendation_refresh(
+    *,
+    user_id: int,
+    profile_id: int,
+    chat_mode: str = "research",
+) -> asyncio.Task[None]:
+    """Refresh prompts off the response path so an SSE terminal event is never delayed by another LLM call."""
+    task = asyncio.create_task(
+        asyncio.to_thread(_refresh_one_in_new_session, user_id, profile_id, chat_mode)
+    )
+    _refresh_tasks.add(task)
+    task.add_done_callback(_refresh_tasks.discard)
+    return task
+
+
+def _refresh_one_in_new_session(user_id: int, profile_id: int, chat_mode: str) -> None:
+    try:
+        with SessionLocal() as db:
+            profile = db.get(DigitalHumanProfile, profile_id)
+            if profile is None or profile.status != "enabled":
+                return
+            refresh_recommendations_for_user_profile(
+                db,
+                user_id=user_id,
+                profile=profile,
+                chat_mode=chat_mode,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            "agent",
+            "WARNING",
+            f"推荐问题后台刷新失败: {str(exc)[:200]}",
+            to_db=False,
+        )
 
 
 def refresh_recommendations_for_stock(db: Session, *, user_id: int) -> list[AiPromptRecommendation]:

@@ -46,6 +46,7 @@ from backend.app.ai.prompt_recommendations import (
     recommendation_out,
     refresh_recommendations_for_stock,
     refresh_recommendations_for_user_profile,
+    schedule_recommendation_refresh,
 )
 from backend.app.core.applog import log_event
 from backend.app.agents.stock_agent import run_agent_events
@@ -448,15 +449,6 @@ def _store_assistant_message(session_id: int, content: str, error: str | None, e
         )
         chat_session.status = "error" if error else "active"
         session.commit()
-        if chat_session.digital_human_id and chat_session.chat_mode == "research":
-            profile = session.get(DigitalHumanProfile, chat_session.digital_human_id)
-            if profile is not None:
-                refresh_recommendations_for_user_profile(
-                    session,
-                    user_id=chat_session.user_id,
-                    profile=profile,
-                    chat_mode=chat_session.chat_mode,
-                )
 
 
 @router.get("/model-platforms")
@@ -1889,7 +1881,14 @@ async def agent_chat(
             return
         await producer
         _store_assistant_message(session_id, final_answer, final_error, event_count)
-        # 异步触发记忆消化（不阻塞 SSE 响应）
+        # 推荐问题会再调用一次 LLM，必须脱离终止链路；否则答案显示完后 done 还会延迟十几秒。
+        if profile is not None and payload.chat_mode == "research":
+            schedule_recommendation_refresh(
+                user_id=context.user.id,
+                profile_id=profile.id,
+                chat_mode=payload.chat_mode,
+            )
+        # 记忆消化同样后台执行，不阻塞 SSE 响应。
         asyncio.create_task(schedule_memory_digestion(session_id, context.user.id, profile.id if profile else None))
         yield _sse_event({"type": "done"})
 

@@ -271,6 +271,12 @@ function streamStatusText(message: ChatMessage) {
   return '等待响应'
 }
 
+function releaseComposer(controller: AbortController) {
+  if (abortController.value !== controller) return
+  abortController.value = null
+  sending.value = false
+}
+
 let scrollQueued = false
 
 function scrollChat(smooth = false) {
@@ -419,6 +425,8 @@ async function send() {
         } else if (event.type === 'done') {
           reply.liveTool = null
           reply.streamStatus = reply.error ? 'error' : 'done'
+          // done 是业务终止信号，立即解锁输入；不再等待浏览器观察到底层连接关闭。
+          releaseComposer(controller)
         }
         scrollChat()
       },
@@ -463,8 +471,8 @@ async function send() {
       error.value = reply.error
     }
   } finally {
-    abortController.value = null
-    sending.value = false
+    // 只允许当前请求清理自身状态，避免旧流的 finally 覆盖刚启动的新请求。
+    releaseComposer(controller)
     if (!reply.error && reply.streamStatus !== 'done') {
       reply.streamStatus = 'done'
     }
