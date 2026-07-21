@@ -3,7 +3,8 @@
 数据源自《Tushare全部数据接口核对表_2026-07-12.md》（241 条），按产品边界聚焦：
   - 全收：股票数据、指数专题、宏观经济、大模型语料
   - 选做：ETF 专题（A 股 ETF 轮动相关）、可转债（打板相关）
-  - 跳过：期货/期权/港股/美股/外汇/现货黄金/公募基金/纯债/自选组合（超出 A 股研究边界）
+  - V2 扩展边界收录：公募基金/期货/现货/期权/债券其他/外汇/港股/美股/自选组合
+    （《241 核对表》全覆盖；走通用透传 tushare_query，高价值接口后续再加 semantic_tool 语义化封装）
 
 每条字段：
   api_name        tushare 接口标识（通用透传 tushare_query 的白名单键）
@@ -229,6 +230,83 @@ TUSHARE_CATALOG: list[dict] = [
     {"api_name": "cb_price_chg", "name_cn": "可转债转股价变动", "category": "可转债", "scope": "cb", "params": ["ts_code", "start_date", "end_date"], "default_fields": "", "desc": "可转债转股价变动。", "doc_id": 246, "semantic_tool": None},
     {"api_name": "cb_share", "name_cn": "可转债转股结果", "category": "可转债", "scope": "cb", "params": ["ts_code", "start_date", "end_date"], "default_fields": "", "desc": "可转债转股结果。", "doc_id": 247, "semantic_tool": None},
     {"api_name": "cb_rating", "name_cn": "可转债债券评级", "category": "可转债", "scope": "cb", "params": ["ts_code"], "default_fields": "", "desc": "可转债债券评级。", "doc_id": 458, "semantic_tool": None},
+
+    # ============================================================ 公募基金（V2 扩展边界）
+    {"api_name": "fund_basic", "name_cn": "公募基金列表", "category": "公募基金", "scope": "fund", "params": ["ts_code", "market"], "default_fields": "", "desc": "公募基金基础信息。", "doc_id": 19, "semantic_tool": None},
+    {"api_name": "fund_company", "name_cn": "基金管理人", "category": "公募基金", "scope": "fund", "params": ["ts_code"], "default_fields": "", "desc": "公募基金公司。", "doc_id": 118, "semantic_tool": None},
+    {"api_name": "fund_manager", "name_cn": "基金经理", "category": "公募基金", "scope": "fund", "params": ["ts_code"], "default_fields": "", "desc": "基金经理。", "doc_id": 208, "semantic_tool": None},
+    {"api_name": "mkt_idx_bmk", "name_cn": "基金业绩基准", "category": "公募基金", "scope": "fund", "params": ["ts_code"], "default_fields": "", "desc": "基金业绩基准。", "doc_id": 462, "semantic_tool": None},
+    {"api_name": "fund_share", "name_cn": "基金规模", "category": "公募基金", "scope": "fund", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "基金规模数据。", "doc_id": 207, "semantic_tool": None},
+    {"api_name": "fund_nav", "name_cn": "基金净值", "category": "公募基金", "scope": "fund", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "公募基金净值。", "doc_id": 119, "semantic_tool": None},
+    {"api_name": "fund_div", "name_cn": "基金分红", "category": "公募基金", "scope": "fund", "params": ["ts_code"], "default_fields": "", "desc": "公募基金分红。", "doc_id": 120, "semantic_tool": None},
+    {"api_name": "fund_portfolio", "name_cn": "基金持仓", "category": "公募基金", "scope": "fund", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "公募基金持仓数据。", "doc_id": 121, "semantic_tool": None},
+    {"api_name": "fund_factor_pro", "name_cn": "基金技术面因子(专业版)", "category": "公募基金", "scope": "fund", "params": ["ts_code", "trade_date"], "default_fields": "", "desc": "场内基金技术因子（专业版）。", "doc_id": 359, "semantic_tool": None},
+
+    # ============================================================ 期货数据
+    {"api_name": "fut_basic", "name_cn": "期货合约信息", "category": "期货数据", "scope": "futures", "params": ["ts_code", "exchange"], "default_fields": "", "desc": "期货合约信息。", "doc_id": 135, "semantic_tool": None},
+    {"api_name": "fut_trade_cal", "name_cn": "期货交易日历", "category": "期货数据", "scope": "futures", "params": ["exchange", "start_date", "end_date"], "default_fields": "", "desc": "期货交易日历。", "doc_id": 467, "semantic_tool": None},
+    {"api_name": "fut_daily", "name_cn": "期货日线行情", "category": "期货数据", "scope": "futures", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "期货日线行情。", "doc_id": 138, "semantic_tool": None},
+    {"api_name": "fut_weekly_monthly", "name_cn": "期货周/月线行情", "category": "期货数据", "scope": "futures", "params": ["ts_code", "trade_date", "period"], "default_fields": "", "desc": "期货周/月线行情（每日更新）。", "doc_id": 337, "semantic_tool": None},
+    {"api_name": "ft_mins", "name_cn": "期货历史分钟行情", "category": "期货数据", "scope": "futures", "params": ["ts_code", "freq"], "default_fields": "", "desc": "期货历史分时钟行情。", "doc_id": 313, "semantic_tool": None},
+    {"api_name": "rt_fut_min", "name_cn": "期货实时分钟行情", "category": "期货数据", "scope": "futures", "params": ["ts_code"], "default_fields": "", "desc": "期货实时分时钟行情。", "doc_id": 340, "semantic_tool": None},
+    {"api_name": "fut_wsr", "name_cn": "期货仓单日报", "category": "期货数据", "scope": "futures", "params": ["trade_date"], "default_fields": "", "desc": "仓单日报。", "doc_id": 140, "semantic_tool": None},
+    {"api_name": "fut_settle", "name_cn": "期货每日结算参数", "category": "期货数据", "scope": "futures", "params": ["ts_code"], "default_fields": "", "desc": "结算参数。", "doc_id": 141, "semantic_tool": None},
+    {"api_name": "fut_holding", "name_cn": "期货每日持仓排名", "category": "期货数据", "scope": "futures", "params": ["trade_date"], "default_fields": "", "desc": "每日成交持仓排名。", "doc_id": 139, "semantic_tool": None},
+    {"api_name": "fut_index_daily", "name_cn": "南华期货指数日线", "category": "期货数据", "scope": "futures", "params": ["ts_code", "trade_date"], "default_fields": "", "desc": "南华期货指数日线行情。", "doc_id": 468, "semantic_tool": None},
+    {"api_name": "fut_mapping", "name_cn": "期货主力与连续合约", "category": "期货数据", "scope": "futures", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "主力与连续合约映射。", "doc_id": 189, "semantic_tool": None},
+    {"api_name": "fut_weekly_detail", "name_cn": "期货主要品种交易周报", "category": "期货数据", "scope": "futures", "params": ["trade_date"], "default_fields": "", "desc": "主要品种交易周报。", "doc_id": 216, "semantic_tool": None},
+    {"api_name": "ft_limit", "name_cn": "期货合约涨跌停价格", "category": "期货数据", "scope": "futures", "params": ["trade_date"], "default_fields": "", "desc": "期货合约涨跌停价格（盘前）。", "doc_id": 368, "semantic_tool": None},
+
+    # ============================================================ 现货数据
+    {"api_name": "sge_basic", "name_cn": "上海黄金基础信息", "category": "现货数据", "scope": "spot", "params": [], "default_fields": "", "desc": "黄金现货基础信息。", "doc_id": 284, "semantic_tool": None},
+    {"api_name": "sge_daily", "name_cn": "上海黄金现货日行情", "category": "现货数据", "scope": "spot", "params": ["trade_date", "start_date", "end_date"], "default_fields": "", "desc": "现货黄金日行情。", "doc_id": 285, "semantic_tool": None},
+
+    # ============================================================ 期权数据
+    {"api_name": "opt_basic", "name_cn": "期权合约信息", "category": "期权数据", "scope": "options", "params": ["ts_code", "exchange"], "default_fields": "", "desc": "期权合约信息。", "doc_id": 158, "semantic_tool": None},
+    {"api_name": "opt_daily", "name_cn": "期权日行情", "category": "期权数据", "scope": "options", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "期权日行情。", "doc_id": 159, "semantic_tool": None},
+    {"api_name": "opt_mins", "name_cn": "期权历史分钟行情", "category": "期权数据", "scope": "options", "params": ["ts_code", "freq"], "default_fields": "", "desc": "期权历史分时钟行情。", "doc_id": 341, "semantic_tool": None},
+
+    # ============================================================ 债券其他（可转债已收录，此处补纯债/回购/大宗/收益率曲线）
+    {"api_name": "repo_daily", "name_cn": "债券回购日行情", "category": "债券专题", "scope": "bond", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "债券回购日行情。", "doc_id": 256, "semantic_tool": None},
+    {"api_name": "bc_otcqt", "name_cn": "柜台流通式债券报价", "category": "债券专题", "scope": "bond", "params": ["bond_id"], "default_fields": "", "desc": "柜台流通式债券报价。", "doc_id": 322, "semantic_tool": None},
+    {"api_name": "bc_bestotcqt", "name_cn": "柜台流通式债券最优报价", "category": "债券专题", "scope": "bond", "params": ["bond_id"], "default_fields": "", "desc": "柜台流通式债券最优报价。", "doc_id": 323, "semantic_tool": None},
+    {"api_name": "bond_blk", "name_cn": "债券大宗交易", "category": "债券专题", "scope": "bond", "params": ["trade_date", "start_date", "end_date"], "default_fields": "", "desc": "债券大宗交易。", "doc_id": 271, "semantic_tool": None},
+    {"api_name": "bond_blk_detail", "name_cn": "债券大宗交易明细", "category": "债券专题", "scope": "bond", "params": ["trade_date"], "default_fields": "", "desc": "债券大宗交易明细。", "doc_id": 272, "semantic_tool": None},
+    {"api_name": "yc_cb", "name_cn": "国债收益率曲线", "category": "债券专题", "scope": "bond", "params": ["curve_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "国债收益率曲线。", "doc_id": 201, "semantic_tool": None},
+
+    # ============================================================ 外汇数据
+    {"api_name": "fx_obasic", "name_cn": "外汇基础信息(海外)", "category": "外汇数据", "scope": "fx", "params": ["trade_date"], "default_fields": "", "desc": "外汇基础信息。", "doc_id": 178, "semantic_tool": None},
+    {"api_name": "fx_daily", "name_cn": "外汇日行情", "category": "外汇数据", "scope": "fx", "params": ["trade_date", "start_date", "end_date"], "default_fields": "", "desc": "外汇日行情。", "doc_id": 179, "semantic_tool": None},
+
+    # ============================================================ 港股数据（方案"后港股美股"）
+    {"api_name": "hk_basic", "name_cn": "港股基础信息", "category": "港股数据", "scope": "hk", "params": ["ts_code", "list_status"], "default_fields": "", "desc": "港股列表。", "doc_id": 191, "semantic_tool": None},
+    {"api_name": "hk_tradecal", "name_cn": "港股交易日历", "category": "港股数据", "scope": "hk", "params": ["exchange", "start_date", "end_date", "is_open"], "default_fields": "", "desc": "港股交易日历。", "doc_id": 250, "semantic_tool": None},
+    {"api_name": "hk_daily", "name_cn": "港股日行情", "category": "港股数据", "scope": "hk", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "港股行情。", "doc_id": 192, "semantic_tool": None},
+    {"api_name": "hk_daily_adj", "name_cn": "港股复权行情", "category": "港股数据", "scope": "hk", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "港股复权行情。", "doc_id": 339, "semantic_tool": None},
+    {"api_name": "hk_adjfactor", "name_cn": "港股复权因子", "category": "港股数据", "scope": "hk", "params": ["ts_code", "trade_date"], "default_fields": "", "desc": "港股复权因子。", "doc_id": 401, "semantic_tool": None},
+    {"api_name": "hk_mins", "name_cn": "港股分钟行情", "category": "港股数据", "scope": "hk", "params": ["ts_code", "freq"], "default_fields": "", "desc": "港股分时钟行情。", "doc_id": 304, "semantic_tool": None},
+    {"api_name": "rt_hk_k", "name_cn": "港股实时日行情", "category": "港股数据", "scope": "hk", "params": ["ts_code"], "default_fields": "", "desc": "港股实时日行情。", "doc_id": 383, "semantic_tool": None},
+    {"api_name": "hk_income", "name_cn": "港股利润表", "category": "港股数据", "scope": "hk", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "港股利润表。", "doc_id": 389, "semantic_tool": None},
+    {"api_name": "hk_balancesheet", "name_cn": "港股资产负债表", "category": "港股数据", "scope": "hk", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "港股资产负债表。", "doc_id": 390, "semantic_tool": None},
+    {"api_name": "hk_cashflow", "name_cn": "港股现金流量表", "category": "港股数据", "scope": "hk", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "港股现金流量表。", "doc_id": 391, "semantic_tool": None},
+    {"api_name": "hk_fina_indicator", "name_cn": "港股财务指标数据", "category": "港股数据", "scope": "hk", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "港股财务指标数据。", "doc_id": 388, "semantic_tool": None},
+
+    # ============================================================ 美股数据（方案"后港股美股"）
+    {"api_name": "us_basic", "name_cn": "美股基础信息", "category": "美股数据", "scope": "us", "params": ["ts_code"], "default_fields": "", "desc": "美股列表。", "doc_id": 252, "semantic_tool": None},
+    {"api_name": "us_tradecal", "name_cn": "美股交易日历", "category": "美股数据", "scope": "us", "params": ["exchange", "start_date", "end_date", "is_open"], "default_fields": "", "desc": "美股交易日历。", "doc_id": 253, "semantic_tool": None},
+    {"api_name": "us_daily", "name_cn": "美股日行情", "category": "美股数据", "scope": "us", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "美股行情。", "doc_id": 254, "semantic_tool": None},
+    {"api_name": "us_daily_adj", "name_cn": "美股复权行情", "category": "美股数据", "scope": "us", "params": ["ts_code", "trade_date", "start_date", "end_date"], "default_fields": "", "desc": "美股复权行情。", "doc_id": 338, "semantic_tool": None},
+    {"api_name": "us_adjfactor", "name_cn": "美股复权因子", "category": "美股数据", "scope": "us", "params": ["ts_code", "trade_date"], "default_fields": "", "desc": "美股复权因子。", "doc_id": 402, "semantic_tool": None},
+    {"api_name": "us_income", "name_cn": "美股利润表", "category": "美股数据", "scope": "us", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "美股利润表。", "doc_id": 394, "semantic_tool": None},
+    {"api_name": "us_balancesheet", "name_cn": "美股资产负债表", "category": "美股数据", "scope": "us", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "美股资产负债表。", "doc_id": 395, "semantic_tool": None},
+    {"api_name": "us_cashflow", "name_cn": "美股现金流量表", "category": "美股数据", "scope": "us", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "美股现金流量表。", "doc_id": 396, "semantic_tool": None},
+    {"api_name": "us_fina_indicator", "name_cn": "美股财务指标数据", "category": "美股数据", "scope": "us", "params": ["ts_code", "end_date"], "default_fields": "", "desc": "美股财务指标数据。", "doc_id": 393, "semantic_tool": None},
+
+    # ============================================================ 自选组合（Tushare 云端组合）
+    {"api_name": "p_list", "name_cn": "组合列表", "category": "自选组合", "scope": "portfolio", "params": [], "default_fields": "", "desc": "云端组合列表。", "doc_id": 446, "semantic_tool": None},
+    {"api_name": "p_get", "name_cn": "组合成分查询", "category": "自选组合", "scope": "portfolio", "params": ["p_id"], "default_fields": "", "desc": "组合成分查询。", "doc_id": 449, "semantic_tool": None},
+    {"api_name": "p_save", "name_cn": "组合保存", "category": "自选组合", "scope": "portfolio", "params": ["p_name", "stocks"], "default_fields": "", "desc": "组合保存。", "doc_id": 445, "semantic_tool": None},
+    {"api_name": "p_delete", "name_cn": "组合删除", "category": "自选组合", "scope": "portfolio", "params": ["p_id"], "default_fields": "", "desc": "组合删除。", "doc_id": 447, "semantic_tool": None},
 ]
 
 
