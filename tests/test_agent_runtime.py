@@ -183,6 +183,29 @@ class AgentRuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(tool.has_side_effects)
         self.assertTrue(self.repository.has_side_effects(run_id))
 
+    def test_terminal_run_closes_unfinished_inline_tool(self) -> None:
+        run, _ = self.create_run()
+        run_id = run["run_id"]
+        self.repository.append_event(
+            run_id,
+            {
+                "type": "action",
+                "tool_call_id": "call-failed-dispatch",
+                "tool": "dispatch_agent_tasks",
+                "content": '{"tasks":[]}',
+                "risk_level": "high",
+                "has_side_effects": True,
+            },
+        )
+
+        self.repository.mark_terminal(run_id, "failed", error="子任务创建失败")
+
+        with self.SessionFactory() as db:
+            tool = db.scalar(select(AgentToolExecution).where(AgentToolExecution.run_id == run_id))
+            self.assertEqual(tool.status, "failed")
+            self.assertEqual(tool.error, "子任务创建失败")
+            self.assertIsNotNone(tool.finished_at)
+
     def test_same_session_is_serialized_while_other_sessions_can_run(self) -> None:
         first, _ = self.create_run(priority=300)
         second, _ = self.create_run(priority=200)

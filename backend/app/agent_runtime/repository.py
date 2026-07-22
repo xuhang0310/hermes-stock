@@ -521,12 +521,13 @@ class AgentRunRepository:
             row = db.get(AgentRun, run_id)
             if row is None:
                 return
+            terminal_at = _utcnow()
             row.status = status
             row.error = error[:16000] if error else None
             row.result_message_id = result_message_id
             row.worker_id = None
-            row.finished_at = _utcnow()
-            row.heartbeat_at = _utcnow()
+            row.finished_at = terminal_at
+            row.heartbeat_at = terminal_at
             db.query(AgentRunStep).filter(
                 AgentRunStep.run_id == run_id,
                 AgentRunStep.status == "running",
@@ -534,7 +535,21 @@ class AgentRunRepository:
                 {
                     AgentRunStep.status: "failed" if status == "failed" else status,
                     AgentRunStep.error: error[:16000] if error else None,
-                    AgentRunStep.finished_at: _utcnow(),
+                    AgentRunStep.finished_at: terminal_at,
+                },
+                synchronize_session=False,
+            )
+            tool_status = "failed" if status == "failed" else "cancelled"
+            tool_error = (error or f"Agent run ended with status {status} before the tool completed.")[:16000]
+            db.query(AgentToolExecution).filter(
+                AgentToolExecution.run_id == run_id,
+                AgentToolExecution.execution_mode == "inline",
+                AgentToolExecution.status.in_(["running", "waiting_approval"]),
+            ).update(
+                {
+                    AgentToolExecution.status: tool_status,
+                    AgentToolExecution.error: tool_error,
+                    AgentToolExecution.finished_at: terminal_at,
                 },
                 synchronize_session=False,
             )

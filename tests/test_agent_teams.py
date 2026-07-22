@@ -36,6 +36,8 @@ class AgentTeamRuntimeTests(unittest.TestCase):
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         Base.metadata.create_all(self.engine)
         self.SessionFactory = sessionmaker(bind=self.engine, expire_on_commit=False)
         with self.SessionFactory() as db:
@@ -200,6 +202,39 @@ class AgentTeamRuntimeTests(unittest.TestCase):
                 self.assertFalse(payload["allow_code_execution"])
                 self.assertEqual(child.parent_run_id, self.parent["run_id"])
                 self.assertEqual(child.orchestration_depth, 1)
+
+    def test_team_persists_five_children_before_their_delegations(self) -> None:
+        tasks = [
+            {
+                "agent_code": "intelligence-officer" if index % 2 else "risk-officer",
+                "instruction": f"并行处理第 {index} 个高优任务",
+                "expected_output": f"第 {index} 个任务结论",
+            }
+            for index in range(1, 6)
+        ]
+        team = self.team_service.start_team(
+            leader_run_id=self.parent["run_id"],
+            tool_call_id="call-team-five-members",
+            arguments={"objective": "并行完成五项研究", "tasks": tasks, "timeout_seconds": 600},
+        )
+
+        self.assertEqual(len(team["members"]), 5)
+        with self.SessionFactory() as db:
+            child_ids = set(
+                db.scalars(
+                    select(AgentRun.run_id).where(
+                        AgentRun.team_id == team["team_id"],
+                        AgentRun.parent_run_id == self.parent["run_id"],
+                    )
+                ).all()
+            )
+            delegated_child_ids = set(
+                db.scalars(
+                    select(AgentDelegation.child_run_id).where(AgentDelegation.team_id == team["team_id"])
+                ).all()
+            )
+            self.assertEqual(len(child_ids), 5)
+            self.assertEqual(delegated_child_ids, child_ids)
 
     def test_parent_parks_and_resumes_after_all_children_with_partial_result(self) -> None:
         team = self._start_team()

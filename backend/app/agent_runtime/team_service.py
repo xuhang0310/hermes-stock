@@ -252,6 +252,9 @@ class AgentTeamService:
                     max_attempts=max(1, settings.agent_run_max_attempts),
                 )
                 db.add(child_run)
+                # These mappers have no ORM relationship, so make the FK parent
+                # visible before inserting the delegation that references it.
+                db.flush()
                 delegation = AgentDelegation(
                     delegation_id=uuid.uuid4().hex,
                     team_id=team_id,
