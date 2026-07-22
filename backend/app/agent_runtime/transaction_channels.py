@@ -19,6 +19,7 @@ from backend.app.agent_runtime.channel_runs import build_channel_request, create
 from backend.app.agent_runtime.repository import agent_run_repository
 from backend.app.agent_runtime.transaction_state import transaction_state_service
 from backend.app.core.database import SessionLocal
+from backend.app.core.llm_config import resolve_vision_model_config_id
 from backend.app.core.models import (
     AiChatMessage,
     AiChatSession,
@@ -149,6 +150,12 @@ def create_transaction_run(
     existing = agent_run_repository.get_by_idempotency_key(user_id, idempotency_key)
     if existing is not None:
         return {**existing, "created": False}
+    requested_model_config_id = model_config_id
+    if image_base64:
+        try:
+            model_config_id = resolve_vision_model_config_id(model_config_id)
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
     session_id, history = _open_transaction_session(
         user_id=user_id,
         code=code,
@@ -187,6 +194,10 @@ def create_transaction_run(
     )
     request_payload["image_mime_type"] = mime_type
     request_payload["image_sha256"] = image_sha256
+    request_payload["requested_model_config_id"] = requested_model_config_id
+    request_payload["vision_model_routed"] = bool(
+        image_base64 and model_config_id != requested_model_config_id
+    )
     run = create_channel_run(
         request_payload,
         idempotency_key=idempotency_key or f"transaction:{message_id}",
@@ -223,7 +234,10 @@ def _transaction_result(run_id: str, code: str) -> dict[str, Any]:
         executions = db.scalars(
             select(AgentToolExecution)
             .where(AgentToolExecution.run_id == run_id, AgentToolExecution.result_json.is_not(None))
-            .order_by(AgentToolExecution.id.desc())
+            .order_by(
+                AgentToolExecution.created_at.desc(),
+                AgentToolExecution.execution_id.desc(),
+            )
         ).all()
         tool_result: dict[str, Any] = {}
         for execution in executions:

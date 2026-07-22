@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from backend.app.ai.llm_client import chat_completion
-from backend.app.core.llm_config import active_llm_config
+from backend.app.core.llm_config import active_llm_config, resolve_vision_model_config_id
 from backend.app.agents.position_import_v2 import parse_with_pydantic_ai
 
 
@@ -113,6 +113,7 @@ def parse_position_input(
     image_hash = None
     if image_base64:
         _, clean_base64, image_hash = decode_image_payload(image_base64)
+        model_config_id = resolve_vision_model_config_id(model_config_id)
     log_event(
         "position", "INFO", "持仓录入解析开始",
         to_db=False, has_image=bool(clean_base64), instruction=instruction[:60],

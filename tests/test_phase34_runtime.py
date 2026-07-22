@@ -17,6 +17,7 @@ from backend.app.agent_runtime.repository import AgentRunRepository
 from backend.app.agent_runtime.tool_repository import ToolExecutionRepository
 from backend.app.agent_runtime.tool_specs import ToolSpec
 from backend.app.agent_runtime.tool_worker import ToolWorker, initialize_tool_worker_runtime
+from backend.app.agent_runtime.transaction_channels import _transaction_result
 from backend.app.agent_runtime.transaction_state import TransactionStateService
 from backend.app.core.database import Base
 from backend.app.core.models import (
@@ -336,6 +337,56 @@ class Phase34RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted["slots"]["account_id"], 7)
         self.assertIsNone(persisted["pending_action"])
         self.assertEqual(persisted["status"], "completed")
+
+    def test_position_transaction_result_uses_execution_uuid_ordering(self) -> None:
+        with self.SessionFactory() as db:
+            db.add_all(
+                [
+                    AgentToolExecution(
+                        execution_id="execution-old",
+                        run_id=self.run["run_id"],
+                        tool_call_id="call-old",
+                        tool_name="save_position_holdings",
+                        status="completed",
+                        result_json=json.dumps({"saved_count": 0, "rows": []}),
+                        created_at=datetime.utcnow() - timedelta(minutes=1),
+                    ),
+                    AgentToolExecution(
+                        execution_id="execution-new",
+                        run_id=self.run["run_id"],
+                        tool_call_id="call-new",
+                        tool_name="save_position_holdings",
+                        status="completed",
+                        result_json=json.dumps(
+                            {
+                                "saved_count": 1,
+                                "rows": [{"symbol": "600519.SH", "position_quantity": 100}],
+                            }
+                        ),
+                        created_at=datetime.utcnow(),
+                    ),
+                ]
+            )
+            db.commit()
+
+        with (
+            patch(
+                "backend.app.agent_runtime.transaction_channels.SessionLocal",
+                self.SessionFactory,
+            ),
+            patch(
+                "backend.app.agent_runtime.transaction_channels.agent_run_repository",
+                self.run_repository,
+            ),
+            patch(
+                "backend.app.agent_runtime.transaction_channels.transaction_state_service.load",
+                return_value=None,
+            ),
+        ):
+            result = _transaction_result(self.run["run_id"], "position-entry-agent")
+
+        self.assertTrue(result["should_save"])
+        self.assertEqual(result["rows"][0]["symbol"], "600519.SH")
 
 
 if __name__ == "__main__":

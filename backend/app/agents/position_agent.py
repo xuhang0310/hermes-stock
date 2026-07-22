@@ -7,11 +7,11 @@ from datetime import date
 from typing import Any
 
 from backend.app.agents.position_import import decode_image_payload
-from backend.app.agents.position_intent import PositionAction, build_intent_hint, detect_position_intent, intent_summary
+from backend.app.agents.position_intent import PositionAction, build_intent_hint, detect_position_intent
 from backend.app.data.repository import StockRepository
 from backend.app.agents.stock_agent import _stream_chat
 from backend.app.ai.llm_client import chat_completion
-from backend.app.core.llm_config import active_llm_config
+from backend.app.core.llm_config import active_llm_config, resolve_vision_model_config_id
 
 
 POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
@@ -280,14 +280,15 @@ def run_position_agent(
     history: list[dict[str, str]] | None = None,
     pending_action: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    llm_config = active_llm_config(model_config_id)
-    if not llm_config["api_key"] or not llm_config["base_url"]:
-        raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
-
     clean_base64 = None
     image_hash = None
     if image_base64:
         _, clean_base64, image_hash = decode_image_payload(image_base64)
+        model_config_id = resolve_vision_model_config_id(model_config_id)
+
+    llm_config = active_llm_config(model_config_id)
+    if not llm_config["api_key"] or not llm_config["base_url"]:
+        raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
 
     normalized_pending = _normalize_pending_action(pending_action)
     system_prompt = (
@@ -413,14 +414,15 @@ def run_position_agent_events(
     history: list[dict[str, str]] | None = None,
     pending_action: dict[str, Any] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
-    llm_config = active_llm_config(model_config_id)
-    if not llm_config["api_key"] or not llm_config["base_url"]:
-        raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
-
     clean_base64 = None
     image_hash = None
     if image_base64:
         _, clean_base64, image_hash = decode_image_payload(image_base64)
+        model_config_id = resolve_vision_model_config_id(model_config_id)
+
+    llm_config = active_llm_config(model_config_id)
+    if not llm_config["api_key"] or not llm_config["base_url"]:
+        raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
 
     text = instruction.strip() or "请识别并录入这张持仓截图。"
     # P1: 意图预处理 — 在 LLM 调用前检测交易动作，注入 system prompt

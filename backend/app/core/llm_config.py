@@ -14,6 +14,89 @@ from backend.app.core.models import LlmModelConfig
 from backend.app.core.settings import settings
 
 
+_VISION_MODEL_PREFIXES = (
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+    "qwen3.5-plus",
+    "qwen3-vl",
+    "qwen2.5-vl",
+    "qwen-vl",
+    "qwen3-omni",
+    "qwen-omni",
+    "qvq",
+    "kimi-k2.5",
+)
+
+
+def model_supports_vision(model_name: str | None) -> bool:
+    """Return whether a configured model is known to accept image content."""
+    normalized = (model_name or "").strip().lower()
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix}-")
+        for prefix in _VISION_MODEL_PREFIXES
+    )
+
+
+def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | None:
+    """Resolve an enabled vision model, preferring the requested model/platform."""
+    with SessionLocal() as session:
+        query = select(LlmModelConfig).options(selectinload(LlmModelConfig.platform))
+        selected = None
+        if model_config_id:
+            selected = session.scalar(
+                query.where(
+                    LlmModelConfig.id == model_config_id,
+                    LlmModelConfig.status != "disabled",
+                ).limit(1)
+            )
+            if selected is None:
+                raise RuntimeError("所选模型配置不存在或已停用。")
+        else:
+            selected = session.scalar(
+                query.where(
+                    LlmModelConfig.is_active.is_(True),
+                    LlmModelConfig.status == "enabled",
+                )
+                .order_by(LlmModelConfig.updated_at.desc(), LlmModelConfig.id.desc())
+                .limit(1)
+            )
+
+        if selected is not None and model_supports_vision(selected.model_name):
+            return selected.id
+
+        candidates = session.scalars(
+            query.where(LlmModelConfig.status != "disabled").order_by(
+                LlmModelConfig.is_active.desc(),
+                LlmModelConfig.updated_at.desc(),
+                LlmModelConfig.id.desc(),
+            )
+        ).all()
+        vision_candidates = [
+            row
+            for row in candidates
+            if model_supports_vision(row.model_name)
+            and (row.platform is None or row.platform.status != "disabled")
+        ]
+        if selected is not None and selected.platform_id is not None:
+            same_platform = next(
+                (
+                    row
+                    for row in vision_candidates
+                    if row.platform_id == selected.platform_id
+                ),
+                None,
+            )
+            if same_platform is not None:
+                return same_platform.id
+        if vision_candidates:
+            return vision_candidates[0].id
+        if selected is None and model_supports_vision(settings.llm_model):
+            return None
+        raise RuntimeError(
+            "当前没有配置支持图片理解的模型，请先启用 Qwen3.7 Plus 或其他视觉模型。"
+        )
+
+
 def active_llm_config(model_config_id: int | None = None) -> dict:
     """获取当前活跃 LLM 模型配置。
 
