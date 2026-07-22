@@ -23,7 +23,7 @@ from backend.app.feishu.feishu import (
     test_channel,
     validate_webhook_url,
 )
-from backend.app.core.models import Heartbeat, JobRun, NotifyChannel, ScheduledJob, SystemLog
+from backend.app.core.models import AgentReport, Heartbeat, JobRun, NotifyChannel, ScheduledJob, SystemLog
 from backend.app.scheduler.rhythm_scheduler import DH_TO_AGENT, HEARTBEAT_COMPONENT, dispatch_manual_run, is_trading_day, now_sh
 from backend.app.core.settings import settings
 
@@ -261,8 +261,8 @@ def _job_out(job: ScheduledJob) -> dict:
     }
 
 
-def _run_out(run: JobRun) -> dict:
-    return {
+def _run_out(run: JobRun, *, output_content: str | None = None) -> dict:
+    payload = {
         "run_id": run.run_id,
         "job_key": run.job_key,
         "trigger_type": run.trigger_type,
@@ -276,6 +276,21 @@ def _run_out(run: JobRun) -> dict:
         "error": run.error,
         "created_at": run.created_at.isoformat() if run.created_at else None,
     }
+    if output_content is not None:
+        payload["output_content"] = output_content
+    return payload
+
+
+def _run_output_content(db: Session, run: JobRun) -> str | None:
+    if run.output_content:
+        return run.output_content
+    if run.report_id:
+        report_content = db.scalar(
+            select(AgentReport.content).where(AgentReport.report_id == run.report_id).limit(1)
+        )
+        if report_content:
+            return report_content
+    return run.output_preview
 
 
 @router.get("/schedule/jobs")
@@ -440,6 +455,18 @@ def schedule_runs(
         query = query.where(JobRun.status == status)
     rows = db.scalars(query.order_by(JobRun.created_at.desc(), JobRun.id.desc()).limit(limit)).all()
     return [_run_out(row) for row in rows]
+
+
+@router.get("/schedule/runs/{run_id}")
+def schedule_run_detail(
+    run_id: str,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    run = db.scalar(select(JobRun).where(JobRun.run_id == run_id).limit(1))
+    if run is None:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    return _run_out(run, output_content=_run_output_content(db, run) or "")
 
 
 @router.get("/schedule/status")

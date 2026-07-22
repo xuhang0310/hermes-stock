@@ -1157,6 +1157,7 @@ class JobRun(Base):
     report_id: Mapped[str | None] = mapped_column(String(120))
     notification_id: Mapped[int | None] = mapped_column(Integer)
     output_preview: Mapped[str | None] = mapped_column(Text)
+    output_content: Mapped[str | None] = mapped_column(LONG_TEXT)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 

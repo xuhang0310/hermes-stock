@@ -238,6 +238,7 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             ("approval_policy", "approval_policy VARCHAR(24) NOT NULL DEFAULT 'full'"),
         ):
             _add_column("scheduled_jobs", column, ddl)
+        _add_column("job_runs", "output_content", "output_content LONGTEXT NULL")
 
         def _add_index(table: str, index_name: str, columns: str) -> None:
             exists = connection.execute(

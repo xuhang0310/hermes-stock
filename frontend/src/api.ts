@@ -468,6 +468,8 @@ export const api = {
     const suffix = params.toString()
     return request<JobRun[]>(`/api/schedule/runs${suffix ? `?${suffix}` : ''}`)
   },
+  scheduleRun: (runId: string) =>
+    request<JobRun>(`/api/schedule/runs/${encodeURIComponent(runId)}`),
   scheduleStatus: () => request<ScheduleStatus>('/api/schedule/status'),
   dataSources: () => request<DataSourceConfig[]>('/api/data-sources'),
   saveDataSource: (provider: string, payload: Record<string, unknown>) =>

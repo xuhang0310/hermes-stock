@@ -330,6 +330,7 @@ export type DashboardRun = {
   duration_ms: number | null
   report_id: string | null
   output_preview: string | null
+  output_content?: string | null
   error: string | null
 }
 
@@ -554,6 +555,7 @@ export type JobRun = {
   report_id: string | null
   notification_id: number | null
   output_preview: string | null
+  output_content?: string | null
   error: string | null
   created_at: string | null
 }

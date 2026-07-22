@@ -363,7 +363,7 @@ def _run_agent_report(
             notification_id = notification.id
             if notification.status != "sent":
                 notification_error = notification.error or "飞书未确认发送成功"
-    return report_id, notification_id, answer[:500], notification_error
+    return report_id, notification_id, answer, notification_error
 
 
 def _run_health_check(now: datetime, push_channel_key: str | None) -> tuple[str, int | None, str | None]:
@@ -570,7 +570,7 @@ def _finalize_run(
     *,
     report_id: str | None = None,
     notification_id: int | None = None,
-    output_preview: str | None = None,
+    output_content: str | None = None,
     error: str | None = None,
     duration_ms: int | None = None,
 ) -> None:
@@ -583,7 +583,8 @@ def _finalize_run(
         run.duration_ms = duration_ms
         run.report_id = report_id
         run.notification_id = notification_id
-        run.output_preview = (output_preview or "")[:1000] or None
+        run.output_preview = (output_content or "")[:1000] or None
+        run.output_content = output_content or None
         run.error = error
         session.commit()
 
@@ -616,11 +617,11 @@ def _execute_job(job_key: str, run_id: str) -> None:
     status = "success"
     report_id: str | None = None
     notification_id: int | None = None
-    output_preview: str | None = None
+    output_content: str | None = None
     error: str | None = None
     try:
         if snapshot["job_kind"] == "health_check":
-            output_preview, notification_id, push_error = _run_health_check(
+            output_content, notification_id, push_error = _run_health_check(
                 ran_at,
                 snapshot["push_channel_key"],
             )
@@ -628,13 +629,13 @@ def _execute_job(job_key: str, run_id: str) -> None:
                 status = "failed"
                 error = f"健康检查已完成，但飞书任务群推送失败: {push_error}"
         elif snapshot["job_kind"] == "position_price_sync":
-            output_preview = _run_position_price_sync(ran_at)
+            output_content = _run_position_price_sync(ran_at)
         elif snapshot["job_kind"] == "rag_ingest":
             from backend.app.ai.rag_ingest import run_ingest
 
-            output_preview = run_ingest()
+            output_content = run_ingest()
         elif snapshot["job_kind"] in {"agent_report", "agent_task"}:
-            report_id, notification_id, output_preview, push_error = _run_agent_report(
+            report_id, notification_id, output_content, push_error = _run_agent_report(
                 snapshot,
                 ran_at,
                 run_id,
@@ -644,7 +645,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
                 error = f"报告已生成，但飞书任务群推送失败: {push_error}"
         else:
             status = "skipped"
-            output_preview = f"暂不支持的任务类型: {snapshot['job_kind']}"
+            output_content = f"暂不支持的任务类型: {snapshot['job_kind']}"
     except Exception as exc:  # noqa: BLE001
         status = "failed"
         error = str(exc)[:1000]
@@ -657,7 +658,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
         status,
         report_id=report_id,
         notification_id=notification_id,
-        output_preview=output_preview,
+        output_content=output_content,
         error=error,
         duration_ms=duration_ms,
     )

@@ -16,6 +16,7 @@ from backend.app.core.models import (
     AiChatMessage,
     AiChatSession,
     AgentDelegation,
+    AgentReport,
     AgentRun,
     AgentTeamRun,
     DigitalHumanProfile,
@@ -23,7 +24,8 @@ from backend.app.core.models import (
     ScheduledJob,
     User,
 )
-from backend.app.scheduler.rhythm_scheduler import _is_due, _recover_stale_runs
+from backend.app.scheduler.rhythm_api import _run_output_content
+from backend.app.scheduler.rhythm_scheduler import _finalize_run, _is_due, _recover_stale_runs
 from backend.app.scheduler.schedule_service import AgentScheduleService
 
 
@@ -412,6 +414,63 @@ class AgentScheduleServiceTests(unittest.TestCase):
             self.assertTrue(job.enabled)
             self.assertEqual(run.status, "failed")
             self.assertTrue(_is_due(job, datetime.now()))
+
+    def test_job_run_preserves_full_output_and_derives_preview(self) -> None:
+        full_output = "完整结果" * 1200
+        with self.SessionFactory() as db:
+            db.add(
+                JobRun(
+                    run_id="full-output-run",
+                    job_key="full-output-job",
+                    fire_key="full-output-job@manual",
+                    trigger_type="manual",
+                    status="running",
+                    started_at=datetime.now(),
+                )
+            )
+            db.commit()
+
+        with patch("backend.app.scheduler.rhythm_scheduler.SessionLocal", self.SessionFactory):
+            _finalize_run(
+                "full-output-run",
+                "success",
+                output_content=full_output,
+                duration_ms=1234,
+            )
+
+        with self.SessionFactory() as db:
+            run = db.scalar(select(JobRun).where(JobRun.run_id == "full-output-run"))
+            self.assertEqual(run.output_content, full_output)
+            self.assertEqual(run.output_preview, full_output[:1000])
+
+    def test_historical_job_run_recovers_full_report_content(self) -> None:
+        full_output = "历史完整结果" * 800
+        with self.SessionFactory() as db:
+            db.add(
+                AgentReport(
+                    report_id="historical-report",
+                    task_id="historical-job",
+                    agent_name="pm",
+                    title="历史报告",
+                    action_suggestion="observe",
+                    content=full_output,
+                )
+            )
+            run = JobRun(
+                run_id="historical-run",
+                job_key="historical-job",
+                fire_key="historical-job@schedule",
+                trigger_type="schedule",
+                status="success",
+                started_at=datetime.now(),
+                report_id="historical-report",
+                output_preview=full_output[:500],
+            )
+            db.add(run)
+            db.commit()
+            db.refresh(run)
+
+            self.assertEqual(_run_output_content(db, run), full_output)
 
 
 if __name__ == "__main__":

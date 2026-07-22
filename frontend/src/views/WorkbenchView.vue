@@ -32,6 +32,8 @@ const approvalOpen = ref(false)
 const riskOpen = ref(false)
 const selectedReport = ref<DashboardResearch | null>(null)
 const selectedRun = ref<DashboardRun | null>(null)
+const runDetailLoading = ref(false)
+const runDetailError = ref('')
 const busyApprovalId = ref('')
 const approvalMessage = ref('')
 const resolvedApprovalIds = ref<Set<string>>(new Set())
@@ -42,6 +44,7 @@ const layout = ref({
 })
 
 let clockTimer = 0
+let runDetailRequest = 0
 
 const pendingApprovals = computed(() =>
   props.dashboard.approvals.filter((item) => !resolvedApprovalIds.value.has(item.approval_id))
@@ -227,6 +230,30 @@ async function decideApproval(approval: DashboardApproval, decision: 'approved' 
   } finally {
     busyApprovalId.value = ''
   }
+}
+
+async function openRunDetail(run: DashboardRun) {
+  const requestId = ++runDetailRequest
+  selectedRun.value = run
+  runDetailLoading.value = true
+  runDetailError.value = ''
+  try {
+    const detail = await api.scheduleRun(run.run_id)
+    if (requestId === runDetailRequest) selectedRun.value = { ...run, ...detail }
+  } catch (error) {
+    if (requestId === runDetailRequest) {
+      runDetailError.value = error instanceof Error ? error.message : '完整结果加载失败'
+    }
+  } finally {
+    if (requestId === runDetailRequest) runDetailLoading.value = false
+  }
+}
+
+function closeRunDetail() {
+  runDetailRequest += 1
+  selectedRun.value = null
+  runDetailLoading.value = false
+  runDetailError.value = ''
 }
 </script>
 
@@ -442,7 +469,7 @@ async function decideApproval(approval: DashboardApproval, decision: 'approved' 
               :key="run.run_id"
               class="wb-running-row"
               type="button"
-              @click="selectedRun = run"
+              @click="openRunDetail(run)"
             >
               <span>
                 <strong>{{ run.name }}</strong>
@@ -456,7 +483,7 @@ async function decideApproval(approval: DashboardApproval, decision: 'approved' 
           </div>
           <div class="wb-runtime-group recent">
             <h3>最近完成</h3>
-            <button v-for="run in dashboard.runtime.recent.slice(0, 3)" :key="run.run_id" type="button" @click="selectedRun = run">
+            <button v-for="run in dashboard.runtime.recent.slice(0, 3)" :key="run.run_id" type="button" @click="openRunDetail(run)">
               <span>{{ run.name }}</span>
               <time>{{ localDateTime(run.started_at) }}</time>
               <b :class="run.status">{{ runStatusLabel(run.status) }} · {{ formatDuration(run.duration_ms) }}</b>
@@ -573,18 +600,22 @@ async function decideApproval(approval: DashboardApproval, decision: 'approved' 
       </section>
     </div>
 
-    <div v-if="selectedRun" class="wb-modal-backdrop" @click.self="selectedRun = null">
+    <div v-if="selectedRun" class="wb-modal-backdrop" @click.self="closeRunDetail">
       <section class="wb-modal" role="dialog" aria-modal="true" aria-label="运行详情">
         <header>
           <div><span>JOB RUN</span><h2>{{ selectedRun.name }}</h2><p>{{ selectedRun.run_id }}</p></div>
-          <button type="button" title="关闭" @click="selectedRun = null">×</button>
+          <button type="button" title="关闭" @click="closeRunDetail">×</button>
         </header>
         <div class="wb-modal-body wb-run-detail">
           <div><span>状态</span><strong :class="selectedRun.status">{{ runStatusLabel(selectedRun.status) }}</strong></div>
           <div><span>触发方式</span><strong>{{ triggerLabel(selectedRun.trigger_type) }}</strong></div>
           <div><span>开始时间</span><strong>{{ localDateTime(selectedRun.started_at) }}</strong></div>
           <div><span>耗时</span><strong>{{ selectedRun.status === 'running' ? formatElapsed(selectedRun.started_at) : formatDuration(selectedRun.duration_ms) }}</strong></div>
-          <section><h3>{{ selectedRun.error ? '错误信息' : '结果摘要' }}</h3><pre>{{ selectedRun.error || selectedRun.output_preview || '暂无运行结果摘要' }}</pre></section>
+          <section>
+            <h3>{{ selectedRun.error ? '错误信息' : '结果输出' }}</h3>
+            <pre v-if="runDetailLoading">正在读取完整结果…</pre>
+            <pre v-else>{{ runDetailError ? `${runDetailError}\n\n当前显示摘要：\n${selectedRun.error || selectedRun.output_preview || '暂无运行结果摘要'}` : selectedRun.error || selectedRun.output_content || selectedRun.output_preview || '暂无运行结果' }}</pre>
+          </section>
         </div>
       </section>
     </div>

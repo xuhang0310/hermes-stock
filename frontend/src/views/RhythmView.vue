@@ -13,12 +13,15 @@ const editingKey = ref('')
 const runsJobKey = ref('')
 const editorOpen = ref(false)
 const selectedRun = ref<JobRun | null>(null)
+const runDetailLoading = ref(false)
+const runDetailError = ref('')
 const saving = ref(false)
 const actionKey = ref('')
 const message = ref('')
 const messageTone = ref<MessageTone>('info')
 const historySection = ref<HTMLElement | null>(null)
 let timer: number | undefined
+let runDetailRequest = 0
 
 const DIGITAL_HUMANS: Array<{ code: string; label: string }> = [
   { code: 'stock-pm', label: '总调度 PM' },
@@ -181,7 +184,31 @@ function runPreview(run: JobRun) {
 }
 
 function runDetail(run: JobRun) {
-  return run.error || run.output_preview || '本次运行没有输出内容。'
+  return run.error || run.output_content || run.output_preview || '本次运行没有输出内容。'
+}
+
+async function openRunDetail(run: JobRun) {
+  const requestId = ++runDetailRequest
+  selectedRun.value = run
+  runDetailLoading.value = true
+  runDetailError.value = ''
+  try {
+    const detail = await api.scheduleRun(run.run_id)
+    if (requestId === runDetailRequest) selectedRun.value = detail
+  } catch (error) {
+    if (requestId === runDetailRequest) {
+      runDetailError.value = error instanceof Error ? error.message : '完整结果加载失败'
+    }
+  } finally {
+    if (requestId === runDetailRequest) runDetailLoading.value = false
+  }
+}
+
+function closeRunDetail() {
+  runDetailRequest += 1
+  selectedRun.value = null
+  runDetailLoading.value = false
+  runDetailError.value = ''
 }
 
 function weekdaySelected(value: string) {
@@ -439,7 +466,7 @@ onUnmounted(() => {
           <span>{{ triggerText(run.trigger_type) }}</span>
           <span>{{ durationText(run.duration_ms) }}</span>
           <p :class="{ error: Boolean(run.error) }">{{ runPreview(run) }}</p>
-          <button type="button" @click="selectedRun = run">查看</button>
+          <button type="button" @click="openRunDetail(run)">查看</button>
         </article>
         <div v-if="!runs.length" class="rhythm-empty">暂无运行记录。</div>
       </div>
@@ -513,11 +540,11 @@ onUnmounted(() => {
       </form>
     </div>
 
-    <div v-if="selectedRun" class="model-dialog-backdrop rhythm-dialog-backdrop" @mousedown.self="selectedRun = null">
+    <div v-if="selectedRun" class="model-dialog-backdrop rhythm-dialog-backdrop" @mousedown.self="closeRunDetail">
       <section class="model-dialog model-dialog--wide rhythm-run-dialog" role="dialog" aria-modal="true">
         <header class="dialog-header">
           <div><small>RUN DETAIL</small><h2>运行详情</h2></div>
-          <button type="button" title="关闭" aria-label="关闭" @click="selectedRun = null">×</button>
+          <button type="button" title="关闭" aria-label="关闭" @click="closeRunDetail">×</button>
         </header>
         <div class="dialog-body">
           <div class="rhythm-run-meta">
@@ -528,10 +555,11 @@ onUnmounted(() => {
           </div>
           <div class="rhythm-run-output" :class="{ error: Boolean(selectedRun.error) }">
             <span>{{ selectedRun.error ? '错误信息' : '结果输出' }}</span>
-            <pre>{{ runDetail(selectedRun) }}</pre>
+            <pre v-if="runDetailLoading">正在读取完整结果…</pre>
+            <pre v-else>{{ runDetailError ? `${runDetailError}\n\n当前显示摘要：\n${runDetail(selectedRun)}` : runDetail(selectedRun) }}</pre>
           </div>
         </div>
-        <footer><span></span><button type="button" @click="selectedRun = null">关闭</button></footer>
+        <footer><span></span><button type="button" @click="closeRunDetail">关闭</button></footer>
       </section>
     </div>
   </section>
