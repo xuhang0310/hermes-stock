@@ -107,6 +107,7 @@ type AgentRunCreated = {
 }
 
 type AgentRunStatus = AgentRunCreated & {
+  source_type?: string
   last_event_seq: number
   attempts: number
   max_attempts: number

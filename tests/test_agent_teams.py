@@ -8,9 +8,12 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from backend.app.ai import ai_api
 from backend.app.agent_runtime.agentscope_engine import _resume_event
+from backend.app.agent_runtime.orchestration_tools import TEAM_AND_SCHEDULE_TOOL_SCHEMAS
 from backend.app.agent_runtime.repository import AgentRunRepository
 from backend.app.agent_runtime.team_service import AgentTeamService
+from backend.app.auth.auth import AuthContext
 from backend.app.core.database import Base
 from backend.app.core.models import (
     AiChatMessage,
@@ -203,6 +206,36 @@ class AgentTeamRuntimeTests(unittest.TestCase):
                 self.assertEqual(child.parent_run_id, self.parent["run_id"])
                 self.assertEqual(child.orchestration_depth, 1)
 
+            child_sessions = db.scalars(
+                select(AiChatSession)
+                .where(AiChatSession.source_type == "delegation")
+                .order_by(AiChatSession.id)
+            ).all()
+            self.assertEqual(len(child_sessions), 2)
+            first_prompt = db.scalar(
+                select(AiChatMessage)
+                .where(AiChatMessage.session_id == child_sessions[0].id)
+                .order_by(AiChatMessage.id)
+                .limit(1)
+            )
+            self.assertIn("# Agent Team 子任务 #1", first_prompt.content)
+            self.assertIn("## 派发提示词\n核验今日重要新闻", first_prompt.content)
+            self.assertIn("## 交付要求\n来源、可信度、影响", first_prompt.content)
+
+            owner = db.get(User, self.user_id)
+            visible = db.scalars(
+                select(AiChatSession).where(
+                    ai_api._session_visibility(
+                        AuthContext(user=owner, permissions={"agent:use"})
+                    )
+                )
+            ).all()
+            self.assertTrue({row.id for row in child_sessions}.issubset({row.id for row in visible}))
+            marker = ai_api._session_source_out(child_sessions[0])
+            self.assertTrue(marker["is_child_task"])
+            self.assertEqual(marker["child_task_index"], 1)
+            self.assertRegex(marker["source_identifier"], r"^TEAM-[0-9A-F]{8}-01$")
+
     def test_team_persists_five_children_before_their_delegations(self) -> None:
         tasks = [
             {
@@ -235,6 +268,37 @@ class AgentTeamRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(len(child_ids), 5)
             self.assertEqual(delegated_child_ids, child_ids)
+
+    def test_team_accepts_twenty_members_and_rejects_twenty_one(self) -> None:
+        tasks = [
+            {
+                "agent_code": "intelligence-officer" if index % 2 else "risk-officer",
+                "instruction": f"并行处理第 {index} 个子任务",
+            }
+            for index in range(1, 21)
+        ]
+        team = self.team_service.start_team(
+            leader_run_id=self.parent["run_id"],
+            tool_call_id="call-team-twenty-members",
+            arguments={"objective": "并行完成二十项研究", "tasks": tasks},
+        )
+        self.assertEqual(len(team["members"]), 20)
+        with self.assertRaisesRegex(ValueError, "一次最多可委派 20 个子任务"):
+            self.team_service.start_team(
+                leader_run_id=self.parent["run_id"],
+                tool_call_id="call-team-too-many-members",
+                arguments={"objective": "任务过多", "tasks": tasks + [tasks[0]]},
+            )
+
+        dispatch_schema = next(
+            item
+            for item in TEAM_AND_SCHEDULE_TOOL_SCHEMAS
+            if item["function"]["name"] == "dispatch_agent_tasks"
+        )
+        self.assertEqual(
+            dispatch_schema["function"]["parameters"]["properties"]["tasks"]["maxItems"],
+            20,
+        )
 
     def test_parent_parks_and_resumes_after_all_children_with_partial_result(self) -> None:
         team = self._start_team()

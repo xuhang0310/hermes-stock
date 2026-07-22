@@ -30,6 +30,7 @@ TERMINAL_DELEGATION_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "timed_out"}
 )
 MAX_MEMBER_RESULT_CHARS = 12_000
+MAX_TEAM_MEMBERS = 20
 
 
 def _utcnow() -> datetime:
@@ -86,7 +87,7 @@ class AgentTeamService:
         tasks = arguments.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             raise ValueError("至少需要一个数字人子任务。")
-        max_members = max(1, min(settings.agent_team_max_members, 12))
+        max_members = max(1, min(settings.agent_team_max_members, MAX_TEAM_MEMBERS))
         if len(tasks) > max_members:
             raise ValueError(f"一次最多可委派 {max_members} 个子任务。")
 
@@ -168,16 +169,17 @@ class AgentTeamService:
             for index, (profile, instruction, expected_output, required) in enumerate(normalized, start=1):
                 child_run_id = uuid.uuid4().hex
                 external_id = f"{team_id}:{index}"
+                instruction_summary = " ".join(instruction.split())
                 child_session = AiChatSession(
                     user_id=leader.user_id,
                     digital_human_id=profile.id,
                     model_config_id=leader_request.get("model_config_id"),
-                    title=f"Agent Team · {profile.name}"[:160],
+                    title=f"子任务 #{index} · {profile.name} · {instruction_summary}"[:160],
                     status="active",
                     chat_mode="research",
                     source_type="delegation",
                     external_conversation_id=external_id[:160],
-                    source_label="Agent Team",
+                    source_label="Agent Team 子任务",
                 )
                 db.add(child_session)
                 db.flush()
@@ -187,6 +189,8 @@ class AgentTeamService:
                     instruction=instruction,
                     expected_output=expected_output,
                     leader_question=str(leader_request.get("question") or ""),
+                    member_index=index,
+                    agent_name=profile.name,
                 )
                 db.add(
                     AiChatMessage(
@@ -621,17 +625,21 @@ class AgentTeamService:
         instruction: str,
         expected_output: str | None,
         leader_question: str,
+        member_index: int,
+        agent_name: str,
     ) -> str:
         parts = [
-            "你是 Agent Team 的专业成员，请独立完成下面的子任务。",
-            f"总任务：{objective}",
-            f"你的子任务：{instruction}",
+            f"# Agent Team 子任务 #{member_index}",
+            f"**执行数字人：{agent_name}**",
+            "这是总调度派发的独立子任务。请只完成本任务，不要继续委派。",
+            f"## 总任务\n{objective}",
+            f"## 派发提示词\n{instruction}",
         ]
         if expected_output:
-            parts.append(f"交付要求：{expected_output}")
+            parts.append(f"## 交付要求\n{expected_output}")
         if leader_question and leader_question != objective:
-            parts.append(f"用户原始问题：{leader_question}")
-        parts.append("请给出可直接交给总调度统稿的结论、证据、风险和未解决问题。")
+            parts.append(f"## 用户原始问题\n{leader_question}")
+        parts.append("请输出可直接交给总调度统稿的结论、证据、风险和未解决问题。")
         return "\n\n".join(parts)
 
 

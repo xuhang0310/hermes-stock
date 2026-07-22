@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, shallowReactive } from 'vue'
 import { api } from '../api'
 import AgentApprovalCard from '../components/AgentApprovalCard.vue'
 import AgentProcessDisclosure from '../components/AgentProcessDisclosure.vue'
@@ -8,7 +8,9 @@ import ChatAttachmentPicker from '../components/ChatAttachmentPicker.vue'
 import FeishuBotPanel from './FeishuBotPanel.vue'
 import type {
   AgentAttachment,
+  AgentMessage,
   AgentSession,
+  AgentSessionDetail,
   AgentStreamEvent,
   AgentToolApproval,
   ApprovalPolicy,
@@ -61,6 +63,26 @@ type ChatAttachmentPickerHandle = {
   handlePaste: (event: ClipboardEvent) => Promise<boolean>
 }
 
+type ActiveChatRequest = {
+  key: string
+  sessionId: number | null
+  profileId: number | null
+  modelId: number | null
+  controller: AbortController
+  messages: ChatMessage[]
+}
+
+let draftSequence = 0
+
+function createDraftKey() {
+  draftSequence += 1
+  return `draft:${Date.now()}:${draftSequence}`
+}
+
+function sessionKey(sessionId: number) {
+  return `session:${sessionId}`
+}
+
 const profiles = ref<DigitalHuman[]>([])
 const models = ref<ModelConfig[]>([])
 const sessions = ref<AgentSession[]>([])
@@ -79,8 +101,8 @@ const selectedSessionSourceType = ref('web')
 const selectedSessionSourceLabel = ref('网页')
 const selectedSessionSourceIdentifier = ref<string | null>(null)
 const selectedSessionReadOnly = ref(false)
-const sending = ref(false)
-const abortController = ref<AbortController | null>(null)
+const selectedDraftKey = ref(createDraftKey())
+const activeRequests = shallowReactive(new Map<string, ActiveChatRequest>())
 const loadingSessions = ref(false)
 const loadingSession = ref(false)
 const loadingPrompts = ref(false)
@@ -93,6 +115,10 @@ function pasteIntoComposer(event: ClipboardEvent) {
 }
 
 const selectedProfile = computed(() => profiles.value.find((item) => item.id === selectedProfileId.value) || null)
+const selectedConversationKey = computed(() =>
+  selectedSessionId.value ? sessionKey(selectedSessionId.value) : selectedDraftKey.value
+)
+const selectedSessionRunning = computed(() => activeRequests.has(selectedConversationKey.value))
 const filteredSessions = computed(() => {
   const profileId = selectedProfileId.value
   if (!profileId) return sessions.value
@@ -185,39 +211,60 @@ async function refreshSessions(profileId: number | null = selectedProfileId.valu
   }
 }
 
+function toChatMessages(items: AgentMessage[]): ChatMessage[] {
+  return items.map((item) => ({
+    id: item.id,
+    role: item.role,
+    content: item.error || item.content,
+    error: item.error || undefined,
+    created_at: item.created_at,
+    steps: [],
+    liveReasoning: '',
+    liveContent: '',
+    files: [],
+    attachments: item.attachments || [],
+    approval: null,
+    streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined,
+    durationMs: item.duration_ms ?? undefined,
+    processExpanded: false,
+    processAutoCollapsed: true
+  }))
+}
+
+function selectSessionDetail(detail: AgentSessionDetail, sessionMessages: ChatMessage[]) {
+  selectedSessionId.value = detail.id
+  selectedProfileId.value = detail.digital_human_id || selectedProfileId.value
+  selectedModelId.value = detail.model_config_id || selectedModelId.value
+  selectedSessionSourceType.value = detail.source_type || 'web'
+  selectedSessionSourceLabel.value = detail.source_label || '网页'
+  selectedSessionSourceIdentifier.value = detail.source_identifier || null
+  selectedSessionReadOnly.value = Boolean(detail.read_only)
+  messages.value = sessionMessages
+}
+
 async function openSession(id: number) {
-  if (sending.value) return
   error.value = ''
+  const activeRequest = activeRequests.get(sessionKey(id))
+  if (activeRequest) {
+    selectedSessionId.value = id
+    selectedProfileId.value = activeRequest.profileId || selectedProfileId.value
+    selectedModelId.value = activeRequest.modelId || selectedModelId.value
+    selectedSessionSourceType.value = 'web'
+    selectedSessionSourceLabel.value = '网页'
+    selectedSessionSourceIdentifier.value = null
+    selectedSessionReadOnly.value = false
+    messages.value = activeRequest.messages
+    if (selectedProfileId.value) await loadPromptRecommendations(selectedProfileId.value)
+    scrollChat(false)
+    return
+  }
   loadingSession.value = true
   try {
     const detail = await api.agentSession(id)
-    selectedSessionId.value = detail.id
-    selectedProfileId.value = detail.digital_human_id || selectedProfileId.value
-    selectedModelId.value = detail.model_config_id || selectedModelId.value
-    selectedSessionSourceType.value = detail.source_type || 'web'
-    selectedSessionSourceLabel.value = detail.source_label || '网页'
-    selectedSessionSourceIdentifier.value = detail.source_identifier || null
-    selectedSessionReadOnly.value = Boolean(detail.read_only)
+    selectSessionDetail(detail, toChatMessages(detail.messages))
     if (selectedProfileId.value) {
       await loadPromptRecommendations(selectedProfileId.value)
     }
-    messages.value = detail.messages.map((item) => ({
-      id: item.id,
-      role: item.role,
-      content: item.error || item.content,
-      error: item.error || undefined,
-      created_at: item.created_at,
-      steps: [],
-      liveReasoning: '',
-      liveContent: '',
-      files: [],
-      attachments: item.attachments || [],
-      approval: null,
-      streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined,
-      durationMs: item.duration_ms ?? undefined,
-      processExpanded: false,
-      processAutoCollapsed: true
-    }))
     scrollChat(false)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载历史会话失败'
@@ -227,8 +274,8 @@ async function openSession(id: number) {
 }
 
 function newSession(profileId?: number | null) {
-  if (sending.value) return
   selectedSessionId.value = null
+  selectedDraftKey.value = createDraftKey()
   selectedSessionSourceType.value = 'web'
   selectedSessionSourceLabel.value = '网页'
   selectedSessionSourceIdentifier.value = null
@@ -246,7 +293,7 @@ function newSession(profileId?: number | null) {
 }
 
 async function deleteSession(item: AgentSession) {
-  if (sending.value) return
+  if (sessionIsRunning(item.id)) return
   const removedId = item.id
   const wasActive = selectedSessionId.value === removedId
   // 乐观移除：立即从列表隐藏（逻辑删除，服务端仅置为 deleted、记录仍保留）
@@ -261,7 +308,7 @@ async function deleteSession(item: AgentSession) {
 }
 
 function applyQuickPrompt(prompt: string) {
-  if (sending.value) return
+  if (selectedSessionRunning.value) return
   question.value = prompt
 }
 
@@ -285,7 +332,7 @@ async function loadPromptRecommendations(profileId: number) {
 }
 
 async function refreshPromptRecommendations() {
-  if (!selectedProfileId.value || sending.value) return
+  if (!selectedProfileId.value || selectedSessionRunning.value) return
   loadingPrompts.value = true
   try {
     const payload = await api.refreshPromptRecommendations(selectedProfileId.value)
@@ -299,7 +346,7 @@ async function refreshPromptRecommendations() {
 }
 
 async function dismissPrompt(item: { id?: number }) {
-  if (!item.id || sending.value) return
+  if (!item.id || selectedSessionRunning.value) return
   promptRecommendations.value = promptRecommendations.value.filter((row) => row.id !== item.id)
   try {
     await api.dismissPromptRecommendation(item.id)
@@ -376,10 +423,10 @@ function processStepCount(message: ChatMessage) {
   return message.steps.length + Number(Boolean(message.liveReasoning)) + Number(Boolean(message.liveTool))
 }
 
-function releaseComposer(controller: AbortController) {
-  if (abortController.value !== controller) return
-  abortController.value = null
-  sending.value = false
+function releaseRequest(request: ActiveChatRequest) {
+  if (activeRequests.get(request.key) === request) {
+    activeRequests.delete(request.key)
+  }
 }
 
 let scrollQueued = false
@@ -431,19 +478,34 @@ async function downloadFile(file: GeneratedFile) {
   }
 }
 
-function handleRunEvent(reply: ChatMessage, controller: AbortController, event: AgentStreamEvent) {
+function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: AgentStreamEvent) {
   if (event.type === 'session') {
-    selectedSessionId.value = event.session_id || selectedSessionId.value
-    selectedSessionSourceType.value = 'web'
-    selectedSessionSourceLabel.value = '网页'
-    selectedSessionSourceIdentifier.value = null
-    selectedSessionReadOnly.value = false
-    if (event.profile?.id) selectedProfileId.value = event.profile.id
-    if (event.model?.id) selectedModelId.value = event.model.id
+    if (event.profile?.id) request.profileId = event.profile.id
+    if (event.model?.id) request.modelId = event.model.id
+    if (event.session_id) {
+      const previousKey = request.key
+      request.sessionId = event.session_id
+      request.key = sessionKey(event.session_id)
+      activeRequests.delete(previousKey)
+      activeRequests.set(request.key, request)
+    }
+    if (requestIsVisible(request)) {
+      selectedSessionId.value = request.sessionId || selectedSessionId.value
+      selectedSessionSourceType.value = 'web'
+      selectedSessionSourceLabel.value = '网页'
+      selectedSessionSourceIdentifier.value = null
+      selectedSessionReadOnly.value = false
+      if (request.profileId) selectedProfileId.value = request.profileId
+      if (request.modelId) selectedModelId.value = request.modelId
+    }
+    void refreshSessions(request.profileId)
     return
   }
   if (event.type === 'model_selected') {
-    if (event.model?.id) selectedModelId.value = event.model.id
+    if (event.model?.id) {
+      request.modelId = event.model.id
+      if (requestIsVisible(request)) selectedModelId.value = event.model.id
+    }
     pushStep(reply, {
       type: 'model',
       content: `${event.model?.display_name || '默认模型'} / ${event.model?.model_name || ''}`
@@ -528,7 +590,7 @@ function handleRunEvent(reply: ChatMessage, controller: AbortController, event: 
     reply.streamStatus = 'error'
     finishStreamDuration(reply)
     pushStep(reply, { type: 'error', content: reply.error })
-    error.value = reply.error
+    if (requestIsVisible(request)) error.value = reply.error
   } else if (event.type === 'done') {
     reply.liveTool = null
     if (reply.error) {
@@ -537,9 +599,9 @@ function handleRunEvent(reply: ChatMessage, controller: AbortController, event: 
     } else {
       completeStream(reply, event.duration_ms)
     }
-    releaseComposer(controller)
+    releaseRequest(request)
   }
-  scrollChat()
+  if (requestIsVisible(request)) scrollChat()
 }
 
 async function send() {
@@ -549,18 +611,22 @@ async function send() {
   }
   const enteredText = question.value.trim()
   const sentAttachments = pendingAttachments.value.map(({ preview_url: _preview, ...item }) => item)
-  if ((!enteredText && !sentAttachments.length) || sending.value) return
+  const requestKey = selectedConversationKey.value
+  if ((!enteredText && !sentAttachments.length) || activeRequests.has(requestKey)) return
   const text = enteredText || '请分析我上传的附件。'
+  const requestSessionId = selectedSessionId.value
+  const requestProfileId = selectedProfileId.value
+  const requestModelId = selectedModelId.value
+  const requestMessages = messages.value
 
-  const history = messages.value
+  const history = requestMessages
     .filter((item) => item.content)
     .map((item) => ({ role: item.role, content: item.content }))
     .slice(-8)
-  sending.value = true
   error.value = ''
   question.value = ''
   pendingAttachments.value = []
-  messages.value.push({
+  requestMessages.push({
     id: Date.now(),
     role: 'user',
     content: text,
@@ -571,7 +637,7 @@ async function send() {
     files: [],
     attachments: sentAttachments
   })
-  messages.value.push({
+  requestMessages.push({
     id: Date.now() + 1,
     role: 'assistant',
     content: '',
@@ -587,23 +653,31 @@ async function send() {
     processExpanded: true,
     processAutoCollapsed: false
   })
-  const reply = messages.value[messages.value.length - 1]
+  const reply = requestMessages[requestMessages.length - 1]
   scrollChat()
 
   const controller = new AbortController()
-  abortController.value = controller
+  const request: ActiveChatRequest = {
+    key: requestKey,
+    sessionId: requestSessionId,
+    profileId: requestProfileId,
+    modelId: requestModelId,
+    controller,
+    messages: requestMessages
+  }
+  activeRequests.set(request.key, request)
   try {
     await api.streamAgentChat(
       {
         question: text,
         history,
-        session_id: selectedSessionId.value,
-        digital_human_id: selectedProfileId.value,
-        model_config_id: selectedModelId.value,
+        session_id: requestSessionId,
+        digital_human_id: requestProfileId,
+        model_config_id: requestModelId,
         attachments: sentAttachments.map((item) => ({ path: item.path })),
         approval_policy: approvalPolicy.value
       },
-      (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
+      (event: AgentStreamEvent) => handleRunEvent(reply, request, event),
       controller.signal
     )
     // 收尾：优先保住已产出内容（有半截答案就转正）；只有从头到尾什么都没收到才提示重试，
@@ -621,11 +695,10 @@ async function send() {
         completeStream(reply)
       }
     }
-    // 不阻塞输入框：推迟到 nextTick 后跑，确保 sending=false 先渲染到 DOM
     nextTick(() => {
-      refreshSessions().catch(() => {})
-      if (selectedProfileId.value) {
-        loadPromptRecommendations(selectedProfileId.value).catch(() => {})
+      refreshSessions(request.profileId).catch(() => {})
+      if (requestIsVisible(request) && request.profileId) {
+        loadPromptRecommendations(request.profileId).catch(() => {})
       }
     })
   } catch (err) {
@@ -643,80 +716,96 @@ async function send() {
       reply.error = err instanceof Error ? err.message : '发送失败'
       reply.streamStatus = 'error'
       finishStreamDuration(reply)
-      error.value = reply.error
+      if (requestIsVisible(request)) error.value = reply.error
     }
   } finally {
-    // 只允许当前请求清理自身状态，避免旧流的 finally 覆盖刚启动的新请求。
-    releaseComposer(controller)
+    releaseRequest(request)
     if (!reply.error) completeStream(reply)
     else finishStreamDuration(reply)
-    scrollChat()
+    if (requestIsVisible(request)) scrollChat()
   }
 }
 
-async function recoverActiveRun() {
-  if (sending.value) return
+async function resumeRecoveredRun(runId: string, request: ActiveChatRequest, reply: ChatMessage) {
+  const controller = request.controller
   try {
-    const [run] = await api.activeAgentRuns({ chat_mode: 'research' })
-    if (!run) return
-
-    await openSession(run.session_id)
-    if (sending.value || selectedSessionReadOnly.value) return
-
-    const reply: ChatMessage = {
-      id: -Date.now(),
-      role: 'assistant',
-      content: '',
-      created_at: new Date().toISOString(),
-      steps: [],
-      liveReasoning: '',
-      liveContent: '',
-      files: [],
-      attachments: [],
-      approval: null,
-      streamStatus: 'connecting',
-      startedAt: Date.now(),
-      processExpanded: true,
-      processAutoCollapsed: false
+    await api.resumeAgentRun(
+      runId,
+      (event: AgentStreamEvent) => handleRunEvent(reply, request, event),
+      controller.signal
+    )
+    if (!reply.content && reply.liveContent.trim()) {
+      reply.content = reply.liveContent.trim()
+      reply.liveContent = ''
     }
-    messages.value.push(reply)
-    sending.value = true
-    error.value = ''
-    scrollChat()
+    if (!reply.error) completeStream(reply)
+  } catch (err) {
+    if (controller.signal.aborted) {
+      flushReasoning(reply)
+      flushThought(reply)
+      reply.liveTool = null
+      completeStream(reply)
+    } else {
+      reply.error = err instanceof Error ? err.message : '恢复数字人任务失败'
+      reply.streamStatus = 'error'
+      finishStreamDuration(reply)
+      if (requestIsVisible(request)) error.value = reply.error
+    }
+  } finally {
+    releaseRequest(request)
+    if (!reply.error) completeStream(reply)
+    if (requestIsVisible(request)) scrollChat()
+    nextTick(() => {
+      refreshSessions(request.profileId).catch(() => {})
+    })
+  }
+}
 
-    const controller = new AbortController()
-    abortController.value = controller
-    try {
-      await api.resumeAgentRun(
-        run.run_id,
-        (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
-        controller.signal
-      )
-      if (!reply.content && reply.liveContent.trim()) {
-        reply.content = reply.liveContent.trim()
-        reply.liveContent = ''
+async function recoverActiveRuns() {
+  try {
+    const runs = (await api.activeAgentRuns({ chat_mode: 'research' })).filter(
+      (run) => !run.source_type || run.source_type === 'web'
+    )
+    let selectedRecovered = false
+    for (const run of runs) {
+      const key = sessionKey(run.session_id)
+      if (activeRequests.has(key)) continue
+      const detail = await api.agentSession(run.session_id)
+      if (detail.read_only) continue
+      const requestMessages = toChatMessages(detail.messages)
+      const reply: ChatMessage = {
+        id: -Date.now() - run.session_id,
+        role: 'assistant',
+        content: '',
+        created_at: new Date().toISOString(),
+        steps: [],
+        liveReasoning: '',
+        liveContent: '',
+        files: [],
+        attachments: [],
+        approval: null,
+        streamStatus: 'connecting',
+        startedAt: Date.now(),
+        processExpanded: true,
+        processAutoCollapsed: false
       }
-      if (!reply.error) completeStream(reply)
-      nextTick(() => {
-        refreshSessions().catch(() => {})
-        if (selectedProfileId.value) loadPromptRecommendations(selectedProfileId.value).catch(() => {})
-      })
-    } catch (err) {
-      if (controller.signal.aborted) {
-        flushReasoning(reply)
-        flushThought(reply)
-        reply.liveTool = null
-        completeStream(reply)
-      } else {
-        reply.error = err instanceof Error ? err.message : '恢复数字人任务失败'
-        reply.streamStatus = 'error'
-        finishStreamDuration(reply)
-        error.value = reply.error
+      requestMessages.push(reply)
+      const request: ActiveChatRequest = {
+        key,
+        sessionId: run.session_id,
+        profileId: detail.digital_human_id,
+        modelId: detail.model_config_id,
+        controller: new AbortController(),
+        messages: requestMessages
       }
-    } finally {
-      releaseComposer(controller)
-      if (!reply.error) completeStream(reply)
-      scrollChat()
+      activeRequests.set(key, request)
+      if (!selectedRecovered) {
+        selectSessionDetail(detail, requestMessages)
+        selectedRecovered = true
+        error.value = ''
+        scrollChat()
+      }
+      void resumeRecoveredRun(run.run_id, request, reply)
     }
   } catch {
     // Runtime recovery is best-effort and must not block the chat page.
@@ -724,7 +813,7 @@ async function recoverActiveRun() {
 }
 
 function stopSending() {
-  abortController.value?.abort()
+  activeRequests.get(selectedConversationKey.value)?.controller.abort()
 }
 
 async function resolveApproval(message: ChatMessage, decision: 'approved' | 'denied') {
@@ -756,8 +845,16 @@ function submitFromKeyboard(event: KeyboardEvent) {
 
 onMounted(async () => {
   await load()
-  await recoverActiveRun()
+  await recoverActiveRuns()
 })
+
+function sessionIsRunning(sessionId: number) {
+  return activeRequests.has(sessionKey(sessionId))
+}
+
+function requestIsVisible(request: ActiveChatRequest) {
+  return messages.value === request.messages
+}
 </script>
 
 <template>
@@ -785,7 +882,7 @@ onMounted(async () => {
 
       <div class="assistant-switcher">
         <label>当前数字人</label>
-        <select v-model.number="selectedProfileId" :disabled="sending" @change="newSession(selectedProfileId)">
+        <select v-model.number="selectedProfileId" @change="newSession(selectedProfileId)">
           <option v-for="item in profiles" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select>
         <p>{{ selectedProfile?.description || '暂无可用数字人，请先配置画像。' }}</p>
@@ -805,7 +902,9 @@ onMounted(async () => {
           >
             <div class="session-item-heading">
               <strong>{{ item.title }}</strong>
-              <em v-if="item.source_type !== 'web'" class="session-source-badge">{{ item.source_label || item.source_type }}</em>
+              <em v-if="item.is_child_task" class="session-source-badge child-task">子任务</em>
+              <em v-else-if="item.source_type !== 'web'" class="session-source-badge">{{ item.source_label || item.source_type }}</em>
+              <em v-if="sessionIsRunning(item.id)" class="session-running-badge">执行中</em>
             </div>
             <span>{{ item.digital_human_name || '数字人' }} · {{ sessionSourceDescription(item) }}</span>
             <small>{{ item.message_count }} 条 · {{ item.status }}</small>
@@ -814,7 +913,7 @@ onMounted(async () => {
             class="session-delete"
             type="button"
             title="删除该会话（从列表移除，记录仍保留在后台）"
-            :disabled="sending || loadingSession"
+            :disabled="sessionIsRunning(item.id) || loadingSession"
             @click.stop="deleteSession(item)"
           >×</button>
         </div>
@@ -836,14 +935,14 @@ onMounted(async () => {
             v-for="prompt in displayedPrompts"
             :key="`${prompt.source}-${prompt.id || prompt.text}`"
             type="button"
-            :disabled="sending"
+            :disabled="selectedSessionRunning"
             :class="{ dynamic: prompt.source === 'dynamic' }"
             :title="prompt.reason || (prompt.source === 'dynamic' ? '根据历史对话和系统数据推荐' : '该数字人的固定提示词')"
             @click="applyQuickPrompt(prompt.text)"
           >
             {{ prompt.text }}
           </button>
-          <button type="button" :disabled="sending || loadingPrompts || !selectedProfileId" @click="refreshPromptRecommendations">
+          <button type="button" :disabled="selectedSessionRunning || loadingPrompts || !selectedProfileId" @click="refreshPromptRecommendations">
             {{ loadingPrompts ? '推荐生成中' : '刷新推荐' }}
           </button>
         </div>
@@ -851,10 +950,11 @@ onMounted(async () => {
 
       <section ref="chatScroll" class="message-list">
         <div v-if="selectedSessionReadOnly" class="external-session-notice">
-          <b aria-hidden="true">{{ selectedSessionSourceType === 'feishu' ? '飞' : '时' }}</b>
+          <b aria-hidden="true">{{ selectedSessionSourceType === 'delegation' ? '子' : selectedSessionSourceType === 'feishu' ? '飞' : '时' }}</b>
           <div>
             <strong>{{ selectedSessionSourceLabel }} · {{ selectedSessionSourceIdentifier || selectedSessionSourceType }}</strong>
-            <span>该记录来自外部渠道并在这里只读展示。</span>
+            <span v-if="selectedSessionSourceType === 'delegation'">该会话是总调度派发的子任务，第一条消息展示完整派发提示词，执行记录和结果在这里只读保留。</span>
+            <span v-else>该记录来自外部渠道并在这里只读展示。</span>
           </div>
         </div>
         <div v-if="pendingApproval" class="pending-approval-dock">
@@ -877,8 +977,13 @@ onMounted(async () => {
 
         <article v-for="item in messages" :key="item.id" class="message" :class="item.role">
           <template v-if="item.role === 'user'">
-            <span>{{ selectedSessionReadOnly ? selectedSessionSourceLabel : '你' }}</span>
-            <p>{{ item.content }}</p>
+            <span>{{ selectedSessionSourceType === 'delegation' ? '派发指令' : selectedSessionReadOnly ? selectedSessionSourceLabel : '你' }}</span>
+            <div
+              v-if="selectedSessionSourceType === 'delegation'"
+              class="md-body child-task-prompt"
+              v-html="renderMarkdown(item.content)"
+            ></div>
+            <p v-else>{{ item.content }}</p>
             <div v-if="item.attachments.length" class="message-attachment-list">
               <button v-for="file in item.attachments" :key="file.path" type="button" @click="downloadFile(file)">
                 <b>{{ file.kind === 'image' ? '图' : '文' }}</b><span>{{ file.name }}</span>
@@ -949,6 +1054,7 @@ onMounted(async () => {
       <div v-if="selectedSessionReadOnly" class="chat-composer chat-composer-readonly">
         <strong>{{ selectedSessionSourceLabel }}会话为只读</strong>
         <span v-if="selectedSessionSourceType === 'feishu'">请在 {{ selectedSessionSourceIdentifier || '对应飞书会话' }} 中继续发送消息。</span>
+        <span v-else-if="selectedSessionSourceType === 'delegation'">这是总调度派发的独立子任务，可查看完整指令和结果，但不能在子任务中继续追加对话。</span>
         <span v-else>该会话由内部调度器触发，不能在这里直接追加消息。</span>
       </div>
       <form v-else class="chat-composer" @paste="pasteIntoComposer" @submit.prevent="send">
@@ -956,26 +1062,26 @@ onMounted(async () => {
           v-model="question"
           rows="2"
           placeholder="输入问题，或上传研报、表格和图片"
-          :disabled="sending || !selectedProfile"
+          :disabled="selectedSessionRunning || !selectedProfile"
           @keydown.enter="submitFromKeyboard"
         ></textarea>
         <footer class="chat-composer-toolbar">
-          <ChatAttachmentPicker ref="attachmentPicker" v-model="pendingAttachments" :disabled="sending || !selectedProfile" />
-          <ApprovalPolicyControl v-model="approvalPolicy" :disabled="sending" :exec-available="workspaceExecAvailable" />
+          <ChatAttachmentPicker ref="attachmentPicker" v-model="pendingAttachments" :disabled="selectedSessionRunning || !selectedProfile" />
+          <ApprovalPolicyControl v-model="approvalPolicy" :disabled="selectedSessionRunning" :exec-available="workspaceExecAvailable" />
           <span class="chat-composer-spacer"></span>
-          <select v-model.number="selectedModelId" :disabled="sending || !models.length" :title="modelOptionLabel(activeModel)">
+          <select v-model.number="selectedModelId" :disabled="selectedSessionRunning || !models.length" :title="modelOptionLabel(activeModel)">
             <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
               <option v-for="item in group.rows" :key="item.id" :value="item.id">{{ modelOptionLabel(item) }}</option>
             </optgroup>
           </select>
           <button
             class="chat-composer-send"
-            :class="{ stop: sending }"
-            :type="sending ? 'button' : 'submit'"
-            :title="sending ? '停止生成' : '发送'"
-            :disabled="!sending && ((!question.trim() && !pendingAttachments.length) || !selectedProfile)"
-            @click="sending ? stopSending() : undefined"
-          >{{ sending ? '■' : '↑' }}</button>
+            :class="{ stop: selectedSessionRunning }"
+            :type="selectedSessionRunning ? 'button' : 'submit'"
+            :title="selectedSessionRunning ? '停止当前会话' : '发送'"
+            :disabled="!selectedSessionRunning && ((!question.trim() && !pendingAttachments.length) || !selectedProfile)"
+            @click="selectedSessionRunning ? stopSending() : undefined"
+          >{{ selectedSessionRunning ? '■' : '↑' }}</button>
         </footer>
       </form>
       <p v-if="error" class="chat-page-error">{{ error }}</p>

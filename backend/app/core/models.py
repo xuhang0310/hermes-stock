@@ -623,7 +623,7 @@ class AgentTeamRun(Base):
     tool_call_id: Mapped[str] = mapped_column(String(160), nullable=False)
     objective: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
-    max_members: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
+    max_members: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     result_json: Mapped[str | None] = mapped_column(LONG_TEXT)
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
     deadline_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

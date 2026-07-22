@@ -116,6 +116,22 @@ class AgentRuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with self.SessionFactory() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(AgentRun)), 1)
 
+    def test_active_run_lock_is_scoped_to_one_session(self) -> None:
+        run, _ = self.create_run()
+
+        self.assertEqual(
+            self.repository.active_run_for_session(self.user_id, self.session_id)["run_id"],
+            run["run_id"],
+        )
+        self.assertIsNone(
+            self.repository.active_run_for_session(self.user_id, self.other_session_id)
+        )
+
+        self.repository.mark_terminal(run["run_id"], "completed")
+        self.assertIsNone(
+            self.repository.active_run_for_session(self.user_id, self.session_id)
+        )
+
     def test_idempotency_race_compensation_removes_duplicate_message(self) -> None:
         with self.SessionFactory() as db:
             duplicate = AiChatMessage(

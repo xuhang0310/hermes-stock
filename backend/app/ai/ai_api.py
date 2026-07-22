@@ -30,7 +30,6 @@ from backend.app.agent_runtime.service import agent_runtime_service
 from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.models import (
     AiChatMessage,
-    AiPromptRecommendation,
     AiChatSession,
     AgentArtifact,
     AgentRun,
@@ -1992,18 +1991,25 @@ def _chat_messages_out(messages: list[AiChatMessage]) -> list[dict]:
 
 
 def _session_visibility(context: AuthContext):
-    web_session = and_(
+    owned_session = and_(
         AiChatSession.user_id == context.user.id,
-        or_(AiChatSession.source_type == "web", AiChatSession.source_type.is_(None)),
+        or_(
+            AiChatSession.source_type.in_(["web", "delegation"]),
+            AiChatSession.source_type.is_(None),
+        ),
     )
     if "all" in context.permissions or "digital_human:manage" in context.permissions:
-        return or_(web_session, AiChatSession.source_type.in_(["feishu", "scheduler"]))
-    return web_session
+        return or_(
+            owned_session,
+            AiChatSession.source_type.in_(["feishu", "scheduler", "delegation"]),
+        )
+    return owned_session
 
 
 def _session_source_out(row: AiChatSession) -> dict:
     source_type = row.source_type or "web"
     source_identifier = None
+    child_task_index = None
     if source_type == "feishu" and row.external_conversation_id:
         digest = hashlib.sha256(
             f"{row.digital_human_id}:{row.external_conversation_id}".encode("utf-8")
@@ -2011,11 +2017,27 @@ def _session_source_out(row: AiChatSession) -> dict:
         source_identifier = f"FS-{digest}"
     elif source_type == "scheduler" and row.external_conversation_id:
         source_identifier = f"SC-{row.external_conversation_id[:20]}"
+    elif source_type == "delegation" and row.external_conversation_id:
+        team_id, _, index_text = row.external_conversation_id.rpartition(":")
+        try:
+            child_task_index = int(index_text)
+        except ValueError:
+            child_task_index = None
+        team_marker = (team_id or row.external_conversation_id)[:8].upper()
+        index_marker = f"-{child_task_index:02d}" if child_task_index is not None else ""
+        source_identifier = f"TEAM-{team_marker}{index_marker}"
+    is_child_task = source_type == "delegation"
     return {
         "source_type": source_type,
-        "source_label": row.source_label or ("网页" if source_type == "web" else source_type),
+        "source_label": (
+            "Agent Team 子任务"
+            if is_child_task
+            else row.source_label or ("网页" if source_type == "web" else source_type)
+        ),
         "source_identifier": source_identifier,
         "read_only": source_type != "web",
+        "is_child_task": is_child_task,
+        "child_task_index": child_task_index,
     }
 
 
@@ -2498,13 +2520,18 @@ async def create_agent_run(
             "status": existing["status"],
             "created": False,
         }
-    admission = await asyncio.to_thread(agent_run_repository.admission_counts, context.user.id)
-    if admission["user_active"] >= max(1, settings.agent_user_active_limit):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many active Agent tasks for this account.",
-            headers={"Retry-After": "3"},
+    if payload.session_id:
+        active_session_run = await asyncio.to_thread(
+            agent_run_repository.active_run_for_session,
+            context.user.id,
+            payload.session_id,
         )
+        if active_session_run is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="当前会话已有 Agent 任务正在执行，请等待完成或先停止该会话。",
+            )
+    admission = await asyncio.to_thread(agent_run_repository.admission_counts, context.user.id)
     if admission["queued"] >= max(1, settings.agent_queue_limit):
         raise HTTPException(
             status_code=429,

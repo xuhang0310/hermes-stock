@@ -743,10 +743,12 @@ export type AgentSession = {
   status: string
   message_count: number
   updated_at: string
-  source_type: 'web' | 'feishu' | string
+  source_type: 'web' | 'feishu' | 'scheduler' | 'delegation' | string
   source_label: string
   source_identifier: string | null
   read_only: boolean
+  is_child_task: boolean
+  child_task_index: number | null
 }
 
 export type AgentMessage = {
@@ -791,10 +793,12 @@ export type AgentSessionDetail = {
   digital_human_name: string | null
   model_config_id: number | null
   model_display_name: string | null
-  source_type: 'web' | 'feishu' | string
+  source_type: 'web' | 'feishu' | 'scheduler' | 'delegation' | string
   source_label: string
   source_identifier: string | null
   read_only: boolean
+  is_child_task: boolean
+  child_task_index: number | null
   messages: AgentMessage[]
 }
 

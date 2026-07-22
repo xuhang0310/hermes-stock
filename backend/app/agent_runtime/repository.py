@@ -173,6 +173,21 @@ class AgentRunRepository:
             ).all()
             return [_run_dict(row) for row in rows]
 
+    def active_run_for_session(self, user_id: int, session_id: int) -> dict[str, Any] | None:
+        """Return the current non-terminal run for one user-owned conversation."""
+        with self.session_factory() as db:
+            row = db.scalar(
+                select(AgentRun)
+                .where(
+                    AgentRun.user_id == user_id,
+                    AgentRun.session_id == session_id,
+                    AgentRun.status.not_in(TERMINAL_RUN_STATUSES),
+                )
+                .order_by(AgentRun.created_at.desc(), AgentRun.run_id.desc())
+                .limit(1)
+            )
+            return _run_dict(row) if row else None
+
     def admission_counts(self, user_id: int) -> dict[str, int]:
         with self.session_factory() as db:
             user_active = db.scalar(

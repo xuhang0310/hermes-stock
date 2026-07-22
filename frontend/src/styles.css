@@ -1850,6 +1850,27 @@ tbody tr.clickable-row:focus-visible td {
   white-space: nowrap;
 }
 
+.session-source-badge.child-task {
+  border-color: rgba(213, 180, 106, 0.5);
+  background: rgba(213, 180, 106, 0.1);
+  color: #f2d58b;
+}
+
+.session-running-badge {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  padding: 2px 5px;
+  border: 1px solid rgba(55, 214, 147, 0.42);
+  border-radius: 4px;
+  background: rgba(55, 214, 147, 0.08);
+  color: #79e4b5;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .session-item span,
 .session-item small {
   display: block;
@@ -2062,6 +2083,23 @@ button.btn-stop:hover {
   color: var(--muted);
   font-size: 11px;
   overflow-wrap: anywhere;
+}
+
+.child-task-prompt {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-left: 3px solid rgba(213, 180, 106, 0.72);
+  background: rgba(213, 180, 106, 0.055);
+}
+
+.child-task-prompt h1,
+.child-task-prompt h2 {
+  margin: 10px 0 5px;
+  font-size: 14px;
+}
+
+.child-task-prompt h1:first-child {
+  margin-top: 0;
 }
 
 .message {

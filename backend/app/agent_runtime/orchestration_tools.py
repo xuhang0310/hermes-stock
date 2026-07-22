@@ -29,7 +29,7 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
                 "tasks": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 6,
+                    "maxItems": 20,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -159,7 +159,7 @@ ORCHESTRATION_PROMPT = """
 
 总调度编排规则：
 1. 简单问题直接回答；只有跨专业、可并行且需要汇总证据的复杂任务才创建 Agent Team。
-2. 委派前先调用 list_delegatable_agents，只使用返回的 agent_code。每个子任务必须有清晰边界和交付要求，最多 6 个。
+2. 委派前先调用 list_delegatable_agents，只使用返回的 agent_code。每个子任务必须有清晰边界和交付要求，最多 20 个。
 3. dispatch_agent_tasks 返回后，根据每个成员的状态、证据和缺口统一复核并统稿；部分失败时明确标注，不得把失败结果当成事实。
 4. 用户明确要求“定时、每天、每周、稍后、每隔多久”执行时，可以创建定时任务。创建前复述执行者、时间、指令、是否推送飞书、是否允许代码执行。
 5. 定时代码只在用户隔离工作区的 Docker 沙箱执行；不要把密钥、数据库密码或宿主机路径写进任务指令。
