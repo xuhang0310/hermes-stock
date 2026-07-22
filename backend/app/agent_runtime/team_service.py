@@ -59,6 +59,7 @@ TERMINAL_DELEGATION_STATUSES = frozenset(
 )
 MAX_MEMBER_RESULT_CHARS = 12_000
 MAX_TEAM_MEMBERS = 20
+MAX_AGENT_WORK_PACKAGE_CHARS = 24_000
 
 
 def _utcnow() -> datetime:
@@ -88,6 +89,24 @@ def _agent_access(profile: DigitalHumanProfile) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def _merge_agent_work_items(items: list[dict[str, Any]]) -> tuple[str, str | None]:
+    if len(items) == 1:
+        return str(items[0]["instruction"]), items[0].get("expected_output")
+
+    instruction_lines = [
+        "请在同一次执行中完成以下工作项，不要拆成多个独立任务：",
+        *[
+            f"{index}. {item['instruction']}"
+            for index, item in enumerate(items, start=1)
+        ],
+    ]
+    expected_lines = [
+        f"{index}. {item.get('expected_output') or '完成对应工作项，并明确结论、证据与缺口。'}"
+        for index, item in enumerate(items, start=1)
+    ]
+    return "\n".join(instruction_lines), "请按工作项分别交付：\n" + "\n".join(expected_lines)
 
 
 class AgentTeamService:
@@ -134,8 +153,6 @@ class AgentTeamService:
         if not isinstance(tasks, list) or not tasks:
             raise ValueError("至少需要一个数字人子任务。")
         max_members = max(1, min(settings.agent_team_max_members, MAX_TEAM_MEMBERS))
-        if len(tasks) > max_members:
-            raise ValueError(f"一次最多可委派 {max_members} 个子任务。")
 
         objective = str(arguments.get("objective") or "").strip()
         timeout_seconds = int(arguments.get("timeout_seconds") or settings.agent_team_timeout_seconds)
@@ -190,7 +207,7 @@ class AgentTeamService:
                 for key in {_agent_code_key(profile.code), _agent_code_key(profile.name)}
             }
             available_codes = sorted(profiles_by_code)
-            normalized: list[tuple[int, DigitalHumanProfile, str, str | None, bool, str]] = []
+            grouped: dict[str, dict[str, Any]] = {}
             rejected_tasks: list[dict[str, Any]] = []
             for index, task in enumerate(tasks, start=1):
                 if not isinstance(task, dict):
@@ -247,13 +264,71 @@ class AgentTeamService:
                         }
                     )
                     continue
+                group = grouped.get(profile.code)
+                if group is None:
+                    group = {
+                        "profile": profile,
+                        "requested_codes": [],
+                        "source_task_indexes": [],
+                        "items": [],
+                        "instruction_signatures": set(),
+                        "required": False,
+                    }
+                    grouped[profile.code] = group
+                group["requested_codes"].append(profile_code)
+                group["source_task_indexes"].append(index)
+                group["required"] = bool(group["required"] or required)
+                signature = " ".join(instruction.split())
+                if signature not in group["instruction_signatures"]:
+                    group["instruction_signatures"].add(signature)
+                    group["items"].append(
+                        {
+                            "instruction": instruction,
+                            "expected_output": expected_output,
+                            "required": required,
+                            "source_task_index": index,
+                        }
+                    )
+
+            normalized: list[dict[str, Any]] = []
+            for group in grouped.values():
+                instruction, expected_output = _merge_agent_work_items(group["items"])
+                if len(instruction) + len(expected_output or "") > MAX_AGENT_WORK_PACKAGE_CHARS:
+                    rejected_tasks.append(
+                        {
+                            "member_index": group["source_task_indexes"][0],
+                            "requested_agent_code": group["requested_codes"][0],
+                            "status": "rejected",
+                            "required": bool(group["required"]),
+                            "error": (
+                                f"数字人 {group['profile'].code} 的合并工作包超过 "
+                                f"{MAX_AGENT_WORK_PACKAGE_CHARS} 字符，请精简要求后重试。"
+                            ),
+                        }
+                    )
+                    continue
                 normalized.append(
-                    (index, profile, instruction, expected_output, required, profile_code)
+                    {
+                        **group,
+                        "instruction": instruction,
+                        "expected_output": expected_output,
+                    }
                 )
 
             if not normalized:
                 details = "; ".join(item["error"] for item in rejected_tasks)
                 raise ValueError(f"没有可执行的子任务。{details}")
+            if len(normalized) > max_members:
+                raise ValueError(f"一次最多可委派 {max_members} 个不同数字人。")
+
+            valid_task_count = sum(len(group["source_task_indexes"]) for group in normalized)
+            dispatch_stats = {
+                "requested_task_count": len(tasks),
+                "accepted_task_count": valid_task_count,
+                "agent_count": len(normalized),
+                "merged_task_count": max(0, valid_task_count - len(normalized)),
+                "rejected_task_count": len(rejected_tasks),
+            }
 
             team_id = uuid.uuid4().hex
             root_run_id = leader.root_run_id or leader.run_id
@@ -268,13 +343,21 @@ class AgentTeamService:
                 objective=objective,
                 status="running",
                 max_members=max_members,
-                result_json=json.dumps({"rejected_tasks": rejected_tasks}, ensure_ascii=False),
+                result_json=json.dumps(
+                    {"rejected_tasks": rejected_tasks, "dispatch_stats": dispatch_stats},
+                    ensure_ascii=False,
+                ),
                 deadline_at=deadline_at,
             )
             db.add(team)
             leader.team_id = team_id
 
-            for index, profile, instruction, expected_output, required, requested_code in normalized:
+            for index, work_package in enumerate(normalized, start=1):
+                profile = work_package["profile"]
+                instruction = work_package["instruction"]
+                expected_output = work_package["expected_output"]
+                required = bool(work_package["required"])
+                requested_codes = list(dict.fromkeys(work_package["requested_codes"]))
                 child_run_id = uuid.uuid4().hex
                 external_id = f"{team_id}:{index}"
                 instruction_summary = " ".join(instruction.split())
@@ -344,6 +427,8 @@ class AgentTeamService:
                     "root_run_id": root_run_id,
                     "team_id": team_id,
                     "orchestration_depth": 1,
+                    "delegated_work_items": work_package["items"],
+                    "delegated_source_task_indexes": work_package["source_task_indexes"],
                 }
                 child_run = AgentRun(
                     run_id=child_run_id,
@@ -360,7 +445,7 @@ class AgentTeamService:
                     deadline_at=deadline_at,
                     status="queued",
                     priority=250,
-                    idempotency_key=f"team:{team_id}:{index}",
+                    idempotency_key=f"team:{team_id}:agent:{profile.code}"[:120],
                     request_json=json.dumps(child_request, ensure_ascii=False, default=str),
                     attempts=1,
                     max_attempts=max(1, settings.agent_run_max_attempts),
@@ -391,9 +476,12 @@ class AgentTeamService:
                         "run_id": child_run_id,
                         "session_id": child_session.id,
                         "agent_code": profile.code,
-                        "requested_agent_code": requested_code,
-                        "agent_code_normalized": requested_code != profile.code,
+                        "requested_agent_code": requested_codes[0],
+                        "requested_agent_codes": requested_codes,
+                        "agent_code_normalized": any(code != profile.code for code in requested_codes),
                         "agent_name": profile.name,
+                        "work_item_count": len(work_package["items"]),
+                        "source_task_indexes": work_package["source_task_indexes"],
                         "status": "queued",
                     }
                 )
@@ -422,6 +510,7 @@ class AgentTeamService:
             "deadline_at": deadline_at.isoformat(),
             "members": child_runs,
             "rejected_tasks": rejected_tasks,
+            "dispatch_stats": dispatch_stats,
             "created": True,
         }
 
@@ -519,6 +608,7 @@ class AgentTeamService:
                 "objective": team.objective,
                 "members": result.get("members", []),
                 "rejected_tasks": result.get("rejected_tasks", []),
+                "dispatch_stats": result.get("dispatch_stats", {}),
                 "summary": result.get("summary"),
                 "error": team.error,
             }
@@ -639,6 +729,7 @@ class AgentTeamService:
 
         preflight = _loads(team.result_json, {})
         rejected_tasks = list(preflight.get("rejected_tasks") or [])
+        dispatch_stats = dict(preflight.get("dispatch_stats") or {})
         members = [
             _loads(row.result_json, {
                 "run_id": row.child_run_id,
@@ -669,6 +760,7 @@ class AgentTeamService:
                 "summary": summary,
                 "members": members,
                 "rejected_tasks": rejected_tasks,
+                "dispatch_stats": dispatch_stats,
             },
             ensure_ascii=False,
             default=str,
@@ -724,6 +816,7 @@ class AgentTeamService:
             "finished_at": team.finished_at.isoformat() if team.finished_at else None,
             "error": team.error,
             "rejected_tasks": stored_result.get("rejected_tasks", []),
+            "dispatch_stats": stored_result.get("dispatch_stats", {}),
             "members": [
                 {
                     "delegation_id": row.delegation_id,

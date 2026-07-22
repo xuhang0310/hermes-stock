@@ -381,7 +381,10 @@ function stepLabel(step: ReactStep) {
 }
 
 function teamEventText(event: AgentStreamEvent) {
-  if (event.type === 'team_created') return `已创建协作组，${event.member_count || 0} 个数字人开始并行执行`
+  if (event.type === 'team_created') {
+    const merged = event.merged_task_count || 0
+    return `已创建协作组，${event.member_count || 0} 个数字人开始并行执行${merged ? `；已合并 ${merged} 条同角色分派` : ''}`
+  }
   if (event.type === 'team_member_queued') return `${event.agent_name || event.agent_code || '数字人'} 已进入执行队列`
   if (event.type === 'team_member_done') return `${event.agent_name || event.agent_code || '数字人'}：${event.status || '完成'}`
   if (event.type === 'team_done') return event.summary || `协作完成 ${event.completed || 0}/${event.total || 0}`

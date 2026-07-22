@@ -674,6 +674,7 @@ async def run_agentscope(
                         "objective": team["objective"],
                         "member_count": len(team["members"]),
                         "rejected_count": len(team.get("rejected_tasks", [])),
+                        **team.get("dispatch_stats", {}),
                         "deadline_at": team["deadline_at"],
                     }
                 )

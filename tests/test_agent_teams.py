@@ -398,7 +398,7 @@ class AgentTeamRuntimeTests(unittest.TestCase):
         self.assertEqual(result["summary"], "1/2 个子任务完成")
         self.assertEqual(len(result["rejected_tasks"]), 1)
 
-    def test_team_persists_five_children_before_their_delegations(self) -> None:
+    def test_team_merges_repeated_agents_into_one_child_each(self) -> None:
         tasks = [
             {
                 "agent_code": "intelligence-officer" if index % 2 else "risk-officer",
@@ -413,7 +413,14 @@ class AgentTeamRuntimeTests(unittest.TestCase):
             arguments={"objective": "并行完成五项研究", "tasks": tasks, "timeout_seconds": 600},
         )
 
-        self.assertEqual(len(team["members"]), 5)
+        self.assertEqual(len(team["members"]), 2)
+        self.assertEqual(team["dispatch_stats"]["requested_task_count"], 5)
+        self.assertEqual(team["dispatch_stats"]["agent_count"], 2)
+        self.assertEqual(team["dispatch_stats"]["merged_task_count"], 3)
+        members = {item["agent_code"]: item for item in team["members"]}
+        self.assertEqual(members["intelligence-officer"]["work_item_count"], 3)
+        self.assertEqual(members["intelligence-officer"]["source_task_indexes"], [1, 3, 5])
+        self.assertEqual(members["risk-officer"]["work_item_count"], 2)
         with self.SessionFactory() as db:
             child_ids = set(
                 db.scalars(
@@ -428,10 +435,21 @@ class AgentTeamRuntimeTests(unittest.TestCase):
                     select(AgentDelegation.child_run_id).where(AgentDelegation.team_id == team["team_id"])
                 ).all()
             )
-            self.assertEqual(len(child_ids), 5)
+            self.assertEqual(len(child_ids), 2)
             self.assertEqual(delegated_child_ids, child_ids)
+            delegations = db.scalars(
+                select(AgentDelegation)
+                .where(AgentDelegation.team_id == team["team_id"])
+                .order_by(AgentDelegation.member_index)
+            ).all()
+            self.assertEqual(
+                {row.target_profile_code for row in delegations},
+                {"intelligence-officer", "risk-officer"},
+            )
+            self.assertIn("1. 并行处理第 1 个高优任务", delegations[0].instruction)
+            self.assertIn("3. 并行处理第 5 个高优任务", delegations[0].instruction)
 
-    def test_team_accepts_twenty_members_and_rejects_twenty_one(self) -> None:
+    def test_team_collapses_twenty_directives_and_schema_caps_model_output(self) -> None:
         tasks = [
             {
                 "agent_code": "intelligence-officer" if index % 2 else "risk-officer",
@@ -444,13 +462,15 @@ class AgentTeamRuntimeTests(unittest.TestCase):
             tool_call_id="call-team-twenty-members",
             arguments={"objective": "并行完成二十项研究", "tasks": tasks},
         )
-        self.assertEqual(len(team["members"]), 20)
-        with self.assertRaisesRegex(ValueError, "一次最多可委派 20 个子任务"):
-            self.team_service.start_team(
-                leader_run_id=self.parent["run_id"],
-                tool_call_id="call-team-too-many-members",
-                arguments={"objective": "任务过多", "tasks": tasks + [tasks[0]]},
-            )
+        self.assertEqual(len(team["members"]), 2)
+        self.assertEqual(team["dispatch_stats"]["merged_task_count"], 18)
+        extra = self.team_service.start_team(
+            leader_run_id=self.parent["run_id"],
+            tool_call_id="call-team-extra-duplicate",
+            arguments={"objective": "任务很多但角色重复", "tasks": tasks + [tasks[0]]},
+        )
+        self.assertEqual(len(extra["members"]), 2)
+        self.assertEqual(extra["dispatch_stats"]["requested_task_count"], 21)
 
         dispatch_schema = next(
             item
@@ -461,6 +481,46 @@ class AgentTeamRuntimeTests(unittest.TestCase):
             dispatch_schema["function"]["parameters"]["properties"]["tasks"]["maxItems"],
             20,
         )
+
+    def test_alias_and_canonical_code_share_one_child_run(self) -> None:
+        team = self.team_service.start_team(
+            leader_run_id=self.parent["run_id"],
+            tool_call_id="call-team-alias-merge",
+            arguments={
+                "objective": "研究两家公司",
+                "tasks": [
+                    {"agent_code": "stock_researcher", "instruction": "研究公司 A"},
+                    {"agent_code": "research-analyst", "instruction": "研究公司 B"},
+                ],
+            },
+        )
+
+        self.assertEqual(len(team["members"]), 1)
+        member = team["members"][0]
+        self.assertEqual(member["agent_code"], "research-analyst")
+        self.assertEqual(member["work_item_count"], 2)
+        self.assertEqual(member["requested_agent_codes"], ["stock_researcher", "research-analyst"])
+        self.assertTrue(member["agent_code_normalized"])
+        with self.SessionFactory() as db:
+            self.assertEqual(
+                db.scalar(
+                    select(func.count())
+                    .select_from(AgentRun)
+                    .where(
+                        AgentRun.team_id == team["team_id"],
+                        AgentRun.parent_run_id == self.parent["run_id"],
+                    )
+                ),
+                1,
+            )
+            child = db.scalar(
+                select(AgentRun).where(
+                    AgentRun.team_id == team["team_id"],
+                    AgentRun.parent_run_id == self.parent["run_id"],
+                )
+            )
+            payload = __import__("json").loads(child.request_json)
+            self.assertEqual(len(payload["delegated_work_items"]), 2)
 
     def test_parent_parks_and_resumes_after_all_children_with_partial_result(self) -> None:
         team = self._start_team()

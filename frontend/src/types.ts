@@ -850,6 +850,11 @@ export type AgentStreamEvent = {
   agent_code?: string
   agent_name?: string
   member_count?: number
+  requested_task_count?: number
+  accepted_task_count?: number
+  agent_count?: number
+  merged_task_count?: number
+  rejected_task_count?: number
   completed?: number
   total?: number
   summary?: string
