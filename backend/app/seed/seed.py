@@ -141,7 +141,7 @@ def seed_position_accounts(db: Session) -> None:
 
 
 def seed_position_agent_profile(db: Session) -> None:
-    """Ensure the Feishu-only binding target for the position-entry agent exists."""
+    """Ensure the position-entry agent can serve web, Feishu, and delegated runs."""
     _upsert(
         db,
         DigitalHumanProfile,
@@ -149,20 +149,21 @@ def seed_position_agent_profile(db: Session) -> None:
         {
             "name": "持仓录入 Agent",
             "avatar_tone": "严谨、逐项确认、先账户后写入",
-            "target_roles": "feishu_bot",
-            "description": "飞书专用持仓录入助手，按账户确认规则解析并保存持仓。",
-            "system_prompt": "此档案仅作为飞书持仓录入机器人绑定目标。",
+            "target_roles": "*",
+            "description": "持仓录入助手，按账户确认规则解析、核对并保存持仓。",
+            "system_prompt": "你是持仓录入 Agent，只处理持仓识别、账户确认和受控写入。",
             "quick_prompts_json": "[]",
             "status": "enabled",
             "sort_order": 900,
             "can_write_positions": True,
-            "delegation_enabled": False,
+            "delegation_enabled": True,
+            "delegation_description": "识别持仓截图或文本，在账户明确后受控写入持仓。",
         },
     )
 
 
 def seed_watchlist_agent_profile(db: Session) -> None:
-    """Ensure the Feishu-only binding target for the watchlist-entry agent exists."""
+    """Ensure the watchlist agent can serve web, Feishu, and delegated runs."""
     _upsert(
         db,
         DigitalHumanProfile,
@@ -170,14 +171,15 @@ def seed_watchlist_agent_profile(db: Session) -> None:
         {
             "name": "自选录入 Agent",
             "avatar_tone": "简洁、先核对标的、写入可追溯",
-            "target_roles": "feishu_bot",
-            "description": "飞书专用自选录入助手，可查询、增加和删除自选标的。",
-            "system_prompt": "此档案仅作为飞书自选录入机器人绑定目标。",
+            "target_roles": "*",
+            "description": "自选录入助手，可查询、增加和删除自选标的。",
+            "system_prompt": "你是自选录入 Agent，只处理自选查询和受控增删。",
             "quick_prompts_json": "[]",
             "status": "enabled",
             "sort_order": 910,
             "can_write_positions": False,
-            "delegation_enabled": False,
+            "delegation_enabled": True,
+            "delegation_description": "查询、增加或删除自选标的，并保留来源和操作说明。",
         },
     )
 

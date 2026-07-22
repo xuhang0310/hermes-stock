@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.ai import ai_api
-from backend.app.agent_runtime.agentscope_engine import _resume_event
+from backend.app.agent_runtime.agentscope_engine import _build_definition, _resume_event
 from backend.app.agent_runtime.orchestration_tools import TEAM_AND_SCHEDULE_TOOL_SCHEMAS
 from backend.app.agent_runtime.repository import AgentRunRepository
 from backend.app.agent_runtime.team_service import AgentTeamService
@@ -87,6 +87,43 @@ class AgentTeamRuntimeTests(unittest.TestCase):
                 sort_order=3,
                 delegation_enabled=True,
             )
+            research = DigitalHumanProfile(
+                code="research-analyst",
+                name="个股研究员",
+                avatar_tone="structured",
+                target_roles="*",
+                description="个股研究",
+                system_prompt="研究个股",
+                quick_prompts_json="[]",
+                status="enabled",
+                sort_order=4,
+                delegation_enabled=True,
+            )
+            position_entry = DigitalHumanProfile(
+                code="position-entry-agent",
+                name="持仓录入 Agent",
+                avatar_tone="careful",
+                target_roles="*",
+                description="录入持仓",
+                system_prompt="受控录入持仓",
+                quick_prompts_json="[]",
+                status="enabled",
+                sort_order=5,
+                can_write_positions=True,
+                delegation_enabled=True,
+            )
+            watchlist_entry = DigitalHumanProfile(
+                code="watchlist-entry-agent",
+                name="自选录入 Agent",
+                avatar_tone="careful",
+                target_roles="*",
+                description="管理自选",
+                system_prompt="受控管理自选",
+                quick_prompts_json="[]",
+                status="enabled",
+                sort_order=6,
+                delegation_enabled=True,
+            )
             ask_stock = DigitalHumanProfile(
                 code="ask_stock",
                 name="问股入口",
@@ -96,10 +133,21 @@ class AgentTeamRuntimeTests(unittest.TestCase):
                 system_prompt="入口",
                 quick_prompts_json="[]",
                 status="enabled",
-                sort_order=4,
+                sort_order=7,
                 delegation_enabled=True,
             )
-            db.add_all([user, pm, intelligence, risk, ask_stock])
+            db.add_all(
+                [
+                    user,
+                    pm,
+                    intelligence,
+                    risk,
+                    research,
+                    position_entry,
+                    watchlist_entry,
+                    ask_stock,
+                ]
+            )
             db.flush()
             session = AiChatSession(
                 user_id=user.id,
@@ -187,7 +235,13 @@ class AgentTeamRuntimeTests(unittest.TestCase):
         self.assertEqual(len(team["members"]), 2)
         self.assertEqual(
             {item["code"] for item in self.team_service.list_delegatable_agents()},
-            {"intelligence-officer", "risk-officer"},
+            {
+                "intelligence-officer",
+                "risk-officer",
+                "research-analyst",
+                "position-entry-agent",
+                "watchlist-entry-agent",
+            },
         )
         with self.SessionFactory() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(AgentTeamRun)), 1)
@@ -235,6 +289,114 @@ class AgentTeamRuntimeTests(unittest.TestCase):
             self.assertTrue(marker["is_child_task"])
             self.assertEqual(marker["child_task_index"], 1)
             self.assertRegex(marker["source_identifier"], r"^TEAM-[0-9A-F]{8}-01$")
+
+    def test_alias_is_normalized_to_the_registered_agent_code(self) -> None:
+        team = self.team_service.start_team(
+            leader_run_id=self.parent["run_id"],
+            tool_call_id="call-team-alias",
+            arguments={
+                "objective": "研究目标公司",
+                "tasks": [
+                    {
+                        "agent_code": "stock_researcher",
+                        "instruction": "输出目标公司的研究备忘录",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(team["members"][0]["agent_code"], "research-analyst")
+        self.assertEqual(team["members"][0]["requested_agent_code"], "stock_researcher")
+        self.assertTrue(team["members"][0]["agent_code_normalized"])
+        with self.SessionFactory() as db:
+            child = db.get(AgentRun, team["members"][0]["run_id"])
+            payload = __import__("json").loads(child.request_json)
+            self.assertEqual(payload["digital_human_code"], "research-analyst")
+            self.assertTrue(payload["delegation_read_only"])
+
+    def test_transaction_agents_are_delegatable_with_scoped_write_access(self) -> None:
+        agents = {
+            item["code"]: item for item in self.team_service.list_delegatable_agents(self.user_id)
+        }
+        self.assertFalse(agents["position-entry-agent"]["read_only"])
+        self.assertEqual(agents["position-entry-agent"]["business_write_scope"], "positions")
+        self.assertFalse(agents["watchlist-entry-agent"]["read_only"])
+        self.assertEqual(agents["watchlist-entry-agent"]["business_write_scope"], "watchlist")
+
+        with patch(
+            "backend.app.agent_runtime.agentscope_engine.transaction_state_service.prompt_context",
+            return_value="",
+        ):
+            _, position_tools, position_writes = _build_definition(
+                {"digital_human_code": "position-entry-agent", "chat_mode": "research"}
+            )
+            _, watchlist_tools, watchlist_writes = _build_definition(
+                {"digital_human_code": "watchlist-entry-agent", "chat_mode": "research"}
+            )
+        position_names = {item["function"]["name"] for item in position_tools}
+        watchlist_names = {item["function"]["name"] for item in watchlist_tools}
+        self.assertEqual(position_writes, {"save_position_holdings"})
+        self.assertNotIn("ws_run_python", position_names)
+        self.assertEqual(
+            watchlist_writes,
+            {"add_watchlist_items", "remove_watchlist_items"},
+        )
+        self.assertNotIn("ws_run_python", watchlist_names)
+
+        team = self.team_service.start_team(
+            leader_run_id=self.parent["run_id"],
+            tool_call_id="call-team-transaction-agents",
+            arguments={
+                "objective": "同步持仓和自选",
+                "tasks": [
+                    {"agent_code": "持仓录入Agent", "instruction": "录入已确认的持仓"},
+                    {"agent_code": "watchlist_agent", "instruction": "增加已确认的自选"},
+                ],
+            },
+        )
+
+        with self.SessionFactory() as db:
+            payloads = {
+                child.request_json: __import__("json").loads(child.request_json)
+                for child in db.scalars(
+                    select(AgentRun).where(AgentRun.team_id == team["team_id"])
+                ).all()
+            }
+        by_code = {payload["digital_human_code"]: payload for payload in payloads.values()}
+        self.assertFalse(by_code["position-entry-agent"]["delegation_read_only"])
+        self.assertTrue(by_code["position-entry-agent"]["can_write_positions"])
+        self.assertFalse(by_code["position-entry-agent"]["allow_code_execution"])
+        self.assertFalse(by_code["watchlist-entry-agent"]["delegation_read_only"])
+        self.assertFalse(by_code["watchlist-entry-agent"]["allow_code_execution"])
+
+    def test_unknown_agent_rejects_only_that_member(self) -> None:
+        team = self.team_service.start_team(
+            leader_run_id=self.parent["run_id"],
+            tool_call_id="call-team-partial-preflight",
+            arguments={
+                "objective": "并行研究",
+                "tasks": [
+                    {"agent_code": "made_up_agent", "instruction": "无效任务"},
+                    {"agent_code": "risk-officer", "instruction": "执行风险检查"},
+                ],
+            },
+        )
+
+        self.assertEqual(len(team["members"]), 1)
+        self.assertEqual(team["members"][0]["agent_code"], "risk-officer")
+        self.assertEqual(len(team["rejected_tasks"]), 1)
+        self.assertEqual(team["rejected_tasks"][0]["member_index"], 1)
+        self.assertIn("可用 agent_code", team["rejected_tasks"][0]["error"])
+
+        self.assertFalse(self.repository.mark_waiting_children(self.parent["run_id"]))
+        completed = self._complete_child(team["members"][0]["run_id"], "风险结论")
+        self.assertTrue(completed["parent_requeued"])
+        result = self.team_service.result_for_tool_call(
+            self.parent["run_id"], "call-team-partial-preflight"
+        )
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["summary"], "1/2 个子任务完成")
+        self.assertEqual(len(result["rejected_tasks"]), 1)
 
     def test_team_persists_five_children_before_their_delegations(self) -> None:
         tasks = [

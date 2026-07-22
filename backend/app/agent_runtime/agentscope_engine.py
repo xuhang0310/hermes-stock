@@ -673,9 +673,12 @@ async def run_agentscope(
                         "team_id": team["team_id"],
                         "objective": team["objective"],
                         "member_count": len(team["members"]),
+                        "rejected_count": len(team.get("rejected_tasks", [])),
                         "deadline_at": team["deadline_at"],
                     }
                 )
+                for rejected in team.get("rejected_tasks", []):
+                    await emit({"type": "team_member_rejected", "team_id": team["team_id"], **rejected})
                 for member in team["members"]:
                     await emit(
                         {

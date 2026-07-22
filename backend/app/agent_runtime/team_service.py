@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -23,9 +24,36 @@ from backend.app.core.settings import settings
 from backend.app.agent_runtime.profile_access import target_roles_allow
 
 
-DELEGATABLE_EXCLUDED_CODES = frozenset(
-    {"stock-pm", "ask_stock", "position-entry-agent", "watchlist-entry-agent"}
-)
+DELEGATABLE_EXCLUDED_CODES = frozenset({"stock-pm", "ask_stock"})
+TRANSACTION_DELEGATION_CODES = frozenset({"position-entry-agent", "watchlist-entry-agent"})
+AGENT_CODE_ALIASES = {
+    "stock-researcher": "research-analyst",
+    "stock-research-analyst": "research-analyst",
+    "researcher": "research-analyst",
+    "individual-stock-researcher": "research-analyst",
+    "个股研究员": "research-analyst",
+    "risk-manager": "risk-officer",
+    "risk-analyst": "risk-officer",
+    "风控官": "risk-officer",
+    "风控复盘官": "risk-officer",
+    "intelligence-agent": "intelligence-officer",
+    "news-agent": "intelligence-officer",
+    "情报官": "intelligence-officer",
+    "quant-agent": "quant-analyst",
+    "量化分析师": "quant-analyst",
+    "position-agent": "position-entry-agent",
+    "position-entry": "position-entry-agent",
+    "portfolio-entry-agent": "position-entry-agent",
+    "holding-entry-agent": "position-entry-agent",
+    "持仓agent": "position-entry-agent",
+    "持仓录入agent": "position-entry-agent",
+    "持仓录入": "position-entry-agent",
+    "watchlist-agent": "watchlist-entry-agent",
+    "watchlist-entry": "watchlist-entry-agent",
+    "自选agent": "watchlist-entry-agent",
+    "自选录入agent": "watchlist-entry-agent",
+    "自选录入": "watchlist-entry-agent",
+}
 TERMINAL_DELEGATION_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "timed_out"}
 )
@@ -42,6 +70,24 @@ def _loads(value: str | None, fallback: Any) -> Any:
         return json.loads(value or "")
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _agent_code_key(value: str) -> str:
+    return re.sub(r"-+", "-", re.sub(r"[\s_]+", "-", value.strip().casefold())).strip("-")
+
+
+def _agent_access(profile: DigitalHumanProfile) -> dict[str, Any]:
+    transaction_agent = profile.code in TRANSACTION_DELEGATION_CODES
+    return {
+        "read_only": not transaction_agent,
+        "business_write_scope": (
+            "positions"
+            if profile.code == "position-entry-agent"
+            else "watchlist"
+            if profile.code == "watchlist-entry-agent"
+            else None
+        ),
+    }
 
 
 class AgentTeamService:
@@ -72,7 +118,7 @@ class AgentTeamService:
                     "code": row.code,
                     "name": row.name,
                     "description": row.delegation_description or row.description,
-                    "read_only": True,
+                    **_agent_access(row),
                 }
                 for row in rows
             ]
@@ -123,30 +169,91 @@ class AgentTeamService:
             if owner is None or not owner.is_enabled:
                 raise PermissionError("Agent Team 所有者不存在或已停用。")
 
-            normalized: list[tuple[DigitalHumanProfile, str, str | None, bool]] = []
-            for task in tasks:
+            available_profiles = list(
+                db.scalars(
+                    select(DigitalHumanProfile).where(
+                        DigitalHumanProfile.status == "enabled",
+                        DigitalHumanProfile.delegation_enabled.is_(True),
+                        DigitalHumanProfile.code.not_in(DELEGATABLE_EXCLUDED_CODES),
+                    )
+                ).all()
+            )
+            available_profiles = [
+                profile
+                for profile in available_profiles
+                if target_roles_allow(profile.target_roles, owner.role)
+            ]
+            profiles_by_code = {profile.code: profile for profile in available_profiles}
+            profiles_by_key = {
+                key: profile
+                for profile in available_profiles
+                for key in {_agent_code_key(profile.code), _agent_code_key(profile.name)}
+            }
+            available_codes = sorted(profiles_by_code)
+            normalized: list[tuple[int, DigitalHumanProfile, str, str | None, bool, str]] = []
+            rejected_tasks: list[dict[str, Any]] = []
+            for index, task in enumerate(tasks, start=1):
                 if not isinstance(task, dict):
-                    raise ValueError("子任务必须是结构化对象。")
+                    rejected_tasks.append(
+                        {
+                            "member_index": index,
+                            "requested_agent_code": None,
+                            "status": "rejected",
+                            "required": True,
+                            "error": "子任务必须是结构化对象。",
+                        }
+                    )
+                    continue
                 profile_code = str(task.get("agent_code") or "").strip()
                 instruction = str(task.get("instruction") or "").strip()
                 expected_output = str(task.get("expected_output") or "").strip() or None
                 required = bool(task.get("required", True))
                 if not profile_code or not instruction:
-                    raise ValueError("每个子任务都必须包含 agent_code 和 instruction。")
+                    rejected_tasks.append(
+                        {
+                            "member_index": index,
+                            "requested_agent_code": profile_code or None,
+                            "status": "rejected",
+                            "required": required,
+                            "error": "子任务必须同时包含 agent_code 和 instruction。",
+                        }
+                    )
+                    continue
                 if len(instruction) > 8000:
-                    raise ValueError("单个子任务说明不能超过 8000 字符。")
-                profile = db.scalar(
-                    select(DigitalHumanProfile).where(
-                        DigitalHumanProfile.code == profile_code,
-                        DigitalHumanProfile.status == "enabled",
-                        DigitalHumanProfile.delegation_enabled.is_(True),
-                    ).limit(1)
+                    rejected_tasks.append(
+                        {
+                            "member_index": index,
+                            "requested_agent_code": profile_code,
+                            "status": "rejected",
+                            "required": required,
+                            "error": "单个子任务说明不能超过 8000 字符。",
+                        }
+                    )
+                    continue
+                requested_key = _agent_code_key(profile_code)
+                resolved_code = AGENT_CODE_ALIASES.get(requested_key, profile_code)
+                profile = profiles_by_code.get(resolved_code) or profiles_by_key.get(requested_key)
+                if profile is None:
+                    rejected_tasks.append(
+                        {
+                            "member_index": index,
+                            "requested_agent_code": profile_code,
+                            "status": "rejected",
+                            "required": required,
+                            "error": (
+                                f"数字人 {profile_code} 不可委派；可用 agent_code："
+                                + ", ".join(available_codes)
+                            ),
+                        }
+                    )
+                    continue
+                normalized.append(
+                    (index, profile, instruction, expected_output, required, profile_code)
                 )
-                if profile is None or profile.code in DELEGATABLE_EXCLUDED_CODES:
-                    raise ValueError(f"数字人 {profile_code} 不可委派。")
-                if not target_roles_allow(profile.target_roles, owner.role):
-                    raise PermissionError(f"当前用户角色无权调用数字人 {profile_code}。")
-                normalized.append((profile, instruction, expected_output, required))
+
+            if not normalized:
+                details = "; ".join(item["error"] for item in rejected_tasks)
+                raise ValueError(f"没有可执行的子任务。{details}")
 
             team_id = uuid.uuid4().hex
             root_run_id = leader.root_run_id or leader.run_id
@@ -161,12 +268,13 @@ class AgentTeamService:
                 objective=objective,
                 status="running",
                 max_members=max_members,
+                result_json=json.dumps({"rejected_tasks": rejected_tasks}, ensure_ascii=False),
                 deadline_at=deadline_at,
             )
             db.add(team)
             leader.team_id = team_id
 
-            for index, (profile, instruction, expected_output, required) in enumerate(normalized, start=1):
+            for index, profile, instruction, expected_output, required, requested_code in normalized:
                 child_run_id = uuid.uuid4().hex
                 external_id = f"{team_id}:{index}"
                 instruction_summary = " ".join(instruction.split())
@@ -209,6 +317,7 @@ class AgentTeamService:
                         "当前任务来自总调度 Agent Team。只完成分配给你的子任务，不要继续委派。",
                     ]
                 )
+                transaction_agent = profile.code in TRANSACTION_DELEGATION_CODES
                 child_request = {
                     "session_id": child_session.id,
                     "user_id": leader.user_id,
@@ -224,10 +333,11 @@ class AgentTeamService:
                     "chat_mode": "research",
                     "skills": [],
                     "memory_context": "",
-                    "can_write_positions": False,
+                    "can_write_positions": profile.code == "position-entry-agent",
+                    "default_account_id": leader_request.get("default_account_id"),
                     "allow_code_execution": False,
-                    "approval_policy": "full",
-                    "delegation_read_only": True,
+                    "approval_policy": str(leader_request.get("approval_policy") or "full"),
+                    "delegation_read_only": not transaction_agent,
                     "source_type": "delegation",
                     "source_ref": team_id,
                     "parent_run_id": leader.run_id,
@@ -281,6 +391,8 @@ class AgentTeamService:
                         "run_id": child_run_id,
                         "session_id": child_session.id,
                         "agent_code": profile.code,
+                        "requested_agent_code": requested_code,
+                        "agent_code_normalized": requested_code != profile.code,
                         "agent_name": profile.name,
                         "status": "queued",
                     }
@@ -309,6 +421,7 @@ class AgentTeamService:
             "status": "running",
             "deadline_at": deadline_at.isoformat(),
             "members": child_runs,
+            "rejected_tasks": rejected_tasks,
             "created": True,
         }
 
@@ -405,6 +518,7 @@ class AgentTeamService:
                 "status": team.status,
                 "objective": team.objective,
                 "members": result.get("members", []),
+                "rejected_tasks": result.get("rejected_tasks", []),
                 "summary": result.get("summary"),
                 "error": team.error,
             }
@@ -523,6 +637,8 @@ class AgentTeamService:
                         child.error = row.error
                         child.finished_at = now
 
+        preflight = _loads(team.result_json, {})
+        rejected_tasks = list(preflight.get("rejected_tasks") or [])
         members = [
             _loads(row.result_json, {
                 "run_id": row.child_run_id,
@@ -535,8 +651,9 @@ class AgentTeamService:
             for row in delegations
         ]
         completed = sum(1 for row in delegations if row.status == "completed")
-        failed = len(delegations) - completed
-        if completed == len(delegations):
+        failed = len(delegations) - completed + len(rejected_tasks)
+        total = len(delegations) + len(rejected_tasks)
+        if completed == total:
             team.status = "completed"
         elif completed:
             team.status = "partial"
@@ -544,9 +661,15 @@ class AgentTeamService:
             team.status = "failed"
         team.finished_at = now
         team.error = None if failed == 0 else f"{failed} 个子任务未成功完成。"
-        summary = f"{completed}/{len(delegations)} 个子任务完成"
+        summary = f"{completed}/{total} 个子任务完成"
         team.result_json = json.dumps(
-            {"team_id": team.team_id, "status": team.status, "summary": summary, "members": members},
+            {
+                "team_id": team.team_id,
+                "status": team.status,
+                "summary": summary,
+                "members": members,
+                "rejected_tasks": rejected_tasks,
+            },
             ensure_ascii=False,
             default=str,
         )
@@ -579,12 +702,13 @@ class AgentTeamService:
                 "team_id": team.team_id,
                 "status": team.status,
                 "completed": completed,
-                "total": len(delegations),
+                "total": total,
                 "summary": summary,
             },
         }
 
     def _team_dict(self, db: Session, team: AgentTeamRun) -> dict[str, Any]:
+        stored_result = _loads(team.result_json, {})
         members = db.scalars(
             select(AgentDelegation)
             .where(AgentDelegation.team_id == team.team_id)
@@ -599,6 +723,7 @@ class AgentTeamService:
             "deadline_at": team.deadline_at.isoformat(),
             "finished_at": team.finished_at.isoformat() if team.finished_at else None,
             "error": team.error,
+            "rejected_tasks": stored_result.get("rejected_tasks", []),
             "members": [
                 {
                     "delegation_id": row.delegation_id,

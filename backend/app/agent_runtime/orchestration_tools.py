@@ -34,7 +34,14 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
-                            "agent_code": {"type": "string", "description": "数字人 code。"},
+                            "agent_code": {
+                                "type": "string",
+                                "description": (
+                                    "必须原样使用 list_delegatable_agents 返回的 code，不要翻译或改写。"
+                                    "内置示例：research-analyst、position-entry-agent、"
+                                    "watchlist-entry-agent。"
+                                ),
+                            },
                             "instruction": {"type": "string", "description": "边界明确、可独立完成的子任务。"},
                             "expected_output": {"type": "string", "description": "希望返回的结构或验收条件。"},
                             "required": {"type": "boolean", "default": True},
@@ -159,11 +166,12 @@ ORCHESTRATION_PROMPT = """
 
 总调度编排规则：
 1. 简单问题直接回答；只有跨专业、可并行且需要汇总证据的复杂任务才创建 Agent Team。
-2. 委派前先调用 list_delegatable_agents，只使用返回的 agent_code。每个子任务必须有清晰边界和交付要求，最多 20 个。
-3. dispatch_agent_tasks 返回后，根据每个成员的状态、证据和缺口统一复核并统稿；部分失败时明确标注，不得把失败结果当成事实。
-4. 用户明确要求“定时、每天、每周、稍后、每隔多久”执行时，可以创建定时任务。创建前复述执行者、时间、指令、是否推送飞书、是否允许代码执行。
-5. 定时代码只在用户隔离工作区的 Docker 沙箱执行；不要把密钥、数据库密码或宿主机路径写进任务指令。
-6. 修改、暂停、恢复和删除任务时，先用 list_agent_schedules 找到准确 job_key。
+2. 委派前先调用 list_delegatable_agents，必须逐字复制返回的 agent_code，禁止翻译、改成下划线或自行创造代码。每个子任务必须有清晰边界和交付要求，最多 20 个。
+3. 持仓新增、修改和截图录入委派给 position-entry-agent；自选查询、增加和删除委派给 watchlist-entry-agent。这两个专用 Agent 只有各自业务写权限，不具备代码执行权限。
+4. dispatch_agent_tasks 返回后，根据每个成员的状态、证据和缺口统一复核并统稿；部分失败时明确标注，不得把失败结果当成事实。
+5. 用户明确要求“定时、每天、每周、稍后、每隔多久”执行时，可以创建定时任务。创建前复述执行者、时间、指令、是否推送飞书、是否允许代码执行。
+6. 定时代码只在用户隔离工作区的 Docker 沙箱执行；不要把密钥、数据库密码或宿主机路径写进任务指令。
+7. 修改、暂停、恢复和删除任务时，先用 list_agent_schedules 找到准确 job_key。
 """
 
 
