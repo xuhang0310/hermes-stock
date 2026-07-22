@@ -51,6 +51,7 @@ const form = reactive({
   description: '',
   schedule_type: 'daily',
   run_time: '',
+  run_once_at: '',
   weekday_mask: '',
   interval_minutes: null as number | null,
   window_start: '',
@@ -60,6 +61,7 @@ const form = reactive({
   prompt_template: '',
   push_channel_key: '',
   enabled: true,
+  allow_code_execution: false,
   sort_order: 0
 })
 
@@ -121,6 +123,7 @@ function weekdayText(mask: string | null | undefined) {
 }
 
 function scheduleText(job: ScheduleJob) {
+  if (job.schedule_type === 'once') return `一次 · ${beijingFromDb(job.run_once_at) || '-'}`
   if (job.schedule_type === 'interval') {
     return `每 ${job.interval_minutes ?? '-'} 分钟 · ${job.window_start || '--:--'} 至 ${job.window_end || '--:--'}`
   }
@@ -130,11 +133,13 @@ function scheduleText(job: ScheduleJob) {
 }
 
 function jobMark(job: ScheduleJob) {
+  if (job.schedule_type === 'once') return '1x'
   if (job.schedule_type === 'interval') return `${job.interval_minutes || '-'}m`
   return (job.run_time || '--:--').slice(0, 5)
 }
 
 function jobKindLabel(kind: string) {
+  if (kind === 'agent_task') return 'Agent 任务'
   if (kind === 'agent_report') return 'Agent 报告'
   if (kind === 'health_check') return '系统检查'
   if (kind === 'rule_scan') return '规则扫描'
@@ -226,6 +231,7 @@ function edit(job: ScheduleJob) {
     description: job.description || '',
     schedule_type: job.schedule_type,
     run_time: job.run_time || '',
+    run_once_at: job.run_once_at ? job.run_once_at.slice(0, 16) : '',
     weekday_mask: weekdayValues(job.weekday_mask).join(','),
     interval_minutes: job.interval_minutes,
     window_start: job.window_start || '',
@@ -235,6 +241,7 @@ function edit(job: ScheduleJob) {
     prompt_template: job.prompt_template || '',
     push_channel_key: job.push_channel_key || '',
     enabled: job.enabled,
+    allow_code_execution: job.allow_code_execution,
     sort_order: job.sort_order
   })
   editorOpen.value = true
@@ -254,6 +261,7 @@ async function save() {
       description: form.description || null,
       schedule_type: form.schedule_type,
       run_time: form.run_time || null,
+      run_once_at: form.run_once_at || null,
       weekday_mask: form.weekday_mask || null,
       interval_minutes: form.interval_minutes,
       window_start: form.window_start || null,
@@ -263,6 +271,7 @@ async function save() {
       prompt_template: form.prompt_template || null,
       push_channel_key: form.push_channel_key || null,
       enabled: form.enabled,
+      allow_code_execution: form.allow_code_execution,
       sort_order: form.sort_order
     })
     await loadJobs()
@@ -370,7 +379,11 @@ onUnmounted(() => {
         >
           <div class="rhythm-job-mark" :class="{ off: !job.enabled }">{{ jobMark(job) }}</div>
           <div class="rhythm-job-identity">
-            <div><strong>{{ job.name }}</strong><span>{{ jobKindLabel(job.job_kind) }}</span></div>
+            <div>
+              <strong>{{ job.name }}</strong>
+              <span>{{ jobKindLabel(job.job_kind) }}</span>
+              <span v-if="job.created_via === 'agent'">总调度创建</span>
+            </div>
             <p>{{ jobDescription(job) }}</p>
             <code>{{ job.job_key }}</code>
           </div>
@@ -449,7 +462,7 @@ onUnmounted(() => {
             <header><h3>基本信息</h3><span>用于列表识别和运行记录</span></header>
             <div class="rhythm-form-grid">
               <label><span>任务名称</span><input v-model="form.name" maxlength="160" required /></label>
-              <label><span>调度类型</span><select v-model="form.schedule_type"><option value="daily">每日计划</option><option value="weekly">每周计划</option><option value="monthly_last">月末计划</option><option value="interval">盘中循环</option></select></label>
+              <label><span>调度类型</span><select v-model="form.schedule_type"><option value="once">一次执行</option><option value="daily">每日计划</option><option value="weekly">每周计划</option><option value="monthly_last">月末计划</option><option value="interval">盘中循环</option></select></label>
               <label class="span-all"><span>任务说明</span><textarea v-model="form.description" rows="2" placeholder="说明这项任务会在什么时间完成什么工作"></textarea></label>
             </div>
           </section>
@@ -457,7 +470,10 @@ onUnmounted(() => {
           <section class="rhythm-form-section">
             <header><h3>执行计划</h3><span>所有时间均按北京时间</span></header>
             <div class="rhythm-form-grid">
-              <template v-if="form.schedule_type === 'interval'">
+              <template v-if="form.schedule_type === 'once'">
+                <label><span>执行时间</span><input v-model="form.run_once_at" type="datetime-local" required /></label>
+              </template>
+              <template v-else-if="form.schedule_type === 'interval'">
                 <label><span>执行间隔</span><div class="rhythm-number-field"><input v-model.number="form.interval_minutes" type="number" min="1" max="1440" /><b>分钟</b></div></label>
                 <label><span>执行窗口</span><div class="rhythm-time-range"><input v-model="form.window_start" type="time" /><i>至</i><input v-model="form.window_end" type="time" /></div></label>
               </template>
@@ -484,6 +500,7 @@ onUnmounted(() => {
           <div class="rhythm-switch-grid">
             <label class="friendly-switch"><input v-model="form.trading_day_only" type="checkbox" /><i></i><span><b>仅交易日执行</b><small>节假日和周末自动跳过</small></span></label>
             <label class="friendly-switch"><input v-model="form.enabled" type="checkbox" /><i></i><span><b>启用该任务</b><small>关闭后不再自动触发</small></span></label>
+            <label class="friendly-switch"><input v-model="form.allow_code_execution" type="checkbox" /><i></i><span><b>允许沙箱代码</b><small>仅在当前用户隔离工作区的 Docker 沙箱执行</small></span></label>
           </div>
 
           <details class="rhythm-advanced">

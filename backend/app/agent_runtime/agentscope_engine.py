@@ -11,6 +11,13 @@ from sqlalchemy import select
 from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.contracts import EngineOutcome
 from backend.app.agent_runtime.external_tools import external_tool_executor
+from backend.app.agent_runtime.orchestration_tools import (
+    ORCHESTRATION_PROMPT,
+    ORCHESTRATION_TOOL_NAMES,
+    SCHEDULE_MUTATION_TOOL_NAMES,
+    TEAM_AND_SCHEDULE_TOOL_SCHEMAS,
+    TOOL_DISPLAY_NAMES as ORCHESTRATION_DISPLAY_NAMES,
+)
 from backend.app.agent_runtime.payloads import materialize_agentscope_content
 from backend.app.agent_runtime.tool_specs import should_externalize, tool_spec
 from backend.app.agent_runtime.transaction_state import transaction_state_service
@@ -56,6 +63,8 @@ def select_engine(chat_mode: str, configured_mode: str) -> str:
 
 
 def _tool_display_name(name: str) -> str:
+    if name in ORCHESTRATION_DISPLAY_NAMES:
+        return ORCHESTRATION_DISPLAY_NAMES[name]
     label = digital_human_tool_display_name(name)
     return label if label != name else stock_tool_display_name(name)
 
@@ -63,6 +72,15 @@ def _tool_display_name(name: str) -> str:
 def _tool_preview(name: str, result: dict[str, Any]) -> str:
     if "error" in result:
         return str(result["error"])
+    if name == "list_delegatable_agents":
+        return f"可委派数字人 {len(result.get('agents', []))} 个。"
+    if name == "dispatch_agent_tasks":
+        return str(result.get("summary") or f"Agent Team {result.get('status', '已完成')}。")
+    if name == "list_agent_schedules":
+        return f"定时 Agent 任务 {len(result.get('jobs', []))} 个。"
+    if name in SCHEDULE_MUTATION_TOOL_NAMES:
+        job = result.get("job") if isinstance(result.get("job"), dict) else {}
+        return f"定时任务操作完成：{job.get('name') or result.get('job_key') or '-'}。"
     from backend.app.market.digital_human_tools import digital_human_observation_preview
 
     preview = stock_observation_preview(name, result)
@@ -105,13 +123,33 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         return _knowledge_system_prompt(memory_context), list(TOOLS), write_names
 
     tools = [*TOOLS, *skill_registry.get_tools_for("research", role_code=role_code)]
+    if role_code == "stock-pm":
+        tools.extend(TEAM_AND_SCHEDULE_TOOL_SCHEMAS)
+        write_names.update(SCHEDULE_MUTATION_TOOL_NAMES)
     if request_payload.get("can_write_positions"):
         schemas = write_tool_schemas()
         tools.extend(schemas)
-        write_names = {item["function"]["name"] for item in schemas}
+        write_names.update(item["function"]["name"] for item in schemas)
     if not request_payload.get("allow_code_execution"):
         tools = [item for item in tools if item.get("function", {}).get("name") != "ws_run_python"]
+    if request_payload.get("delegation_read_only"):
+        blocked = {
+            "ws_write_file",
+            "ws_edit_file",
+            "ws_run_python",
+            "save_position_holdings",
+            "add_watchlist_items",
+            "remove_watchlist_items",
+            "update_my_positions",
+            "update_position_field",
+            "rollback_last_position_batch",
+            *ORCHESTRATION_TOOL_NAMES,
+        }
+        tools = [item for item in tools if item.get("function", {}).get("name") not in blocked]
+        write_names.clear()
     system_prompt = _system_prompt(request_payload.get("digital_human_context"), role_code, memory_context)
+    if role_code == "stock-pm":
+        system_prompt += ORCHESTRATION_PROMPT
     active_artifacts = artifact_service.active_context(
         user_id=int(request_payload["user_id"]),
         session_id=int(request_payload["session_id"]) if request_payload.get("session_id") else None,
@@ -181,6 +219,18 @@ def _execute_tool(
             doc_types=args.get("doc_types") if isinstance(args.get("doc_types"), list) else None,
             trust_levels=args.get("trust_levels") if isinstance(args.get("trust_levels"), list) else None,
         )
+    if name == "list_delegatable_agents":
+        from backend.app.agent_runtime.team_service import agent_team_service
+
+        return {
+            "agents": agent_team_service.list_delegatable_agents(
+                int(request_payload["user_id"]),
+            )
+        }
+    if name in SCHEDULE_MUTATION_TOOL_NAMES or name == "list_agent_schedules":
+        from backend.app.scheduler.schedule_service import agent_schedule_service
+
+        return agent_schedule_service.execute(name, args, request_payload)
     if name in write_names:
         return _execute_position_write_tool(
             name,
@@ -219,6 +269,7 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
             self.spec = tool_spec(self.name, write_names=write_names)
             self.is_concurrency_safe = self.spec.is_concurrency_safe
             self.is_read_only = self.spec.is_read_only
+            self.is_external_tool = self.name == "dispatch_agent_tasks"
 
         async def check_permissions(self, tool_input, _context):
             risk = classify_tool_risk(self.name, tool_input, write_names)
@@ -299,7 +350,12 @@ def _history_state(request_payload: dict[str, Any]):
 
 
 def _resume_event(run_id: str, state):
-    from agentscope.event import ConfirmResult, UserConfirmResultEvent
+    from agentscope.event import (
+        ConfirmResult,
+        ExternalExecutionResultEvent,
+        UserConfirmResultEvent,
+    )
+    from agentscope.message import TextBlock, ToolResultBlock, ToolResultState
 
     with SessionLocal() as db:
         approvals = db.scalars(
@@ -328,9 +384,46 @@ def _resume_event(run_id: str, state):
                 "decision": row.status,
             }
         )
-    if not results:
-        return None, resolved_events
-    return UserConfirmResultEvent(reply_id=state.reply_id, confirm_results=results), resolved_events
+    if results:
+        return UserConfirmResultEvent(reply_id=state.reply_id, confirm_results=results), resolved_events
+
+    from backend.app.agent_runtime.team_service import agent_team_service
+
+    execution_results = []
+    for tool_call in pending_calls:
+        if str(tool_call.state) != "submitted":
+            continue
+        result = agent_team_service.result_for_tool_call(run_id, tool_call.id)
+        if result is None:
+            raise RuntimeError("Agent Team 尚未完成，拒绝提前恢复总调度。")
+        failed = result.get("status") == "failed"
+        execution_results.append(
+            ToolResultBlock(
+                id=tool_call.id,
+                name=tool_call.name,
+                output=[TextBlock(text=json.dumps(result, ensure_ascii=False, default=str))],
+                state=ToolResultState.ERROR if failed else ToolResultState.SUCCESS,
+                metadata={"result": result, "display_name": _tool_display_name(tool_call.name)},
+            )
+        )
+        resolved_events.append(
+            {
+                "type": "team_resumed",
+                "team_id": result.get("team_id"),
+                "tool_call_id": tool_call.id,
+                "status": result.get("status"),
+                "summary": result.get("summary"),
+            }
+        )
+    if execution_results:
+        return (
+            ExternalExecutionResultEvent(
+                reply_id=state.reply_id,
+                execution_results=execution_results,
+            ),
+            resolved_events,
+        )
+    return None, resolved_events
 
 
 async def run_agentscope(
@@ -348,6 +441,7 @@ async def run_agentscope(
         ExceedMaxItersEvent,
         ModelCallEndEvent,
         ReplyEndEvent,
+        RequireExternalExecutionEvent,
         RequireUserConfirmEvent,
         TextBlockDeltaEvent,
         TextBlockEndEvent,
@@ -418,6 +512,11 @@ async def run_agentscope(
     tool_args: dict[str, list[str]] = {}
     tool_results: dict[str, list[str]] = {}
     waiting: list[dict[str, Any]] = []
+
+    if state.context:
+        for pending_call in state.context[-1].get_content_blocks("tool_call"):
+            tool_names[pending_call.id] = pending_call.name
+            tool_args[pending_call.id] = [pending_call.input or "{}"]
 
     async def close_text(role: str) -> None:
         nonlocal text_block_open
@@ -537,6 +636,60 @@ async def run_agentscope(
                 await emit({"type": "approval_required", "tool_call_id": tool_call.id, **approval})
             await save_checkpoint(agent.state.model_dump_json(), waiting)
             outcome.status = "waiting_approval"
+            outcome.waiting = waiting
+        elif isinstance(event, RequireExternalExecutionEvent):
+            from backend.app.agent_runtime.redis_broker import redis_broker
+            from backend.app.agent_runtime.team_service import agent_team_service
+
+            await close_text("thought")
+            for tool_call in event.tool_calls:
+                if tool_call.name != "dispatch_agent_tasks":
+                    raise RuntimeError(f"不支持的外部编排工具：{tool_call.name}")
+                try:
+                    args = json.loads(tool_call.input or "{}")
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError("Agent Team 参数不是有效 JSON。") from exc
+                await save_checkpoint(
+                    agent.state.model_dump_json(),
+                    [{"type": "team", "tool_call_id": tool_call.id, "status": "creating"}],
+                )
+                team = await asyncio.to_thread(
+                    agent_team_service.start_team,
+                    leader_run_id=run_id,
+                    tool_call_id=tool_call.id,
+                    arguments=args,
+                )
+                waiting_item = {
+                    "type": "team",
+                    "team_id": team["team_id"],
+                    "tool_call_id": tool_call.id,
+                    "status": team["status"],
+                    "deadline_at": team["deadline_at"],
+                }
+                waiting.append(waiting_item)
+                await emit(
+                    {
+                        "type": "team_created",
+                        "team_id": team["team_id"],
+                        "objective": team["objective"],
+                        "member_count": len(team["members"]),
+                        "deadline_at": team["deadline_at"],
+                    }
+                )
+                for member in team["members"]:
+                    await emit(
+                        {
+                            "type": "team_member_queued",
+                            "team_id": team["team_id"],
+                            "child_run_id": member["run_id"],
+                            "agent_code": member["agent_code"],
+                            "agent_name": member["agent_name"],
+                            "status": member["status"],
+                        }
+                    )
+                    await redis_broker.enqueue(member["run_id"])
+            await save_checkpoint(agent.state.model_dump_json(), waiting)
+            outcome.status = "waiting_children"
             outcome.waiting = waiting
         elif isinstance(event, ModelCallEndEvent):
             await save_checkpoint(agent.state.model_dump_json(), waiting or None)

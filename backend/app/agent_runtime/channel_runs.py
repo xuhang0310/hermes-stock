@@ -26,6 +26,8 @@ def build_channel_request(
     attachments: list[dict[str, Any]] | None = None,
     default_account_id: int | None = None,
     pending_action: dict[str, Any] | None = None,
+    allow_code_execution: bool = False,
+    approval_policy: str = "full",
 ) -> dict[str, Any]:
     with SessionLocal() as db:
         chat_session = db.get(AiChatSession, session_id)
@@ -70,8 +72,8 @@ def build_channel_request(
         "memory_context": "",
         "can_write_positions": digital_human_code == "position-entry-agent",
         "default_account_id": default_account_id,
-        "allow_code_execution": False,
-        "approval_policy": "full",
+        "allow_code_execution": bool(allow_code_execution),
+        "approval_policy": approval_policy if approval_policy in {"ask", "smart", "full"} else "full",
         "source_type": source_type,
         "source_ref": source_ref,
         "pending_action": pending_action,
@@ -158,5 +160,8 @@ def wait_for_channel_run(
             return final_answer or "".join(answer_parts).strip(), model_name, run.get("error") or stream_error
         if run["status"] == "waiting_approval":
             return "", model_name, "Channel run is waiting for an approval that must be completed in the web console."
+        if run["status"] == "waiting_children":
+            time.sleep(0.25)
+            continue
         time.sleep(0.25)
     return "", model_name, "Agent run timed out while waiting for a terminal result."

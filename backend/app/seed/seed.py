@@ -156,6 +156,7 @@ def seed_position_agent_profile(db: Session) -> None:
             "status": "enabled",
             "sort_order": 900,
             "can_write_positions": True,
+            "delegation_enabled": False,
         },
     )
 
@@ -176,6 +177,7 @@ def seed_watchlist_agent_profile(db: Session) -> None:
             "status": "enabled",
             "sort_order": 910,
             "can_write_positions": False,
+            "delegation_enabled": False,
         },
     )
 
@@ -390,6 +392,8 @@ def seed_auth_and_ai_configs(db: Session) -> None:
                 "status": "enabled",
                 "sort_order": item["sort_order"],
                 "can_write_positions": item.get("can_write_positions", False),
+                "delegation_enabled": item["code"] != "stock-pm",
+                "delegation_description": item["description"],
             },
         )
 

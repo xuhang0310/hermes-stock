@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Literal
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -136,8 +138,9 @@ def test_notify_channel(
 class ScheduleJobIn(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str | None = None
-    schedule_type: Literal["daily", "weekly", "monthly_last", "interval"]
+    schedule_type: Literal["once", "daily", "weekly", "monthly_last", "interval"]
     run_time: str | None = Field(default=None, max_length=5)
+    run_once_at: datetime | None = None
     weekday_mask: str | None = Field(default=None, max_length=20)
     interval_minutes: int | None = Field(default=None, ge=1, le=1440)
     window_start: str | None = Field(default=None, max_length=5)
@@ -148,6 +151,12 @@ class ScheduleJobIn(BaseModel):
     push_channel_key: str | None = Field(default=None, max_length=80)
     enabled: bool = True
     sort_order: int = 0
+    allow_code_execution: bool = False
+
+
+class ScheduleJobCreateIn(ScheduleJobIn):
+    job_key: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+    job_kind: Literal["agent_task", "agent_report"] = "agent_task"
 
 
 def _looks_like_utf8_mojibake(value: str | None) -> bool:
@@ -170,6 +179,36 @@ def _validate_schedule_text_encoding(payload: ScheduleJobIn) -> None:
             status_code=422,
             detail="检测到任务文本编码异常，请刷新页面后重试，勿回写乱码内容",
         )
+
+
+def _validate_schedule_shape(payload: ScheduleJobIn) -> None:
+    if payload.schedule_type == "once":
+        if payload.run_once_at is None:
+            raise HTTPException(status_code=422, detail="一次任务必须提供 run_once_at")
+        run_once_at = payload.run_once_at
+        if run_once_at.tzinfo is not None:
+            run_once_at = run_once_at.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+            payload.run_once_at = run_once_at
+        if run_once_at <= now_sh():
+            raise HTTPException(status_code=422, detail="一次任务执行时间必须晚于当前时间")
+        return
+    if payload.schedule_type in {"daily", "weekly", "monthly_last"}:
+        try:
+            datetime.strptime(payload.run_time or "", "%H:%M")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="执行时间必须是 HH:MM") from exc
+        if payload.schedule_type == "weekly" and not payload.weekday_mask:
+            raise HTTPException(status_code=422, detail="每周任务必须选择星期")
+        return
+    if not payload.interval_minutes:
+        raise HTTPException(status_code=422, detail="间隔任务必须提供 interval_minutes")
+    for field_name, value in (("window_start", payload.window_start), ("window_end", payload.window_end)):
+        if value is None:
+            continue
+        try:
+            datetime.strptime(value, "%H:%M")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{field_name} 必须是 HH:MM") from exc
 
 
 def _activate_agent_report_jobs(db: Session) -> list[ScheduledJob]:
@@ -198,6 +237,8 @@ def _job_out(job: ScheduledJob) -> dict:
         "job_kind": job.job_kind,
         "schedule_type": job.schedule_type,
         "run_time": job.run_time,
+        "run_once_at": job.run_once_at.isoformat() if job.run_once_at else None,
+        "timezone": job.timezone,
         "weekday_mask": job.weekday_mask,
         "interval_minutes": job.interval_minutes,
         "window_start": job.window_start,
@@ -207,6 +248,10 @@ def _job_out(job: ScheduledJob) -> dict:
         "agent_name": job.agent_name,
         "prompt_template": job.prompt_template,
         "push_channel_key": job.push_channel_key,
+        "owner_user_id": job.owner_user_id,
+        "created_by_run_id": job.created_by_run_id,
+        "created_via": job.created_via,
+        "allow_code_execution": bool(job.allow_code_execution),
         "enabled": job.enabled,
         "sort_order": job.sort_order,
         "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
@@ -242,6 +287,52 @@ def schedule_jobs(
     return [_job_out(row) for row in rows]
 
 
+@router.post("/schedule/jobs")
+def create_schedule_job(
+    payload: ScheduleJobCreateIn,
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    if payload.digital_human_code and payload.digital_human_code not in VALID_DIGITAL_HUMAN_CODES:
+        raise HTTPException(status_code=400, detail="数字人 code 无效")
+    if payload.push_channel_key and payload.push_channel_key not in BUILTIN_CHANNEL_KEYS:
+        raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
+    _validate_schedule_text_encoding(payload)
+    _validate_schedule_shape(payload)
+    job_key = payload.job_key or f"admin-{uuid4().hex[:16]}"
+    if db.scalar(select(ScheduledJob.id).where(ScheduledJob.job_key == job_key).limit(1)):
+        raise HTTPException(status_code=409, detail="任务标识已存在")
+    job = ScheduledJob(
+        job_key=job_key,
+        name=payload.name,
+        description=payload.description,
+        job_kind=payload.job_kind,
+        schedule_type=payload.schedule_type,
+        run_time=payload.run_time,
+        run_once_at=payload.run_once_at,
+        weekday_mask=payload.weekday_mask,
+        interval_minutes=payload.interval_minutes,
+        window_start=payload.window_start,
+        window_end=payload.window_end,
+        timezone="Asia/Shanghai",
+        trading_day_only=payload.trading_day_only,
+        digital_human_code=payload.digital_human_code,
+        agent_name=DH_TO_AGENT.get(payload.digital_human_code or ""),
+        prompt_template=payload.prompt_template,
+        push_channel_key=payload.push_channel_key,
+        owner_user_id=context.user.id,
+        created_via="admin",
+        allow_code_execution=payload.allow_code_execution,
+        approval_policy="full",
+        enabled=payload.enabled,
+        sort_order=payload.sort_order,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return _job_out(job)
+
+
 @router.put("/schedule/jobs/{job_key}")
 def update_schedule_job(
     job_key: str,
@@ -257,11 +348,13 @@ def update_schedule_job(
     if payload.push_channel_key and payload.push_channel_key not in BUILTIN_CHANNEL_KEYS:
         raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
     _validate_schedule_text_encoding(payload)
+    _validate_schedule_shape(payload)
 
     job.name = payload.name
     job.description = payload.description
     job.schedule_type = payload.schedule_type
     job.run_time = payload.run_time
+    job.run_once_at = payload.run_once_at
     job.weekday_mask = payload.weekday_mask
     job.interval_minutes = payload.interval_minutes
     job.window_start = payload.window_start
@@ -273,9 +366,24 @@ def update_schedule_job(
     job.push_channel_key = payload.push_channel_key
     job.enabled = payload.enabled
     job.sort_order = payload.sort_order
+    job.allow_code_execution = payload.allow_code_execution
     db.commit()
     db.refresh(job)
     return _job_out(job)
+
+
+@router.delete("/schedule/jobs/{job_key}")
+def delete_schedule_job(
+    job_key: str,
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
+    if job is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    db.delete(job)
+    db.commit()
+    return {"deleted": True, "job_key": job_key}
 
 
 @router.post("/schedule/jobs/agent-reports/activate")

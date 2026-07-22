@@ -517,9 +517,11 @@ export type ScheduleJob = {
   job_key: string
   name: string
   description: string | null
-  job_kind: 'agent_report' | 'health_check' | 'rule_scan' | 'l1_digest' | string
-  schedule_type: 'daily' | 'weekly' | 'monthly_last' | 'interval' | string
+  job_kind: 'agent_task' | 'agent_report' | 'health_check' | 'rule_scan' | 'l1_digest' | string
+  schedule_type: 'once' | 'daily' | 'weekly' | 'monthly_last' | 'interval' | string
   run_time: string | null
+  run_once_at: string | null
+  timezone: string
   weekday_mask: string | null
   interval_minutes: number | null
   window_start: string | null
@@ -529,6 +531,10 @@ export type ScheduleJob = {
   agent_name: string | null
   prompt_template: string | null
   push_channel_key: string | null
+  owner_user_id: number | null
+  created_by_run_id: string | null
+  created_via: string
+  allow_code_execution: boolean
   enabled: boolean
   sort_order: number
   last_run_at: string | null
@@ -581,6 +587,8 @@ export type DigitalHuman = {
   status: string
   sort_order: number
   can_write_positions: boolean
+  delegation_enabled: boolean
+  delegation_description: string | null
   feishu_bot_enabled: boolean
   updated_at: string | null
 }
@@ -831,4 +839,13 @@ export type AgentStreamEvent = {
   max_attempts?: number
   retry_after_ms?: number
   reset_stream?: boolean
+  team_id?: string
+  child_run_id?: string
+  agent_code?: string
+  agent_name?: string
+  member_count?: number
+  completed?: number
+  total?: number
+  summary?: string
+  deadline_at?: string
 }

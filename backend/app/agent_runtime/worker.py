@@ -24,6 +24,9 @@ class AgentRuntimeWorker:
         self.repository = repository
         self.broker = broker
         self.executor = AgentRunExecutor(repository, broker)
+        from backend.app.agent_runtime.team_service import AgentTeamService
+
+        self.team_service = AgentTeamService(repository.session_factory, repository)
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._running: set[asyncio.Task[bool]] = set()
@@ -96,6 +99,9 @@ class AgentRuntimeWorker:
                 for run_id in expired_runs:
                     if await asyncio.to_thread(self.repository.requeue, run_id):
                         await self.broker.enqueue(run_id)
+                resumed_team_runs = await asyncio.to_thread(self.team_service.reconcile)
+                for run_id in resumed_team_runs:
+                    await self.broker.enqueue(run_id)
             if now - last_cleanup >= 3600:
                 last_cleanup = now
                 pruned = await asyncio.to_thread(

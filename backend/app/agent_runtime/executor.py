@@ -30,6 +30,9 @@ class AgentRunExecutor:
         self.repository = repository
         self.broker = broker
         self.worker_id = worker_id or f"{socket.gethostname()}:{uuid.uuid4().hex[:10]}"
+        from backend.app.agent_runtime.team_service import AgentTeamService
+
+        self.team_service = AgentTeamService(repository.session_factory, repository)
 
     async def execute(self, run_id: str) -> bool:
         run_lease = await self.broker.acquire_lease(f"run:{run_id}", settings.agent_lock_ttl_seconds)
@@ -98,6 +101,7 @@ class AgentRunExecutor:
                 await sink.emit({"type": "done", "status": "cancelled", "duration_ms": duration_ms})
                 await sink.flush()
                 await asyncio.to_thread(self.repository.mark_terminal, run_id, "cancelled")
+                await self._notify_team_parent(run_id)
                 return True
             if outcome.status == "waiting_approval":
                 approval_already_resolved = await asyncio.to_thread(
@@ -107,8 +111,17 @@ class AgentRunExecutor:
                 if approval_already_resolved:
                     await self.broker.enqueue(run_id)
                 return True
+            if outcome.status == "waiting_children":
+                team_already_resolved = await asyncio.to_thread(
+                    self.repository.mark_waiting_children,
+                    run_id,
+                )
+                if team_already_resolved:
+                    await self.broker.enqueue(run_id)
+                return True
             if outcome.status == "failed":
                 await self._handle_failure(run, sink, outcome.error or "Agent execution failed", started)
+                await self._notify_team_parent(run_id)
                 return True
 
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -127,6 +140,7 @@ class AgentRunExecutor:
                 "completed",
                 result_message_id=message_id,
             )
+            await self._notify_team_parent(run_id)
             self._schedule_post_run(request_payload)
             log_event(
                 "agent", "INFO", "Durable Agent run completed", to_db=False,
@@ -213,6 +227,13 @@ class AgentRunExecutor:
     async def _recover_or_fail(self, run_id: str, error: str) -> None:
         run = await asyncio.to_thread(self.repository.get_run, run_id)
         if run and run["status"] not in {"completed", "failed", "cancelled"}:
+            if run.get("cancel_requested"):
+                await asyncio.to_thread(self.repository.mark_terminal, run_id, "cancelled")
+                sink = DurableEventSink(run_id, self.repository, self.broker)
+                await sink.emit({"type": "done", "status": "cancelled"})
+                await sink.flush()
+                await self._notify_team_parent(run_id)
+                return
             has_side_effects = await asyncio.to_thread(self.repository.has_side_effects, run_id)
             if not has_side_effects and self._is_retryable(error) and await asyncio.to_thread(
                 self.repository.requeue, run_id, error=error
@@ -224,7 +245,18 @@ class AgentRunExecutor:
             await sink.emit({"type": "error", "content": error})
             await sink.emit({"type": "done", "status": "failed"})
             await sink.flush()
+            await self._notify_team_parent(run_id)
         log_event("agent", "ERROR", "Durable Agent worker failed", run_id=run_id, error=error[:500])
+
+    async def _notify_team_parent(self, run_id: str) -> None:
+        result = await asyncio.to_thread(self.team_service.on_child_terminal, run_id)
+        if not result or not result.get("parent_run_id"):
+            return
+        parent_run_id = str(result["parent_run_id"])
+        for seq in result.get("event_seqs") or []:
+            await self.broker.publish_event(parent_run_id, int(seq))
+        if result.get("parent_requeued"):
+            await self.broker.enqueue(parent_run_id)
 
     @staticmethod
     def _is_retryable(error: str) -> bool:

@@ -8,6 +8,7 @@ RunStatus = Literal[
     "queued",
     "running",
     "waiting_approval",
+    "waiting_children",
     "completed",
     "failed",
     "cancelled",

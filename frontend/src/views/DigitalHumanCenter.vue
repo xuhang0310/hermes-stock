@@ -30,7 +30,7 @@ const props = withDefaults(defineProps<{
 const activeCenterTab = ref<'chat' | 'feishuBots'>(props.initialTab)
 
 type ReactStep = {
-  type: 'model' | 'reasoning' | 'thought' | 'action' | 'observation' | 'error'
+  type: 'model' | 'reasoning' | 'thought' | 'action' | 'observation' | 'team' | 'error'
   content: string
   tool?: string
   displayName?: string
@@ -329,7 +329,16 @@ function stepLabel(step: ReactStep) {
   if (step.type === 'thought') return 'Thought'
   if (step.type === 'action') return `Action: ${step.displayName || step.tool || 'tool'}`
   if (step.type === 'observation') return 'Observation'
+  if (step.type === 'team') return 'Agent Team'
   return 'Error'
+}
+
+function teamEventText(event: AgentStreamEvent) {
+  if (event.type === 'team_created') return `已创建协作组，${event.member_count || 0} 个数字人开始并行执行`
+  if (event.type === 'team_member_queued') return `${event.agent_name || event.agent_code || '数字人'} 已进入执行队列`
+  if (event.type === 'team_member_done') return `${event.agent_name || event.agent_code || '数字人'}：${event.status || '完成'}`
+  if (event.type === 'team_done') return event.summary || `协作完成 ${event.completed || 0}/${event.total || 0}`
+  return event.summary || '子任务结果已回流，总调度继续统稿'
 }
 
 function streamStatusText(message: ChatMessage) {
@@ -490,6 +499,12 @@ function handleRunEvent(reply: ChatMessage, controller: AbortController, event: 
       approval.status = event.decision || approval.status
       reply.approvalBusy = false
     }
+  } else if (event.type.startsWith('team_')) {
+    reply.streamStatus = 'tooling'
+    reply.liveTool = null
+    flushReasoning(reply)
+    flushThought(reply)
+    pushStep(reply, { type: 'team', content: teamEventText(event) })
   } else if (event.type === 'action') {
     reply.streamStatus = 'tooling'
     reply.liveTool = null

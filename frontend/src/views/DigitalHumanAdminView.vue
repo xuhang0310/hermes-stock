@@ -24,7 +24,7 @@ const READONLY_ROLES = ['risk-officer', 'market-sentinel', 'short-term-hunter']
 const stats = computed(() => ({
   total: list.value.length,
   enabled: list.value.filter((item) => item.status === 'enabled').length,
-  canWrite: list.value.filter((item) => item.can_write_positions).length,
+  delegatable: list.value.filter((item) => item.delegation_enabled).length,
   feishu: list.value.filter((item) => item.feishu_bot_enabled).length
 }))
 
@@ -54,7 +54,9 @@ function fullPayload(item: DigitalHuman): Record<string, unknown> {
     quick_prompts: item.quick_prompts,
     status: item.status,
     sort_order: item.sort_order,
-    can_write_positions: item.can_write_positions
+    can_write_positions: item.can_write_positions,
+    delegation_enabled: item.delegation_enabled,
+    delegation_description: item.delegation_description
   }
 }
 
@@ -201,7 +203,7 @@ onMounted(load)
     <div class="hub-metrics" aria-label="数字人统计">
       <div><span>角色总数</span><strong>{{ stats.total }}</strong></div>
       <div><span>当前启用</span><strong>{{ stats.enabled }}</strong></div>
-      <div><span>可写持仓</span><strong>{{ stats.canWrite }}</strong></div>
+      <div><span>可调度成员</span><strong>{{ stats.delegatable }}</strong></div>
       <div><span>飞书绑定</span><strong>{{ stats.feishu }}</strong></div>
     </div>
 
@@ -222,6 +224,7 @@ onMounted(load)
           </div>
           <div class="entity-badges">
             <span :class="{ accent: item.can_write_positions }">{{ item.can_write_positions ? '可写持仓' : '只读分析' }}</span>
+            <span v-if="item.delegation_enabled" class="accent">可被总调度调用</span>
             <span v-if="item.feishu_bot_enabled">飞书已绑定</span>
           </div>
           <span class="model-health"><i></i>{{ item.status === 'enabled' ? '可用' : '停用' }}</span>
@@ -262,6 +265,14 @@ onMounted(load)
           <label class="friendly-switch">
             <input v-model="editForm.can_write_positions" type="checkbox" /><i></i>
             <span><b>允许写入持仓</b><small>聊天时仍要求用户具备 data:write 权限，并完成预览确认</small></span>
+          </label>
+          <label class="friendly-switch">
+            <input v-model="editForm.delegation_enabled" type="checkbox" /><i></i>
+            <span><b>允许总调度调用</b><small>启用后，总调度可派发独立研究任务；子任务只读运行，不能继续派发。</small></span>
+          </label>
+          <label v-if="editForm.delegation_enabled">
+            <span>Team 能力说明</span>
+            <input v-model="editForm.delegation_description" placeholder="例如：擅长盘中异动、量价关系与市场情绪分析" />
           </label>
           <div v-if="error" class="test-result fail"><strong>{{ error }}</strong></div>
         </div>

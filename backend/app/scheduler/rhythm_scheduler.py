@@ -26,6 +26,7 @@ from backend.app.agent_runtime.channel_runs import (
     create_channel_run,
     wait_for_channel_run,
 )
+from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.feishu.feishu import send_feishu
 from backend.app.core.models import (
     AgentReport,
@@ -146,7 +147,10 @@ def _interval_due(job: ScheduledJob, now: datetime) -> bool:
 
 def _is_due(job: ScheduledJob, now: datetime) -> bool:
     schedule_type = job.schedule_type
-    if schedule_type in ("daily", "weekly", "monthly_last"):
+    if schedule_type == "once":
+        if job.run_once_at is None or job.run_once_at > now:
+            return False
+    elif schedule_type in ("daily", "weekly", "monthly_last"):
         if not job.run_time or job.run_time != now.strftime("%H:%M"):
             return False
         if schedule_type in ("daily", "weekly") and not _weekday_ok(job, now):
@@ -221,16 +225,25 @@ def _run_scheduled_agent(
     with SessionLocal() as db:
         profile = db.scalar(
             select(DigitalHumanProfile)
-            .where(DigitalHumanProfile.code == snap["digital_human_code"])
+            .where(
+                DigitalHumanProfile.code == snap["digital_human_code"],
+                DigitalHumanProfile.status == "enabled",
+            )
             .limit(1)
         )
         if profile is None:
-            raise RuntimeError("Scheduled digital human does not exist.")
-        owner = db.scalar(
-            select(User).where(User.is_enabled.is_(True)).order_by(User.id).limit(1)
-        )
+            raise RuntimeError("Scheduled digital human does not exist or is disabled.")
+        owner = db.get(User, snap.get("owner_user_id")) if snap.get("owner_user_id") else None
+        if snap.get("owner_user_id") and (owner is None or not owner.is_enabled):
+            raise RuntimeError("The scheduled Agent owner is missing or disabled.")
+        if owner is None:
+            owner = db.scalar(
+                select(User).where(User.is_enabled.is_(True)).order_by(User.id).limit(1)
+            )
         if owner is None:
             raise RuntimeError("No enabled user can own the scheduled Agent session.")
+        if not target_roles_allow(profile.target_roles, owner.role):
+            raise RuntimeError("The scheduled Agent is not available to its owner role.")
         chat_session = db.scalar(
             select(AiChatSession)
             .where(
@@ -278,6 +291,8 @@ def _run_scheduled_agent(
         source_ref=job_run_id,
         user_id=owner_id,
         user_label=owner_label,
+        allow_code_execution=bool(snap.get("allow_code_execution")),
+        approval_policy=str(snap.get("approval_policy") or "full"),
     )
     run = create_channel_run(request_payload, idempotency_key=f"schedule:{job_run_id}")
     if run["created"]:
@@ -543,6 +558,9 @@ def _job_snapshot(job: ScheduledJob) -> dict:
         "digital_human_code": job.digital_human_code,
         "prompt_template": job.prompt_template,
         "push_channel_key": job.push_channel_key,
+        "owner_user_id": job.owner_user_id,
+        "allow_code_execution": bool(job.allow_code_execution),
+        "approval_policy": job.approval_policy,
     }
 
 
@@ -615,7 +633,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
             from backend.app.ai.rag_ingest import run_ingest
 
             output_preview = run_ingest()
-        elif snapshot["job_kind"] == "agent_report":
+        elif snapshot["job_kind"] in {"agent_report", "agent_task"}:
             report_id, notification_id, output_preview, push_error = _run_agent_report(
                 snapshot,
                 ran_at,
@@ -675,6 +693,8 @@ def _claim_due_jobs(now: datetime) -> list[tuple[str, str]]:
                 )
             )
             try:
+                if job.schedule_type == "once":
+                    job.enabled = False
                 session.commit()
             except IntegrityError:
                 session.rollback()
@@ -751,6 +771,14 @@ def _recover_stale_runs() -> int:
             run.status = "failed"
             run.error = "进程重启，任务被中断"
             run.finished_at = now_sh()
+            job = session.scalar(
+                select(ScheduledJob).where(ScheduledJob.job_key == run.job_key).limit(1)
+            )
+            if job is not None and job.schedule_type == "once" and not job.enabled:
+                # A crash can happen after a one-shot job is claimed and disabled,
+                # but before its Agent run is dispatched. Re-enable it so the next
+                # scheduler tick claims a fresh fire key and completes the delivery.
+                job.enabled = True
         if stale:
             session.commit()
         return len(stale)

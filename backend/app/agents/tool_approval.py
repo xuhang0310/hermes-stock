@@ -22,6 +22,12 @@ RiskLevel = Literal["low", "medium", "high"]
 APPROVAL_TTL_SECONDS = 300
 _WORKSPACE_MUTATIONS = {"ws_write_file", "ws_edit_file"}
 _CODE_EXECUTION = {"ws_run_python"}
+_PERSISTENT_AUTOMATION = {
+    "create_agent_schedule",
+    "update_agent_schedule",
+    "pause_agent_schedule",
+    "delete_agent_schedule",
+}
 
 
 def normalize_approval_policy(value: str | None, *, legacy_allow_code_execution: bool = False) -> ApprovalPolicy:
@@ -31,7 +37,7 @@ def normalize_approval_policy(value: str | None, *, legacy_allow_code_execution:
 
 
 def classify_tool_risk(tool_name: str, args: dict[str, Any], write_tool_names: set[str] | None = None) -> RiskLevel:
-    if tool_name in _CODE_EXECUTION:
+    if tool_name in _CODE_EXECUTION or tool_name in _PERSISTENT_AUTOMATION:
         return "high"
     if tool_name in (write_tool_names or set()):
         return "high" if bool(args.get("confirmed")) else "low"

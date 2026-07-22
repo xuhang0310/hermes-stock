@@ -105,6 +105,8 @@ class DigitalHumanIn(BaseModel):
     status: str = Field(default="enabled", max_length=24)
     sort_order: int = 0
     can_write_positions: bool = False
+    delegation_enabled: bool = True
+    delegation_description: str | None = Field(default=None, max_length=500)
 
 
 class DataSourceConfigIn(BaseModel):
@@ -408,6 +410,8 @@ def _digital_human_out(profile: DigitalHumanProfile) -> dict:
         "status": profile.status,
         "sort_order": profile.sort_order,
         "can_write_positions": bool(profile.can_write_positions),
+        "delegation_enabled": bool(profile.delegation_enabled),
+        "delegation_description": profile.delegation_description,
         "feishu_bot_enabled": bool(profile.feishu_bot_enabled),
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
     }
@@ -2559,6 +2563,22 @@ def agent_run_status(
     return run
 
 
+@router.get("/agent/runs/{run_id}/team")
+def agent_run_team_status(
+    run_id: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    from backend.app.agent_runtime.team_service import agent_team_service
+
+    run = agent_run_repository.get_run(run_id, user_id=context.user.id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
+    team = agent_team_service.team_for_run(run_id, user_id=context.user.id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="该 Agent 任务没有 Team 协作记录")
+    return team
+
+
 @router.get("/agent/runs/{run_id}/events")
 async def agent_run_events(
     run_id: str,
@@ -2597,6 +2617,9 @@ async def cancel_agent_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
     await asyncio.to_thread(cancel_pending_run_approvals, run_id)
+    from backend.app.agent_runtime.team_service import agent_team_service
+
+    await asyncio.to_thread(agent_team_service.cancel_for_parent, run_id)
     from backend.app.agent_runtime.tool_repository import tool_execution_repository
 
     await asyncio.to_thread(tool_execution_repository.cancel_for_run, run_id)

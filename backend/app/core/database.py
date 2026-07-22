@@ -84,6 +84,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             ("feishu_app_secret_cipher", "ADD COLUMN feishu_app_secret_cipher TEXT NULL AFTER feishu_app_id"),
             ("feishu_bot_enabled", "ADD COLUMN feishu_bot_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER feishu_app_secret_cipher"),
             ("can_write_positions", "ADD COLUMN can_write_positions TINYINT(1) NOT NULL DEFAULT 0 AFTER feishu_bot_enabled"),
+            ("delegation_enabled", "ADD COLUMN delegation_enabled TINYINT(1) NOT NULL DEFAULT 1 AFTER can_write_positions"),
+            ("delegation_description", "ADD COLUMN delegation_description VARCHAR(500) NULL AFTER delegation_enabled"),
         ):
             has_column = connection.execute(
                 text(
@@ -164,6 +166,11 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         _add_column("agent_runs", "priority", "priority INT NOT NULL DEFAULT 100")
         _add_column("agent_runs", "source_type", "source_type VARCHAR(24) NOT NULL DEFAULT 'web'")
         _add_column("agent_runs", "source_ref", "source_ref VARCHAR(160) NULL")
+        _add_column("agent_runs", "parent_run_id", "parent_run_id VARCHAR(64) NULL")
+        _add_column("agent_runs", "root_run_id", "root_run_id VARCHAR(64) NULL")
+        _add_column("agent_runs", "team_id", "team_id VARCHAR(64) NULL")
+        _add_column("agent_runs", "orchestration_depth", "orchestration_depth INT NOT NULL DEFAULT 0")
+        _add_column("agent_runs", "deadline_at", "deadline_at DATETIME NULL")
         for column, ddl in (
             ("execution_mode", "execution_mode VARCHAR(24) NOT NULL DEFAULT 'inline'"),
             ("max_attempts", "max_attempts INT NOT NULL DEFAULT 1"),
@@ -220,6 +227,31 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             connection.execute(text("CREATE INDEX ix_workspace_documents_user_id ON workspace_documents (user_id)"))
         # 数据源配置：embedding/rerank 需要独立 model 字段（后台可配置嵌入/重排模型）
         _add_column("data_source_configs", "model", "model VARCHAR(120) NULL")
+
+        for column, ddl in (
+            ("run_once_at", "run_once_at DATETIME NULL"),
+            ("timezone", "timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai'"),
+            ("owner_user_id", "owner_user_id INT NULL"),
+            ("created_by_run_id", "created_by_run_id VARCHAR(64) NULL"),
+            ("created_via", "created_via VARCHAR(24) NOT NULL DEFAULT 'admin'"),
+            ("allow_code_execution", "allow_code_execution TINYINT(1) NOT NULL DEFAULT 0"),
+            ("approval_policy", "approval_policy VARCHAR(24) NOT NULL DEFAULT 'full'"),
+        ):
+            _add_column("scheduled_jobs", column, ddl)
+
+        def _add_index(table: str, index_name: str, columns: str) -> None:
+            exists = connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE table_schema = DATABASE() AND table_name = :t AND index_name = :i"
+                ),
+                {"t": table, "i": index_name},
+            ).scalar()
+            if not exists:
+                connection.execute(text(f"CREATE INDEX {index_name} ON {table} ({columns})"))
+
+        _add_index("agent_runs", "ix_agent_runs_team_id", "team_id")
+        _add_index("scheduled_jobs", "ix_scheduled_jobs_owner_user_id", "owner_user_id")
 
         # 回填 broker_code（按中文券商名反查），positions.account_id（关联该 symbol 最新快照账户）
         connection.execute(

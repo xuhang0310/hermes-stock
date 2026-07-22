@@ -497,6 +497,8 @@ class DigitalHumanProfile(Base):
     feishu_app_secret_cipher: Mapped[str | None] = mapped_column(Text)
     feishu_bot_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     can_write_positions: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    delegation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    delegation_description: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -582,6 +584,11 @@ class AgentRun(Base):
     chat_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="research")
     source_type: Mapped[str] = mapped_column(String(24), nullable=False, default="web")
     source_ref: Mapped[str | None] = mapped_column(String(160))
+    parent_run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    root_run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    team_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    orchestration_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     idempotency_key: Mapped[str | None] = mapped_column(String(120))
@@ -594,6 +601,62 @@ class AgentRun(Base):
     worker_id: Mapped[str | None] = mapped_column(String(160))
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentTeamRun(Base):
+    """One durable fan-out/fan-in operation owned by a leader Agent run."""
+
+    __tablename__ = "agent_team_runs"
+    __table_args__ = (
+        UniqueConstraint("leader_run_id", "tool_call_id", name="uq_agent_team_leader_call"),
+        Index("ix_agent_team_status_deadline", "status", "deadline_at"),
+    )
+
+    team_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    leader_run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    root_run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    objective: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    max_members: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
+    result_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentDelegation(Base):
+    """A child Agent assignment within a durable Team run."""
+
+    __tablename__ = "agent_delegations"
+    __table_args__ = (
+        UniqueConstraint("team_id", "member_index", name="uq_agent_delegation_member"),
+        UniqueConstraint("child_run_id", name="uq_agent_delegation_child_run"),
+        Index("ix_agent_delegations_team_status", "team_id", "status"),
+    )
+
+    delegation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_team_runs.team_id"), nullable=False)
+    parent_run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    child_run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    member_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_profile_id: Mapped[int] = mapped_column(Integer, ForeignKey("digital_human_profiles.id"), nullable=False)
+    target_profile_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_profile_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    instruction: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    expected_output: Mapped[str | None] = mapped_column(Text)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    result_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -1056,11 +1119,18 @@ class ScheduledJob(Base):
     interval_minutes: Mapped[int | None] = mapped_column(Integer)
     window_start: Mapped[str | None] = mapped_column(String(5))
     window_end: Mapped[str | None] = mapped_column(String(5))
+    run_once_at: Mapped[datetime | None] = mapped_column(DateTime)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Shanghai")
     trading_day_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     digital_human_code: Mapped[str | None] = mapped_column(String(80))
     agent_name: Mapped[str | None] = mapped_column(String(80))
     prompt_template: Mapped[str | None] = mapped_column(Text)
     push_channel_key: Mapped[str | None] = mapped_column(String(80))
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    created_by_run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    created_via: Mapped[str] = mapped_column(String(24), nullable=False, default="admin")
+    allow_code_execution: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approval_policy: Mapped[str] = mapped_column(String(24), nullable=False, default="full")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime)

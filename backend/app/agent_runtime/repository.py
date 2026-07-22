@@ -18,6 +18,8 @@ from backend.app.core.models import (
     AgentRunCheckpoint,
     AgentRunEvent,
     AgentRunStep,
+    AgentDelegation,
+    AgentTeamRun,
     AgentToolApproval,
     AgentToolExecution,
 )
@@ -37,6 +39,11 @@ def _run_dict(row: AgentRun) -> dict[str, Any]:
         "chat_mode": row.chat_mode,
         "source_type": row.source_type,
         "source_ref": row.source_ref,
+        "parent_run_id": row.parent_run_id,
+        "root_run_id": row.root_run_id,
+        "team_id": row.team_id,
+        "orchestration_depth": row.orchestration_depth,
+        "deadline_at": row.deadline_at.isoformat() if row.deadline_at else None,
         "status": row.status,
         "priority": row.priority,
         "last_event_seq": row.last_event_seq,
@@ -68,6 +75,11 @@ class AgentRunRepository:
         priority: int = 100,
         source_type: str = "web",
         source_ref: str | None = None,
+        parent_run_id: str | None = None,
+        root_run_id: str | None = None,
+        team_id: str | None = None,
+        orchestration_depth: int = 0,
+        deadline_at: datetime | None = None,
     ) -> tuple[dict[str, Any], bool]:
         normalized_key = (idempotency_key or "").strip()[:120] or None
         with self.session_factory() as db:
@@ -88,6 +100,11 @@ class AgentRunRepository:
                 chat_mode=chat_mode,
                 source_type=(source_type or "web")[:24],
                 source_ref=(source_ref or "")[:160] or None,
+                parent_run_id=parent_run_id,
+                root_run_id=root_run_id,
+                team_id=team_id,
+                orchestration_depth=max(0, orchestration_depth),
+                deadline_at=deadline_at,
                 status="queued",
                 priority=priority,
                 idempotency_key=normalized_key,
@@ -336,7 +353,7 @@ class AgentRunRepository:
                         select(active.run_id).where(
                             active.session_id == AgentRun.session_id,
                             active.run_id != AgentRun.run_id,
-                            active.status.in_(["running", "waiting_approval"]),
+                            active.status.in_(["running", "waiting_approval", "waiting_children"]),
                         )
                     ),
                 )
@@ -360,7 +377,7 @@ class AgentRunRepository:
                 select(AgentRun.run_id).where(
                     AgentRun.session_id == row.session_id,
                     AgentRun.run_id != row.run_id,
-                    AgentRun.status.in_(["running", "waiting_approval"]),
+                    AgentRun.status.in_(["running", "waiting_approval", "waiting_children"]),
                 ).limit(1)
             )
             if other_active:
@@ -375,6 +392,12 @@ class AgentRunRepository:
             row.worker_id = worker_id[:160]
             row.started_at = row.started_at or now
             row.heartbeat_at = now
+            delegation = db.scalar(
+                select(AgentDelegation).where(AgentDelegation.child_run_id == row.run_id).limit(1)
+            )
+            if delegation is not None and delegation.status == "queued":
+                delegation.status = "running"
+                delegation.started_at = now
             db.commit()
             db.refresh(row)
             return _run_dict(row)
@@ -417,7 +440,7 @@ class AgentRunRepository:
                 return result
             row.cancel_requested = True
             cancelled_now = False
-            if row.status in {"queued", "waiting_approval"}:
+            if row.status in {"queued", "waiting_approval", "waiting_children"}:
                 row.status = "cancelled"
                 row.finished_at = now
                 cancelled_now = True
@@ -445,6 +468,25 @@ class AgentRunRepository:
                 db.commit()
                 return not bool(has_pending)
             return False
+
+    def mark_waiting_children(self, run_id: str) -> bool:
+        """Park a leader run unless every child already finished before parking."""
+
+        with self.session_factory() as db:
+            row = db.scalar(select(AgentRun).where(AgentRun.run_id == run_id).with_for_update())
+            if row is None or row.status != "running":
+                return False
+            active_team = db.scalar(
+                select(AgentTeamRun.team_id).where(
+                    AgentTeamRun.leader_run_id == run_id,
+                    AgentTeamRun.status == "running",
+                ).limit(1)
+            )
+            row.status = "waiting_children" if active_team else "queued"
+            row.worker_id = None
+            row.heartbeat_at = _utcnow()
+            db.commit()
+            return active_team is None
 
     def requeue(self, run_id: str, *, error: str | None = None) -> bool:
         with self.session_factory() as db:
