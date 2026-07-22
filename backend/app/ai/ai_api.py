@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.agent_runtime.artifact_service import artifact_service
+from backend.app.agent_runtime.duration import elapsed_wall_clock_ms
 from backend.app.agent_runtime.payloads import user_text_from_content
 from backend.app.agent_runtime.repository import agent_run_repository
 from backend.app.agent_runtime.service import agent_runtime_service
@@ -1965,13 +1966,16 @@ def stock_strategies(
     return stock_strategy_payload()
 
 
-def _chat_messages_out(messages: list[AiChatMessage]) -> list[dict]:
+def _chat_messages_out(
+    messages: list[AiChatMessage],
+    run_durations: dict[int, int] | None = None,
+) -> list[dict]:
     payloads: list[dict] = []
     last_user_created_at: datetime | None = None
     for item in messages:
         if item.role not in {"user", "assistant"}:
             continue
-        duration_ms = item.duration_ms
+        duration_ms = (run_durations or {}).get(item.id, item.duration_ms)
         if item.role == "user":
             last_user_created_at = item.created_at
         elif duration_ms is None and last_user_created_at is not None:
@@ -1988,6 +1992,26 @@ def _chat_messages_out(messages: list[AiChatMessage]) -> list[dict]:
             }
         )
     return payloads
+
+
+def _run_duration_map(db: Session, session_id: int) -> dict[int, int]:
+    rows = db.execute(
+        select(
+            AgentRun.result_message_id,
+            AgentRun.created_at,
+            AgentRun.finished_at,
+        ).where(
+            AgentRun.session_id == session_id,
+            AgentRun.result_message_id.is_not(None),
+            AgentRun.finished_at.is_not(None),
+        )
+    ).all()
+    durations: dict[int, int] = {}
+    for message_id, created_at, finished_at in rows:
+        duration_ms = elapsed_wall_clock_ms(created_at, finished_at)
+        if message_id is not None and duration_ms is not None:
+            durations[int(message_id)] = duration_ms
+    return durations
 
 
 def _session_visibility(context: AuthContext):
@@ -2113,7 +2137,7 @@ def agent_session_detail(
         "digital_human_name": row.digital_human.name if row.digital_human else None,
         "model_config_id": row.model_config_id,
         "model_display_name": row.model_config.display_name if row.model_config else None,
-        "messages": _chat_messages_out(messages),
+        "messages": _chat_messages_out(messages, _run_duration_map(db, row.id)),
         **_session_source_out(row),
     }
 

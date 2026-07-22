@@ -6,10 +6,12 @@ import socket
 import time
 import uuid
 from contextlib import suppress
+from datetime import datetime
 from typing import Any
 
 from backend.app.agent_runtime.agentscope_engine import run_agentscope
 from backend.app.agent_runtime.contracts import EngineOutcome
+from backend.app.agent_runtime.duration import elapsed_wall_clock_ms
 from backend.app.agent_runtime.event_sink import DurableEventSink
 from backend.app.agent_runtime.legacy_engine import run_legacy
 from backend.app.agent_runtime.redis_broker import RedisBroker, redis_broker
@@ -97,7 +99,7 @@ class AgentRunExecutor:
             await sink.flush()
 
             if await is_cancelled() or outcome.status == "cancelled":
-                duration_ms = int((time.monotonic() - started) * 1000)
+                duration_ms = self._total_duration_ms(run, started)
                 await sink.emit({"type": "done", "status": "cancelled", "duration_ms": duration_ms})
                 await sink.flush()
                 await asyncio.to_thread(self.repository.mark_terminal, run_id, "cancelled")
@@ -124,7 +126,7 @@ class AgentRunExecutor:
                 await self._notify_team_parent(run_id)
                 return True
 
-            duration_ms = int((time.monotonic() - started) * 1000)
+            duration_ms = self._total_duration_ms(run, started)
             message_id = await asyncio.to_thread(
                 self._store_assistant_message,
                 request_payload,
@@ -206,7 +208,7 @@ class AgentRunExecutor:
                 await asyncio.sleep(delay_seconds)
                 await self.broker.enqueue(run_id)
                 return
-        duration_ms = int((time.monotonic() - started) * 1000)
+        duration_ms = self._total_duration_ms(run, started)
         await sink.emit({"type": "error", "content": error})
         await sink.emit({"type": "done", "status": "failed", "duration_ms": duration_ms})
         await sink.flush()
@@ -257,6 +259,12 @@ class AgentRunExecutor:
             await self.broker.publish_event(parent_run_id, int(seq))
         if result.get("parent_requeued"):
             await self.broker.enqueue(parent_run_id)
+
+    @staticmethod
+    def _total_duration_ms(run: dict[str, Any], attempt_started: float) -> int:
+        attempt_ms = max(0, int((time.monotonic() - attempt_started) * 1000))
+        total_ms = elapsed_wall_clock_ms(run.get("created_at"), datetime.utcnow())
+        return max(attempt_ms, total_ms or 0)
 
     @staticmethod
     def _is_retryable(error: str) -> bool:

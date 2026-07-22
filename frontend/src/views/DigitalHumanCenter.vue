@@ -995,7 +995,7 @@ function requestIsVisible(request: ActiveChatRequest) {
               <span class="stream-status-pulse"></span>
               <strong>{{ streamStatusText(item) }}</strong>
               <span v-if="item.streamStatus === 'done' && typeof item.durationMs === 'number'" class="stream-duration">
-                用时 {{ formatStreamDuration(item.durationMs) }}
+                总用时 {{ formatStreamDuration(item.durationMs) }}
               </span>
             </div>
 
