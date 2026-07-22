@@ -22,6 +22,11 @@ dependencies = [
     "chromadb>=0.5.0",
     "pymilvus==2.6.16",
     "sentence-transformers>=3.0.0",
+    "agentscope[storage]==2.0.4.post1",
+    "redis>=5.2.0,<7",
+    "opentelemetry-api==1.42.1",
+    "opentelemetry-sdk==1.42.1",
+    "opentelemetry-exporter-otlp==1.42.1",
 ]
 
 # 可选：position_import v2 试点（STOCK_POSITION_AGENT_V2=true 时才用）。

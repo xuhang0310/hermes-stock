@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.database import Base
+
+
+LONG_TEXT = Text().with_variant(LONGTEXT(), "mysql")
+BIGINT_ID = BigInteger().with_variant(Integer(), "sqlite")
 
 
 class Instrument(Base):
@@ -546,6 +551,8 @@ class AgentToolApproval(Base):
     __tablename__ = "agent_tool_approvals"
 
     approval_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), index=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(160))
     session_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"), nullable=False, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     tool_name: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -556,6 +563,146 @@ class AgentToolApproval(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AgentRun(Base):
+    """Durable execution record; browser connections are not run ownership."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_agent_run_idempotency"),
+        Index("ix_agent_runs_status_heartbeat", "status", "heartbeat_at"),
+        Index("ix_agent_runs_session_created", "session_id", "created_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    engine: Mapped[str] = mapped_column(String(32), nullable=False, default="legacy")
+    chat_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="research")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120))
+    request_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    result_message_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_chat_messages.id"))
+    last_event_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    worker_id: Mapped[str | None] = mapped_column(String(160))
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentRunEvent(Base):
+    """Ordered, replayable events for a durable Agent run."""
+
+    __tablename__ = "agent_run_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_agent_run_event_seq"),
+        Index("ix_agent_run_events_run_created", "run_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    payload_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AgentRunCheckpoint(Base):
+    """Latest AgentScope state used to resume after approval or worker loss."""
+
+    __tablename__ = "agent_run_checkpoints"
+
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), primary_key=True)
+    engine: Mapped[str] = mapped_column(String(32), nullable=False)
+    state_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    waiting_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentRunStep(Base):
+    """A durable, queryable stage within an Agent run."""
+
+    __tablename__ = "agent_run_steps"
+    __table_args__ = (
+        Index("ix_agent_run_steps_run_seq", "run_id", "seq"),
+        Index("ix_agent_run_steps_status", "status", "updated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, default="stage")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    input_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    output_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentToolExecution(Base):
+    """Auditable lifecycle of one model-issued tool call."""
+
+    __tablename__ = "agent_tool_executions"
+    __table_args__ = (
+        UniqueConstraint("run_id", "tool_call_id", name="uq_agent_tool_run_call"),
+        Index("ix_agent_tool_exec_status", "status", "updated_at"),
+    )
+
+    execution_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    step_id: Mapped[int | None] = mapped_column(BIGINT_ID, ForeignKey("agent_run_steps.id"))
+    tool_call_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    tool_version: Mapped[str] = mapped_column(String(40), nullable=False, default="v1")
+    risk_level: Mapped[str | None] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    idempotency_key: Mapped[str | None] = mapped_column(String(160), unique=True)
+    arguments_sha256: Mapped[str | None] = mapped_column(String(64))
+    arguments_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    result_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    has_side_effects: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentOutbox(Base):
+    """Transactional messages for future external tool workers."""
+
+    __tablename__ = "agent_outbox"
+    __table_args__ = (Index("ix_agent_outbox_dispatch", "status", "available_at", "id"),)
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    aggregate_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    topic: Mapped[str] = mapped_column(String(160), nullable=False)
+    payload_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class AiPromptRecommendation(Base):

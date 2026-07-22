@@ -9,6 +9,7 @@ async function loadReader() {
   const server = await createServer({
     root: frontendRoot,
     appType: 'custom',
+    optimizeDeps: { noDiscovery: true },
     server: { middlewareMode: true, hmr: false }
   })
   try {

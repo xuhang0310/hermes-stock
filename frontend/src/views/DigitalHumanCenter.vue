@@ -422,6 +422,111 @@ async function downloadFile(file: GeneratedFile) {
   }
 }
 
+function handleRunEvent(reply: ChatMessage, controller: AbortController, event: AgentStreamEvent) {
+  if (event.type === 'session') {
+    selectedSessionId.value = event.session_id || selectedSessionId.value
+    selectedSessionSourceType.value = 'web'
+    selectedSessionSourceLabel.value = '网页'
+    selectedSessionSourceIdentifier.value = null
+    selectedSessionReadOnly.value = false
+    if (event.profile?.id) selectedProfileId.value = event.profile.id
+    if (event.model?.id) selectedModelId.value = event.model.id
+    return
+  }
+  if (event.type === 'model_selected') {
+    if (event.model?.id) selectedModelId.value = event.model.id
+    pushStep(reply, {
+      type: 'model',
+      content: `${event.model?.display_name || '默认模型'} / ${event.model?.model_name || ''}`
+    })
+  } else if (event.type === 'retrying') {
+    flushReasoning(reply)
+    flushThought(reply)
+    reply.liveTool = null
+    if (event.reset_stream) {
+      reply.liveReasoning = ''
+      reply.liveContent = ''
+    }
+    reply.streamStatus = 'connecting'
+    pushStep(reply, {
+      type: 'reasoning',
+      content: event.message || `第 ${event.attempt || 2} 次尝试正在启动`
+    })
+  } else if (event.type === 'reasoning_delta') {
+    reply.streamStatus = 'streaming'
+    reply.liveReasoning += event.content || ''
+  } else if (event.type === 'content_delta') {
+    reply.streamStatus = 'streaming'
+    flushReasoning(reply)
+    reply.liveContent += event.content || ''
+  } else if (event.type === 'content_end') {
+    flushReasoning(reply)
+    if (event.role === 'answer') {
+      reply.content = reply.liveContent.trim()
+      reply.liveContent = ''
+      completeStream(reply)
+    } else {
+      flushThought(reply)
+      reply.streamStatus = 'tooling'
+    }
+  } else if (event.type === 'tool_progress') {
+    reply.streamStatus = 'tooling'
+    reply.liveTool = applyToolProgress(reply.liveTool, event)
+  } else if (event.type === 'approval_required' && event.approval_id) {
+    reply.streamStatus = 'tooling'
+    reply.liveTool = null
+    reply.approval = {
+      approval_id: event.approval_id,
+      tool: event.tool || '',
+      display_name: event.display_name || event.tool || '工具操作',
+      risk_level: event.risk_level || 'high',
+      arguments_preview: event.arguments_preview || '',
+      expires_at: event.expires_at || '',
+      status: 'pending'
+    }
+  } else if (event.type === 'approval_resolved') {
+    const approval = reply.approval
+    if (approval && event.approval_id && approval.approval_id === event.approval_id) {
+      approval.status = event.decision || approval.status
+      reply.approvalBusy = false
+    }
+  } else if (event.type === 'action') {
+    reply.streamStatus = 'tooling'
+    reply.liveTool = null
+    flushReasoning(reply)
+    flushThought(reply)
+    pushStep(reply, { type: 'action', tool: event.tool, displayName: event.display_name, content: event.content || '' })
+  } else if (event.type === 'observation') {
+    reply.streamStatus = 'tooling'
+    flushReasoning(reply)
+    pushStep(reply, { type: 'observation', content: event.content || '' })
+  } else if (event.type === 'artifact') {
+    const path = event.path?.trim()
+    if (path && !reply.files.some((file) => file.path === path)) {
+      reply.files.push({ path, name: event.name || path.split('/').pop() || path, bytes: event.bytes })
+    }
+  } else if (event.type === 'error') {
+    flushReasoning(reply)
+    flushThought(reply)
+    reply.liveTool = null
+    reply.error = event.content || 'ReAct 响应失败'
+    reply.streamStatus = 'error'
+    finishStreamDuration(reply)
+    pushStep(reply, { type: 'error', content: reply.error })
+    error.value = reply.error
+  } else if (event.type === 'done') {
+    reply.liveTool = null
+    if (reply.error) {
+      reply.streamStatus = 'error'
+      finishStreamDuration(reply, event.duration_ms)
+    } else {
+      completeStream(reply, event.duration_ms)
+    }
+    releaseComposer(controller)
+  }
+  scrollChat()
+}
+
 async function send() {
   if (selectedSessionReadOnly.value) {
     error.value = '飞书同步会话为只读，请在对应飞书会话中继续回复。'
@@ -483,99 +588,7 @@ async function send() {
         attachments: sentAttachments.map((item) => ({ path: item.path })),
         approval_policy: approvalPolicy.value
       },
-      (event: AgentStreamEvent) => {
-        if (event.type === 'session') {
-          selectedSessionId.value = event.session_id || selectedSessionId.value
-          selectedSessionSourceType.value = 'web'
-          selectedSessionSourceLabel.value = '网页'
-          selectedSessionSourceIdentifier.value = null
-          selectedSessionReadOnly.value = false
-          if (event.profile?.id) selectedProfileId.value = event.profile.id
-          if (event.model?.id) selectedModelId.value = event.model.id
-          return
-        }
-        if (event.type === 'model_selected') {
-          if (event.model?.id) selectedModelId.value = event.model.id
-          pushStep(reply, {
-            type: 'model',
-            content: `${event.model?.display_name || '默认模型'} / ${event.model?.model_name || ''}`
-          })
-        } else if (event.type === 'reasoning_delta') {
-          reply.streamStatus = 'streaming'
-          reply.liveReasoning += event.content || ''
-        } else if (event.type === 'content_delta') {
-          reply.streamStatus = 'streaming'
-          flushReasoning(reply)
-          reply.liveContent += event.content || ''
-        } else if (event.type === 'content_end') {
-          flushReasoning(reply)
-          if (event.role === 'answer') {
-            reply.content = reply.liveContent.trim()
-            reply.liveContent = ''
-            completeStream(reply)
-          } else {
-            flushThought(reply)
-            reply.streamStatus = 'tooling'
-          }
-        } else if (event.type === 'tool_progress') {
-          // 模型正在生成工具调用参数（写文件内容等长参数期）：瞬态进度，action 到达即清
-          reply.streamStatus = 'tooling'
-          reply.liveTool = applyToolProgress(reply.liveTool, event)
-        } else if (event.type === 'approval_required' && event.approval_id) {
-          reply.streamStatus = 'tooling'
-          reply.liveTool = null
-          reply.approval = {
-            approval_id: event.approval_id,
-            tool: event.tool || '',
-            display_name: event.display_name || event.tool || '工具操作',
-            risk_level: event.risk_level || 'high',
-            arguments_preview: event.arguments_preview || '',
-            expires_at: event.expires_at || '',
-            status: 'pending'
-          }
-        } else if (event.type === 'approval_resolved') {
-          const approval = reply.approval
-          if (approval && event.approval_id && approval.approval_id === event.approval_id) {
-            approval.status = event.decision || approval.status
-            reply.approvalBusy = false
-          }
-        } else if (event.type === 'action') {
-          reply.streamStatus = 'tooling'
-          reply.liveTool = null
-          flushReasoning(reply)
-          flushThought(reply)
-          pushStep(reply, { type: 'action', tool: event.tool, displayName: event.display_name, content: event.content || '' })
-        } else if (event.type === 'observation') {
-          reply.streamStatus = 'tooling'
-          flushReasoning(reply)
-          pushStep(reply, { type: 'observation', content: event.content || '' })
-        } else if (event.type === 'artifact') {
-          const path = event.path?.trim()
-          if (path && !reply.files.some((file) => file.path === path)) {
-            reply.files.push({ path, name: event.name || path.split('/').pop() || path, bytes: event.bytes })
-          }
-        } else if (event.type === 'error') {
-          flushReasoning(reply)
-          flushThought(reply)
-          reply.liveTool = null
-          reply.error = event.content || 'ReAct 响应失败'
-          reply.streamStatus = 'error'
-          finishStreamDuration(reply)
-          pushStep(reply, { type: 'error', content: reply.error })
-          error.value = reply.error
-        } else if (event.type === 'done') {
-          reply.liveTool = null
-          if (reply.error) {
-            reply.streamStatus = 'error'
-            finishStreamDuration(reply, event.duration_ms)
-          } else {
-            completeStream(reply, event.duration_ms)
-          }
-          // done 是业务终止信号，立即解锁输入；不再等待浏览器观察到底层连接关闭。
-          releaseComposer(controller)
-        }
-        scrollChat()
-      },
+      (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
       controller.signal
     )
     // 收尾：优先保住已产出内容（有半截答案就转正）；只有从头到尾什么都没收到才提示重试，
@@ -626,6 +639,75 @@ async function send() {
   }
 }
 
+async function recoverActiveRun() {
+  if (sending.value) return
+  try {
+    const [run] = await api.activeAgentRuns({ chat_mode: 'research' })
+    if (!run) return
+
+    await openSession(run.session_id)
+    if (sending.value || selectedSessionReadOnly.value) return
+
+    const reply: ChatMessage = {
+      id: -Date.now(),
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
+      steps: [],
+      liveReasoning: '',
+      liveContent: '',
+      files: [],
+      attachments: [],
+      approval: null,
+      streamStatus: 'connecting',
+      startedAt: Date.now(),
+      processExpanded: true,
+      processAutoCollapsed: false
+    }
+    messages.value.push(reply)
+    sending.value = true
+    error.value = ''
+    scrollChat()
+
+    const controller = new AbortController()
+    abortController.value = controller
+    try {
+      await api.resumeAgentRun(
+        run.run_id,
+        (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
+        controller.signal
+      )
+      if (!reply.content && reply.liveContent.trim()) {
+        reply.content = reply.liveContent.trim()
+        reply.liveContent = ''
+      }
+      if (!reply.error) completeStream(reply)
+      nextTick(() => {
+        refreshSessions().catch(() => {})
+        if (selectedProfileId.value) loadPromptRecommendations(selectedProfileId.value).catch(() => {})
+      })
+    } catch (err) {
+      if (controller.signal.aborted) {
+        flushReasoning(reply)
+        flushThought(reply)
+        reply.liveTool = null
+        completeStream(reply)
+      } else {
+        reply.error = err instanceof Error ? err.message : '恢复数字人任务失败'
+        reply.streamStatus = 'error'
+        finishStreamDuration(reply)
+        error.value = reply.error
+      }
+    } finally {
+      releaseComposer(controller)
+      if (!reply.error) completeStream(reply)
+      scrollChat()
+    }
+  } catch {
+    // Runtime recovery is best-effort and must not block the chat page.
+  }
+}
+
 function stopSending() {
   abortController.value?.abort()
 }
@@ -657,7 +739,10 @@ function submitFromKeyboard(event: KeyboardEvent) {
   void send()
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  await recoverActiveRun()
+})
 </script>
 
 <template>

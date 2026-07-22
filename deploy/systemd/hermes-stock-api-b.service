@@ -10,7 +10,9 @@ User=hermes
 Group=hermes
 WorkingDirectory=/opt/hermes-stock/current
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/hermes-stock/redis/connection.env
 Environment=STOCK_BACKGROUND_SERVICES_ENABLED=false
+Environment=STOCK_AGENT_RUNTIME_WORKER_ENABLED=false
 ExecStart=/opt/hermes-stock/venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 18082 --timeout-graceful-shutdown 120
 Restart=always
 RestartSec=1

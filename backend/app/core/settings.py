@@ -81,6 +81,23 @@ class Settings:
     )
     workspace_exec_workspace_files: int = int(os.getenv("STOCK_WORKSPACE_EXEC_WORKSPACE_FILES", "2000"))
     workspace_exec_max_concurrency: int = int(os.getenv("STOCK_WORKSPACE_EXEC_MAX_CONCURRENCY", "4"))
+    # Durable Agent runtime. The legacy engine remains an explicit rollback
+    # switch, while new installations use AgentScope directly.
+    agent_runtime_mode: str = os.getenv("STOCK_AGENT_RUNTIME_MODE", "agentscope").strip().lower()
+    agent_runtime_worker_enabled: bool = os.getenv(
+        "STOCK_AGENT_RUNTIME_WORKER_ENABLED",
+        os.getenv("STOCK_BACKGROUND_SERVICES_ENABLED", "true"),
+    ).lower() == "true"
+    agent_redis_url: str = os.getenv("STOCK_AGENT_REDIS_URL", "").strip()
+    agent_run_timeout_seconds: int = int(os.getenv("STOCK_AGENT_RUN_TIMEOUT_SECONDS", "900"))
+    agent_shutdown_grace_seconds: int = int(os.getenv("STOCK_AGENT_SHUTDOWN_GRACE_SECONDS", "90"))
+    agent_run_max_attempts: int = int(os.getenv("STOCK_AGENT_RUN_MAX_ATTEMPTS", "3"))
+    agent_worker_concurrency: int = int(os.getenv("STOCK_AGENT_WORKER_CONCURRENCY", "4"))
+    agent_user_active_limit: int = int(os.getenv("STOCK_AGENT_USER_ACTIVE_LIMIT", "2"))
+    agent_queue_limit: int = int(os.getenv("STOCK_AGENT_QUEUE_LIMIT", "500"))
+    agent_lock_ttl_seconds: int = int(os.getenv("STOCK_AGENT_LOCK_TTL_SECONDS", "60"))
+    agent_event_retention_days: int = int(os.getenv("STOCK_AGENT_EVENT_RETENTION_DAYS", "14"))
+    agent_event_flush_chars: int = int(os.getenv("STOCK_AGENT_EVENT_FLUSH_CHARS", "320"))
     # 工作区根目录；空=默认 backend/agent_workspace。生产应配到 shared/ 下避免随 release 替换蒸发
     workspace_dir: str = os.getenv("STOCK_WORKSPACE_DIR", "")
     # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号

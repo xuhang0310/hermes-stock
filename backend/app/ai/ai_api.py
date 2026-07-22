@@ -19,15 +19,19 @@ import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, case, desc, func, or_, select, text, update
+from sqlalchemy import and_, case, delete, desc, func, or_, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.agent_runtime.payloads import user_text_from_content
+from backend.app.agent_runtime.repository import agent_run_repository
+from backend.app.agent_runtime.service import agent_runtime_service
 from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.models import (
     AiChatMessage,
     AiPromptRecommendation,
     AiChatSession,
+    AgentRun,
     AgentToolApproval,
     BackgroundTask,
     DataSourceConfig,
@@ -56,7 +60,7 @@ from backend.app.ai.prompt_recommendations import (
 )
 from backend.app.core.applog import log_event
 from backend.app.agents.stock_agent import run_agent_events
-from backend.app.agents.tool_approval import normalize_approval_policy
+from backend.app.agents.tool_approval import cancel_pending_run_approvals, normalize_approval_policy
 from backend.app.market.stock_tools import normalize_a_share_symbol, stock_strategy_payload
 from backend.app.core.settings import settings
 
@@ -2093,14 +2097,21 @@ def agent_approvals(
 
 
 @router.post("/agent/approvals/{approval_id}")
-def resolve_agent_approval(
+async def resolve_agent_approval(
     approval_id: str,
     payload: AgentApprovalDecisionIn,
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
-    row = db.get(AgentToolApproval, approval_id)
-    if row is None or row.user_id != context.user.id:
+    row = db.scalar(
+        select(AgentToolApproval)
+        .where(
+            AgentToolApproval.approval_id == approval_id,
+            AgentToolApproval.user_id == context.user.id,
+        )
+        .with_for_update()
+    )
+    if row is None:
         raise HTTPException(status_code=404, detail="审批请求不存在或无权操作")
     if row.status != "pending":
         return {"approval_id": row.approval_id, "status": row.status}
@@ -2109,36 +2120,47 @@ def resolve_agent_approval(
         row.resolved_at = datetime.utcnow()
         db.commit()
         raise HTTPException(status_code=409, detail="审批请求已过期")
-    resolved_at = datetime.utcnow()
-    result = db.execute(
-        update(AgentToolApproval)
-        .where(
-            AgentToolApproval.approval_id == approval_id,
-            AgentToolApproval.user_id == context.user.id,
-            AgentToolApproval.status == "pending",
-            AgentToolApproval.expires_at > resolved_at,
+    if row.run_id:
+        # The worker parks a run under the same row lock. This closes the
+        # approve-before-park race without polling or timing assumptions.
+        db.scalar(select(AgentRun).where(AgentRun.run_id == row.run_id).with_for_update())
+    row.status = payload.decision
+    row.resolved_at = datetime.utcnow()
+    run_ready = False
+    if row.run_id:
+        now = datetime.utcnow()
+        db.execute(
+            update(AgentToolApproval)
+            .where(
+                AgentToolApproval.run_id == row.run_id,
+                AgentToolApproval.status == "pending",
+                AgentToolApproval.expires_at <= now,
+            )
+            .values(status="expired", resolved_at=now)
         )
-        .values(status=payload.decision, resolved_at=resolved_at)
-    )
+        db.flush()
+        remaining = db.scalar(
+            select(func.count())
+            .select_from(AgentToolApproval)
+            .where(AgentToolApproval.run_id == row.run_id, AgentToolApproval.status == "pending")
+        )
+        run_ready = not bool(remaining)
     db.commit()
-    db.expire_all()
-    row = db.get(AgentToolApproval, approval_id)
-    if result.rowcount != 1 or row is None:
-        return {"approval_id": approval_id, "status": row.status if row else "expired"}
+    db.refresh(row)
     log_event(
         "agent", "INFO", "工具审批已处理", operator=context.user.display_name,
         approval_id=approval_id, session_id=row.session_id, tool=row.tool_name, decision=row.status,
     )
+    if row.run_id and run_ready:
+        await agent_runtime_service.resume_after_approval(row.run_id)
     return {"approval_id": row.approval_id, "status": row.status}
 
 
-@router.post("/agent/chat")
-async def agent_chat(
+def _prepare_agent_chat(
     payload: AgentChatIn,
-    request: Request,
-    db: Session = Depends(get_db),
-    context: AuthContext = Depends(require_permission("agent:use")),
-) -> StreamingResponse:
+    db: Session,
+    context: AuthContext,
+) -> dict:
     if not payload.question.strip() and not payload.attachments:
         raise HTTPException(status_code=400, detail="请输入问题或上传附件")
     effective_question, prepared_user_content, attachment_metadata = _prepare_agent_attachments(
@@ -2188,13 +2210,13 @@ async def agent_chat(
         )
         if model_config is None:
             raise HTTPException(status_code=404, detail="模型配置不存在或已停用")
-    if chat_session is not None:
-        if model_config is None and chat_session.model_config_id:
-            existing_model = db.get(LlmModelConfig, chat_session.model_config_id)
-            if existing_model and existing_model.status != "disabled":
-                model_config = existing_model
+    if chat_session is not None and model_config is None and chat_session.model_config_id:
+        existing_model = db.get(LlmModelConfig, chat_session.model_config_id)
+        if existing_model and existing_model.status != "disabled":
+            model_config = existing_model
 
-    if chat_session is None:
+    created_session = chat_session is None
+    if created_session:
         chat_session = AiChatSession(
             user_id=context.user.id,
             digital_human_id=profile.id if profile else None,
@@ -2214,25 +2236,22 @@ async def agent_chat(
     if payload.model_config_id:
         chat_session.model_config_id = model_config.id if model_config else None
 
-    # A persisted session is the source of truth. Client-provided history is only
-    # used while creating a new session, preventing stale tabs from rewriting context.
-    # L1 会话记忆：读历史 + 压缩判断（替代原 limit(12) 硬截断，旧消息压成摘要保主线）
     if payload.session_id:
         history, l1_summary = load_and_compact_history(db, chat_session.id)
     else:
         history = [item.model_dump() for item in payload.history]
         l1_summary = ""
-    db.add(
-        AiChatMessage(
-            session_id=chat_session.id,
-            role="user",
-            content=effective_question,
-            attachments_json=json.dumps(attachment_metadata, ensure_ascii=False) if attachment_metadata else None,
-            event_count=0,
-        )
+    user_message = AiChatMessage(
+        session_id=chat_session.id,
+        role="user",
+        content=effective_question,
+        attachments_json=json.dumps(attachment_metadata, ensure_ascii=False) if attachment_metadata else None,
+        event_count=0,
     )
+    db.add(user_message)
     db.commit()
     session_id = chat_session.id
+    user_message_id = user_message.id
     for attachment in attachment_metadata:
         _register_workspace_doc(
             db,
@@ -2242,22 +2261,301 @@ async def agent_chat(
             session_id=session_id,
             created_by=context.user.display_name,
         )
+
     profile_payload = _digital_human_out(profile) if profile else None
     model_payload = _model_out(model_config) if model_config else None
     digital_human_context = _digital_human_context(context, profile)
     model_config_id = model_config.id if model_config else None
-    # 检索用户长期记忆，注入到 system prompt
     memory_context = retrieve_memories(
-        db, user_id=context.user.id, query=effective_question,
+        db,
+        user_id=context.user.id,
+        query=effective_question,
         digital_human_id=profile.id if profile else None,
     )
-    # L1 压缩摘要拼入 system prompt（复用 memory_context 注入通道，不改 history 的 role 结构）
     if l1_summary:
         memory_context = f"{memory_context}\n\n{l1_summary}" if memory_context else l1_summary
-    # L2 经验记忆：检索跨用户共享的复盘经验，注入 system prompt（带样本量，统计强度低者审慎）
     experience_context = retrieve_experiences(db, query=effective_question)
     if experience_context:
         memory_context = f"{memory_context}\n\n{experience_context}" if memory_context else experience_context
+
+    explicit_approval_policy = payload.approval_policy is not None
+    approval_policy = (
+        normalize_approval_policy(payload.approval_policy, legacy_allow_code_execution=payload.allow_code_execution)
+        if explicit_approval_policy or payload.allow_code_execution
+        else "full"
+    )
+    allow_code_execution = bool(
+        settings.workspace_exec_enabled
+        and (explicit_approval_policy or payload.allow_code_execution)
+        and payload.chat_mode in ("research", "stock")
+    )
+    can_write_positions = bool(
+        profile
+        and profile.can_write_positions
+        and payload.chat_mode == "research"
+        and ("data:write" in context.permissions or "all" in context.permissions)
+    )
+    default_account_id: int | None = None
+    if can_write_positions:
+        default_account_id = db.scalar(
+            text("SELECT id FROM position_accounts WHERE is_default = 1 ORDER BY id LIMIT 1")
+        )
+
+    return {
+        "session_id": session_id,
+        "created_session": created_session,
+        "user_message_id": user_message_id,
+        "attachment_metadata": attachment_metadata,
+        "profile": profile,
+        "profile_payload": profile_payload,
+        "model_payload": model_payload,
+        "effective_question": effective_question,
+        "prepared_user_content": prepared_user_content,
+        "history": history,
+        "digital_human_context": digital_human_context,
+        "model_config_id": model_config_id,
+        "memory_context": memory_context,
+        "can_write_positions": can_write_positions,
+        "default_account_id": default_account_id,
+        "allow_code_execution": allow_code_execution,
+        "approval_policy": approval_policy,
+        "request_payload": {
+            "session_id": session_id,
+            "user_id": context.user.id,
+            "user_label": context.user.display_name,
+            "question": effective_question,
+            "user_text": user_text_from_content(prepared_user_content),
+            "attachments": attachment_metadata,
+            "history": history,
+            "digital_human_id": profile.id if profile else None,
+            "digital_human_code": profile.code if profile else None,
+            "digital_human_context": digital_human_context,
+            "model_config_id": model_config_id,
+            "chat_mode": payload.chat_mode,
+            "skills": payload.skills,
+            "memory_context": memory_context,
+            "can_write_positions": can_write_positions,
+            "default_account_id": default_account_id,
+            "allow_code_execution": allow_code_execution,
+            "approval_policy": approval_policy,
+        },
+    }
+
+
+def _discard_duplicate_preparation(
+    prepared: dict,
+    db: Session,
+    *,
+    user_id: int,
+    canonical_session_id: int,
+) -> None:
+    """Compensate the loser of an idempotency-key insert race."""
+
+    prepared_session_id = int(prepared["session_id"])
+    try:
+        db.execute(
+            delete(AiChatMessage).where(
+                AiChatMessage.id == int(prepared["user_message_id"]),
+                AiChatMessage.session_id == prepared_session_id,
+            )
+        )
+        if prepared_session_id != canonical_session_id:
+            paths = [
+                _workspace_doc_key(user_id, str(item.get("path") or ""))
+                for item in prepared.get("attachment_metadata") or []
+                if item.get("path")
+            ]
+            if paths:
+                db.execute(
+                    update(WorkspaceDocument)
+                    .where(
+                        WorkspaceDocument.user_id == user_id,
+                        WorkspaceDocument.path.in_(paths),
+                        WorkspaceDocument.session_id == prepared_session_id,
+                    )
+                    .values(session_id=canonical_session_id)
+                )
+            if prepared.get("created_session"):
+                db.execute(
+                    delete(AiChatSession).where(
+                        AiChatSession.id == prepared_session_id,
+                        AiChatSession.user_id == user_id,
+                    )
+                )
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        log_event(
+            "agent",
+            "WARNING",
+            "幂等请求补偿清理失败",
+            to_db=False,
+            session_id=prepared_session_id,
+            error=str(exc)[:300],
+        )
+
+
+@router.post("/agent/runs", status_code=202)
+async def create_agent_run(
+    payload: AgentChatIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    idempotency_key = request.headers.get("Idempotency-Key")
+    existing = await asyncio.to_thread(
+        agent_run_repository.get_by_idempotency_key,
+        context.user.id,
+        idempotency_key,
+    )
+    if existing is not None:
+        return {
+            "run_id": existing["run_id"],
+            "session_id": existing["session_id"],
+            "engine": existing["engine"],
+            "status": existing["status"],
+            "created": False,
+        }
+    admission = await asyncio.to_thread(agent_run_repository.admission_counts, context.user.id)
+    if admission["user_active"] >= max(1, settings.agent_user_active_limit):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many active Agent tasks for this account.",
+            headers={"Retry-After": "3"},
+        )
+    if admission["queued"] >= max(1, settings.agent_queue_limit):
+        raise HTTPException(
+            status_code=429,
+            detail="The Agent queue is full. Please retry shortly.",
+            headers={"Retry-After": "5"},
+        )
+    prepared = _prepare_agent_chat(payload, db, context)
+    run = await agent_runtime_service.create_run(
+        prepared["request_payload"],
+        session_event={
+            "type": "session",
+            "session_id": prepared["session_id"],
+            "profile": prepared["profile_payload"],
+            "model": prepared["model_payload"],
+            "chat_mode": payload.chat_mode,
+        },
+        idempotency_key=idempotency_key,
+    )
+    if not run["created"]:
+        _discard_duplicate_preparation(
+            prepared,
+            db,
+            user_id=context.user.id,
+            canonical_session_id=int(run["session_id"]),
+        )
+    return {
+        "run_id": run["run_id"],
+        "session_id": run["session_id"],
+        "engine": run["engine"],
+        "status": run["status"],
+        "created": run["created"],
+    }
+
+
+@router.get("/agent/runs/active")
+def active_agent_runs(
+    chat_mode: Literal["research", "stock", "knowledge"] | None = Query(default=None),
+    session_id: int | None = Query(default=None, ge=1),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> list[dict]:
+    return agent_run_repository.active_runs(
+        context.user.id,
+        chat_mode=chat_mode,
+        session_id=session_id,
+    )
+
+
+@router.get("/agent/runs/{run_id}")
+def agent_run_status(
+    run_id: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    run = agent_run_repository.get_run(run_id, user_id=context.user.id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
+    return run
+
+
+@router.get("/agent/runs/{run_id}/events")
+async def agent_run_events(
+    run_id: str,
+    request: Request,
+    after_seq: int = Query(default=0, ge=0),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> StreamingResponse:
+    run = await asyncio.to_thread(agent_run_repository.get_run, run_id, user_id=context.user.id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
+    header_seq = request.headers.get("Last-Event-ID", "").strip()
+    if header_seq.isdigit():
+        after_seq = max(after_seq, int(header_seq))
+    return StreamingResponse(
+        agent_runtime_service.stream_events(
+            run_id,
+            user_id=context.user.id,
+            after_seq=after_seq,
+            request=request,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/agent/runs/{run_id}/cancel")
+async def cancel_agent_run(
+    run_id: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    run = await asyncio.to_thread(agent_run_repository.request_cancel, run_id, user_id=context.user.id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
+    await asyncio.to_thread(cancel_pending_run_approvals, run_id)
+    if run.get("cancelled_now"):
+        await agent_runtime_service.append_event(
+            run_id,
+            {"type": "done", "status": "cancelled", "duration_ms": 0},
+        )
+    return run
+
+
+@router.get("/agent/runtime/status")
+async def agent_runtime_status(
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    return await agent_runtime_service.status()
+
+
+@router.post("/agent/chat")
+async def agent_chat(
+    payload: AgentChatIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> StreamingResponse:
+    prepared = _prepare_agent_chat(payload, db, context)
+    session_id = prepared["session_id"]
+    profile = prepared["profile"]
+    profile_payload = prepared["profile_payload"]
+    model_payload = prepared["model_payload"]
+    effective_question = prepared["effective_question"]
+    prepared_user_content = prepared["prepared_user_content"]
+    history = prepared["history"]
+    digital_human_context = prepared["digital_human_context"]
+    model_config_id = prepared["model_config_id"]
+    memory_context = prepared["memory_context"]
+    can_write_positions = prepared["can_write_positions"]
+    default_account_id = prepared["default_account_id"]
+    allow_code_execution = prepared["allow_code_execution"]
+    approval_policy = prepared["approval_policy"]
 
     async def event_stream():
         stream_started = time.monotonic()
@@ -2272,29 +2570,6 @@ async def agent_chat(
         final_error: str | None = None
         event_count = 0
         cancel_event = threading.Event()
-        # 三重门之一/二：数字人开 can_write_positions 且用户有 data:write 权限才注入写工具
-        can_write_positions = bool(
-            profile and profile.can_write_positions
-            and payload.chat_mode == "research"
-            and ("data:write" in context.permissions or "all" in context.permissions)
-        )
-        explicit_approval_policy = payload.approval_policy is not None
-        approval_policy = (
-            normalize_approval_policy(payload.approval_policy, legacy_allow_code_execution=payload.allow_code_execution)
-            if explicit_approval_policy or payload.allow_code_execution
-            else "full"
-        )
-        allow_code_execution = bool(
-            settings.workspace_exec_enabled
-            and (explicit_approval_policy or payload.allow_code_execution)
-            and payload.chat_mode in ("research", "stock")
-        )
-        default_account_id: int | None = None
-        if can_write_positions:
-            default_account_id = db.scalar(
-                text("SELECT id FROM position_accounts WHERE is_default = 1 ORDER BY id LIMIT 1")
-            )
-
         def produce_events() -> None:
             started = time.monotonic()
             log_event(

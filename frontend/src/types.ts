@@ -781,12 +781,15 @@ export type StockStrategy = {
 
 export type AgentStreamEvent = {
   type: string
+  run_id?: string
+  seq?: number
   session_id?: number
-  chat_mode?: 'research' | 'stock'
+  chat_mode?: 'research' | 'stock' | 'knowledge'
   profile?: DigitalHuman | null
   model?: Partial<ModelConfig> | null
   role?: 'thought' | 'answer'
   tool?: string
+  tool_call_id?: string
   display_name?: string
   message?: string
   content?: string
@@ -809,4 +812,8 @@ export type AgentStreamEvent = {
   arguments_preview?: string
   expires_at?: string
   decision?: 'approved' | 'denied' | 'expired' | 'cancelled'
+  attempt?: number
+  max_attempts?: number
+  retry_after_ms?: number
+  reset_stream?: boolean
 }

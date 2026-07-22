@@ -20,7 +20,7 @@
 4. MySQL 是业务、运行记录、审批、产物和审计的事实来源；Redis 用于会话锁、事件回放、Pub/Sub、收件箱、唤醒和工作队列。
 5. 长耗时和有副作用的工具使用独立 Tool Worker。利用 AgentScope 的 `RequireExternalExecutionEvent` 挂起 Agent，完成后用 `ExternalExecutionResultEvent` 恢复，而不是仅依赖进程内 `asyncio.Task`。
 6. Agent Team 只从受控模板创建，并设置成员数、递归深度、时长、Token、费用和工具权限预算。高风险业务写操作仍走确定性流程和人工审批。
-7. 通过兼容层保留现有 `/api/agent/*` 契约，以数字人或会话为单位灰度切换，任何阶段都可回滚到旧执行器。
+7. 通过兼容层保留现有 `/api/agent/*` 契约；当前尚无真实用户，验收通过后直接切换，异常时通过配置回滚旧执行器。
 
 一句话概括：**AgentScope 负责“怎么运行 Agent”，Hermes 继续负责“谁能做什么、操作哪些业务数据、结果是否可以交付”。**
 
@@ -129,7 +129,7 @@
 7. **事件可重放，终态唯一。** 每个 Run 最终必须得到且只得到一个终态。
 8. **配置快照化。** 模型、RAG、权限和提示词在 Run 创建时快照，运行中修改配置不影响已开始任务，也不要求重启服务。
 9. **业务事实不放进 Redis。** Redis 加速协调，MySQL 保存最终事实。
-10. **渐进替换。** 新旧运行时可按用户、数字人、会话或来源灰度，不做一次性大爆炸重写。
+10. **可回滚替换。** 当前无真实用户，不建设灰度和双跑链路；新 Run 全量进入 AgentScope，异常时只切换后续 Run 到旧执行器。
 
 ## 5. 目标架构
 
@@ -859,19 +859,19 @@ OpenTelemetry span 至少覆盖：
 - 部署 Redis，启用持久化、密码、内网访问、内存和淘汰策略。
 - 新建运行时 schema、Run/Step/Event/Tool/Outbox 表。
 - 建立 AgentScope adapter 和契约测试。
-- 保持旧执行器为默认。
+- 新项目尚无真实用户，完成契约测试后直接以 AgentScope 为默认；旧执行器仅保留配置回退。
 
-### 阶段 1：问股 Agent 灰度
+### 阶段 1：问股 Agent 切换
 
 - 将模型配置、现有 skill registry、Milvus RAG 和记忆接入 AgentScope。
 - 建立旧事件到新事件的前端兼容层。
-- 先做 shadow run，只比较工具选择、答案和耗时，不向用户展示、不执行写工具。
-- 通过后按数字人或测试用户灰度 5%、20%、50%、100%。
+- 上线前没有真实用户，测试环境直接切换 AgentScope，执行完整功能和故障演练。
+- 保留 `legacy` 配置开关作为快速回滚路径，不维护 shadow 双跑链路。
 
 ### 阶段 2：会话、SSE 和审批
 
 - POST 触发与 SSE 订阅分离。
-- 启用 AgentScope SQL Storage、RedisMessageBus 和跨副本会话锁。
+- 将 AgentScope `AgentState` 检查点写入现有 MySQL 运行账本，并用 Redis 实现事件唤醒、任务队列和跨副本会话租约；不另建一套与业务会话割裂的 App 数据库。
 - 用 HITL 事件替换数据库轮询等待。
 - 完成刷新恢复、页面切换、断线续传、取消和唯一终态。
 
@@ -893,9 +893,9 @@ OpenTelemetry span 至少覆盖：
 - 仅为深度研究启用固定团队模板。
 - 增加预算、并发和递归限制。
 - 增加 RiskCritic 和交付验证。
-- 通过离线题集和线上灰度后再扩大使用范围。
+- 通过离线题集、并发测试和故障注入后再启用。
 
-每个阶段都有 `legacy|agentscope|shadow` feature flag。回滚只切换新 Run 的路由，已经开始的新 Runtime Run 继续收口，避免中途换内核。
+运行时保留 `legacy|agentscope` feature flag。回滚只切换新 Run 的路由，已经开始的新 Runtime Run 继续收口，避免中途换内核。
 
 ## 20. 测试与验收
 
@@ -971,7 +971,7 @@ AgentScope 运行语义
 + 持久化外部 Tool Worker
 + 强化沙箱
 + 可重放事件和全链路观测
-+ 灰度与故障注入测试
++ 全量切换与故障注入测试
 ```
 
 按本方案实施后，Hermes 的 Agent 将不再只是“一个能调用很多工具的流式聊天接口”，而会成为能处理中长任务、可恢复、可审批、可并行、可审计并能稳定交付产物的 Agent 平台。

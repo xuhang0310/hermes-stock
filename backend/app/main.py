@@ -39,6 +39,8 @@ from backend.app.seed.seed import (
     seed_watchlist_agent_profile,
 )
 from backend.app.core.settings import settings
+from backend.app.agent_runtime.redis_broker import redis_broker
+from backend.app.agent_runtime.worker import agent_runtime_worker
 
 
 class WatchlistCreate(BaseModel):
@@ -159,7 +161,9 @@ def create_app(init_db: bool = True) -> FastAPI:
             start_prompt_recommendation_scheduler()
             start_rhythm_scheduler()
             start_feishu_bots()
-            log_event("system", "INFO", "后台组件已启动：调度器 + 飞书机器人 + 推荐刷新")
+            if settings.agent_runtime_worker_enabled:
+                agent_runtime_worker.start()
+            log_event("system", "INFO", "后台组件已启动：Agent Runtime + 调度器 + 飞书机器人 + 推荐刷新")
             # 启动时清理一次过期日志（每日健康检查还会再清理），控制表体积
             await asyncio.to_thread(prune_system_logs)
         elif init_db:
@@ -170,8 +174,10 @@ def create_app(init_db: bool = True) -> FastAPI:
             if init_db and settings.background_services_enabled:
                 log_event("system", "INFO", "应用关闭：停止后台组件", to_db=False)
                 stop_feishu_bots()
+                await agent_runtime_worker.stop()
                 await stop_rhythm_scheduler()
                 await stop_prompt_recommendation_scheduler()
+            await redis_broker.close()
 
     app = FastAPI(
         title="SixRabbits Stock API",

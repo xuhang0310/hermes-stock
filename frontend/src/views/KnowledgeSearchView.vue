@@ -192,6 +192,76 @@ function flushThought(reply: ChatMessage) {
   reply.liveContent = ''
 }
 
+function releaseComposer(controller: AbortController) {
+  if (abortController.value !== controller) return
+  abortController.value = null
+  sending.value = false
+}
+
+function handleRunEvent(reply: ChatMessage, controller: AbortController, event: AgentStreamEvent) {
+  if (event.type === 'session') {
+    selectedSessionId.value = event.session_id || selectedSessionId.value
+    if (event.model?.id) selectedModelId.value = event.model.id
+    return
+  }
+  if (event.type === 'model_selected') {
+    if (event.model?.id) selectedModelId.value = event.model.id
+    pushStep(reply, {
+      type: 'model',
+      content: `${event.model?.display_name || '默认模型'} / ${event.model?.model_name || ''}`
+    })
+  } else if (event.type === 'retrying') {
+    flushReasoning(reply)
+    flushThought(reply)
+    if (event.reset_stream) {
+      reply.liveReasoning = ''
+      reply.liveContent = ''
+    }
+    reply.streamStatus = 'connecting'
+    pushStep(reply, {
+      type: 'reasoning',
+      content: event.message || `第 ${event.attempt || 2} 次尝试正在启动`
+    })
+  } else if (event.type === 'reasoning_delta') {
+    reply.streamStatus = 'streaming'
+    reply.liveReasoning += event.content || ''
+  } else if (event.type === 'content_delta') {
+    reply.streamStatus = 'streaming'
+    flushReasoning(reply)
+    reply.liveContent += event.content || ''
+  } else if (event.type === 'content_end') {
+    flushReasoning(reply)
+    if (event.role === 'answer') {
+      reply.content = reply.liveContent.trim()
+      reply.liveContent = ''
+      reply.streamStatus = 'done'
+    } else {
+      flushThought(reply)
+      reply.streamStatus = 'tooling'
+    }
+  } else if (event.type === 'action') {
+    reply.streamStatus = 'tooling'
+    flushReasoning(reply)
+    flushThought(reply)
+    pushStep(reply, { type: 'action', tool: event.tool, displayName: event.display_name, content: event.content || '' })
+  } else if (event.type === 'observation') {
+    reply.streamStatus = 'tooling'
+    flushReasoning(reply)
+    pushStep(reply, { type: 'observation', content: event.content || '' })
+  } else if (event.type === 'error') {
+    flushReasoning(reply)
+    flushThought(reply)
+    reply.error = event.content || '检索 Agent 响应失败'
+    reply.streamStatus = 'error'
+    pushStep(reply, { type: 'error', content: reply.error })
+    error.value = reply.error
+  } else if (event.type === 'done') {
+    reply.streamStatus = reply.error ? 'error' : 'done'
+    releaseComposer(controller)
+  }
+  scrollChat()
+}
+
 async function send() {
   const text = question.value.trim()
   if (!text || sending.value) return
@@ -237,56 +307,7 @@ async function send() {
         model_config_id: selectedModelId.value,
         chat_mode: 'knowledge'
       },
-      (event: AgentStreamEvent) => {
-        if (event.type === 'session') {
-          selectedSessionId.value = event.session_id || selectedSessionId.value
-          if (event.model?.id) selectedModelId.value = event.model.id
-          return
-        }
-        if (event.type === 'model_selected') {
-          if (event.model?.id) selectedModelId.value = event.model.id
-          pushStep(reply, {
-            type: 'model',
-            content: `${event.model?.display_name || '默认模型'} / ${event.model?.model_name || ''}`
-          })
-        } else if (event.type === 'reasoning_delta') {
-          reply.streamStatus = 'streaming'
-          reply.liveReasoning += event.content || ''
-        } else if (event.type === 'content_delta') {
-          reply.streamStatus = 'streaming'
-          flushReasoning(reply)
-          reply.liveContent += event.content || ''
-        } else if (event.type === 'content_end') {
-          flushReasoning(reply)
-          if (event.role === 'answer') {
-            reply.content = reply.liveContent.trim()
-            reply.liveContent = ''
-            reply.streamStatus = 'done'
-          } else {
-            flushThought(reply)
-            reply.streamStatus = 'tooling'
-          }
-        } else if (event.type === 'action') {
-          reply.streamStatus = 'tooling'
-          flushReasoning(reply)
-          flushThought(reply)
-          pushStep(reply, { type: 'action', tool: event.tool, displayName: event.display_name, content: event.content || '' })
-        } else if (event.type === 'observation') {
-          reply.streamStatus = 'tooling'
-          flushReasoning(reply)
-          pushStep(reply, { type: 'observation', content: event.content || '' })
-        } else if (event.type === 'error') {
-          flushReasoning(reply)
-          flushThought(reply)
-          reply.error = event.content || '检索 Agent 响应失败'
-          reply.streamStatus = 'error'
-          pushStep(reply, { type: 'error', content: reply.error })
-          error.value = reply.error
-        } else if (event.type === 'done') {
-          reply.streamStatus = reply.error ? 'error' : 'done'
-        }
-        scrollChat()
-      },
+      (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
       controller.signal
     )
     if (!reply.content && !reply.error && !reply.steps.length) {
@@ -309,8 +330,7 @@ async function send() {
       error.value = reply.error
     }
   } finally {
-    abortController.value = null
-    sending.value = false
+    releaseComposer(controller)
     if (!reply.error && reply.streamStatus !== 'done') {
       reply.streamStatus = 'done'
     }
@@ -318,11 +338,75 @@ async function send() {
   }
 }
 
+async function recoverActiveRun() {
+  if (sending.value) return
+  try {
+    const [run] = await api.activeAgentRuns({ chat_mode: 'knowledge' })
+    if (!run) return
+
+    await openSession(run.session_id)
+    if (sending.value) return
+
+    const reply: ChatMessage = {
+      id: -Date.now(),
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
+      steps: [],
+      liveReasoning: '',
+      liveContent: '',
+      streamStatus: 'connecting'
+    }
+    messages.value.push(reply)
+    sending.value = true
+    error.value = ''
+    scrollChat()
+
+    const controller = new AbortController()
+    abortController.value = controller
+    try {
+      await api.resumeAgentRun(
+        run.run_id,
+        (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
+        controller.signal
+      )
+      if (!reply.content && reply.liveContent.trim()) {
+        reply.content = reply.liveContent.trim()
+        reply.liveContent = ''
+      }
+      if (!reply.error) reply.streamStatus = 'done'
+      nextTick(() => { refreshSessions().catch(() => {}) })
+    } catch (err) {
+      if (controller.signal.aborted) {
+        flushReasoning(reply)
+        if (reply.liveContent.trim()) {
+          reply.content = reply.liveContent.trim()
+          reply.liveContent = ''
+        }
+        reply.streamStatus = 'done'
+      } else {
+        reply.error = err instanceof Error ? err.message : '恢复检索任务失败'
+        reply.streamStatus = 'error'
+        error.value = reply.error
+      }
+    } finally {
+      releaseComposer(controller)
+      if (!reply.error) reply.streamStatus = 'done'
+      scrollChat()
+    }
+  } catch {
+    // Runtime recovery is best-effort and must not block the chat page.
+  }
+}
+
 function stopSending() {
   abortController.value?.abort()
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  await recoverActiveRun()
+})
 </script>
 
 <template>

@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
+from sqlalchemy import distinct, select, update
+
 from backend.app.core.models import AgentToolApproval
 
 
@@ -77,6 +79,8 @@ def create_tool_approval(
     display_name: str,
     risk_level: RiskLevel,
     args: dict[str, Any],
+    run_id: str | None = None,
+    tool_call_id: str | None = None,
 ) -> dict[str, Any]:
     approval_id = uuid.uuid4().hex
     arguments_json, arguments_preview = _argument_summary(tool_name, args)
@@ -85,6 +89,8 @@ def create_tool_approval(
         db.add(
             AgentToolApproval(
                 approval_id=approval_id,
+                run_id=run_id,
+                tool_call_id=tool_call_id,
                 session_id=session_id,
                 user_id=user_id,
                 tool_name=tool_name,
@@ -144,3 +150,59 @@ def _finish_pending(approval_id: str, status: Literal["expired", "cancelled"]) -
             row.status = status
             row.resolved_at = datetime.utcnow()
             db.commit()
+
+
+def expire_pending_run_approvals() -> list[str]:
+    """Expire parked approvals and return runs that are ready to resume."""
+
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        run_ids = list(
+            db.scalars(
+                select(distinct(AgentToolApproval.run_id)).where(
+                    AgentToolApproval.run_id.is_not(None),
+                    AgentToolApproval.status == "pending",
+                    AgentToolApproval.expires_at <= now,
+                )
+            ).all()
+        )
+        if not run_ids:
+            return []
+        db.execute(
+            update(AgentToolApproval)
+            .where(
+                AgentToolApproval.run_id.in_(run_ids),
+                AgentToolApproval.status == "pending",
+                AgentToolApproval.expires_at <= now,
+            )
+            .values(status="expired", resolved_at=now)
+        )
+        db.commit()
+        ready: list[str] = []
+        for run_id in run_ids:
+            remaining = db.scalar(
+                select(AgentToolApproval.approval_id).where(
+                    AgentToolApproval.run_id == run_id,
+                    AgentToolApproval.status == "pending",
+                ).limit(1)
+            )
+            if not remaining and run_id:
+                ready.append(run_id)
+        return ready
+
+
+def cancel_pending_run_approvals(run_id: str) -> int:
+    """Cancel every unresolved approval belonging to a cancelled run."""
+
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        result = db.execute(
+            update(AgentToolApproval)
+            .where(
+                AgentToolApproval.run_id == run_id,
+                AgentToolApproval.status == "pending",
+            )
+            .values(status="cancelled", resolved_at=now)
+        )
+        db.commit()
+        return int(result.rowcount or 0)

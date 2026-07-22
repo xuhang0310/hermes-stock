@@ -159,6 +159,20 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         _add_column("workspace_documents", "user_id", "user_id INT NULL")
         _add_column("ai_chat_messages", "attachments_json", "attachments_json TEXT NULL")
         _add_column("ai_chat_messages", "duration_ms", "duration_ms INT NULL")
+        _add_column("agent_tool_approvals", "run_id", "run_id VARCHAR(64) NULL")
+        _add_column("agent_tool_approvals", "tool_call_id", "tool_call_id VARCHAR(160) NULL")
+        _add_column("agent_runs", "priority", "priority INT NOT NULL DEFAULT 100")
+        has_approval_run_index = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = 'agent_tool_approvals' "
+                "AND index_name = 'ix_agent_tool_approvals_run_id'"
+            )
+        ).scalar()
+        if not has_approval_run_index:
+            connection.execute(
+                text("CREATE INDEX ix_agent_tool_approvals_run_id ON agent_tool_approvals (run_id)")
+            )
         _add_column("ai_chat_sessions", "source_type", "source_type VARCHAR(24) NOT NULL DEFAULT 'web'")
         _add_column(
             "ai_chat_sessions",

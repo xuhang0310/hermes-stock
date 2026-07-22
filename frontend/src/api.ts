@@ -97,28 +97,163 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-async function streamRequest(
-  url: string,
+type AgentRunCreated = {
+  run_id: string
+  session_id: number
+  engine: string
+  status: string
+  created: boolean
+}
+
+type AgentRunStatus = AgentRunCreated & {
+  last_event_seq: number
+  attempts: number
+  max_attempts: number
+  cancel_requested: boolean
+  error?: string | null
+}
+
+function abortError() {
+  return new DOMException('The operation was aborted.', 'AbortError')
+}
+
+function waitBeforeReconnect(milliseconds: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError())
+      return
+    }
+    const onAbort = () => {
+      window.clearTimeout(timer)
+      reject(abortError())
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, milliseconds)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function cancelAgentRunQuietly(runId: string) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (authToken) headers.Authorization = `Bearer ${authToken}`
+  try {
+    await fetch(`/api/agent/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', headers })
+  } catch {
+    // Cancellation is durable when the API is reachable; a transient network
+    // failure is handled by the server-side run timeout and stale-run recovery.
+  }
+}
+
+async function consumeAgentRunEvents(
+  runId: string,
+  onEvent: (event: AgentStreamEvent) => void,
+  signal?: AbortSignal
+) {
+  let afterSeq = 0
+  let terminal = false
+  let reconnects = 0
+  while (!terminal) {
+    if (signal?.aborted) throw abortError()
+    const seqBeforeConnect = afterSeq
+    const headers: Record<string, string> = { Accept: 'text/event-stream' }
+    if (authToken) headers.Authorization = `Bearer ${authToken}`
+    if (afterSeq > 0) headers['Last-Event-ID'] = String(afterSeq)
+
+    try {
+      const response = await fetch(
+        `/api/agent/runs/${encodeURIComponent(runId)}/events?after_seq=${afterSeq}`,
+        { headers, signal }
+      )
+      if (!response.ok || !response.body) {
+        const detail = await response.text()
+        throw new ApiError(detail || `Request failed: ${response.status}`, response.status)
+      }
+      await readSseStream(response.body, (event: AgentStreamEvent) => {
+        if (typeof event.seq === 'number') afterSeq = Math.max(afterSeq, event.seq)
+        terminal = event.type === 'done'
+        onEvent(event)
+      })
+      if (terminal) return
+
+      const status = await request<AgentRunStatus>(`/api/agent/runs/${encodeURIComponent(runId)}`, { signal })
+      if (['completed', 'failed', 'cancelled'].includes(status.status)) {
+        if (afterSeq < status.last_event_seq) {
+          reconnects = 0
+          continue
+        }
+        if (status.status === 'failed' && status.error) {
+          onEvent({ type: 'error', run_id: runId, content: status.error })
+        }
+        onEvent({
+          type: 'done',
+          run_id: runId,
+          seq: status.last_event_seq,
+          status: status.status,
+          content: status.error || undefined
+        })
+        return
+      }
+      reconnects = afterSeq > seqBeforeConnect ? 0 : reconnects + 1
+    } catch (error) {
+      if (signal?.aborted) throw abortError()
+      if (error instanceof ApiError && error.status < 500) throw error
+      reconnects += 1
+    }
+
+    if (reconnects > 8) {
+      throw new Error('Agent stream was interrupted repeatedly. The task remains recoverable from its run record.')
+    }
+    await waitBeforeReconnect(Math.min(5000, 400 * 2 ** Math.min(reconnects, 4)), signal)
+  }
+}
+
+async function resumeAgentRunStream(
+  runId: string,
+  onEvent: (event: AgentStreamEvent) => void,
+  signal?: AbortSignal
+) {
+  try {
+    await consumeAgentRunEvents(runId, onEvent, signal)
+  } catch (error) {
+    if (signal?.aborted) await cancelAgentRunQuietly(runId)
+    throw error
+  }
+}
+
+async function durableAgentStreamRequest(
   payload: unknown,
   onEvent: (event: AgentStreamEvent) => void,
   signal?: AbortSignal
 ) {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (authToken) {
-    headers.Authorization = `Bearer ${authToken}`
-  }
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-    signal
-  })
-  if (!response.ok || !response.body) {
-    const detail = await response.text()
-    throw new Error(detail || `Request failed: ${response.status}`)
-  }
+  const idempotencyKey = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  let createdRun: AgentRunCreated | null = null
 
-  await readSseStream(response.body, onEvent)
+  try {
+    let createError: unknown = null
+    for (let attempt = 0; attempt < 3 && !createdRun; attempt += 1) {
+      if (signal?.aborted) throw abortError()
+      try {
+        createdRun = await request<AgentRunCreated>('/api/agent/runs', {
+          method: 'POST',
+          headers: { 'Idempotency-Key': idempotencyKey },
+          body: JSON.stringify(payload),
+          signal
+        })
+      } catch (error) {
+        createError = error
+        if (error instanceof ApiError && error.status < 500) throw error
+        if (attempt < 2) await waitBeforeReconnect(300 * 2 ** attempt, signal)
+      }
+    }
+    if (!createdRun) throw createError instanceof Error ? createError : new Error('Agent task could not be created.')
+
+    await consumeAgentRunEvents(createdRun.run_id, onEvent, signal)
+  } catch (error) {
+    if (signal?.aborted && createdRun) await cancelAgentRunQuietly(createdRun.run_id)
+    throw error
+  }
 }
 
 async function streamJsonRequest<T extends { type?: string }>(
@@ -442,6 +577,18 @@ export const api = {
       method: 'POST'
     }),
   stockStrategies: () => request<{ skills: StockStrategy[]; default_skill_id: string }>('/api/agent/stock/strategies'),
+  activeAgentRuns: (params: { chat_mode?: 'research' | 'stock' | 'knowledge'; session_id?: number | null } = {}) => {
+    const query = new URLSearchParams()
+    if (params.chat_mode) query.set('chat_mode', params.chat_mode)
+    if (params.session_id) query.set('session_id', String(params.session_id))
+    const suffix = query.toString()
+    return request<AgentRunStatus[]>(`/api/agent/runs/active${suffix ? `?${suffix}` : ''}`)
+  },
+  resumeAgentRun: (
+    runId: string,
+    onEvent: (event: AgentStreamEvent) => void,
+    signal?: AbortSignal
+  ) => resumeAgentRunStream(runId, onEvent, signal),
   streamAgentChat: (
     payload: {
       question: string
@@ -457,7 +604,7 @@ export const api = {
     },
     onEvent: (event: AgentStreamEvent) => void,
     signal?: AbortSignal
-  ) => streamRequest('/api/agent/chat', payload, onEvent, signal),
+  ) => durableAgentStreamRequest(payload, onEvent, signal),
   streamStockChat: (
     payload: {
       question: string
@@ -471,5 +618,5 @@ export const api = {
     },
     onEvent: (event: AgentStreamEvent) => void,
     signal?: AbortSignal
-  ) => streamRequest('/api/agent/chat', { ...payload, chat_mode: 'stock' }, onEvent, signal)
+  ) => durableAgentStreamRequest({ ...payload, chat_mode: 'stock' }, onEvent, signal)
 }

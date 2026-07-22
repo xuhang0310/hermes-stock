@@ -232,8 +232,12 @@ docker build --quiet -f "$NEW/deploy/sandbox/Dockerfile" -t hermes-stock-python-
 id -u hermes-sandbox >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin hermes-sandbox
 usermod -aG docker hermes-sandbox
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-sandboxd.service" /etc/systemd/system/hermes-stock-sandboxd.service
+install -m 0644 "$NEW/deploy/systemd/hermes-stock-api-a.service" /etc/systemd/system/hermes-stock-api-a.service
+install -m 0644 "$NEW/deploy/systemd/hermes-stock-api-b.service" /etc/systemd/system/hermes-stock-api-b.service
+install -m 0644 "$NEW/deploy/systemd/hermes-stock-background.service" /etc/systemd/system/hermes-stock-background.service
 systemctl daemon-reload
 systemctl enable hermes-stock-sandboxd >/dev/null 2>&1
+systemctl enable hermes-stock-api-a hermes-stock-api-b hermes-stock-background >/dev/null 2>&1
 ln -sfn "$NEW" "$CUR"
 echo SWITCHED
 """
