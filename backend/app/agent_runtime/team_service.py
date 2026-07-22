@@ -24,7 +24,7 @@ from backend.app.agent_runtime.profile_access import target_roles_allow
 
 
 DELEGATABLE_EXCLUDED_CODES = frozenset(
-    {"stock-pm", "position-entry-agent", "watchlist-entry-agent"}
+    {"stock-pm", "ask_stock", "position-entry-agent", "watchlist-entry-agent"}
 )
 TERMINAL_DELEGATION_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "timed_out"}

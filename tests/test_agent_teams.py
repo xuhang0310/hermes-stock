@@ -80,7 +80,19 @@ class AgentTeamRuntimeTests(unittest.TestCase):
                 sort_order=3,
                 delegation_enabled=True,
             )
-            db.add_all([user, pm, intelligence, risk])
+            ask_stock = DigitalHumanProfile(
+                code="ask_stock",
+                name="问股入口",
+                avatar_tone="neutral",
+                target_roles="*",
+                description="虚拟入口档案",
+                system_prompt="入口",
+                quick_prompts_json="[]",
+                status="enabled",
+                sort_order=4,
+                delegation_enabled=True,
+            )
+            db.add_all([user, pm, intelligence, risk, ask_stock])
             db.flush()
             session = AiChatSession(
                 user_id=user.id,

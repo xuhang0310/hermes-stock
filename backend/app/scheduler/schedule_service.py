@@ -18,7 +18,9 @@ from backend.app.scheduler.rhythm_scheduler import DH_TO_AGENT
 
 _TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "monthly_last", "interval"})
-_FORBIDDEN_TARGETS = frozenset({"position-entry-agent", "watchlist-entry-agent"})
+_FORBIDDEN_TARGETS = frozenset(
+    {"ask_stock", "position-entry-agent", "watchlist-entry-agent"}
+)
 
 
 class AgentScheduleService:
