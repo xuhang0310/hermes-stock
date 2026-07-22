@@ -319,8 +319,8 @@ function sessionModelLabel(session: AgentSession) {
 }
 
 function sessionSourceDescription(session: AgentSession) {
-  if (session.source_type !== 'feishu') return sessionModelLabel(session)
-  return [session.source_label || '飞书', session.source_identifier].filter(Boolean).join(' · ')
+  if (session.source_type === 'web') return sessionModelLabel(session)
+  return [session.source_label || session.source_type, session.source_identifier].filter(Boolean).join(' · ')
 }
 
 function stepLabel(step: ReactStep) {
@@ -529,7 +529,7 @@ function handleRunEvent(reply: ChatMessage, controller: AbortController, event: 
 
 async function send() {
   if (selectedSessionReadOnly.value) {
-    error.value = '飞书同步会话为只读，请在对应飞书会话中继续回复。'
+    error.value = `${selectedSessionSourceLabel.value}会话为只读。`
     return
   }
   const enteredText = question.value.trim()
@@ -790,7 +790,7 @@ onMounted(async () => {
           >
             <div class="session-item-heading">
               <strong>{{ item.title }}</strong>
-              <em v-if="item.source_type === 'feishu'" class="session-source-badge">飞书</em>
+              <em v-if="item.source_type !== 'web'" class="session-source-badge">{{ item.source_label || item.source_type }}</em>
             </div>
             <span>{{ item.digital_human_name || '数字人' }} · {{ sessionSourceDescription(item) }}</span>
             <small>{{ item.message_count }} 条 · {{ item.status }}</small>
@@ -835,11 +835,11 @@ onMounted(async () => {
       </section>
 
       <section ref="chatScroll" class="message-list">
-        <div v-if="selectedSessionSourceType === 'feishu'" class="external-session-notice">
-          <b aria-hidden="true">飞</b>
+        <div v-if="selectedSessionReadOnly" class="external-session-notice">
+          <b aria-hidden="true">{{ selectedSessionSourceType === 'feishu' ? '飞' : '时' }}</b>
           <div>
-            <strong>{{ selectedSessionSourceLabel }}同步会话 · {{ selectedSessionSourceIdentifier || 'FS' }}</strong>
-            <span>该记录来自飞书并在这里只读展示；继续对话请回到对应飞书会话。</span>
+            <strong>{{ selectedSessionSourceLabel }} · {{ selectedSessionSourceIdentifier || selectedSessionSourceType }}</strong>
+            <span>该记录来自外部渠道并在这里只读展示。</span>
           </div>
         </div>
         <div v-if="pendingApproval" class="pending-approval-dock">
@@ -862,7 +862,7 @@ onMounted(async () => {
 
         <article v-for="item in messages" :key="item.id" class="message" :class="item.role">
           <template v-if="item.role === 'user'">
-            <span>{{ selectedSessionSourceType === 'feishu' ? '飞书用户' : '你' }}</span>
+            <span>{{ selectedSessionReadOnly ? selectedSessionSourceLabel : '你' }}</span>
             <p>{{ item.content }}</p>
             <div v-if="item.attachments.length" class="message-attachment-list">
               <button v-for="file in item.attachments" :key="file.path" type="button" @click="downloadFile(file)">
@@ -932,8 +932,9 @@ onMounted(async () => {
       </section>
 
       <div v-if="selectedSessionReadOnly" class="chat-composer chat-composer-readonly">
-        <strong>飞书同步会话为只读</strong>
-        <span>请在 {{ selectedSessionSourceIdentifier || '对应飞书会话' }} 中继续发送消息。</span>
+        <strong>{{ selectedSessionSourceLabel }}会话为只读</strong>
+        <span v-if="selectedSessionSourceType === 'feishu'">请在 {{ selectedSessionSourceIdentifier || '对应飞书会话' }} 中继续发送消息。</span>
+        <span v-else>该会话由内部调度器触发，不能在这里直接追加消息。</span>
       </div>
       <form v-else class="chat-composer" @paste="pasteIntoComposer" @submit.prevent="send">
         <textarea

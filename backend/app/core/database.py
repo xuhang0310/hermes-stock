@@ -162,6 +162,21 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         _add_column("agent_tool_approvals", "run_id", "run_id VARCHAR(64) NULL")
         _add_column("agent_tool_approvals", "tool_call_id", "tool_call_id VARCHAR(160) NULL")
         _add_column("agent_runs", "priority", "priority INT NOT NULL DEFAULT 100")
+        _add_column("agent_runs", "source_type", "source_type VARCHAR(24) NOT NULL DEFAULT 'web'")
+        _add_column("agent_runs", "source_ref", "source_ref VARCHAR(160) NULL")
+        for column, ddl in (
+            ("execution_mode", "execution_mode VARCHAR(24) NOT NULL DEFAULT 'inline'"),
+            ("max_attempts", "max_attempts INT NOT NULL DEFAULT 1"),
+            ("timeout_seconds", "timeout_seconds INT NOT NULL DEFAULT 30"),
+            ("available_at", "available_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP"),
+            ("next_retry_at", "next_retry_at DATETIME NULL"),
+            ("lease_owner", "lease_owner VARCHAR(160) NULL"),
+            ("lease_expires_at", "lease_expires_at DATETIME NULL"),
+            ("heartbeat_at", "heartbeat_at DATETIME NULL"),
+            ("error_code", "error_code VARCHAR(80) NULL"),
+        ):
+            _add_column("agent_tool_executions", column, ddl)
+        _add_column("agent_outbox", "published_ref", "published_ref VARCHAR(160) NULL")
         has_approval_run_index = connection.execute(
             text(
                 "SELECT COUNT(*) FROM information_schema.statistics "

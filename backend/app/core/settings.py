@@ -98,6 +98,18 @@ class Settings:
     agent_lock_ttl_seconds: int = int(os.getenv("STOCK_AGENT_LOCK_TTL_SECONDS", "60"))
     agent_event_retention_days: int = int(os.getenv("STOCK_AGENT_EVENT_RETENTION_DAYS", "14"))
     agent_event_flush_chars: int = int(os.getenv("STOCK_AGENT_EVENT_FLUSH_CHARS", "320"))
+    tool_worker_concurrency: int = int(os.getenv("STOCK_TOOL_WORKER_CONCURRENCY", "4"))
+    tool_external_execution_enabled: bool = os.getenv(
+        "STOCK_TOOL_EXTERNAL_EXECUTION_ENABLED",
+        "true" if os.getenv("STOCK_AGENT_REDIS_URL", "").strip() else "false",
+    ).lower() == "true"
+    tool_worker_lease_seconds: int = int(os.getenv("STOCK_TOOL_WORKER_LEASE_SECONDS", "60"))
+    tool_worker_poll_seconds: float = float(os.getenv("STOCK_TOOL_WORKER_POLL_SECONDS", "0.5"))
+    tool_result_wait_seconds: int = int(os.getenv("STOCK_TOOL_RESULT_WAIT_SECONDS", "620"))
+    tool_stream_key: str = os.getenv("STOCK_TOOL_STREAM_KEY", "hermes:agent:tools")
+    tool_dead_stream_key: str = os.getenv("STOCK_TOOL_DEAD_STREAM_KEY", "hermes:agent:tools:dead")
+    tool_consumer_group: str = os.getenv("STOCK_TOOL_CONSUMER_GROUP", "hermes-tool-workers")
+    artifact_version_limit: int = int(os.getenv("STOCK_ARTIFACT_VERSION_LIMIT", "50"))
     # 工作区根目录；空=默认 backend/agent_workspace。生产应配到 shared/ 下避免随 release 替换蒸发
     workspace_dir: str = os.getenv("STOCK_WORKSPACE_DIR", "")
     # 不硬编码默认管理员凭据；只有显式配置 STOCK_ADMIN_USERNAME + STOCK_ADMIN_PASSWORD 时才会创建初始账号

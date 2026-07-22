@@ -612,6 +612,21 @@ export type WorkspaceDoc = {
   ingested: boolean
   ingested_doc_id: number | null
   ingestable: boolean
+  artifact_id: string | null
+  active_version: number | null
+}
+
+export type ArtifactVersion = {
+  artifact_id: string
+  version: number
+  parent_version: number | null
+  sha256: string
+  bytes: number
+  mime_type: string | null
+  validation_status: string
+  active: boolean
+  run_id: string | null
+  created_at: string | null
 }
 
 export type WorkspaceStatus = {

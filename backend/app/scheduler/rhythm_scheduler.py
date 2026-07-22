@@ -21,18 +21,24 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.database import SessionLocal
+from backend.app.agent_runtime.channel_runs import (
+    build_channel_request,
+    create_channel_run,
+    wait_for_channel_run,
+)
 from backend.app.feishu.feishu import send_feishu
 from backend.app.core.models import (
     AgentReport,
-    DataSourceConfig,
+    AiChatMessage,
+    AiChatSession,
     DigitalHumanProfile,
     Heartbeat,
     JobRun,
     ScheduledJob,
     SystemLog,
+    User,
 )
 from backend.app.core.settings import settings
-from backend.app.agents.stock_agent import run_agent_events
 
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -207,38 +213,93 @@ def _build_digital_human_context(code: str | None) -> str | None:
         )
 
 
-# --------------------------------------------------------------------------- #
-# 无头 Agent 报告：消费 run_agent_events 生成器，收集最终答案
-# --------------------------------------------------------------------------- #
-def _consume_agent(question: str, context: str | None, code: str | None) -> tuple[str, str | None, str | None]:
-    buffer: list[str] = []
-    answer = ""
-    model_name: str | None = None
-    error: str | None = None
-    generator = run_agent_events(question, [], context, None, "research", None, code)
-    try:
-        for event in generator:
-            kind = event.get("type")
-            if kind == "model_selected":
-                model_name = (event.get("model") or {}).get("model_name")
-            elif kind == "content_delta":
-                buffer.append(str(event.get("content") or ""))
-            elif kind == "content_end":
-                if event.get("role") == "answer":
-                    answer = "".join(buffer).strip()
-                buffer.clear()
-            elif kind == "error":
-                error = str(event.get("content") or "模型响应失败")
-                break
-    finally:
-        generator.close()
-    return answer, model_name, error
+def _run_scheduled_agent(
+    snap: dict,
+    question: str,
+    job_run_id: str,
+) -> tuple[str, str | None]:
+    with SessionLocal() as db:
+        profile = db.scalar(
+            select(DigitalHumanProfile)
+            .where(DigitalHumanProfile.code == snap["digital_human_code"])
+            .limit(1)
+        )
+        if profile is None:
+            raise RuntimeError("Scheduled digital human does not exist.")
+        owner = db.scalar(
+            select(User).where(User.is_enabled.is_(True)).order_by(User.id).limit(1)
+        )
+        if owner is None:
+            raise RuntimeError("No enabled user can own the scheduled Agent session.")
+        chat_session = db.scalar(
+            select(AiChatSession)
+            .where(
+                AiChatSession.digital_human_id == profile.id,
+                AiChatSession.source_type == "scheduler",
+                AiChatSession.external_conversation_id == snap["job_key"],
+            )
+            .limit(1)
+        )
+        if chat_session is None:
+            chat_session = AiChatSession(
+                user_id=owner.id,
+                digital_human_id=profile.id,
+                title=f"定时任务 · {snap['name']}"[:160],
+                status="active",
+                chat_mode="research",
+                source_type="scheduler",
+                external_conversation_id=snap["job_key"][:160],
+                source_label="定时任务",
+            )
+            db.add(chat_session)
+            db.flush()
+        history_rows = db.scalars(
+            select(AiChatMessage)
+            .where(AiChatMessage.session_id == chat_session.id, AiChatMessage.error.is_(None))
+            .order_by(AiChatMessage.id.desc())
+            .limit(16)
+        ).all()
+        history = [
+            {"role": row.role, "content": row.content}
+            for row in reversed(history_rows)
+            if row.role in {"user", "assistant"} and row.content
+        ]
+        session_id = chat_session.id
+        owner_id = owner.id
+        owner_label = owner.display_name
+        db.commit()
+
+    request_payload = build_channel_request(
+        session_id=session_id,
+        question=question,
+        history=history,
+        digital_human_code=snap["digital_human_code"],
+        source_type="scheduler",
+        source_ref=job_run_id,
+        user_id=owner_id,
+        user_label=owner_label,
+    )
+    run = create_channel_run(request_payload, idempotency_key=f"schedule:{job_run_id}")
+    if run["created"]:
+        with SessionLocal() as db:
+            db.add(AiChatMessage(session_id=session_id, role="user", content=question, event_count=0))
+            db.commit()
+    answer, model_name, error = wait_for_channel_run(run["run_id"])
+    if error:
+        raise RuntimeError(error)
+    if not answer:
+        raise RuntimeError("The scheduled Agent did not return a valid answer.")
+    return answer, model_name
 
 
-def _run_agent_report(snap: dict, now: datetime) -> tuple[str, int | None, str, str | None]:
+def _run_agent_report(
+    snap: dict,
+    now: datetime,
+    job_run_id: str,
+) -> tuple[str, int | None, str, str | None]:
     question = _render(snap["prompt_template"], now) or snap["name"]
-    context = _build_digital_human_context(snap["digital_human_code"])
-    answer, model_name, agent_error = _consume_agent(question, context, snap["digital_human_code"])
+    answer, model_name = _run_scheduled_agent(snap, question, job_run_id)
+    agent_error = None
     if agent_error:
         raise RuntimeError(agent_error)
     if not answer:
@@ -555,7 +616,11 @@ def _execute_job(job_key: str, run_id: str) -> None:
 
             output_preview = run_ingest()
         elif snapshot["job_kind"] == "agent_report":
-            report_id, notification_id, output_preview, push_error = _run_agent_report(snapshot, ran_at)
+            report_id, notification_id, output_preview, push_error = _run_agent_report(
+                snapshot,
+                ran_at,
+                run_id,
+            )
             if push_error:
                 status = "failed"
                 error = f"报告已生成，但飞书任务群推送失败: {push_error}"

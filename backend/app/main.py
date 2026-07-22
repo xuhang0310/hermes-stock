@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -20,9 +19,8 @@ from backend.app.ai.ai_api import resume_background_tasks, resume_pending_upload
 from backend.app.core.applog import configure_logging, get_logger, log_event, prune_system_logs
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.auth.auth_api import router as auth_router
-from backend.app.core.database import SessionLocal, get_db, initialize_default_database, session_scope
-from backend.app.agents.position_agent import run_position_agent, run_position_agent_events
-from backend.app.agents.watchlist_agent import run_watchlist_agent_events
+from backend.app.core.database import get_db, initialize_default_database, session_scope
+from backend.app.agents.position_agent import run_position_agent
 from backend.app.agents.position_import import parse_position_screenshot
 from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
@@ -40,6 +38,10 @@ from backend.app.seed.seed import (
 )
 from backend.app.core.settings import settings
 from backend.app.agent_runtime.redis_broker import redis_broker
+from backend.app.agent_runtime.transaction_channels import (
+    create_transaction_run,
+    stream_transaction_run,
+)
 from backend.app.agent_runtime.worker import agent_runtime_worker
 
 
@@ -506,58 +508,34 @@ def create_app(init_db: bool = True) -> FastAPI:
         request: Request,
         context: AuthContext = Depends(require_permission("data:write")),
     ) -> StreamingResponse:
+        try:
+            run = await asyncio.to_thread(
+                create_transaction_run,
+                user_id=context.user.id,
+                user_label=context.user.username,
+                code="position-entry-agent",
+                question=payload.instruction,
+                model_config_id=payload.model_config_id,
+                account_id=payload.account_id,
+                pending_action=payload.pending_action,
+                image_base64=payload.image_base64,
+                mime_type=payload.mime_type,
+                idempotency_key=request.headers.get("Idempotency-Key"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         async def event_stream() -> AsyncIterator[str]:
             yield ": connected\n\n"
-            queue: asyncio.Queue[dict | object] = asyncio.Queue()
-            loop = asyncio.get_running_loop()
-            _DONE = object()
-            cancel_event = threading.Event()
-
-            def produce_events() -> None:
-                try:
-                    # The streaming worker owns its Session for its full lifetime.
-                    with SessionLocal() as worker_db:
-                        worker_repo = StockRepository(worker_db)
-                        for event in run_position_agent_events(
-                            repository=worker_repo,
-                            instruction=payload.instruction,
-                            image_base64=payload.image_base64,
-                            mime_type=payload.mime_type,
-                            model_config_id=payload.model_config_id,
-                            created_by=context.user.username,
-                            account_id=payload.account_id,
-                            cancel_event=cancel_event,
-                            history=payload.history,
-                            pending_action=payload.pending_action,
-                        ):
-                            if cancel_event.is_set():
-                                break
-                            asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
-                except Exception as exc:  # noqa: BLE001
-                    asyncio.run_coroutine_threadsafe(
-                        queue.put({"type": "error", "message": str(exc)}), loop
-                    ).result()
-                finally:
-                    asyncio.run_coroutine_threadsafe(queue.put(_DONE), loop).result()
-
-            producer = asyncio.create_task(asyncio.to_thread(produce_events))
-            disconnected = False
-            while True:
-                if await request.is_disconnected():
-                    disconnected = True
-                    cancel_event.set()
-                    break
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=8)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                if event is _DONE:
-                    break
-                yield _sse_event(event)
-                await asyncio.sleep(0)
-            if not disconnected:
-                await producer
+            try:
+                async for event in stream_transaction_run(
+                    run["run_id"],
+                    code="position-entry-agent",
+                    request=request,
+                ):
+                    yield _sse_event(event)
+            except Exception as exc:  # noqa: BLE001
+                yield _sse_event({"type": "error", "message": str(exc)})
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -601,53 +579,31 @@ def create_app(init_db: bool = True) -> FastAPI:
         request: Request,
         context: AuthContext = Depends(require_permission("data:write")),
     ) -> StreamingResponse:
+        try:
+            run = await asyncio.to_thread(
+                create_transaction_run,
+                user_id=context.user.id,
+                user_label=context.user.username,
+                code="watchlist-entry-agent",
+                question=payload.instruction,
+                model_config_id=payload.model_config_id,
+                pending_action=payload.pending_action,
+                idempotency_key=request.headers.get("Idempotency-Key"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         async def event_stream() -> AsyncIterator[str]:
             yield ": connected\n\n"
-            queue: asyncio.Queue[dict | object] = asyncio.Queue()
-            loop = asyncio.get_running_loop()
-            done = object()
-            cancel_event = threading.Event()
-
-            def produce_events() -> None:
-                try:
-                    with SessionLocal() as worker_db:
-                        for event in run_watchlist_agent_events(
-                            repository=StockRepository(worker_db),
-                            instruction=payload.instruction,
-                            model_config_id=payload.model_config_id,
-                            created_by=context.user.username,
-                            cancel_event=cancel_event,
-                            history=payload.history,
-                            pending_action=payload.pending_action,
-                        ):
-                            if cancel_event.is_set():
-                                break
-                            asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
-                except Exception as exc:  # noqa: BLE001
-                    asyncio.run_coroutine_threadsafe(
-                        queue.put({"type": "error", "message": str(exc)}), loop
-                    ).result()
-                finally:
-                    asyncio.run_coroutine_threadsafe(queue.put(done), loop).result()
-
-            producer = asyncio.create_task(asyncio.to_thread(produce_events))
-            disconnected = False
-            while True:
-                if await request.is_disconnected():
-                    disconnected = True
-                    cancel_event.set()
-                    break
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=8)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                if event is done:
-                    break
-                yield _sse_event(event)
-                await asyncio.sleep(0)
-            if not disconnected:
-                await producer
+            try:
+                async for event in stream_transaction_run(
+                    run["run_id"],
+                    code="watchlist-entry-agent",
+                    request=request,
+                ):
+                    yield _sse_event(event)
+            except Exception as exc:  # noqa: BLE001
+                yield _sse_event({"type": "error", "message": str(exc)})
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 

@@ -1,6 +1,6 @@
 # Hermes Stock 基于 AgentScope 2.0 的 Agent 重构方案
 
-> 状态：架构设计稿，可作为实施基线
+> 状态：阶段 0-4 已实现并通过回归；阶段 5 Agent Team 尚未开始
 >
 > 日期：2026-07-22
 >
@@ -101,7 +101,7 @@
 | Python、PDF、Word、Excel、PPT | sandbox broker 和工作区工具 | 外部 Tool Worker + 强化沙箱 |
 | 文件连续修改 | `ws_read_file`、`ws_edit_file` 等 | 会话工作区 + 产物版本和 active artifact |
 | 工具审批 | `AgentToolApproval`、`tool_approval.py` | AgentScope HITL + Hermes 审批策略与审计 |
-| 定时任务与 XXL-Job | `rhythm_scheduler.py` | XXL 负责触发，RunService 负责执行 |
+| 定时任务 | `rhythm_scheduler.py` | 内置调度器负责唯一触发，RunService 负责 Agent 执行 |
 | SSE 和运行时长 | `ai_api.py`、Vue 流式 UI | 统一 AgentEvent 流和终态事件 |
 
 ### 3.2 当前执行链路的结构性问题
@@ -137,7 +137,7 @@
 flowchart LR
     WEB["Vue Web"] --> GW["Hermes API / Control Plane"]
     FEISHU["Feishu Bot"] --> GW
-    XXL["XXL-Job"] --> GW
+    SCHED["Hermes 内置调度器"] --> GW
 
     GW --> AUTH["JWT + RBAC + ABAC"]
     GW --> BIZ[("Hermes MySQL")]
@@ -170,7 +170,7 @@ flowchart LR
 | Hermes API | 鉴权、业务校验、创建 Run、查询状态、SSE 网关、审批入口 | 是 |
 | AgentScope Runtime | Agent 组装、ReAct、上下文、会话锁、HITL、Team、事件发布 | 是 |
 | Tool Worker | 执行长工具、有副作用工具和沙箱任务，续租、重试、回传结果 | 是，按工具池扩展 |
-| Scheduler Adapter | 接收 XXL 触发，幂等创建 Run，处理补偿扫描 | 主动触发由 XXL 保证 |
+| Internal Scheduler | 单实例认领计划，幂等创建 Run，处理补偿扫描和人工重跑 | 由数据库唯一 fire key 防重 |
 | MySQL | 业务事实、Run/Step/审批/产物/审计、AgentScope 持久状态 | 主从/备份 |
 | Redis | 会话锁、事件回放、Pub/Sub、收件箱、唤醒、Streams 队列、限流 | Sentinel 或集群 |
 | Milvus | 知识块向量及租户过滤 | 现有部署继续使用 |
@@ -206,7 +206,7 @@ stateful services
 
 两个 Runtime 副本不是重复执行同一个任务。它们共享 AgentScope SQL Storage 和 RedisMessageBus，同一 session 的分布式锁只允许一个副本推进；另一个副本用于接管新 Run 或故障恢复。Tool Worker 按 `io` 与 `sandbox` 分池，避免一个文档任务耗尽全部普通工具并发。
 
-Runtime、Worker、Redis 和 AgentScope 数据库端口只监听 Docker 私网或 `127.0.0.1`，Nginx 只公开 Hermes API。XXL-Job 通过内网签名接口触发。Redis 开启认证、AOF、最大内存告警和备份，但不配置会淘汰队列/锁键的激进 eviction 策略。
+Runtime、Worker、Redis 和 AgentScope 数据库端口只监听 Docker 私网或 `127.0.0.1`，Nginx 只公开 Hermes API。内置调度器运行在唯一后台服务中，并通过 MySQL `fire_key` 防止重复触发。Redis 开启认证、AOF、最大内存告警和备份，但不配置会淘汰队列/锁键的激进 eviction 策略。
 
 ## 6. AgentScope 集成边界
 
@@ -700,16 +700,9 @@ Team 是复杂任务的加速和质量机制，不是所有对话的默认包装
 - 图片和文件先进入同一 Attachment/Artifact 服务，再转成 AgentScope DataBlock 或文件引用。
 - 高风险审批使用飞书交互卡片回调；签名校验、用户绑定和审批 TTL 必须在 Hermes API 完成。
 
-### 15.2 XXL-Job
+### 15.2 内置调度器
 
-XXL-Job 只负责企业级 cron、失败告警、人工重跑和执行器可见性。一次触发只调用：
-
-```text
-POST /internal/schedules/{job_key}/trigger
-Idempotency-Key: xxl:{job_key}:{scheduled_fire_time}
-```
-
-Hermes 创建 Run 后立即返回 `run_id`。Agent 内部步骤、审批、Team 和工具恢复由 AgentScope 与 Worker 管理。不要让 XXL-Job 和 AgentScope APScheduler 同时拥有同一计划，否则会重复触发。
+Hermes 只保留一套计划所有权：后台服务中的节律调度器负责 cron、交易日判断、人工重跑和故障扫描。每次计划先用 `job_key + scheduled_fire_time` 生成唯一 `fire_key`，认领成功后再以 `schedule:{job_run_id}` 为幂等键创建 Agent Run。Agent 内部步骤、审批和工具恢复仍由 AgentScope 与 Worker 管理，API 副本不启动调度循环。
 
 ## 16. 数据模型
 
@@ -886,7 +879,7 @@ OpenTelemetry span 至少覆盖：
 
 - 迁移持仓与自选 Agent，使用结构化槽位和幂等写入。
 - 迁移飞书所有对话到统一 RunService，并在数字人列表展示来源。
-- XXL-Job 改为幂等创建 Run，关闭重复的进程内计划所有权。
+- 内置调度器以唯一 `fire_key` 幂等创建 Run，关闭任何重复的外部计划所有权。
 
 ### 阶段 5：Agent Team
 

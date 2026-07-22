@@ -130,6 +130,125 @@ class RedisBroker:
         except Exception:  # noqa: BLE001
             pass
 
+    @staticmethod
+    def tool_result_channel(execution_id: str) -> str:
+        return f"hermes:agent:tool:{execution_id}:result"
+
+    async def ensure_tool_group(self) -> bool:
+        client = self._get_client()
+        if client is None:
+            return False
+        try:
+            await client.xgroup_create(
+                settings.tool_stream_key,
+                settings.tool_consumer_group,
+                id="0-0",
+                mkstream=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if "BUSYGROUP" not in str(exc):
+                self._log_failure_once("tool group create", exc)
+                return False
+        self._warned = False
+        return True
+
+    async def publish_tool_task(self, execution_id: str) -> str | None:
+        client = self._get_client()
+        if client is None or not await self.ensure_tool_group():
+            return None
+        try:
+            message_id = await client.xadd(
+                settings.tool_stream_key,
+                {"execution_id": execution_id},
+                maxlen=100_000,
+                approximate=True,
+            )
+            self._warned = False
+            return str(message_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log_failure_once("tool publish", exc)
+            return None
+
+    async def consume_tool_task(
+        self,
+        consumer: str,
+        *,
+        timeout_ms: int = 1000,
+    ) -> tuple[str, str] | None:
+        client = self._get_client()
+        if client is None or not await self.ensure_tool_group():
+            return None
+        try:
+            rows = await client.xreadgroup(
+                settings.tool_consumer_group,
+                consumer,
+                {settings.tool_stream_key: ">"},
+                count=1,
+                block=max(1, timeout_ms),
+            )
+            self._warned = False
+            if not rows:
+                return None
+            _stream, messages = rows[0]
+            if not messages:
+                return None
+            message_id, fields = messages[0]
+            execution_id = str((fields or {}).get("execution_id") or "")
+            return (str(message_id), execution_id) if execution_id else None
+        except Exception as exc:  # noqa: BLE001
+            self._log_failure_once("tool consume", exc)
+            return None
+
+    async def acknowledge_tool_task(self, message_id: str) -> None:
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            await client.xack(settings.tool_stream_key, settings.tool_consumer_group, message_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log_failure_once("tool acknowledge", exc)
+
+    async def publish_tool_result(self, execution_id: str, status: str) -> None:
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            await client.publish(self.tool_result_channel(execution_id), status)
+            self._warned = False
+        except Exception as exc:  # noqa: BLE001
+            self._log_failure_once("tool result publish", exc)
+
+    async def subscribe_tool_result(self, execution_id: str):
+        client = self._get_client()
+        if client is None:
+            return None
+        try:
+            pubsub = client.pubsub()
+            await pubsub.subscribe(self.tool_result_channel(execution_id))
+            self._warned = False
+            return pubsub
+        except Exception as exc:  # noqa: BLE001
+            self._log_failure_once("tool result subscribe", exc)
+            return None
+
+    async def dead_letter_tool(self, execution_id: str, status: str, error: str | None) -> None:
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            await client.xadd(
+                settings.tool_dead_stream_key,
+                {
+                    "execution_id": execution_id,
+                    "status": status,
+                    "error": (error or "")[:1000],
+                },
+                maxlen=10_000,
+                approximate=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log_failure_once("tool dead letter", exc)
+
     async def acquire_lease(self, resource: str, ttl_seconds: int) -> str | None:
         client = self._get_client()
         if client is None:

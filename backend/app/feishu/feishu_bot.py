@@ -31,8 +31,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
+from backend.app.agent_runtime.channel_runs import (
+    build_channel_request,
+    create_channel_run,
+    wait_for_channel_run,
+)
 from backend.app.feishu.feishu import decrypt_value
-from backend.app.core.models import AiChatMessage, AiChatSession, DigitalHumanProfile, SystemLog, User
+from backend.app.core.models import AiChatMessage, AiChatSession, DigitalHumanProfile, User
 from backend.app.scheduler.rhythm_scheduler import _build_digital_human_context
 from backend.app.core.settings import settings
 
@@ -495,11 +500,15 @@ class BotWorker:
                     return
                 _inflight += 1
             self._bump_counter()
-            threading.Thread(target=self._handle, args=(chat_id, chat_type, question), daemon=True).start()
+            threading.Thread(
+                target=self._handle,
+                args=(chat_id, chat_type, question, message_id),
+                daemon=True,
+            ).start()
         except Exception as exc:  # noqa: BLE001
             _log("ERROR", f"机器人[{self.name}] 事件处理异常", {"error": str(exc)[:300]})
 
-    def _handle(self, chat_id: str, chat_type: str, question: str) -> None:
+    def _handle(self, chat_id: str, chat_type: str, question: str, message_id: str = "") -> None:
         global _inflight
         chat_lock = self._chat_lock(chat_id)
         lock_acquired = False
@@ -522,7 +531,22 @@ class BotWorker:
                 if self.stopping:
                     return
                 try:
-                    if self.code == "position-entry-agent":
+                    if session_id is not None:
+                        request_payload = build_channel_request(
+                            session_id=session_id,
+                            question=question,
+                            history=history,
+                            digital_human_code=self.code,
+                            source_type="feishu",
+                            source_ref=message_id or chat_id,
+                            user_label=f"feishu:{chat_id[:48]}",
+                        )
+                        run = create_channel_run(
+                            request_payload,
+                            idempotency_key=f"feishu:{message_id or chat_id + ':' + question[:40]}",
+                        )
+                        answer, _model, error = wait_for_channel_run(run["run_id"])
+                    elif self.code == "position-entry-agent":
                         answer, error = _consume_position_agent_with_history(
                             question,
                             history,
@@ -540,12 +564,13 @@ class BotWorker:
                 except Exception as exc:  # noqa: BLE001
                     answer, error = "", str(exc)[:500]
             persisted_error = error or (None if answer else "模型未返回内容")
-            _complete_feishu_session(
-                session_id,
-                answer=answer,
-                error=persisted_error,
-                duration_ms=int((time.monotonic() - started_at) * 1000),
-            )
+            if session_id is None:
+                _complete_feishu_session(
+                    session_id,
+                    answer=answer,
+                    error=persisted_error,
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
             if error or not answer:
                 final = _card(
                     f"{self.name} · 分析失败",

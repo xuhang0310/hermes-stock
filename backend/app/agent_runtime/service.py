@@ -40,6 +40,9 @@ class AgentRuntimeService:
         chat_mode = str(request_payload.get("chat_mode") or "research")
         request_payload = dict(request_payload)
         engine = select_engine(chat_mode, settings.agent_runtime_mode)
+        source_type = str(request_payload.get("source_type") or "web")
+        source_ref = str(request_payload.get("source_ref") or "") or None
+        priority = {"web": 300, "feishu": 200, "scheduler": 100}.get(source_type, 150)
         run, created = await asyncio.to_thread(
             self.repository.create_run,
             session_id=int(request_payload["session_id"]),
@@ -48,6 +51,9 @@ class AgentRuntimeService:
             chat_mode=chat_mode,
             request_payload=request_payload,
             idempotency_key=idempotency_key,
+            priority=priority,
+            source_type=source_type,
+            source_ref=source_ref,
         )
         if created:
             await self.append_event(run["run_id"], {**session_event, "run_id": run["run_id"]})

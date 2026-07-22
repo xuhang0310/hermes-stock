@@ -23,6 +23,7 @@ from sqlalchemy import and_, case, delete, desc, func, or_, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.payloads import user_text_from_content
 from backend.app.agent_runtime.repository import agent_run_repository
 from backend.app.agent_runtime.service import agent_runtime_service
@@ -31,6 +32,7 @@ from backend.app.core.models import (
     AiChatMessage,
     AiPromptRecommendation,
     AiChatSession,
+    AgentArtifact,
     AgentRun,
     AgentToolApproval,
     BackgroundTask,
@@ -141,6 +143,10 @@ class AgentChatIn(BaseModel):
 
 class AgentApprovalDecisionIn(BaseModel):
     decision: Literal["approved", "denied"]
+
+
+class ArtifactRestoreIn(BaseModel):
+    version: int = Field(ge=1)
 
 
 class PromptRecommendationRefreshIn(BaseModel):
@@ -940,6 +946,18 @@ def save_workspace_note(
         db, user_id=_context.user.id, path=result["path"], title=payload.title,
         session_id=payload.session_id, created_by=_context.user.display_name,
     )
+    try:
+        versioned = artifact_service.register_file(
+            user_id=_context.user.id,
+            workspace_path=result["path"],
+            session_id=payload.session_id,
+            run_id=None,
+            title=payload.title,
+            created_by=_context.user.display_name,
+        )
+        result = {**result, **versioned}
+    except (FileNotFoundError, ValueError):
+        pass
     log_event(
         "workspace", "INFO", "回答存入工作区",
         operator=_context.user.display_name, path=result.get("path"), bytes=result.get("bytes"),
@@ -1125,6 +1143,15 @@ def list_workspace_documents(
         row.path: row
         for row in db.scalars(select(WorkspaceDocument).where(WorkspaceDocument.user_id == _context.user.id)).all()
     }
+    artifacts = {
+        row.workspace_path: row
+        for row in db.scalars(
+            select(AgentArtifact).where(
+                AgentArtifact.user_id == _context.user.id,
+                AgentArtifact.status == "active",
+            )
+        ).all()
+    }
     sessions = {
         s.id: s for s in db.scalars(
             select(AiChatSession).where(AiChatSession.id.in_([r.session_id for r in registry.values() if r.session_id]))
@@ -1135,8 +1162,11 @@ def list_workspace_documents(
         if file.is_symlink() or not file.is_file() or file.suffix.lower() not in _WORKSPACE_DOCUMENT_EXTS:
             continue
         rel = file.resolve().relative_to(root).as_posix()
+        if rel == ".hermes" or rel.startswith(".hermes/"):
+            continue
         stat = file.stat()
         meta = registry.get(_workspace_doc_key(_context.user.id, rel))
+        artifact = artifacts.get(rel)
         session = sessions.get(meta.session_id) if meta and meta.session_id else None
         docs.append({
             "path": rel,
@@ -1150,6 +1180,8 @@ def list_workspace_documents(
             "ingested": bool(meta and meta.ingested_doc_id),
             "ingested_doc_id": meta.ingested_doc_id if meta else None,
             "ingestable": file.suffix.lower() in _WORKSPACE_INGEST_EXTS,
+            "artifact_id": artifact.artifact_id if artifact else None,
+            "active_version": artifact.active_version if artifact else None,
         })
     docs.sort(key=lambda d: d["mtime"], reverse=True)
     return docs
@@ -1172,6 +1204,33 @@ def download_workspace_document(
         raise HTTPException(status_code=404, detail="文档不存在")
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return FileResponse(str(target), filename=target.name, media_type=media_type)
+
+
+@router.get("/workspace/artifacts/{artifact_id}/versions")
+def list_artifact_versions(
+    artifact_id: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> list[dict]:
+    versions = artifact_service.list_versions(artifact_id, user_id=context.user.id)
+    if not versions:
+        raise HTTPException(status_code=404, detail="Artifact not found or has no versions.")
+    return versions
+
+
+@router.post("/workspace/artifacts/{artifact_id}/restore")
+def restore_artifact_version(
+    artifact_id: str,
+    payload: ArtifactRestoreIn,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    try:
+        return artifact_service.restore(
+            artifact_id,
+            payload.version,
+            user_id=context.user.id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 class WorkspaceIngestIn(BaseModel):
@@ -1934,7 +1993,7 @@ def _session_visibility(context: AuthContext):
         or_(AiChatSession.source_type == "web", AiChatSession.source_type.is_(None)),
     )
     if "all" in context.permissions or "digital_human:manage" in context.permissions:
-        return or_(web_session, AiChatSession.source_type == "feishu")
+        return or_(web_session, AiChatSession.source_type.in_(["feishu", "scheduler"]))
     return web_session
 
 
@@ -1946,6 +2005,8 @@ def _session_source_out(row: AiChatSession) -> dict:
             f"{row.digital_human_id}:{row.external_conversation_id}".encode("utf-8")
         ).hexdigest()[:8].upper()
         source_identifier = f"FS-{digest}"
+    elif source_type == "scheduler" and row.external_conversation_id:
+        source_identifier = f"SC-{row.external_conversation_id[:20]}"
     return {
         "source_type": source_type,
         "source_label": row.source_label or ("网页" if source_type == "web" else source_type),
@@ -2261,6 +2322,23 @@ def _prepare_agent_chat(
             session_id=session_id,
             created_by=context.user.display_name,
         )
+        try:
+            versioned = artifact_service.register_file(
+                user_id=context.user.id,
+                workspace_path=attachment["path"],
+                session_id=session_id,
+                run_id=None,
+                title=attachment["name"],
+                created_by=context.user.display_name,
+            )
+            attachment.update(
+                {
+                    "artifact_id": versioned["artifact_id"],
+                    "version": versioned["version"],
+                }
+            )
+        except (FileNotFoundError, ValueError):
+            pass
 
     profile_payload = _digital_human_out(profile) if profile else None
     model_payload = _model_out(model_config) if model_config else None
@@ -2519,6 +2597,9 @@ async def cancel_agent_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
     await asyncio.to_thread(cancel_pending_run_approvals, run_id)
+    from backend.app.agent_runtime.tool_repository import tool_execution_repository
+
+    await asyncio.to_thread(tool_execution_repository.cancel_for_run, run_id)
     if run.get("cancelled_now"):
         await agent_runtime_service.append_event(
             run_id,

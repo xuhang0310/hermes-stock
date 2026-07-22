@@ -7,8 +7,12 @@ from typing import Any
 
 from sqlalchemy import select
 
+from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.contracts import EngineOutcome
+from backend.app.agent_runtime.external_tools import external_tool_executor
 from backend.app.agent_runtime.payloads import materialize_agentscope_content
+from backend.app.agent_runtime.tool_specs import should_externalize, tool_spec
+from backend.app.agent_runtime.transaction_state import transaction_state_service
 from backend.app.agents.tool_approval import (
     classify_tool_risk,
     create_tool_approval,
@@ -17,6 +21,7 @@ from backend.app.agents.tool_approval import (
 from backend.app.core.database import SessionLocal
 from backend.app.core.llm_config import active_llm_config
 from backend.app.core.models import AgentToolApproval
+from backend.app.core.settings import settings
 from backend.app.market.digital_human_tools import digital_human_tool_display_name, write_tool_schemas
 from backend.app.market.stock_tools import (
     stock_observation_preview,
@@ -71,6 +76,24 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
     memory_context = str(request_payload.get("memory_context") or "")
     skills = list(request_payload.get("skills") or [])
     write_names: set[str] = set()
+    if role_code == "position-entry-agent":
+        from backend.app.agents.position_agent import POSITION_AGENT_TOOLS, _position_agent_prompt
+
+        write_names = {"save_position_holdings"}
+        return (
+            _position_agent_prompt() + transaction_state_service.prompt_context(request_payload),
+            list(POSITION_AGENT_TOOLS),
+            write_names,
+        )
+    if role_code == "watchlist-entry-agent":
+        from backend.app.agents.watchlist_agent import WATCHLIST_AGENT_TOOLS, _watchlist_agent_prompt
+
+        write_names = {"add_watchlist_items", "remove_watchlist_items"}
+        return (
+            _watchlist_agent_prompt() + transaction_state_service.prompt_context(request_payload),
+            list(WATCHLIST_AGENT_TOOLS),
+            write_names,
+        )
     if chat_mode == "stock":
         return (
             stock_system_prompt_with_skills(request_payload.get("digital_human_context"), skills, memory_context),
@@ -87,11 +110,14 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         write_names = {item["function"]["name"] for item in schemas}
     if not request_payload.get("allow_code_execution"):
         tools = [item for item in tools if item.get("function", {}).get("name") != "ws_run_python"]
-    return (
-        _system_prompt(request_payload.get("digital_human_context"), role_code, memory_context),
-        tools,
-        write_names,
+    system_prompt = _system_prompt(request_payload.get("digital_human_context"), role_code, memory_context)
+    active_artifacts = artifact_service.active_context(
+        user_id=int(request_payload["user_id"]),
+        session_id=int(request_payload["session_id"]) if request_payload.get("session_id") else None,
     )
+    if active_artifacts:
+        system_prompt += f"\n\n{active_artifacts}"
+    return system_prompt, tools, write_names
 
 
 def _execute_tool(
@@ -106,6 +132,41 @@ def _execute_tool(
         run_sql,
         search_knowledge,
     )
+
+    args, transaction_state = transaction_state_service.before_tool(request_payload, name, args)
+    role_code = str(request_payload.get("digital_human_code") or "")
+    if role_code == "position-entry-agent":
+        from backend.app.agents.position_agent import _execute_position_tool
+        from backend.app.data.repository import StockRepository
+
+        account_id = (transaction_state or {}).get("slots", {}).get("account_id")
+        account_id = request_payload.get("default_account_id") or account_id
+        with SessionLocal() as db:
+            result = _execute_position_tool(
+                repository=StockRepository(db),
+                name=name,
+                args=args,
+                created_by=str(request_payload.get("user_label") or "agent"),
+                source_name="AgentScope",
+                image_mime_type=str(request_payload.get("image_mime_type") or "image/png"),
+                image_sha256=request_payload.get("image_sha256"),
+                account_id=int(account_id) if account_id else None,
+            )
+        transaction_state_service.after_tool(request_payload, name, args, result)
+        return result
+    if role_code == "watchlist-entry-agent":
+        from backend.app.agents.watchlist_agent import _execute_watchlist_tool
+        from backend.app.data.repository import StockRepository
+
+        with SessionLocal() as db:
+            result = _execute_watchlist_tool(
+                StockRepository(db),
+                name,
+                args,
+                created_by=str(request_payload.get("user_label") or "agent"),
+            )
+        transaction_state_service.after_tool(request_payload, name, args, result)
+        return result
 
     if name == "run_sql":
         return run_sql(str(args.get("sql") or ""))
@@ -154,8 +215,9 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
             self.name = str(function["name"])
             self.description = str(function.get("description") or self.name)
             self.input_schema = dict(function.get("parameters") or {"type": "object", "properties": {}})
-            self.is_concurrency_safe = not self.name.startswith("ws_") and self.name not in write_names
-            self.is_read_only = self.name not in write_names and self.name not in {"ws_write_file", "ws_edit_file", "ws_run_python"}
+            self.spec = tool_spec(self.name, write_names=write_names)
+            self.is_concurrency_safe = self.spec.is_concurrency_safe
+            self.is_read_only = self.spec.is_read_only
 
         async def check_permissions(self, tool_input, _context):
             risk = classify_tool_risk(self.name, tool_input, write_names)
@@ -171,15 +233,49 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
 
         async def call(self, **kwargs):
             try:
-                result = await asyncio.to_thread(_execute_tool, self.name, kwargs, request_payload, write_names)
+                execution_id = None
+                externalized = should_externalize(
+                    self.spec,
+                    enabled=bool(settings.tool_external_execution_enabled and request_payload.get("run_id")),
+                )
+                if externalized:
+                    result, execution_id = await external_tool_executor.execute(
+                        run_id=str(request_payload["run_id"]),
+                        tool_name=self.name,
+                        arguments=kwargs,
+                        spec=self.spec,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        _execute_tool, self.name, kwargs, request_payload, write_names
+                    )
+                    if self.name in {"ws_write_file", "ws_edit_file"} and result.get("path"):
+                        result = {**result, "artifacts": [{"path": result["path"]}]}
+                    result = await asyncio.to_thread(
+                        artifact_service.register_result,
+                        result=result,
+                        user_id=int(request_payload["user_id"]),
+                        session_id=(
+                            int(request_payload["session_id"])
+                            if request_payload.get("session_id")
+                            else None
+                        ),
+                        run_id=str(request_payload.get("run_id") or "") or None,
+                        created_by=str(request_payload.get("user_label") or "agent"),
+                    )
                 state = ToolResultState.ERROR if "error" in result else ToolResultState.SUCCESS
             except Exception as exc:  # noqa: BLE001
                 result = {"error": str(exc)}
+                execution_id = None
                 state = ToolResultState.ERROR
             return ToolChunk(
                 content=[TextBlock(text=json.dumps(result, ensure_ascii=False, default=str))],
                 state=state,
-                metadata={"result": result, "display_name": _tool_display_name(self.name)},
+                metadata={
+                    "result": result,
+                    "display_name": _tool_display_name(self.name),
+                    "execution_id": execution_id,
+                },
             )
 
     return [HermesTool(schema) for schema in schemas]
@@ -267,7 +363,9 @@ async def run_agentscope(
     from agentscope.state import AgentState
     from agentscope.tool import Toolkit
 
+    request_payload = {**request_payload, "run_id": run_id}
     system_prompt, schemas, write_names = _build_definition(request_payload)
+    request_payload["write_tool_names"] = sorted(write_names)
     llm = active_llm_config(request_payload.get("model_config_id"))
     if not llm.get("base_url") or not llm.get("api_key"):
         raise RuntimeError("当前模型未配置 API Key 或 Base URL。")
@@ -386,6 +484,7 @@ async def run_agentscope(
         elif isinstance(event, ToolResultEndEvent):
             name = tool_names.get(event.tool_call_id, "")
             raw_result = event.metadata.get("result") if isinstance(event.metadata, dict) else None
+            execution_id = event.metadata.get("execution_id") if isinstance(event.metadata, dict) else None
             if not isinstance(raw_result, dict):
                 text_result = "".join(tool_results.get(event.tool_call_id, []))
                 try:
@@ -403,6 +502,7 @@ async def run_agentscope(
                     "tool": name,
                     "display_name": _tool_display_name(name),
                     "success": str(event.state) == "success",
+                    "execution_id": execution_id,
                 }
             )
             await save_checkpoint(agent.state.model_dump_json(), None)

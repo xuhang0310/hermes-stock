@@ -152,6 +152,9 @@ def _artifact_snapshot(root: Path) -> dict[str, tuple[int, int]]:
     snapshot: dict[str, tuple[int, int]] = {}
     for path in root.rglob("*"):
         try:
+            rel = path.relative_to(root).as_posix()
+            if rel == ".hermes" or rel.startswith(".hermes/"):
+                continue
             if path.is_symlink() or not path.is_file() or path.suffix.lower() not in _ARTIFACT_EXTS:
                 continue
             resolved = path.resolve()
@@ -280,7 +283,11 @@ def ws_glob(pattern: str = "**/*") -> dict:
     root = _ensure_root()
     pat = (pattern or "").strip() or "**/*"
     try:
-        matches = [p for p in root.glob(pat) if p.is_file()]
+        matches = [
+            p for p in root.glob(pat)
+            if p.is_file()
+            and not p.relative_to(root).as_posix().startswith(".hermes/")
+        ]
     except (ValueError, OSError) as exc:
         return {"error": f"匹配模式无效: {str(exc)[:150]}"}
     matches.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
@@ -302,7 +309,11 @@ def ws_grep(pattern: str, glob: str | None = None) -> dict:
     root = _ensure_root()
     pat = (glob or "").strip() or "**/*"
     try:
-        candidates = [p for p in root.glob(pat) if p.is_file()]
+        candidates = [
+            p for p in root.glob(pat)
+            if p.is_file()
+            and not p.relative_to(root).as_posix().startswith(".hermes/")
+        ]
     except (ValueError, OSError) as exc:
         return {"error": f"匹配模式无效: {str(exc)[:150]}"}
     hits: list[dict[str, Any]] = []

@@ -1,0 +1,21 @@
+[Unit]
+Description=SixRabbits Stock durable tool worker
+After=network-online.target docker.service hermes-stock-sandboxd.service
+Wants=network-online.target docker.service hermes-stock-sandboxd.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-stock/current
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/hermes-stock/redis/connection.env
+ExecStart=/opt/hermes-stock/venv/bin/python -m backend.app.agent_runtime.tool_worker
+Restart=always
+RestartSec=1
+TimeoutStopSec=130
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

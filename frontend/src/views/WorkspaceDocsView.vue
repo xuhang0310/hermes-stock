@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
-import type { WorkspaceDoc } from '../types'
+import type { ArtifactVersion, WorkspaceDoc } from '../types'
 import { beijingFromEpoch } from '../utils/datetime'
 
 const docs = ref<WorkspaceDoc[]>([])
@@ -9,6 +9,9 @@ const loading = ref(false)
 const error = ref('')
 const busyPath = ref<string | null>(null)
 const notice = ref('')
+const versionsOpen = ref<string | null>(null)
+const versions = ref<Record<string, ArtifactVersion[]>>({})
+const restoringVersion = ref<string | null>(null)
 
 const DH_NAMES: Record<string, string> = {
   'stock-pm': 'A股研究总调度',
@@ -90,6 +93,39 @@ async function ingest(doc: WorkspaceDoc) {
   }
 }
 
+async function toggleVersions(doc: WorkspaceDoc) {
+  if (!doc.artifact_id) return
+  if (versionsOpen.value === doc.artifact_id) {
+    versionsOpen.value = null
+    return
+  }
+  versionsOpen.value = doc.artifact_id
+  error.value = ''
+  try {
+    versions.value[doc.artifact_id] = await api.artifactVersions(doc.artifact_id)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '版本记录加载失败'
+  }
+}
+
+async function restoreVersion(doc: WorkspaceDoc, version: number) {
+  if (!doc.artifact_id || version === doc.active_version) return
+  const key = `${doc.artifact_id}:${version}`
+  restoringVersion.value = key
+  error.value = ''
+  notice.value = ''
+  try {
+    await api.restoreArtifactVersion(doc.artifact_id, version)
+    notice.value = `《${doc.title}》已恢复到 v${version}，并保留为新的历史版本。`
+    await load()
+    versions.value[doc.artifact_id] = await api.artifactVersions(doc.artifact_id)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '恢复版本失败'
+  } finally {
+    restoringVersion.value = null
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -140,6 +176,14 @@ onMounted(load)
             <span class="sz">{{ fmtBytes(doc.bytes) }}</span>
             <span class="tm">{{ fmtTime(doc.mtime) }}</span>
           </div>
+          <button
+            v-if="doc.artifact_id"
+            class="wsd-version-trigger"
+            :aria-expanded="versionsOpen === doc.artifact_id"
+            @click="toggleVersions(doc)"
+          >
+            v{{ doc.active_version || 1 }} 版本记录
+          </button>
           <span v-if="doc.ingested" class="wsd-kb in">✓ 已入库</span>
           <span v-else-if="doc.ingestable" class="wsd-kb out">未入库</span>
           <span v-else class="wsd-kb out">仅下载</span>
@@ -154,6 +198,25 @@ onMounted(load)
               {{ busyPath === doc.path ? '处理中…' : '＋ 加入知识库' }}
             </button>
             <button v-else class="wsd-btn done" disabled>✓ 已加入</button>
+          </div>
+        </div>
+
+        <div v-if="doc.artifact_id && versionsOpen === doc.artifact_id" class="wsd-versions">
+          <div v-for="item in versions[doc.artifact_id] || []" :key="item.version" class="wsd-version-row">
+            <span class="ver">v{{ item.version }}</span>
+            <span class="state" :class="{ active: item.active }">{{ item.active ? '当前版本' : '历史版本' }}</span>
+            <span>{{ fmtBytes(item.bytes) }}</span>
+            <span>{{ item.created_at ? item.created_at.replace('T', ' ').slice(0, 19) : '-' }}</span>
+            <span :class="item.validation_status === 'valid' ? 'valid' : 'invalid'">
+              {{ item.validation_status === 'valid' ? '校验通过' : '校验异常' }}
+            </span>
+            <button
+              class="wsd-btn"
+              :disabled="item.active || restoringVersion === `${doc.artifact_id}:${item.version}`"
+              @click="restoreVersion(doc, item.version)"
+            >
+              {{ item.active ? '使用中' : restoringVersion === `${doc.artifact_id}:${item.version}` ? '恢复中' : '恢复此版' }}
+            </button>
           </div>
         </div>
       </article>
@@ -241,6 +304,11 @@ onMounted(load)
 .wsd-convo.agent .av { background: rgba(131, 124, 106, 0.4); color: #d8d2c1; }
 
 .wsd-right { display: flex; align-items: center; gap: 16px; }
+.wsd-version-trigger {
+  border: 0; background: transparent; color: var(--cyan); cursor: pointer; padding: 5px 0;
+  font-size: 11.5px; white-space: nowrap;
+}
+.wsd-version-trigger:hover { color: #bdeeee; }
 .wsd-meta { display: flex; flex-direction: column; gap: 3px; text-align: right; font-variant-numeric: tabular-nums; }
 .wsd-meta .sz { font-size: 13px; color: var(--ink-soft); font-weight: 600; }
 .wsd-meta .tm { font-size: 11px; color: var(--ink-mute); }
@@ -259,6 +327,20 @@ onMounted(load)
 .wsd-btn.done { color: var(--ok); border-color: rgba(39, 197, 138, 0.35); cursor: default; }
 .wsd-btn:disabled { opacity: 0.7; cursor: default; }
 
+.wsd-versions {
+  grid-column: 1 / -1; border-top: 1px solid var(--line-soft); padding-top: 10px;
+  display: flex; flex-direction: column;
+}
+.wsd-version-row {
+  display: grid; grid-template-columns: 52px 86px 90px minmax(150px, 1fr) 90px auto;
+  align-items: center; gap: 12px; min-height: 38px; color: var(--ink-mute); font-size: 11.5px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.wsd-version-row:last-child { border-bottom: 0; }
+.wsd-version-row .ver { color: var(--ink); font-family: var(--mono); font-weight: 700; }
+.wsd-version-row .state.active, .wsd-version-row .valid { color: var(--ok); }
+.wsd-version-row .invalid { color: var(--danger); }
+
 .wsd-foot { margin-top: 18px; color: var(--ink-mute); font-size: 11.5px; display: flex; align-items: center; gap: 8px; }
 .wsd-foot .live { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 
@@ -266,5 +348,7 @@ onMounted(load)
   .wsd-stats { grid-template-columns: repeat(2, 1fr); }
   .wsd-card { grid-template-columns: 44px 1fr; }
   .wsd-right { grid-column: 1 / -1; justify-content: space-between; flex-wrap: wrap; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+  .wsd-version-row { grid-template-columns: 44px 76px 1fr auto; gap: 8px; }
+  .wsd-version-row > span:nth-child(4), .wsd-version-row > span:nth-child(5) { display: none; }
 }
 </style>

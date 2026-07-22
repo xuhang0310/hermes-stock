@@ -1,4 +1,5 @@
 import type {
+  ArtifactVersion,
   AgentItem,
   DashboardPayload,
   EventItem,
@@ -262,6 +263,8 @@ async function streamJsonRequest<T extends { type?: string }>(
   onEvent: (event: T) => void
 ) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  headers['Idempotency-Key'] =
+    globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
   if (authToken) {
     headers.Authorization = `Bearer ${authToken}`
   }
@@ -483,6 +486,13 @@ export const api = {
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
   workspaceStatus: () => request<WorkspaceStatus>('/api/workspace/status'),
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
+  artifactVersions: (artifactId: string) =>
+    request<ArtifactVersion[]>(`/api/workspace/artifacts/${encodeURIComponent(artifactId)}/versions`),
+  restoreArtifactVersion: (artifactId: string, version: number) =>
+    request<Record<string, unknown>>(`/api/workspace/artifacts/${encodeURIComponent(artifactId)}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ version })
+    }),
   ingestWorkspaceDoc: (path: string) =>
     request<{ doc_id: number; chunks: number; failed: number; path: string }>('/api/workspace/documents/ingest', {
       method: 'POST',

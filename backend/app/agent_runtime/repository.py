@@ -35,6 +35,8 @@ def _run_dict(row: AgentRun) -> dict[str, Any]:
         "user_id": row.user_id,
         "engine": row.engine,
         "chat_mode": row.chat_mode,
+        "source_type": row.source_type,
+        "source_ref": row.source_ref,
         "status": row.status,
         "priority": row.priority,
         "last_event_seq": row.last_event_seq,
@@ -42,6 +44,7 @@ def _run_dict(row: AgentRun) -> dict[str, Any]:
         "max_attempts": row.max_attempts,
         "cancel_requested": bool(row.cancel_requested),
         "error": row.error,
+        "result_message_id": row.result_message_id,
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -63,6 +66,8 @@ class AgentRunRepository:
         request_payload: dict[str, Any],
         idempotency_key: str | None = None,
         priority: int = 100,
+        source_type: str = "web",
+        source_ref: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         normalized_key = (idempotency_key or "").strip()[:120] or None
         with self.session_factory() as db:
@@ -81,6 +86,8 @@ class AgentRunRepository:
                 user_id=user_id,
                 engine=engine,
                 chat_mode=chat_mode,
+                source_type=(source_type or "web")[:24],
+                source_ref=(source_ref or "")[:160] or None,
                 status="queued",
                 priority=priority,
                 idempotency_key=normalized_key,

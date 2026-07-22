@@ -580,6 +580,8 @@ class AgentRun(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     engine: Mapped[str] = mapped_column(String(32), nullable=False, default="legacy")
     chat_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="research")
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False, default="web")
+    source_ref: Mapped[str | None] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     idempotency_key: Mapped[str | None] = mapped_column(String(120))
@@ -669,6 +671,7 @@ class AgentToolExecution(Base):
     tool_call_id: Mapped[str] = mapped_column(String(160), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(120), nullable=False)
     tool_version: Mapped[str] = mapped_column(String(40), nullable=False, default="v1")
+    execution_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="inline")
     risk_level: Mapped[str | None] = mapped_column(String(24))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
     idempotency_key: Mapped[str | None] = mapped_column(String(160), unique=True)
@@ -678,6 +681,14 @@ class AgentToolExecution(Base):
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
     has_side_effects: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    available_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime)
+    lease_owner: Mapped[str | None] = mapped_column(String(160))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error_code: Mapped[str | None] = mapped_column(String(80))
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -700,7 +711,79 @@ class AgentOutbox(Base):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     available_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    published_ref: Mapped[str | None] = mapped_column(String(160))
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentArtifact(Base):
+    """Stable identity for a workspace artifact across edits and runs."""
+
+    __tablename__ = "agent_artifacts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "workspace_path", name="uq_agent_artifact_user_path"),
+        Index("ix_agent_artifacts_session", "session_id", "updated_at"),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    session_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"))
+    digital_human_code: Mapped[str | None] = mapped_column(String(80))
+    workspace_path: Mapped[str] = mapped_column(String(300), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(500))
+    mime_type: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+    active_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by_run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentArtifactVersion(Base):
+    """Immutable snapshot and lineage for one artifact revision."""
+
+    __tablename__ = "agent_artifact_versions"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "version", name="uq_agent_artifact_version"),
+        Index("ix_agent_artifact_versions_run", "run_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    artifact_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_artifacts.artifact_id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_version: Mapped[int | None] = mapped_column(Integer)
+    run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    tool_execution_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_tool_executions.execution_id"))
+    storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BIGINT_ID, nullable=False, default=0)
+    mime_type: Mapped[str | None] = mapped_column(String(120))
+    validation_status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    validation_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AgentTransactionState(Base):
+    """Structured slots for position/watchlist agents across turns and channels."""
+
+    __tablename__ = "agent_transaction_states"
+    __table_args__ = (
+        UniqueConstraint("session_id", "agent_code", name="uq_agent_transaction_session_code"),
+        Index("ix_agent_transaction_expiry", "status", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    agent_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    intent: Mapped[str | None] = mapped_column(String(80))
+    slots_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False, default="{}")
+    evidence_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False, default="[]")
+    missing_fields_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False, default="[]")
+    pending_action_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="collecting")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

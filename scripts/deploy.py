@@ -160,6 +160,19 @@ class Deployer:
             return False
         return True
 
+    def _restart_tool_worker(self) -> bool:
+        rc, out, err = self.run("systemctl restart hermes-stock-tool-worker")
+        if rc != 0:
+            log(f"Tool Worker 重启失败: {out} {err}")
+            return False
+        for _ in range(20):
+            rc, out, _ = self.run("systemctl is-active hermes-stock-tool-worker")
+            if rc == 0 and out.strip() == "active":
+                return True
+            time.sleep(1)
+        log("Tool Worker 健康检查超时")
+        return False
+
     def _sandbox_enabled(self) -> bool:
         rc, _, _ = self.run("test -f /etc/systemd/system/hermes-stock-sandboxd.service")
         return rc == 0
@@ -235,9 +248,11 @@ install -m 0644 "$NEW/deploy/systemd/hermes-stock-sandboxd.service" /etc/systemd
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-api-a.service" /etc/systemd/system/hermes-stock-api-a.service
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-api-b.service" /etc/systemd/system/hermes-stock-api-b.service
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-background.service" /etc/systemd/system/hermes-stock-background.service
+install -m 0644 "$NEW/deploy/systemd/hermes-stock-tool-worker.service" /etc/systemd/system/hermes-stock-tool-worker.service
 systemctl daemon-reload
 systemctl enable hermes-stock-sandboxd >/dev/null 2>&1
 systemctl enable hermes-stock-api-a hermes-stock-api-b hermes-stock-background >/dev/null 2>&1
+systemctl enable hermes-stock-tool-worker >/dev/null 2>&1
 ln -sfn "$NEW" "$CUR"
 echo SWITCHED
 """
@@ -249,7 +264,12 @@ echo SWITCHED
         log(f"已切换 current -> {new}，重启服务，验证中...")
 
         if self._ha_enabled() and not a.defer_restart:
-            if not self._restart_sandbox() or not self._restart_background() or not self._rolling_restart():
+            if (
+                not self._restart_sandbox()
+                or not self._restart_background()
+                or not self._restart_tool_worker()
+                or not self._rolling_restart()
+            ):
                 self._rollback(cur, old)
                 return 1
         elif not a.defer_restart:
@@ -293,6 +313,10 @@ echo SWITCHED
             self.run("systemctl stop hermes-stock-sandboxd")
         if self._ha_enabled():
             self._restart_background()
+            if self.run(f"test -f {old}/backend/app/agent_runtime/tool_worker.py")[0] == 0:
+                self._restart_tool_worker()
+            else:
+                self.run("systemctl stop hermes-stock-tool-worker")
             self._rolling_restart()
         else:
             self.run(f"systemctl restart {self.a.service} && sleep 3")
