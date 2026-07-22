@@ -51,6 +51,7 @@ class WatchlistAgentIn(BaseModel):
     instruction: str = Field(min_length=1, max_length=2000)
     model_config_id: int | None = None
     history: list[dict[str, str]] = Field(default_factory=list, max_length=8)
+    pending_action: dict | None = None
 
 
 class PositionAccountIn(BaseModel):
@@ -122,8 +123,10 @@ class PositionAgentAddIn(BaseModel):
     instruction: str = Field(min_length=1, max_length=2000)
     image_base64: str | None = Field(default=None, min_length=100)
     mime_type: str = Field(default="image/png", max_length=80)
-    account_id: int | None = None
+    account_id: int | None = Field(default=None, ge=1)
     model_config_id: int | None = None
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=8)
+    pending_action: dict | None = None
 
 
 def _sse_event(event: dict) -> str:
@@ -265,9 +268,9 @@ def create_app(init_db: bool = True) -> FastAPI:
     @app.get("/api/dashboard")
     def dashboard(
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("dashboard:view")),
+        context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> dict:
-        return repository.dashboard()
+        return repository.dashboard(user_id=context.user.id)
 
     @app.get("/api/events")
     def events(
@@ -472,6 +475,8 @@ def create_app(init_db: bool = True) -> FastAPI:
                 model_config_id=payload.model_config_id,
                 created_by=context.user.username,
                 account_id=payload.account_id,
+                history=payload.history,
+                pending_action=payload.pending_action,
             )
             return {
                 "batch": None,
@@ -482,6 +487,7 @@ def create_app(init_db: bool = True) -> FastAPI:
                 "rows": result.get("rows") or [],
                 "steps": result.get("steps") or [],
                 "summary": result.get("summary") or result.get("reply"),
+                "pending_action": result.get("pending_action"),
             }
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -515,6 +521,8 @@ def create_app(init_db: bool = True) -> FastAPI:
                             created_by=context.user.username,
                             account_id=payload.account_id,
                             cancel_event=cancel_event,
+                            history=payload.history,
+                            pending_action=payload.pending_action,
                         ):
                             if cancel_event.is_set():
                                 break
@@ -604,6 +612,7 @@ def create_app(init_db: bool = True) -> FastAPI:
                             created_by=context.user.username,
                             cancel_event=cancel_event,
                             history=payload.history,
+                            pending_action=payload.pending_action,
                         ):
                             if cancel_event.is_set():
                                 break

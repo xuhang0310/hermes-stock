@@ -1,11 +1,25 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
+import AgentApprovalCard from '../components/AgentApprovalCard.vue'
+import AgentProcessDisclosure from '../components/AgentProcessDisclosure.vue'
+import ApprovalPolicyControl from '../components/ApprovalPolicyControl.vue'
+import ChatAttachmentPicker from '../components/ChatAttachmentPicker.vue'
 import FeishuBotPanel from './FeishuBotPanel.vue'
-import type { AgentSession, AgentStreamEvent, DigitalHuman, ModelConfig, PromptRecommendation } from '../types'
+import type {
+  AgentAttachment,
+  AgentSession,
+  AgentStreamEvent,
+  AgentToolApproval,
+  ApprovalPolicy,
+  DigitalHuman,
+  ModelConfig,
+  PromptRecommendation
+} from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
 import { extractGeneratedFiles, type GeneratedFile } from '../utils/workspace'
+import { elapsedStreamMilliseconds, formatStreamDuration } from '../utils/streamDuration'
 
 const props = withDefaults(defineProps<{
   initialTab?: 'chat' | 'feishuBots'
@@ -33,7 +47,18 @@ type ChatMessage = {
   liveContent: string
   liveTool?: LiveToolProgress | null
   files: GeneratedFile[]
+  attachments: AgentAttachment[]
+  approval?: AgentToolApproval | null
+  approvalBusy?: boolean
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
+  startedAt?: number
+  durationMs?: number
+  processExpanded?: boolean
+  processAutoCollapsed?: boolean
+}
+
+type ChatAttachmentPickerHandle = {
+  handlePaste: (event: ClipboardEvent) => Promise<boolean>
 }
 
 const profiles = ref<DigitalHuman[]>([])
@@ -43,11 +68,17 @@ const promptRecommendations = ref<PromptRecommendation[]>([])
 const fallbackPrompts = ref<string[]>([])
 const messages = ref<ChatMessage[]>([])
 const question = ref('')
-const allowCodeExecution = ref(false)
+const approvalPolicy = ref<ApprovalPolicy>('ask')
+const pendingAttachments = ref<AgentAttachment[]>([])
+const attachmentPicker = ref<ChatAttachmentPickerHandle | null>(null)
 const workspaceExecAvailable = ref(false)
 const selectedProfileId = ref<number | null>(null)
 const selectedModelId = ref<number | null>(null)
 const selectedSessionId = ref<number | null>(null)
+const selectedSessionSourceType = ref('web')
+const selectedSessionSourceLabel = ref('网页')
+const selectedSessionSourceIdentifier = ref<string | null>(null)
+const selectedSessionReadOnly = ref(false)
 const sending = ref(false)
 const abortController = ref<AbortController | null>(null)
 const loadingSessions = ref(false)
@@ -55,6 +86,11 @@ const loadingSession = ref(false)
 const loadingPrompts = ref(false)
 const error = ref('')
 const chatScroll = ref<HTMLElement | null>(null)
+
+function pasteIntoComposer(event: ClipboardEvent) {
+  if (selectedSessionReadOnly.value) return
+  void attachmentPicker.value?.handlePaste(event)
+}
 
 const selectedProfile = computed(() => profiles.value.find((item) => item.id === selectedProfileId.value) || null)
 const filteredSessions = computed(() => {
@@ -69,6 +105,14 @@ const activeModel = computed(
     models.value[0] ||
     null
 )
+
+const pendingApproval = computed<{ message: ChatMessage; approval: AgentToolApproval } | null>(() => {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const message = messages.value[index]
+    if (message.approval?.status === 'pending') return { message, approval: message.approval }
+  }
+  return null
+})
 
 const modelGroups = computed(() => {
   const groups = new Map<string, ModelConfig[]>()
@@ -150,6 +194,10 @@ async function openSession(id: number) {
     selectedSessionId.value = detail.id
     selectedProfileId.value = detail.digital_human_id || selectedProfileId.value
     selectedModelId.value = detail.model_config_id || selectedModelId.value
+    selectedSessionSourceType.value = detail.source_type || 'web'
+    selectedSessionSourceLabel.value = detail.source_label || '网页'
+    selectedSessionSourceIdentifier.value = detail.source_identifier || null
+    selectedSessionReadOnly.value = Boolean(detail.read_only)
     if (selectedProfileId.value) {
       await loadPromptRecommendations(selectedProfileId.value)
     }
@@ -163,7 +211,12 @@ async function openSession(id: number) {
       liveReasoning: '',
       liveContent: '',
       files: [],
-      streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined
+      attachments: item.attachments || [],
+      approval: null,
+      streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined,
+      durationMs: item.duration_ms ?? undefined,
+      processExpanded: false,
+      processAutoCollapsed: true
     }))
     scrollChat(false)
   } catch (err) {
@@ -176,9 +229,15 @@ async function openSession(id: number) {
 function newSession(profileId?: number | null) {
   if (sending.value) return
   selectedSessionId.value = null
+  selectedSessionSourceType.value = 'web'
+  selectedSessionSourceLabel.value = '网页'
+  selectedSessionSourceIdentifier.value = null
+  selectedSessionReadOnly.value = false
   selectedProfileId.value = profileId ?? selectedProfileId.value ?? profiles.value[0]?.id ?? null
   messages.value = []
   question.value = ''
+  pendingAttachments.value = []
+  approvalPolicy.value = 'ask'
   error.value = ''
   if (selectedProfileId.value) {
     loadPromptRecommendations(selectedProfileId.value)
@@ -259,6 +318,11 @@ function sessionModelLabel(session: AgentSession) {
   return model ? modelOptionLabel(model) : session.model_display_name || '默认模型'
 }
 
+function sessionSourceDescription(session: AgentSession) {
+  if (session.source_type !== 'feishu') return sessionModelLabel(session)
+  return [session.source_label || '飞书', session.source_identifier].filter(Boolean).join(' · ')
+}
+
 function stepLabel(step: ReactStep) {
   if (step.type === 'model') return '模型'
   if (step.type === 'reasoning') return 'Reasoning'
@@ -275,6 +339,32 @@ function streamStatusText(message: ChatMessage) {
   if (message.streamStatus === 'error') return '流式响应异常'
   if (message.streamStatus === 'done') return '流式响应完成'
   return '等待响应'
+}
+
+function finishStreamDuration(message: ChatMessage, durationMs?: number) {
+  if (typeof durationMs === 'number' && Number.isFinite(durationMs)) {
+    message.durationMs = Math.max(0, Math.round(durationMs))
+    return
+  }
+  if (typeof message.durationMs === 'number') return
+  message.durationMs = elapsedStreamMilliseconds(message.startedAt)
+}
+
+function completeStream(message: ChatMessage, durationMs?: number) {
+  finishStreamDuration(message, durationMs)
+  message.streamStatus = 'done'
+  if (!message.processAutoCollapsed) {
+    message.processExpanded = false
+    message.processAutoCollapsed = true
+  }
+}
+
+function hasProcessDetails(message: ChatMessage) {
+  return message.steps.length > 0 || Boolean(message.liveReasoning) || Boolean(message.liveTool)
+}
+
+function processStepCount(message: ChatMessage) {
+  return message.steps.length + Number(Boolean(message.liveReasoning)) + Number(Boolean(message.liveTool))
 }
 
 function releaseComposer(controller: AbortController) {
@@ -333,19 +423,23 @@ async function downloadFile(file: GeneratedFile) {
 }
 
 async function send() {
-  const text = question.value.trim()
-  if (!text || sending.value) return
+  if (selectedSessionReadOnly.value) {
+    error.value = '飞书同步会话为只读，请在对应飞书会话中继续回复。'
+    return
+  }
+  const enteredText = question.value.trim()
+  const sentAttachments = pendingAttachments.value.map(({ preview_url: _preview, ...item }) => item)
+  if ((!enteredText && !sentAttachments.length) || sending.value) return
+  const text = enteredText || '请分析我上传的附件。'
 
   const history = messages.value
     .filter((item) => item.content)
     .map((item) => ({ role: item.role, content: item.content }))
     .slice(-8)
-  const executionGranted = workspaceExecAvailable.value && allowCodeExecution.value
-  allowCodeExecution.value = false
-
   sending.value = true
   error.value = ''
   question.value = ''
+  pendingAttachments.value = []
   messages.value.push({
     id: Date.now(),
     role: 'user',
@@ -354,7 +448,8 @@ async function send() {
     steps: [],
     liveReasoning: '',
     liveContent: '',
-    files: []
+    files: [],
+    attachments: sentAttachments
   })
   messages.value.push({
     id: Date.now() + 1,
@@ -365,7 +460,12 @@ async function send() {
     liveReasoning: '',
     liveContent: '',
     files: [],
-    streamStatus: 'connecting'
+    attachments: [],
+    approval: null,
+    streamStatus: 'connecting',
+    startedAt: Date.now(),
+    processExpanded: true,
+    processAutoCollapsed: false
   })
   const reply = messages.value[messages.value.length - 1]
   scrollChat()
@@ -380,11 +480,16 @@ async function send() {
         session_id: selectedSessionId.value,
         digital_human_id: selectedProfileId.value,
         model_config_id: selectedModelId.value,
-        allow_code_execution: executionGranted
+        attachments: sentAttachments.map((item) => ({ path: item.path })),
+        approval_policy: approvalPolicy.value
       },
       (event: AgentStreamEvent) => {
         if (event.type === 'session') {
           selectedSessionId.value = event.session_id || selectedSessionId.value
+          selectedSessionSourceType.value = 'web'
+          selectedSessionSourceLabel.value = '网页'
+          selectedSessionSourceIdentifier.value = null
+          selectedSessionReadOnly.value = false
           if (event.profile?.id) selectedProfileId.value = event.profile.id
           if (event.model?.id) selectedModelId.value = event.model.id
           return
@@ -407,7 +512,7 @@ async function send() {
           if (event.role === 'answer') {
             reply.content = reply.liveContent.trim()
             reply.liveContent = ''
-            reply.streamStatus = 'done'
+            completeStream(reply)
           } else {
             flushThought(reply)
             reply.streamStatus = 'tooling'
@@ -416,6 +521,24 @@ async function send() {
           // 模型正在生成工具调用参数（写文件内容等长参数期）：瞬态进度，action 到达即清
           reply.streamStatus = 'tooling'
           reply.liveTool = applyToolProgress(reply.liveTool, event)
+        } else if (event.type === 'approval_required' && event.approval_id) {
+          reply.streamStatus = 'tooling'
+          reply.liveTool = null
+          reply.approval = {
+            approval_id: event.approval_id,
+            tool: event.tool || '',
+            display_name: event.display_name || event.tool || '工具操作',
+            risk_level: event.risk_level || 'high',
+            arguments_preview: event.arguments_preview || '',
+            expires_at: event.expires_at || '',
+            status: 'pending'
+          }
+        } else if (event.type === 'approval_resolved') {
+          const approval = reply.approval
+          if (approval && event.approval_id && approval.approval_id === event.approval_id) {
+            approval.status = event.decision || approval.status
+            reply.approvalBusy = false
+          }
         } else if (event.type === 'action') {
           reply.streamStatus = 'tooling'
           reply.liveTool = null
@@ -437,11 +560,17 @@ async function send() {
           reply.liveTool = null
           reply.error = event.content || 'ReAct 响应失败'
           reply.streamStatus = 'error'
+          finishStreamDuration(reply)
           pushStep(reply, { type: 'error', content: reply.error })
           error.value = reply.error
         } else if (event.type === 'done') {
           reply.liveTool = null
-          reply.streamStatus = reply.error ? 'error' : 'done'
+          if (reply.error) {
+            reply.streamStatus = 'error'
+            finishStreamDuration(reply, event.duration_ms)
+          } else {
+            completeStream(reply, event.duration_ms)
+          }
           // done 是业务终止信号，立即解锁输入；不再等待浏览器观察到底层连接关闭。
           releaseComposer(controller)
         }
@@ -461,7 +590,7 @@ async function send() {
         reply.error = '回复未完成，请重试。'
         reply.streamStatus = 'error'
       } else {
-        reply.streamStatus = 'done'
+        completeStream(reply)
       }
     }
     // 不阻塞输入框：推迟到 nextTick 后跑，确保 sending=false 先渲染到 DOM
@@ -481,24 +610,51 @@ async function send() {
         reply.content = reply.liveContent.trim()
         reply.liveContent = ''
       }
-      reply.streamStatus = 'done'
+      completeStream(reply)
     } else {
       reply.error = err instanceof Error ? err.message : '发送失败'
       reply.streamStatus = 'error'
+      finishStreamDuration(reply)
       error.value = reply.error
     }
   } finally {
     // 只允许当前请求清理自身状态，避免旧流的 finally 覆盖刚启动的新请求。
     releaseComposer(controller)
-    if (!reply.error && reply.streamStatus !== 'done') {
-      reply.streamStatus = 'done'
-    }
+    if (!reply.error) completeStream(reply)
+    else finishStreamDuration(reply)
     scrollChat()
   }
 }
 
 function stopSending() {
   abortController.value?.abort()
+}
+
+async function resolveApproval(message: ChatMessage, decision: 'approved' | 'denied') {
+  if (!message.approval || message.approval.status !== 'pending' || message.approvalBusy) return
+  message.approvalBusy = true
+  error.value = ''
+  try {
+    const result = await api.resolveAgentApproval(message.approval.approval_id, decision)
+    if (['approved', 'denied', 'expired', 'cancelled'].includes(result.status)) {
+      message.approval.status = result.status as AgentToolApproval['status']
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '审批操作失败'
+  } finally {
+    message.approvalBusy = false
+  }
+}
+
+function resolvePendingApproval(decision: 'approved' | 'denied') {
+  const pending = pendingApproval.value
+  if (pending) void resolveApproval(pending.message, decision)
+}
+
+function submitFromKeyboard(event: KeyboardEvent) {
+  if (event.isComposing || event.shiftKey) return
+  event.preventDefault()
+  void send()
 }
 
 onMounted(load)
@@ -547,8 +703,11 @@ onMounted(load)
             type="button"
             @click="openSession(item.id)"
           >
-            <strong>{{ item.title }}</strong>
-            <span>{{ item.digital_human_name || '数字人' }} · {{ sessionModelLabel(item) }}</span>
+            <div class="session-item-heading">
+              <strong>{{ item.title }}</strong>
+              <em v-if="item.source_type === 'feishu'" class="session-source-badge">飞书</em>
+            </div>
+            <span>{{ item.digital_human_name || '数字人' }} · {{ sessionSourceDescription(item) }}</span>
             <small>{{ item.message_count }} 条 · {{ item.status }}</small>
           </button>
           <button
@@ -591,6 +750,26 @@ onMounted(load)
       </section>
 
       <section ref="chatScroll" class="message-list">
+        <div v-if="selectedSessionSourceType === 'feishu'" class="external-session-notice">
+          <b aria-hidden="true">飞</b>
+          <div>
+            <strong>{{ selectedSessionSourceLabel }}同步会话 · {{ selectedSessionSourceIdentifier || 'FS' }}</strong>
+            <span>该记录来自飞书并在这里只读展示；继续对话请回到对应飞书会话。</span>
+          </div>
+        </div>
+        <div v-if="pendingApproval" class="pending-approval-dock">
+          <div class="pending-approval-dock-label">
+            <strong>操作等待审批</strong>
+            <span>Agent 已暂停，确认后将继续执行</span>
+          </div>
+          <AgentApprovalCard
+            :approval="pendingApproval.approval"
+            :busy="pendingApproval.message.approvalBusy"
+            prominent
+            @decide="resolvePendingApproval"
+          />
+        </div>
+
         <div v-if="!messages.length" class="chat-empty">
           <strong>{{ selectedProfile?.name || 'A股研究数字人' }}</strong>
           <span>选择数字人和模型后开始会话，ReAct 的 Thought / Action / Observation 会在这里随回答一起出现。</span>
@@ -598,31 +777,54 @@ onMounted(load)
 
         <article v-for="item in messages" :key="item.id" class="message" :class="item.role">
           <template v-if="item.role === 'user'">
-            <span>你</span>
+            <span>{{ selectedSessionSourceType === 'feishu' ? '飞书用户' : '你' }}</span>
             <p>{{ item.content }}</p>
+            <div v-if="item.attachments.length" class="message-attachment-list">
+              <button v-for="file in item.attachments" :key="file.path" type="button" @click="downloadFile(file)">
+                <b>{{ file.kind === 'image' ? '图' : '文' }}</b><span>{{ file.name }}</span>
+              </button>
+            </div>
           </template>
           <template v-else>
             <div v-if="item.streamStatus" class="stream-status" :class="item.streamStatus">
               <span class="stream-status-pulse"></span>
               <strong>{{ streamStatusText(item) }}</strong>
+              <span v-if="item.streamStatus === 'done' && typeof item.durationMs === 'number'" class="stream-duration">
+                用时 {{ formatStreamDuration(item.durationMs) }}
+              </span>
             </div>
 
-            <div v-if="item.steps.length" class="react-steps">
-              <div v-for="(step, index) in item.steps" :key="index" class="react-step" :class="step.type">
-                <strong>{{ stepLabel(step) }}</strong>
-                <span>{{ step.content }}</span>
+            <AgentApprovalCard
+              v-if="item.approval && item.approval.status !== 'pending'"
+              :approval="item.approval"
+              :busy="item.approvalBusy"
+              @decide="(decision) => resolveApproval(item, decision)"
+            />
+
+            <AgentProcessDisclosure
+              v-if="hasProcessDetails(item)"
+              :completed="item.streamStatus === 'done'"
+              :expanded="Boolean(item.processExpanded)"
+              :step-count="processStepCount(item)"
+              @toggle="item.processExpanded = !item.processExpanded"
+            >
+              <div v-if="item.steps.length" class="react-steps">
+                <div v-for="(step, index) in item.steps" :key="index" class="react-step" :class="step.type">
+                  <strong>{{ stepLabel(step) }}</strong>
+                  <span>{{ step.content }}</span>
+                </div>
               </div>
-            </div>
 
-            <div v-if="item.liveReasoning" class="react-step reasoning live">
-              <strong>Reasoning</strong>
-              <span>{{ item.liveReasoning }}</span>
-            </div>
+              <div v-if="item.liveReasoning" class="react-step reasoning live">
+                <strong>Reasoning</strong>
+                <span>{{ item.liveReasoning }}</span>
+              </div>
 
-            <div v-if="item.liveTool" class="react-step action tool-progress">
-              <strong><span class="tool-progress-pulse"></span>正在生成「{{ item.liveTool.displayName }}」· 已 {{ item.liveTool.chars.toLocaleString() }} 字</strong>
-              <pre v-if="item.liveTool.preview" class="tool-progress-preview">{{ item.liveTool.preview }}</pre>
-            </div>
+              <div v-if="item.liveTool" class="react-step action tool-progress">
+                <strong><span class="tool-progress-pulse"></span>正在生成「{{ item.liveTool.displayName }}」· 已 {{ item.liveTool.chars.toLocaleString() }} 字</strong>
+                <pre v-if="item.liveTool.preview" class="tool-progress-preview">{{ item.liveTool.preview }}</pre>
+              </div>
+            </AgentProcessDisclosure>
 
             <div v-if="item.liveContent" class="md-body" v-html="renderMarkdown(item.liveContent)"></div>
             <div v-else-if="item.content" class="md-body" v-html="renderMarkdown(item.content)"></div>
@@ -644,37 +846,36 @@ onMounted(load)
         </article>
       </section>
 
-      <form class="chat-input sandbox-chat-input" @submit.prevent="send">
-        <input
+      <div v-if="selectedSessionReadOnly" class="chat-composer chat-composer-readonly">
+        <strong>飞书同步会话为只读</strong>
+        <span>请在 {{ selectedSessionSourceIdentifier || '对应飞书会话' }} 中继续发送消息。</span>
+      </div>
+      <form v-else class="chat-composer" @paste="pasteIntoComposer" @submit.prevent="send">
+        <textarea
           v-model="question"
-          type="text"
-          placeholder="例如：今天有哪些需要优先处理的事件？"
+          rows="2"
+          placeholder="输入问题，或上传研报、表格和图片"
           :disabled="sending || !selectedProfile"
-        />
-        <select v-model.number="selectedModelId" :disabled="sending || !models.length" :title="modelOptionLabel(activeModel)">
-          <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
-            <option v-for="item in group.rows" :key="item.id" :value="item.id">
-              {{ modelOptionLabel(item) }}
-            </option>
-          </optgroup>
-        </select>
-        <label
-          class="exec-toggle"
-          :class="{ active: allowCodeExecution }"
-          :title="workspaceExecAvailable ? '仅授权当前这一条消息在隔离容器中执行 Python' : 'Python 沙箱当前不可用'"
-        >
-          <input v-model="allowCodeExecution" type="checkbox" :disabled="sending || !workspaceExecAvailable" />
-          <span class="exec-toggle-track"><i></i></span>
-          <strong>本次执行 Python</strong>
-        </label>
-        <button
-          :type="sending ? 'button' : 'submit'"
-          :class="{ 'btn-stop': sending }"
-          :disabled="!sending && (!question.trim() || !selectedProfile)"
-          @click="sending ? stopSending() : undefined"
-        >
-          {{ sending ? '⏹ 停止' : '发送' }}
-        </button>
+          @keydown.enter="submitFromKeyboard"
+        ></textarea>
+        <footer class="chat-composer-toolbar">
+          <ChatAttachmentPicker ref="attachmentPicker" v-model="pendingAttachments" :disabled="sending || !selectedProfile" />
+          <ApprovalPolicyControl v-model="approvalPolicy" :disabled="sending" :exec-available="workspaceExecAvailable" />
+          <span class="chat-composer-spacer"></span>
+          <select v-model.number="selectedModelId" :disabled="sending || !models.length" :title="modelOptionLabel(activeModel)">
+            <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
+              <option v-for="item in group.rows" :key="item.id" :value="item.id">{{ modelOptionLabel(item) }}</option>
+            </optgroup>
+          </select>
+          <button
+            class="chat-composer-send"
+            :class="{ stop: sending }"
+            :type="sending ? 'button' : 'submit'"
+            :title="sending ? '停止生成' : '发送'"
+            :disabled="!sending && ((!question.trim() && !pendingAttachments.length) || !selectedProfile)"
+            @click="sending ? stopSending() : undefined"
+          >{{ sending ? '■' : '↑' }}</button>
+        </footer>
       </form>
       <p v-if="error" class="chat-page-error">{{ error }}</p>
     </main>

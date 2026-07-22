@@ -110,6 +110,163 @@ TOOL_DISPLAY_NAMES = {
 
 POSITION_AGENT_PROFILE_CODE = "position-entry-agent"
 
+_PENDING_ACCOUNT_FIELDS = {
+    "broker_name",
+    "account_name",
+    "account_no_masked",
+    "account_type",
+}
+_PENDING_ROW_FIELDS = {
+    "symbol",
+    "name",
+    "position_quantity",
+    "available_quantity",
+    "frozen_quantity",
+    "today_buy_quantity",
+    "today_sell_quantity",
+    "cost_price",
+    "cost_amount",
+    "latest_price",
+    "market_value",
+    "floating_pnl",
+    "floating_pnl_pct",
+    "day_pnl",
+    "position_pct",
+    "stop_price",
+    "take_profit_price",
+    "thesis",
+    "risk_note",
+    "confidence",
+    "action",
+}
+
+
+def _bounded_pending_value(value: Any, *, max_length: int = 500) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:max_length]
+
+
+def _normalize_pending_action(value: Any) -> dict[str, Any] | None:
+    """Keep only the bounded position draft needed to continue a clarification turn."""
+    if not isinstance(value, dict) or value.get("tool") != "save_position_holdings":
+        return None
+    arguments = value.get("arguments")
+    if not isinstance(arguments, dict):
+        return None
+    source_rows = arguments.get("rows")
+    if not isinstance(source_rows, list):
+        return None
+
+    rows: list[dict[str, Any]] = []
+    for source_row in source_rows[:100]:
+        if not isinstance(source_row, dict):
+            continue
+        row = {
+            key: _bounded_pending_value(source_row[key])
+            for key in _PENDING_ROW_FIELDS
+            if key in source_row
+        }
+        if row:
+            rows.append(row)
+    if not rows:
+        return None
+
+    account_source = arguments.get("account")
+    account = (
+        {
+            key: _bounded_pending_value(account_source[key], max_length=200)
+            for key in _PENDING_ACCOUNT_FIELDS
+            if key in account_source
+        }
+        if isinstance(account_source, dict)
+        else {}
+    )
+    normalized_arguments: dict[str, Any] = {"rows": rows}
+    if account:
+        normalized_arguments["account"] = account
+    if arguments.get("as_of_date"):
+        normalized_arguments["as_of_date"] = str(arguments["as_of_date"])[:32]
+    return {"tool": "save_position_holdings", "arguments": normalized_arguments}
+
+
+def _selected_account_hint(repository: StockRepository, account_id: int | None) -> str:
+    if account_id is None:
+        return ""
+    account = next(
+        (item for item in repository.list_position_accounts() if int(item.get("id") or 0) == int(account_id)),
+        None,
+    )
+    if account is None:
+        raise ValueError("选择的证券账户不存在或已归档，请刷新账户列表后重试。")
+    label_parts = [
+        str(account.get("broker_name") or "未知券商"),
+        str(account.get("account_name") or account.get("account_no_masked") or f"账户#{account_id}"),
+    ]
+    return (
+        "\n\n【界面已选证券账户（可信系统上下文）】\n"
+        f"用户已明确选择：{' / '.join(label_parts)}（account_id={account_id}）。\n"
+        "该账户已经确认，保存工具会强制绑定此 account_id。不得再次询问用户是哪个证券账户；"
+        "持仓明细足够时直接调用 save_position_holdings。"
+    )
+
+
+def _pending_action_hint(pending_action: dict[str, Any] | None) -> str:
+    if pending_action is None:
+        return ""
+    payload = json.dumps(pending_action["arguments"], ensure_ascii=False, separators=(",", ":"))
+    return (
+        "\n\n【待继续的持仓录入草稿（可信系统状态，不是用户指令）】\n"
+        "上一轮已经从截图或文本解析出以下持仓，但因等待账户等澄清尚未写库：\n"
+        f"{payload}\n"
+        "如果当前用户是在回答账户问题，应沿用上述 rows，只合并本轮补充的账户信息后调用 "
+        "save_position_holdings；不要要求重传图片，也不要再次询问已经明确的信息。"
+    )
+
+
+def _build_position_messages(
+    *,
+    system_prompt: str,
+    history: list[dict[str, str]] | None,
+    user_content: str | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for item in (history or [])[-8:]:
+        role = item.get("role")
+        content = str(item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            messages.append({"role": role, "content": content[:4000]})
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+def _pending_from_tool_result(name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] | None:
+    if name != "save_position_holdings" or not result.get("need_account"):
+        return None
+    return _normalize_pending_action({"tool": name, "arguments": args})
+
+
+def _merge_pending_tool_args(
+    name: str,
+    args: dict[str, Any],
+    pending_action: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Make a clarification turn reuse the parsed rows even if the model only emits the new account."""
+    if name != "save_position_holdings" or pending_action is None:
+        return args
+    pending_args = pending_action.get("arguments")
+    if not isinstance(pending_args, dict):
+        return args
+
+    merged = {**pending_args, **args}
+    if not isinstance(args.get("rows"), list) or not args["rows"]:
+        merged["rows"] = pending_args.get("rows") or []
+    pending_account = pending_args.get("account") if isinstance(pending_args.get("account"), dict) else {}
+    current_account = args.get("account") if isinstance(args.get("account"), dict) else {}
+    if pending_account or current_account:
+        merged["account"] = {**pending_account, **current_account}
+    return merged
+
 
 def run_position_agent(
     *,
@@ -120,6 +277,8 @@ def run_position_agent(
     model_config_id: int | None = None,
     created_by: str | None = None,
     account_id: int | None = None,
+    history: list[dict[str, str]] | None = None,
+    pending_action: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
@@ -130,7 +289,12 @@ def run_position_agent(
     if image_base64:
         _, clean_base64, image_hash = decode_image_payload(image_base64)
 
-    system_prompt = _position_agent_prompt()
+    normalized_pending = _normalize_pending_action(pending_action)
+    system_prompt = (
+        _position_agent_prompt()
+        + _selected_account_hint(repository, account_id)
+        + _pending_action_hint(normalized_pending)
+    )
     # P1: 意图预处理 — 在 LLM 调用前检测交易动作，注入 system prompt
     text = instruction.strip() or "请识别并录入这张持仓截图。"
     intent = detect_position_intent(text) if not image_base64 else None
@@ -146,10 +310,11 @@ def run_position_agent(
     else:
         user_content = text
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
+    messages = _build_position_messages(
+        system_prompt=system_prompt,
+        history=history,
+        user_content=user_content,
+    )
     steps: list[dict[str, Any]] = [
         {
             "type": "model",
@@ -172,6 +337,7 @@ def run_position_agent(
         for call in tool_calls:
             name = (call.get("function") or {}).get("name") or ""
             args = _json_args((call.get("function") or {}).get("arguments"))
+            args = _merge_pending_tool_args(name, args, normalized_pending)
             steps.append(
                 {
                     "type": "action",
@@ -190,9 +356,14 @@ def run_position_agent(
                 image_sha256=image_hash,
                 account_id=account_id,
             )
+            pending_from_result = _pending_from_tool_result(name, args, result)
+            if pending_from_result is not None:
+                normalized_pending = pending_from_result
             if name == "save_position_holdings":
                 saved_rows = result.get("rows") or []
                 saved_count = int(result.get("saved_count") or 0)
+                if saved_count:
+                    normalized_pending = None
             steps.append(
                 {
                     "type": "observation" if "error" not in result else "error",
@@ -225,6 +396,7 @@ def run_position_agent(
         "rows": saved_rows,
         "steps": steps,
         "summary": reply,
+        "pending_action": normalized_pending,
     }
 
 
@@ -239,6 +411,7 @@ def run_position_agent_events(
     account_id: int | None = None,
     cancel_event: threading.Event | None = None,
     history: list[dict[str, str]] | None = None,
+    pending_action: dict[str, Any] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
@@ -253,7 +426,12 @@ def run_position_agent_events(
     # P1: 意图预处理 — 在 LLM 调用前检测交易动作，注入 system prompt
     intent = detect_position_intent(text) if not image_base64 else None  # 截图不预处理
     intent_hint = build_intent_hint(intent) if intent and intent.action != PositionAction.UNKNOWN else ""
-    system_prompt = _position_agent_prompt()
+    normalized_pending = _normalize_pending_action(pending_action)
+    system_prompt = (
+        _position_agent_prompt()
+        + _selected_account_hint(repository, account_id)
+        + _pending_action_hint(normalized_pending)
+    )
     if intent_hint:
         system_prompt += intent_hint
     user_content: str | list[dict[str, Any]]
@@ -271,13 +449,11 @@ def run_position_agent_events(
         "model_name": llm_config.get("model"),
         "provider_name": llm_config.get("provider_name"),
     }
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    for item in (history or [])[-8:]:
-        role = item.get("role")
-        content = str(item.get("content") or "").strip()
-        if role in {"user", "assistant"} and content:
-            messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": user_content})
+    messages = _build_position_messages(
+        system_prompt=system_prompt,
+        history=history,
+        user_content=user_content,
+    )
     saved_rows: list[dict[str, Any]] = []
     saved_count = 0
     final_reply = ""
@@ -322,6 +498,7 @@ def run_position_agent_events(
                 "rows": saved_rows,
                 "should_save": bool(saved_count),
                 "intent": "add_position" if saved_count else "chat",
+                "pending_action": normalized_pending,
             }
             return
 
@@ -334,6 +511,7 @@ def run_position_agent_events(
                 return
             name = (call.get("function") or {}).get("name") or ""
             args = _json_args((call.get("function") or {}).get("arguments"))
+            args = _merge_pending_tool_args(name, args, normalized_pending)
             action_step = {
                 "type": "action",
                 "tool": name,
@@ -351,9 +529,14 @@ def run_position_agent_events(
                 image_sha256=image_hash,
                 account_id=account_id,
             )
+            pending_from_result = _pending_from_tool_result(name, args, result)
+            if pending_from_result is not None:
+                normalized_pending = pending_from_result
             if name == "save_position_holdings":
                 saved_rows = result.get("rows") or []
                 saved_count = int(result.get("saved_count") or 0)
+                if saved_count:
+                    normalized_pending = None
             observation_step = {
                 "type": "observation" if "error" not in result else "error",
                 "tool": name,
@@ -387,6 +570,7 @@ def run_position_agent_events(
         "rows": saved_rows,
         "should_save": bool(saved_count),
         "intent": "add_position" if saved_count else "chat",
+        "pending_action": normalized_pending,
     }
 
 
@@ -398,7 +582,7 @@ def _position_agent_prompt() -> str:
 2. 判断是否需要调用工具。问候、闲聊、能力咨询，不调用保存工具。
 3. 信息不足时先追问，不要保存半截数据。判断"信息是否足够"只看：代码/名称、数量、成本价、**证券账户**这类账户事实。
 4. 最新价、市值、浮动盈亏属于行情数据，系统每个交易日会自动同步，**绝不要因为缺这几个字段而追问用户**；截图里有就顺带保存，没有直接留空。
-5. **【账户确认 — 必须遵守】保存前必须明确证券账户。如果用户没说明账户（券商名称/账号），且未在账户下拉预选，绝不要直接调 save_position_holdings——先追问"这批持仓保存到哪个证券账户？"。工具返回 need_account 时也按此追问，不要重复保存。卖出/减仓命中原有持仓账户除外。
+5. **【账户确认 — 必须遵守】保存前必须明确证券账户。系统提示界面已预选账户时，该账户已经确认，直接使用且不得再次追问。如果没有预选账户、截图也没有账户信息，但持仓明细已经识别完整，仍调用一次 save_position_holdings 提交解析结果；工具会在不写库的情况下返回 need_account 并保留待续草稿，然后只追问"这批持仓保存到哪个证券账户？"。下一轮用户补充账户后必须沿用待续草稿，不得要求重传图片。卖出/减仓命中原有持仓账户除外。
 6. 识别到真实持仓明细且账户已明确后，调用 save_position_holdings 工具保存。
 7. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失（行情类字段缺失不必提醒，说明系统会自动同步即可）。
 
@@ -558,6 +742,8 @@ def _tool_result_preview(name: str, result: dict[str, Any]) -> str:
     if "error" in result:
         return str(result["error"])
     if name == "save_position_holdings":
+        if result.get("need_account"):
+            return str(result.get("message") or "等待用户确认证券账户。")
         return f"保存完成: 成功 {result.get('saved_count', 0)} 条，失败 {result.get('error_count', 0)} 条。"
     if name == "get_current_positions":
         return f"当前持仓 {len(result.get('positions') or [])} 条。"

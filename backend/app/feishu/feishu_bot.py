@@ -26,11 +26,13 @@ from collections import deque
 from datetime import date, datetime
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import case, desc, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
 from backend.app.feishu.feishu import decrypt_value
-from backend.app.core.models import DigitalHumanProfile, SystemLog
+from backend.app.core.models import AiChatMessage, AiChatSession, DigitalHumanProfile, SystemLog, User
 from backend.app.scheduler.rhythm_scheduler import _build_digital_human_context
 from backend.app.core.settings import settings
 
@@ -54,6 +56,144 @@ def _log(level: str, message: str, context: dict | None = None) -> None:
     from backend.app.core.applog import log_event
 
     log_event("feishu_bot", level, message, context=context)
+
+
+def _feishu_session_owner_id(db: Session) -> int | None:
+    """Choose an enabled application administrator as the technical FK owner."""
+    return db.scalar(
+        select(User.id)
+        .where(User.is_enabled.is_(True))
+        .order_by(
+            case(
+                (User.role == "super_admin", 0),
+                (User.role == "admin", 1),
+                else_=2,
+            ),
+            User.id,
+        )
+        .limit(1)
+    )
+
+
+def _feishu_history(db: Session, session_id: int) -> list[dict[str, str]]:
+    rows = db.scalars(
+        select(AiChatMessage)
+        .where(AiChatMessage.session_id == session_id, AiChatMessage.error.is_(None))
+        .order_by(desc(AiChatMessage.id))
+        .limit(_HISTORY_TURNS * 2)
+    ).all()
+    return [
+        {"role": row.role, "content": row.content}
+        for row in reversed(rows)
+        if row.role in {"user", "assistant"} and row.content
+    ]
+
+
+def _feishu_session_title(question: str, chat_type: str) -> str:
+    prefix = "飞书群聊" if chat_type == "group" else "飞书私聊"
+    summary = " ".join(question.strip().split())[:120] or "新的飞书会话"
+    return f"{prefix} · {summary}"[:160]
+
+
+def _find_feishu_session(db: Session, profile_id: int, chat_id: str) -> AiChatSession | None:
+    conversation_id = chat_id[:160]
+    return db.scalar(
+        select(AiChatSession)
+        .where(
+            AiChatSession.digital_human_id == profile_id,
+            AiChatSession.source_type == "feishu",
+            AiChatSession.external_conversation_id == conversation_id,
+        )
+        .order_by(AiChatSession.id)
+        .limit(1)
+    )
+
+
+def _open_or_create_feishu_session(
+    *,
+    profile_id: int,
+    chat_id: str,
+    chat_type: str,
+    question: str,
+) -> tuple[int | None, list[dict[str, str]]]:
+    """Persist the incoming message and return durable history from previous turns."""
+    label = "飞书群聊" if chat_type == "group" else "飞书私聊"
+    try:
+        with SessionLocal() as db:
+            chat_session = _find_feishu_session(db, profile_id, chat_id)
+            if chat_session is None:
+                owner_id = _feishu_session_owner_id(db)
+                if owner_id is None:
+                    _log("WARNING", "飞书会话未落库：系统没有可用用户", {"profile_id": profile_id})
+                    return None, []
+                chat_session = AiChatSession(
+                    user_id=owner_id,
+                    digital_human_id=profile_id,
+                    title=_feishu_session_title(question, chat_type),
+                    status="active",
+                    chat_mode="research",
+                    source_type="feishu",
+                    external_conversation_id=chat_id[:160],
+                    source_label=label,
+                )
+                db.add(chat_session)
+                try:
+                    db.flush()
+                except IntegrityError:
+                    db.rollback()
+                    chat_session = _find_feishu_session(db, profile_id, chat_id)
+                    if chat_session is None:
+                        raise
+
+            history = _feishu_history(db, chat_session.id)
+            chat_session.status = "active"
+            chat_session.source_label = label
+            chat_session.updated_at = datetime.utcnow()
+            db.add(AiChatMessage(session_id=chat_session.id, role="user", content=question, event_count=0))
+            db.commit()
+            return chat_session.id, history
+    except Exception as exc:  # noqa: BLE001
+        _log(
+            "ERROR",
+            "飞书会话消息落库失败",
+            {"profile_id": profile_id, "chat_id": chat_id[:48], "error": str(exc)[:300]},
+        )
+        return None, []
+
+
+def _complete_feishu_session(
+    session_id: int | None,
+    *,
+    answer: str,
+    error: str | None,
+    duration_ms: int,
+) -> None:
+    if session_id is None:
+        return
+    try:
+        with SessionLocal() as db:
+            chat_session = db.get(AiChatSession, session_id)
+            if chat_session is None:
+                return
+            db.add(
+                AiChatMessage(
+                    session_id=session_id,
+                    role="assistant",
+                    content=answer or "",
+                    event_count=0,
+                    duration_ms=max(0, duration_ms),
+                    error=error,
+                )
+            )
+            chat_session.status = "error" if error else "active"
+            chat_session.updated_at = datetime.utcnow()
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        _log(
+            "ERROR",
+            "飞书会话回复落库失败",
+            {"session_id": session_id, "error": str(exc)[:300]},
+        )
 
 
 def _card(title: str, body: str, template: str, note: str | None = None) -> str:
@@ -186,6 +326,8 @@ class BotWorker:
         self._seen: dict[str, float] = {}
         self._seen_lock = threading.Lock()
         self._history: dict[str, deque] = {}
+        self._chat_locks: dict[str, threading.Lock] = {}
+        self._chat_locks_guard = threading.Lock()
         self.connected = False
         self.started_at: datetime | None = None
         self.last_event_at: datetime | None = None
@@ -303,6 +445,10 @@ class BotWorker:
         self.today_count += 1
         self.last_event_at = datetime.now()
 
+    def _chat_lock(self, chat_id: str) -> threading.Lock:
+        with self._chat_locks_guard:
+            return self._chat_locks.setdefault(chat_id, threading.Lock())
+
     def on_event(self, data) -> None:  # noqa: ANN001 —— lark P2ImMessageReceiveV1
         """SDK 回调（运行在 ws 循环线程）：只做过滤与派发，必须立即返回。"""
         try:
@@ -349,18 +495,29 @@ class BotWorker:
                     return
                 _inflight += 1
             self._bump_counter()
-            threading.Thread(target=self._handle, args=(chat_id, question), daemon=True).start()
+            threading.Thread(target=self._handle, args=(chat_id, chat_type, question), daemon=True).start()
         except Exception as exc:  # noqa: BLE001
             _log("ERROR", f"机器人[{self.name}] 事件处理异常", {"error": str(exc)[:300]})
 
-    def _handle(self, chat_id: str, question: str) -> None:
+    def _handle(self, chat_id: str, chat_type: str, question: str) -> None:
         global _inflight
+        chat_lock = self._chat_lock(chat_id)
+        lock_acquired = False
         try:
             placeholder_id = self._send_card(
                 chat_id,
                 _card(f"{self.name} 正在分析…", "已收到问题，正在检索与分析，完成后本条消息会更新为结论。", "wathet"),
             )
-            history = list(self._history.get(chat_id) or [])
+            chat_lock.acquire()
+            lock_acquired = True
+            started_at = time.monotonic()
+            session_id, stored_history = _open_or_create_feishu_session(
+                profile_id=self.profile_id,
+                chat_id=chat_id,
+                chat_type=chat_type,
+                question=question,
+            )
+            history = stored_history if session_id is not None else list(self._history.get(chat_id) or [])
             with _agent_slots:
                 if self.stopping:
                     return
@@ -382,6 +539,13 @@ class BotWorker:
                         answer, _model, error = _consume_agent_with_history(question, history, context, self.code)
                 except Exception as exc:  # noqa: BLE001
                     answer, error = "", str(exc)[:500]
+            persisted_error = error or (None if answer else "模型未返回内容")
+            _complete_feishu_session(
+                session_id,
+                answer=answer,
+                error=persisted_error,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+            )
             if error or not answer:
                 final = _card(
                     f"{self.name} · 分析失败",
@@ -413,6 +577,8 @@ class BotWorker:
             else:
                 self._send_card(chat_id, final)
         finally:
+            if lock_acquired:
+                chat_lock.release()
             with _inflight_lock:
                 _inflight -= 1
 

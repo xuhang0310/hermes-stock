@@ -1,16 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
-import DataTable from '../components/DataTable.vue'
 import type { JobRun, ScheduleJob, ScheduleStatus } from '../types'
 import { beijingFromDb } from '../utils/datetime'
+
+type MessageTone = 'success' | 'error' | 'info'
 
 const jobs = ref<ScheduleJob[]>([])
 const runs = ref<JobRun[]>([])
 const status = ref<ScheduleStatus | null>(null)
 const editingKey = ref('')
 const runsJobKey = ref('')
+const editorOpen = ref(false)
+const selectedRun = ref<JobRun | null>(null)
+const saving = ref(false)
+const actionKey = ref('')
 const message = ref('')
+const messageTone = ref<MessageTone>('info')
+const historySection = ref<HTMLElement | null>(null)
 let timer: number | undefined
 
 const DIGITAL_HUMANS: Array<{ code: string; label: string }> = [
@@ -27,6 +34,16 @@ const DIGITAL_HUMANS: Array<{ code: string; label: string }> = [
 const CHANNELS: Array<{ key: string; label: string }> = [
   { key: '', label: '不推送' },
   { key: 'feishu-daily', label: '飞书任务群' }
+]
+
+const WEEKDAYS = [
+  { value: '1', label: '周一' },
+  { value: '2', label: '周二' },
+  { value: '3', label: '周三' },
+  { value: '4', label: '周四' },
+  { value: '5', label: '周五' },
+  { value: '6', label: '周六' },
+  { value: '7', label: '周日' }
 ]
 
 const form = reactive({
@@ -47,34 +64,134 @@ const form = reactive({
 })
 
 const editingJob = computed(() => jobs.value.find((item) => item.job_key === editingKey.value) || null)
+const enabledJobs = computed(() => jobs.value.filter((item) => item.enabled).length)
+const todayExecutions = computed(() => {
+  if (!status.value) return 0
+  return status.value.today.success + status.value.today.failed + status.value.today.running
+})
+const todaySuccessRate = computed(() => {
+  if (!status.value) return '-'
+  const completed = status.value.today.success + status.value.today.failed
+  return completed ? `${Math.round((status.value.today.success / completed) * 100)}%` : '-'
+})
+const schedulerState = computed(() => {
+  if (!status.value) return '正在连接'
+  if (!status.value.scheduler_enabled) return '已停用'
+  return status.value.scheduler_alive ? '运行正常' : '心跳异常'
+})
+const notifyState = computed(() => {
+  const channel = status.value?.notify_channel
+  return channel?.configured && channel.enabled ? '已启用' : '未配置'
+})
+const historyJob = computed(() => jobs.value.find((item) => item.job_key === runsJobKey.value) || null)
+
+watch([editorOpen, selectedRun], ([isEditorOpen, run]) => {
+  document.body.classList.toggle('rhythm-modal-open', isEditorOpen || Boolean(run))
+})
+
+function setMessage(text: string, tone: MessageTone = 'info') {
+  message.value = text
+  messageTone.value = tone
+}
 
 function humanLabel(code: string | null) {
-  if (!code) return '-'
+  if (!code) return '规则任务'
   return DIGITAL_HUMANS.find((item) => item.code === code)?.label || code
 }
 
 function channelLabel(job: ScheduleJob) {
   if (!job.push_channel_key) return '不推送'
-  if (job.job_kind === 'health_check') return '飞书任务群（仅异常）'
+  if (job.job_kind === 'health_check') return '飞书任务群，仅异常'
   return CHANNELS.find((item) => item.key === job.push_channel_key)?.label || job.push_channel_key
+}
+
+function weekdayValues(mask: string | null | undefined) {
+  const values = String(mask || '')
+    .replace(/[\[\]\s]/g, '')
+    .split(',')
+    .filter((value) => WEEKDAYS.some((day) => day.value === value))
+  return Array.from(new Set(values)).sort((a, b) => Number(a) - Number(b))
+}
+
+function weekdayText(mask: string | null | undefined) {
+  const values = weekdayValues(mask)
+  if (!values.length || values.join(',') === '1,2,3,4,5,6,7') return '每天'
+  if (values.join(',') === '1,2,3,4,5') return '工作日'
+  return values.map((value) => WEEKDAYS.find((day) => day.value === value)?.label || value).join('、')
 }
 
 function scheduleText(job: ScheduleJob) {
   if (job.schedule_type === 'interval') {
-    return `每 ${job.interval_minutes ?? '-'} 分（${job.window_start || ''}-${job.window_end || ''}）`
+    return `每 ${job.interval_minutes ?? '-'} 分钟 · ${job.window_start || '--:--'} 至 ${job.window_end || '--:--'}`
   }
-  const days = job.weekday_mask ? `[${job.weekday_mask}]` : '每天'
-  if (job.schedule_type === 'weekly') return `每周 ${job.weekday_mask} ${job.run_time || ''}`
-  if (job.schedule_type === 'monthly_last') return `月末 ${job.run_time || ''}`
-  return `${days} ${job.run_time || ''}`
+  if (job.schedule_type === 'weekly') return `${weekdayText(job.weekday_mask)} · ${job.run_time || '--:--'}`
+  if (job.schedule_type === 'monthly_last') return `每月最后一个交易日 · ${job.run_time || '--:--'}`
+  return `${weekdayText(job.weekday_mask)} · ${job.run_time || '--:--'}`
+}
+
+function jobMark(job: ScheduleJob) {
+  if (job.schedule_type === 'interval') return `${job.interval_minutes || '-'}m`
+  return (job.run_time || '--:--').slice(0, 5)
+}
+
+function jobKindLabel(kind: string) {
+  if (kind === 'agent_report') return 'Agent 报告'
+  if (kind === 'health_check') return '系统检查'
+  if (kind === 'rule_scan') return '规则扫描'
+  if (kind === 'l1_digest') return '事件摘要'
+  return kind || '定时任务'
+}
+
+function jobDescription(job: ScheduleJob) {
+  return job.description || `${jobKindLabel(job.job_kind)}，按设定时间自动执行。`
 }
 
 function statusText(value: string | null) {
   if (value === 'success') return '成功'
   if (value === 'failed') return '失败'
   if (value === 'running') return '运行中'
-  if (value === 'skipped') return '跳过'
+  if (value === 'skipped') return '已跳过'
   return value || '未运行'
+}
+
+function triggerText(value: string) {
+  if (value === 'schedule') return '自动调度'
+  if (value === 'manual') return '手动执行'
+  if (value === 'retry') return '自动重试'
+  return value || '-'
+}
+
+function durationText(value: number | null) {
+  if (value === null || value === undefined) return '-'
+  if (value < 1000) return `${value} ms`
+  if (value < 60_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} 秒`
+  const minutes = Math.floor(value / 60_000)
+  const seconds = Math.round((value % 60_000) / 1000)
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`
+}
+
+function runPreview(run: JobRun) {
+  const text = (run.error || run.output_preview || '本次运行没有输出内容').replace(/\s+/g, ' ').trim()
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text
+}
+
+function runDetail(run: JobRun) {
+  return run.error || run.output_preview || '本次运行没有输出内容。'
+}
+
+function weekdaySelected(value: string) {
+  return weekdayValues(form.weekday_mask).includes(value)
+}
+
+function toggleWeekday(value: string) {
+  const selected = new Set(weekdayValues(form.weekday_mask))
+  if (selected.has(value)) selected.delete(value)
+  else selected.add(value)
+  form.weekday_mask = Array.from(selected).sort((a, b) => Number(a) - Number(b)).join(',')
+}
+
+function isActionBusy(action: string, job: ScheduleJob) {
+  return actionKey.value === `${action}:${job.job_key}`
 }
 
 async function loadStatus() {
@@ -89,11 +206,7 @@ async function loadJobs() {
   try {
     jobs.value = await api.scheduleJobs()
   } catch (error) {
-    message.value = `加载任务失败：${error instanceof Error ? error.message : String(error)}`
-    return
-  }
-  if (!editingKey.value && jobs.value[0]) {
-    edit(jobs.value[0])
+    setMessage(`加载任务失败：${error instanceof Error ? error.message : String(error)}`, 'error')
   }
 }
 
@@ -102,7 +215,7 @@ async function loadRuns(jobKey?: string) {
     runsJobKey.value = jobKey || ''
     runs.value = await api.scheduleRuns(jobKey)
   } catch (error) {
-    message.value = `加载历史失败：${error instanceof Error ? error.message : String(error)}`
+    setMessage(`加载历史失败：${error instanceof Error ? error.message : String(error)}`, 'error')
   }
 }
 
@@ -113,7 +226,7 @@ function edit(job: ScheduleJob) {
     description: job.description || '',
     schedule_type: job.schedule_type,
     run_time: job.run_time || '',
-    weekday_mask: job.weekday_mask || '',
+    weekday_mask: weekdayValues(job.weekday_mask).join(','),
     interval_minutes: job.interval_minutes,
     window_start: job.window_start || '',
     window_end: job.window_end || '',
@@ -124,11 +237,17 @@ function edit(job: ScheduleJob) {
     enabled: job.enabled,
     sort_order: job.sort_order
   })
+  editorOpen.value = true
+}
+
+function closeEditor() {
+  if (saving.value) return
+  editorOpen.value = false
 }
 
 async function save() {
-  if (!editingKey.value) return
-  message.value = ''
+  if (!editingKey.value || saving.value) return
+  saving.value = true
   try {
     await api.saveScheduleJob(editingKey.value, {
       name: form.name,
@@ -146,32 +265,47 @@ async function save() {
       enabled: form.enabled,
       sort_order: form.sort_order
     })
-    message.value = `${form.name} 已保存`
     await loadJobs()
+    editorOpen.value = false
+    setMessage(`${form.name} 已保存，新的调度配置立即生效。`, 'success')
   } catch (error) {
-    message.value = `保存失败：${error instanceof Error ? error.message : String(error)}`
+    setMessage(`保存失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+  } finally {
+    saving.value = false
   }
 }
 
 async function toggle(job: ScheduleJob) {
-  message.value = ''
+  if (actionKey.value) return
+  actionKey.value = `toggle:${job.job_key}`
   try {
     await api.toggleScheduleJob(job.job_key)
     await loadJobs()
+    setMessage(`${job.name} 已${job.enabled ? '停用' : '启用'}。`, 'success')
   } catch (error) {
-    message.value = `启停失败：${error instanceof Error ? error.message : String(error)}`
+    setMessage(`启停失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+  } finally {
+    actionKey.value = ''
   }
 }
 
 async function runNow(job: ScheduleJob) {
-  message.value = ''
+  if (actionKey.value) return
+  actionKey.value = `run:${job.job_key}`
   try {
     await api.runScheduleJob(job.job_key)
-    message.value = `${job.name} 已触发，可在运行历史查看结果`
+    setMessage(`${job.name} 已进入执行队列，可在下方查看进度。`, 'success')
     await loadRuns(job.job_key)
   } catch (error) {
-    message.value = `触发失败：${error instanceof Error ? error.message : String(error)}`
+    setMessage(`触发失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+  } finally {
+    actionKey.value = ''
   }
+}
+
+async function showHistory(job: ScheduleJob) {
+  await loadRuns(job.job_key)
+  window.requestAnimationFrame(() => historySection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
 onMounted(async () => {
@@ -187,177 +321,201 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
+  document.body.classList.remove('rhythm-modal-open')
 })
 </script>
 
 <template>
-  <section class="page-section">
-    <header class="section-header">
+  <section class="rhythm-hub">
+    <header class="rhythm-hero">
       <div>
-        <h2>定时任务</h2>
+        <span class="eyebrow">AUTOMATION CONTROL</span>
+        <h1>定时任务</h1>
+        <p>统一管理盘前、盘中、收盘后的自动研究与群消息推送。</p>
+      </div>
+      <div v-if="status" class="rhythm-health-badge" :class="{ ok: status.scheduler_alive, danger: !status.scheduler_alive }">
+        <i></i>
+        <span><small>调度服务</small><strong>{{ schedulerState }}</strong></span>
       </div>
     </header>
-    <div class="rhythm-status" v-if="status">
-      <span class="status-pill" :class="status.scheduler_alive ? 'ok' : 'danger'">
-        {{ status.scheduler_alive ? '调度器运行中' : (status.scheduler_enabled ? '调度器无心跳' : '调度器已停用') }}
-      </span>
-      <span class="status-pill">{{ status.is_trading_day ? '今日为交易日' : '今日非交易日' }}</span>
-      <span class="status-pill">今日成功 {{ status.today.success }}</span>
-      <span class="status-pill" :class="status.today.failed ? 'danger' : ''">今日失败 {{ status.today.failed }}</span>
-      <span class="status-pill">运行中 {{ status.today.running }}</span>
-      <span
-        class="status-pill"
-        :class="status.notify_channel?.configured && status.notify_channel?.enabled ? 'ok' : 'danger'"
-        :title="status.notify_channel?.last_error || ''"
-      >
-        飞书任务群 {{ status.notify_channel?.configured && status.notify_channel?.enabled ? '已启用' : '未配置' }}
-      </span>
-      <span class="status-muted">心跳 {{ status.heartbeat_at || '-' }}</span>
-    </div>
-  </section>
 
-  <section class="management-grid">
-    <form class="editor-panel" @submit.prevent="save">
-      <header>
-        <h2>编辑任务</h2>
-      </header>
-      <label>
-        <span>当前任务</span>
-        <select v-model="editingKey" @change="editingJob && edit(editingJob)">
-          <option v-for="job in jobs" :key="job.job_key" :value="job.job_key">{{ job.name }}</option>
-        </select>
-      </label>
-      <label>
-        <span>名称</span>
-        <input v-model="form.name" maxlength="160" required />
-      </label>
-      <label>
-        <span>调度类型</span>
-        <select v-model="form.schedule_type">
-          <option value="daily">每日 daily</option>
-          <option value="weekly">每周 weekly</option>
-          <option value="monthly_last">月末 monthly_last</option>
-          <option value="interval">盘中区间 interval</option>
-        </select>
-      </label>
-      <label v-if="form.schedule_type !== 'interval'">
-        <span>触发时间 HH:MM</span>
-        <input v-model="form.run_time" placeholder="08:30" maxlength="5" />
-      </label>
-      <label v-if="form.schedule_type === 'daily' || form.schedule_type === 'weekly'">
-        <span>星期（1-7 逗号分隔，留空=每天）</span>
-        <input v-model="form.weekday_mask" placeholder="1,2,3,4,5" maxlength="20" />
-      </label>
-      <template v-if="form.schedule_type === 'interval'">
-        <label>
-          <span>间隔分钟</span>
-          <input v-model.number="form.interval_minutes" type="number" min="1" max="1440" />
-        </label>
-        <label>
-          <span>窗口开始 / 结束</span>
-          <span class="inline-pair">
-            <input v-model="form.window_start" placeholder="09:30" maxlength="5" />
-            <input v-model="form.window_end" placeholder="15:00" maxlength="5" />
-          </span>
-        </label>
-      </template>
-      <label class="checkbox-row">
-        <input v-model="form.trading_day_only" type="checkbox" />
-        <span>仅交易日执行</span>
-      </label>
-      <label>
-        <span>数字人角色</span>
-        <select v-model="form.digital_human_code">
-          <option value="">（健康检查等规则任务留空）</option>
-          <option v-for="item in DIGITAL_HUMANS" :key="item.code" :value="item.code">{{ item.label }}</option>
-        </select>
-      </label>
-      <label>
-        <span>群消息推送</span>
-        <select v-model="form.push_channel_key">
-          <option v-for="item in CHANNELS" :key="item.key" :value="item.key">{{ item.label }}</option>
-        </select>
-      </label>
-      <label>
-        <span>提示词模板（支持 {date} {weekday} {time}）</span>
-        <textarea v-model="form.prompt_template" rows="4"></textarea>
-      </label>
-      <label class="checkbox-row">
-        <input v-model="form.enabled" type="checkbox" />
-        <span>启用该任务</span>
-      </label>
-      <button type="submit" :disabled="!editingKey">保存任务</button>
-      <p class="form-message">{{ message }}</p>
-    </form>
-
-    <section class="page-section">
-      <header class="section-header">
-        <div>
-          <h2>节律任务</h2>
-          <p>立即执行会无视交易日与时间窗，用于验收。</p>
-        </div>
-      </header>
-      <div class="table-wrap">
-        <table class="list-table">
-          <thead>
-            <tr>
-              <th>任务</th>
-              <th>调度</th>
-              <th>角色</th>
-              <th>推送</th>
-              <th>上次运行</th>
-              <th>状态</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="!jobs.length">
-              <td colspan="7" class="empty-cell">暂无任务</td>
-            </tr>
-            <tr v-for="job in jobs" :key="job.job_key" :class="{ 'row-active': job.job_key === editingKey }">
-              <td>
-                <span class="job-dot" :class="job.enabled ? 'on' : 'off'" :title="job.enabled ? '已启用' : '已停用'"></span>
-                {{ job.name }}
-              </td>
-              <td>{{ scheduleText(job) }}</td>
-              <td>{{ humanLabel(job.digital_human_code) }}</td>
-              <td>{{ channelLabel(job) }}</td>
-              <td class="nowrap">{{ job.last_run_at || '-' }}</td>
-              <td><span class="job-status" :class="job.last_status || 'none'">{{ statusText(job.last_status) }}</span></td>
-              <td>
-                <div class="cell-actions">
-                  <button type="button" @click="edit(job)">编辑</button>
-                  <button type="button" :class="{ danger: job.enabled }" @click="toggle(job)">
-                    {{ job.enabled ? '停用' : '启用' }}
-                  </button>
-                  <button type="button" @click="runNow(job)">执行</button>
-                  <button type="button" @click="loadRuns(job.job_key)">历史</button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <header class="section-header">
-        <div>
-          <h2>运行历史{{ runsJobKey ? `（${runsJobKey}）` : '' }}</h2>
-          <p>
-            <button type="button" class="link-button" @click="loadRuns()">查看全部</button>
-          </p>
-        </div>
-      </header>
-      <DataTable
-        :columns="['时间', '任务', '触发', '状态', '耗时ms', '结果 / 错误']"
-        :rows="runs.map((run) => [
-          beijingFromDb(run.created_at),
-          run.job_key,
-          run.trigger_type,
-          statusText(run.status),
-          run.duration_ms ?? '-',
-          run.error || run.output_preview || '-'
-        ])"
-      />
+    <section v-if="status" class="hub-metrics rhythm-metrics" aria-label="调度概览">
+      <div><span>启用任务</span><strong>{{ enabledJobs }} / {{ jobs.length }}</strong></div>
+      <div><span>今日执行</span><strong>{{ todayExecutions }}</strong></div>
+      <div><span>今日成功率</span><strong>{{ todaySuccessRate }}</strong></div>
+      <div><span>飞书任务群</span><strong>{{ notifyState }}</strong></div>
     </section>
+
+    <div v-if="status" class="rhythm-meta-line">
+      <span :class="{ accent: status.is_trading_day }">{{ status.is_trading_day ? '今日为交易日' : '今日非交易日' }}</span>
+      <span>成功 {{ status.today.success }}</span>
+      <span :class="{ danger: status.today.failed }">失败 {{ status.today.failed }}</span>
+      <span>运行中 {{ status.today.running }}</span>
+      <span>最近心跳 {{ beijingFromDb(status.heartbeat_at) }}</span>
+    </div>
+
+    <p v-if="message" class="hub-message" :class="messageTone">{{ message }}</p>
+
+    <section class="hub-section">
+      <header class="hub-section-title">
+        <div><h2>任务编排</h2><p>任务按计划自动执行，也可以随时手动验收。</p></div>
+        <span class="rhythm-section-count">{{ enabledJobs }} 个正在运行</span>
+      </header>
+
+      <div class="rhythm-job-list">
+        <article
+          v-for="job in jobs"
+          :key="job.job_key"
+          :class="{ active: job.job_key === runsJobKey, disabled: !job.enabled }"
+        >
+          <div class="rhythm-job-mark" :class="{ off: !job.enabled }">{{ jobMark(job) }}</div>
+          <div class="rhythm-job-identity">
+            <div><strong>{{ job.name }}</strong><span>{{ jobKindLabel(job.job_kind) }}</span></div>
+            <p>{{ jobDescription(job) }}</p>
+            <code>{{ job.job_key }}</code>
+          </div>
+          <div class="rhythm-job-fact schedule">
+            <small>调度计划</small>
+            <strong>{{ scheduleText(job) }}</strong>
+            <span>{{ job.trading_day_only ? '仅交易日执行' : '每日均可执行' }}</span>
+          </div>
+          <div class="rhythm-job-fact delivery">
+            <small>执行与推送</small>
+            <strong>{{ humanLabel(job.digital_human_code) }}</strong>
+            <span>{{ channelLabel(job) }}</span>
+          </div>
+          <div class="rhythm-job-last">
+            <small>上次运行</small>
+            <span class="job-status" :class="job.last_status || 'none'" :title="job.last_error || ''">
+              <i></i>{{ statusText(job.last_status) }}
+            </span>
+            <time>{{ beijingFromDb(job.last_run_at) }}</time>
+          </div>
+          <div class="rhythm-job-actions">
+            <button type="button" @click="edit(job)">配置</button>
+            <button type="button" :class="{ danger: job.enabled }" :disabled="Boolean(actionKey)" @click="toggle(job)">
+              {{ isActionBusy('toggle', job) ? '处理中' : job.enabled ? '停用' : '启用' }}
+            </button>
+            <button class="run" type="button" :disabled="Boolean(actionKey)" @click="runNow(job)">
+              {{ isActionBusy('run', job) ? '执行中' : '立即执行' }}
+            </button>
+            <button type="button" @click="showHistory(job)">运行记录</button>
+          </div>
+        </article>
+        <div v-if="!jobs.length" class="rhythm-empty">暂时没有可管理的任务。</div>
+      </div>
+    </section>
+
+    <section ref="historySection" class="hub-section rhythm-history-section">
+      <header class="hub-section-title">
+        <div>
+          <h2>运行记录</h2>
+          <p>{{ historyJob ? `正在查看「${historyJob.name}」` : '最近的自动执行和手动验收记录' }}</p>
+        </div>
+        <button v-if="runsJobKey" class="quiet-action" type="button" @click="loadRuns()">查看全部任务</button>
+      </header>
+
+      <div class="rhythm-run-list">
+        <div class="rhythm-run-head" aria-hidden="true">
+          <span>状态</span><span>开始时间</span><span>任务</span><span>触发方式</span><span>耗时</span><span>结果摘要</span><span></span>
+        </div>
+        <article v-for="run in runs" :key="run.run_id">
+          <span class="rhythm-run-state" :class="run.status"><i></i>{{ statusText(run.status) }}</span>
+          <time>{{ beijingFromDb(run.started_at || run.created_at) }}</time>
+          <strong>{{ jobs.find((job) => job.job_key === run.job_key)?.name || run.job_key }}</strong>
+          <span>{{ triggerText(run.trigger_type) }}</span>
+          <span>{{ durationText(run.duration_ms) }}</span>
+          <p :class="{ error: Boolean(run.error) }">{{ runPreview(run) }}</p>
+          <button type="button" @click="selectedRun = run">查看</button>
+        </article>
+        <div v-if="!runs.length" class="rhythm-empty">暂无运行记录。</div>
+      </div>
+    </section>
+
+    <div v-if="editorOpen && editingJob" class="model-dialog-backdrop rhythm-dialog-backdrop" @mousedown.self="closeEditor">
+      <form class="model-dialog model-dialog--wide rhythm-dialog" role="dialog" aria-modal="true" @submit.prevent="save">
+        <header class="dialog-header">
+          <div><small>SCHEDULE SETUP</small><h2>配置 {{ editingJob.name }}</h2></div>
+          <button type="button" title="关闭" aria-label="关闭" :disabled="saving" @click="closeEditor">×</button>
+        </header>
+
+        <div class="dialog-body rhythm-dialog-body">
+          <div class="friendly-tip">
+            <b>{{ jobKindLabel(editingJob.job_kind) }} · {{ editingJob.job_key }}</b>
+            <span>保存后立即生效，不需要重启服务。</span>
+          </div>
+
+          <section class="rhythm-form-section">
+            <header><h3>基本信息</h3><span>用于列表识别和运行记录</span></header>
+            <div class="rhythm-form-grid">
+              <label><span>任务名称</span><input v-model="form.name" maxlength="160" required /></label>
+              <label><span>调度类型</span><select v-model="form.schedule_type"><option value="daily">每日计划</option><option value="weekly">每周计划</option><option value="monthly_last">月末计划</option><option value="interval">盘中循环</option></select></label>
+              <label class="span-all"><span>任务说明</span><textarea v-model="form.description" rows="2" placeholder="说明这项任务会在什么时间完成什么工作"></textarea></label>
+            </div>
+          </section>
+
+          <section class="rhythm-form-section">
+            <header><h3>执行计划</h3><span>所有时间均按北京时间</span></header>
+            <div class="rhythm-form-grid">
+              <template v-if="form.schedule_type === 'interval'">
+                <label><span>执行间隔</span><div class="rhythm-number-field"><input v-model.number="form.interval_minutes" type="number" min="1" max="1440" /><b>分钟</b></div></label>
+                <label><span>执行窗口</span><div class="rhythm-time-range"><input v-model="form.window_start" type="time" /><i>至</i><input v-model="form.window_end" type="time" /></div></label>
+              </template>
+              <label v-else><span>触发时间</span><input v-model="form.run_time" type="time" required /></label>
+              <label v-if="form.schedule_type === 'monthly_last'"><span>执行日期</span><input value="每月最后一个交易日" disabled /></label>
+              <label v-if="form.schedule_type === 'daily' || form.schedule_type === 'weekly'" class="span-all">
+                <span>执行星期 <small>不选择代表每天</small></span>
+                <span class="rhythm-weekdays">
+                  <button v-for="day in WEEKDAYS" :key="day.value" type="button" :class="{ selected: weekdaySelected(day.value) }" @click="toggleWeekday(day.value)">{{ day.label }}</button>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section class="rhythm-form-section">
+            <header><h3>执行内容</h3><span>选择负责的数字人和结果去向</span></header>
+            <div class="rhythm-form-grid">
+              <label><span>数字人角色</span><select v-model="form.digital_human_code"><option value="">规则任务，不使用数字人</option><option v-for="item in DIGITAL_HUMANS" :key="item.code" :value="item.code">{{ item.label }}</option></select></label>
+              <label><span>结果推送</span><select v-model="form.push_channel_key"><option v-for="item in CHANNELS" :key="item.key" :value="item.key">{{ item.label }}</option></select></label>
+              <label class="span-all"><span>提示词模板 <small>支持 {date}、{weekday}、{time}</small></span><textarea v-model="form.prompt_template" rows="6" placeholder="填写数字人执行任务时收到的完整指令"></textarea></label>
+            </div>
+          </section>
+
+          <div class="rhythm-switch-grid">
+            <label class="friendly-switch"><input v-model="form.trading_day_only" type="checkbox" /><i></i><span><b>仅交易日执行</b><small>节假日和周末自动跳过</small></span></label>
+            <label class="friendly-switch"><input v-model="form.enabled" type="checkbox" /><i></i><span><b>启用该任务</b><small>关闭后不再自动触发</small></span></label>
+          </div>
+
+          <details class="rhythm-advanced">
+            <summary>高级设置</summary>
+            <label><span>显示顺序</span><input v-model.number="form.sort_order" type="number" min="0" /></label>
+          </details>
+        </div>
+
+        <footer><button type="button" :disabled="saving" @click="closeEditor">取消</button><span></span><button class="primary-action" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存配置' }}</button></footer>
+      </form>
+    </div>
+
+    <div v-if="selectedRun" class="model-dialog-backdrop rhythm-dialog-backdrop" @mousedown.self="selectedRun = null">
+      <section class="model-dialog model-dialog--wide rhythm-run-dialog" role="dialog" aria-modal="true">
+        <header class="dialog-header">
+          <div><small>RUN DETAIL</small><h2>运行详情</h2></div>
+          <button type="button" title="关闭" aria-label="关闭" @click="selectedRun = null">×</button>
+        </header>
+        <div class="dialog-body">
+          <div class="rhythm-run-meta">
+            <div><span>任务</span><strong>{{ jobs.find((job) => job.job_key === selectedRun?.job_key)?.name || selectedRun.job_key }}</strong></div>
+            <div><span>状态</span><strong class="job-status" :class="selectedRun.status">{{ statusText(selectedRun.status) }}</strong></div>
+            <div><span>开始时间</span><strong>{{ beijingFromDb(selectedRun.started_at || selectedRun.created_at) }}</strong></div>
+            <div><span>运行耗时</span><strong>{{ durationText(selectedRun.duration_ms) }}</strong></div>
+          </div>
+          <div class="rhythm-run-output" :class="{ error: Boolean(selectedRun.error) }">
+            <span>{{ selectedRun.error ? '错误信息' : '结果输出' }}</span>
+            <pre>{{ runDetail(selectedRun) }}</pre>
+          </div>
+        </div>
+        <footer><span></span><button type="button" @click="selectedRun = null">关闭</button></footer>
+      </section>
+    </div>
   </section>
 </template>

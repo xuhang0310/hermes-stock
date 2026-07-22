@@ -5,6 +5,7 @@ import { renderMarkdown } from '../utils/markdown'
 import type {
   ModelConfig,
   PositionAgentStep,
+  WatchlistAgentPendingAction,
   WatchlistAgentStreamEvent,
   WatchlistItem
 } from '../types'
@@ -42,6 +43,7 @@ const agentMessages = ref<AgentMessage[]>([])
 const agentScroll = ref<HTMLElement | null>(null)
 const models = ref<ModelConfig[]>([])
 const selectedModelId = ref<number | null>(null)
+const agentPendingAction = ref<WatchlistAgentPendingAction | null>(null)
 
 const activeModel = computed(
   () =>
@@ -174,7 +176,8 @@ async function sendAgentMessage() {
       {
         instruction,
         model_config_id: selectedModelId.value,
-        history
+        history,
+        pending_action: agentPendingAction.value
       },
       (event) => handleAgentEvent(event, now + 1)
     )
@@ -215,6 +218,7 @@ function handleAgentEvent(event: WatchlistAgentStreamEvent, messageId: number) {
       status: 'done',
       changed: Boolean(event.should_save)
     }))
+    agentPendingAction.value = event.pending_action || null
     if (event.should_save) emit('refresh')
   } else if (event.type === 'error') {
     const error = event.message || '自选录入 Agent 流式响应异常'

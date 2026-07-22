@@ -9,7 +9,7 @@ async function loadReader() {
   const server = await createServer({
     root: frontendRoot,
     appType: 'custom',
-    server: { middlewareMode: true }
+    server: { middlewareMode: true, hmr: false }
   })
   try {
     return await server.ssrLoadModule('/src/utils/sse.ts')

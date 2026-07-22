@@ -498,6 +498,14 @@ class DigitalHumanProfile(Base):
 
 class AiChatSession(Base):
     __tablename__ = "ai_chat_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "digital_human_id",
+            "source_type",
+            "external_conversation_id",
+            name="uq_ai_chat_session_external",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
@@ -506,6 +514,9 @@ class AiChatSession(Base):
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
     chat_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="research")
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False, default="web")
+    external_conversation_id: Mapped[str | None] = mapped_column(String(160))
+    source_label: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -522,11 +533,29 @@ class AiChatMessage(Base):
     session_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(24), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    attachments_json: Mapped[str | None] = mapped_column(Text)
     event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped[AiChatSession] = relationship(back_populates="messages")
+
+
+class AgentToolApproval(Base):
+    __tablename__ = "agent_tool_approvals"
+
+    approval_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    tool_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(24), nullable=False)
+    arguments_json: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class AiPromptRecommendation(Base):

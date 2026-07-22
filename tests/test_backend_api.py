@@ -171,6 +171,19 @@ class BackendApiTests(unittest.TestCase):
         self.assertTrue(payload["title"].startswith("SixRabbits"))
         self.assertGreaterEqual(payload["counts"]["open_positions"], 1)
         self.assertGreaterEqual(len(payload["recent_events"]), 1)
+        self.assertIn("portfolio", payload)
+        self.assertIn("market", payload)
+        self.assertIn("runtime", payload)
+        self.assertIn("approvals", payload)
+        self.assertIn("risk_events", payload)
+        self.assertIn("next_job", payload)
+        self.assertEqual(len(payload["market"]["items"]), 3)
+
+    def test_agent_approval_center_lists_current_user_requests(self) -> None:
+        response = self.client.get("/api/agent/approvals", headers=self.auth_headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
 
     def test_event_detail_includes_evidence_and_reports(self) -> None:
         response = self.client.get("/api/events/demo-l0-stop-loss-000001", headers=self.auth_headers)

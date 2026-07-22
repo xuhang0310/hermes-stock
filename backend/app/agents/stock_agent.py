@@ -33,6 +33,13 @@ from backend.app.agents.position_intent import (
     detect_position_intent,
     intent_summary,
 )
+from backend.app.agents.tool_approval import (
+    ApprovalPolicy,
+    classify_tool_risk,
+    create_tool_approval,
+    requires_approval,
+    wait_for_tool_approval,
+)
 from backend.app.ai.retrieval import retrieve_chunks
 from backend.app.market.stock_tools import (
     stock_observation_preview,
@@ -610,6 +617,9 @@ def run_agent_events(
     can_write_positions: bool = False,
     default_account_id: int | None = None,
     allow_code_execution: bool = False,
+    approval_policy: ApprovalPolicy = "ask",
+    session_id: int | None = None,
+    user_content: str | list[dict[str, Any]] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> Generator[dict, None, None]:
     stock_mode = chat_mode == "stock"
@@ -651,7 +661,7 @@ def run_agent_events(
     for item in (history or [])[-8:]:
         if item.get("role") in {"user", "assistant"} and item.get("content"):
             messages.append({"role": item["role"], "content": item["content"]})
-    messages.append({"role": "user", "content": question})
+    messages.append({"role": "user", "content": user_content if user_content is not None else question})
 
     llm_config = active_llm_config(model_config_id)
     yield {
@@ -733,6 +743,56 @@ def run_agent_events(
                 args = json.loads(call.get("function", {}).get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
+
+            risk_level = classify_tool_risk(name, args, write_tool_names)
+            if requires_approval(approval_policy, risk_level):
+                if name in write_tool_names:
+                    approval_display_name = digital_human_tool_display_name(name)
+                elif name == "search_knowledge":
+                    approval_display_name = "知识库检索"
+                elif name == "run_sql":
+                    approval_display_name = "只读数据查询"
+                elif name == "get_schema":
+                    approval_display_name = "查看数据结构"
+                else:
+                    approval_display_name = _registry_display_name(name)
+                if user_id is None or session_id is None:
+                    approval_status = "denied"
+                    approval_payload = None
+                else:
+                    approval_payload = create_tool_approval(
+                        session_id=session_id,
+                        user_id=user_id,
+                        tool_name=name,
+                        display_name=approval_display_name,
+                        risk_level=risk_level,
+                        args=args,
+                    )
+                    yield {"type": "approval_required", **approval_payload}
+                    approval_status = wait_for_tool_approval(approval_payload["approval_id"], cancel_event=cancel_event)
+                    yield {
+                        "type": "approval_resolved",
+                        "approval_id": approval_payload["approval_id"],
+                        "tool": name,
+                        "display_name": approval_display_name,
+                        "decision": approval_status,
+                    }
+                if approval_status != "approved":
+                    labels = {
+                        "denied": "用户拒绝了本次操作",
+                        "expired": "审批等待已超时",
+                        "cancelled": "任务已取消",
+                    }
+                    result = {"error": labels.get(approval_status, "本次操作未获批准")}
+                    yield {"type": "observation", "content": result["error"]}
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.get("id", ""),
+                            "content": json.dumps(result, ensure_ascii=False),
+                        }
+                    )
+                    continue
 
             if name in write_tool_names:
                 # 写持仓工具需要额外上下文，不经过 registry

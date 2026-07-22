@@ -1,7 +1,8 @@
 [Unit]
 Description=SixRabbits Stock background services
-After=network.target docker.service
-Wants=docker.service
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

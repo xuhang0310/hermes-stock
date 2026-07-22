@@ -18,6 +18,7 @@ data/*.db-wal
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+data/llm_calls/
 logs/
 *.log
 tmp/

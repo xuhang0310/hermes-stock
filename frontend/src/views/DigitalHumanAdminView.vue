@@ -3,25 +3,33 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { DigitalHuman, DigitalHumanCapabilities } from '../types'
 
+type AdminDialog = 'profile' | 'capabilities' | null
+
 const list = ref<DigitalHuman[]>([])
 const loading = ref(false)
 const error = ref('')
+const message = ref('')
+const dialog = ref<AdminDialog>(null)
 const editingId = ref<number | null>(null)
 const editForm = ref<DigitalHuman | null>(null)
 const saving = ref(false)
 const capabilities = ref<Record<number, DigitalHumanCapabilities>>({})
+const capabilityId = ref<number | null>(null)
 const loadingCaps = ref<number | null>(null)
 const togglePending = ref<number | null>(null)
 
-// 设计上偏只读分析的角色，开写持仓时弹一次知情确认
+// 这些角色默认偏只读，开启写持仓时明确提示影响范围。
 const READONLY_ROLES = ['risk-officer', 'market-sentinel', 'short-term-hunter']
 
 const stats = computed(() => ({
   total: list.value.length,
-  enabled: list.value.filter((d) => d.status === 'enabled').length,
-  canWrite: list.value.filter((d) => d.can_write_positions).length,
-  feishu: list.value.filter((d) => d.feishu_bot_enabled).length,
+  enabled: list.value.filter((item) => item.status === 'enabled').length,
+  canWrite: list.value.filter((item) => item.can_write_positions).length,
+  feishu: list.value.filter((item) => item.feishu_bot_enabled).length
 }))
+
+const capabilityHuman = computed(() => list.value.find((item) => item.id === capabilityId.value) || null)
+const activeCapabilities = computed(() => (capabilityId.value ? capabilities.value[capabilityId.value] : null))
 
 async function load() {
   loading.value = true
@@ -29,81 +37,91 @@ async function load() {
   try {
     list.value = await api.digitalHumans('admin')
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '加载失败'
+    error.value = err instanceof Error ? err.message : '加载数字人失败'
   } finally {
     loading.value = false
   }
 }
 
-function fullPayload(d: DigitalHuman): Record<string, unknown> {
-  // PUT 全量：回填所有字段 + 翻转后的 can_write_positions，避免误清 system_prompt
+function fullPayload(item: DigitalHuman): Record<string, unknown> {
   return {
-    code: d.code,
-    name: d.name,
-    avatar_tone: d.avatar_tone,
-    target_roles: d.target_roles,
-    description: d.description,
-    system_prompt: d.system_prompt,
-    quick_prompts: d.quick_prompts,
-    status: d.status,
-    sort_order: d.sort_order,
-    can_write_positions: d.can_write_positions,
+    code: item.code,
+    name: item.name,
+    avatar_tone: item.avatar_tone,
+    target_roles: item.target_roles,
+    description: item.description,
+    system_prompt: item.system_prompt,
+    quick_prompts: item.quick_prompts,
+    status: item.status,
+    sort_order: item.sort_order,
+    can_write_positions: item.can_write_positions
   }
 }
 
-async function toggleWrite(d: DigitalHuman) {
+async function toggleWrite(item: DigitalHuman) {
   if (togglePending.value) return
-  if (!d.can_write_positions && READONLY_ROLES.includes(d.code)) {
-    if (!window.confirm(`${d.name} 设计上偏只读分析，开启写持仓会让它在对话里能改持仓记录，确认开启？`)) return
+  if (!item.can_write_positions && READONLY_ROLES.includes(item.code)) {
+    if (!window.confirm(`${item.name} 默认承担只读分析职责。开启后它可以在对话中修改持仓记录，确认继续？`)) return
   }
-  togglePending.value = d.id
-  const old = d.can_write_positions
-  d.can_write_positions = !old // 乐观翻转
+  togglePending.value = item.id
+  message.value = ''
+  error.value = ''
+  const previous = item.can_write_positions
+  item.can_write_positions = !previous
   try {
-    const saved = await api.saveDigitalHuman(fullPayload(d), d.id)
-    const idx = list.value.findIndex((x) => x.id === saved.id)
-    if (idx >= 0) list.value[idx] = saved // 回写服务端返回值
-    delete capabilities.value[d.id] // 缓存失效，write_tools 状态重新拉
+    const saved = await api.saveDigitalHuman(fullPayload(item), item.id)
+    const index = list.value.findIndex((row) => row.id === saved.id)
+    if (index >= 0) list.value[index] = saved
+    delete capabilities.value[item.id]
+    message.value = `${saved.name} 已${saved.can_write_positions ? '允许写入持仓' : '切换为只读'}。`
   } catch (err) {
-    d.can_write_positions = old // 回滚
-    error.value = err instanceof Error ? err.message : '切换失败'
+    item.can_write_positions = previous
+    error.value = err instanceof Error ? err.message : '切换持仓权限失败'
   } finally {
     togglePending.value = null
   }
 }
 
-async function toggleStatus(d: DigitalHuman) {
+async function toggleStatus(item: DigitalHuman) {
   if (togglePending.value) return
-  togglePending.value = d.id
-  const old = d.status
-  d.status = d.status === 'enabled' ? 'disabled' : 'enabled'
+  togglePending.value = item.id
+  message.value = ''
+  error.value = ''
+  const previous = item.status
+  item.status = item.status === 'enabled' ? 'disabled' : 'enabled'
   try {
-    const saved = await api.saveDigitalHuman(fullPayload(d), d.id)
-    const idx = list.value.findIndex((x) => x.id === saved.id)
-    if (idx >= 0) list.value[idx] = saved
+    const saved = await api.saveDigitalHuman(fullPayload(item), item.id)
+    const index = list.value.findIndex((row) => row.id === saved.id)
+    if (index >= 0) list.value[index] = saved
+    message.value = `${saved.name} 已${saved.status === 'enabled' ? '启用' : '停用'}。`
   } catch (err) {
-    d.status = old
-    error.value = err instanceof Error ? err.message : '启停失败'
+    item.status = previous
+    error.value = err instanceof Error ? err.message : '切换数字人状态失败'
   } finally {
     togglePending.value = null
   }
 }
 
-function openEditor(d: DigitalHuman) {
-  editingId.value = d.id
-  editForm.value = { ...d, quick_prompts: [...d.quick_prompts] }
+function openEditor(item: DigitalHuman) {
+  editingId.value = item.id
+  editForm.value = { ...item, quick_prompts: [...item.quick_prompts] }
+  error.value = ''
+  dialog.value = 'profile'
 }
 
-function closeEditor() {
+function closeDialog() {
+  if (saving.value) return
+  dialog.value = null
   editingId.value = null
   editForm.value = null
+  capabilityId.value = null
 }
 
 function onQuickPromptsInput(event: Event) {
   if (!editForm.value) return
   editForm.value.quick_prompts = (event.target as HTMLTextAreaElement).value
     .split('\n')
-    .map((s) => s.trim())
+    .map((value) => value.trim())
     .filter(Boolean)
 }
 
@@ -111,155 +129,179 @@ async function saveProfile() {
   if (!editForm.value) return
   saving.value = true
   error.value = ''
+  message.value = ''
   try {
-    const saved = await api.saveDigitalHuman(fullPayload(editForm.value), editForm.value.id ?? undefined)
-    const idx = list.value.findIndex((x) => x.id === saved.id)
-    if (idx >= 0) list.value[idx] = saved
-    closeEditor()
+    const saved = await api.saveDigitalHuman(fullPayload(editForm.value), editForm.value.id)
+    const index = list.value.findIndex((item) => item.id === saved.id)
+    if (index >= 0) list.value[index] = saved
+    delete capabilities.value[saved.id]
+    message.value = `${saved.name} 的画像与权限已更新。`
+    dialog.value = null
+    editingId.value = null
+    editForm.value = null
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '保存失败'
+    error.value = err instanceof Error ? err.message : '保存数字人失败'
   } finally {
     saving.value = false
   }
 }
 
-async function loadCapabilities(d: DigitalHuman) {
-  if (capabilities.value[d.id]) {
-    delete capabilities.value[d.id] // 再次点击收起
-    return
-  }
-  loadingCaps.value = d.id
+async function openCapabilities(item: DigitalHuman) {
+  capabilityId.value = item.id
+  dialog.value = 'capabilities'
+  error.value = ''
+  if (capabilities.value[item.id]) return
+  loadingCaps.value = item.id
   try {
-    capabilities.value[d.id] = await api.digitalHumanCapabilities(d.id)
+    capabilities.value[item.id] = await api.digitalHumanCapabilities(item.id)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '加载能力失败'
+    error.value = err instanceof Error ? err.message : '加载能力清单失败'
   } finally {
     loadingCaps.value = null
   }
+}
+
+function roleLabel(targetRoles: string) {
+  return targetRoles === '*' ? '全部角色可用' : targetRoles.split(',').map((item) => item.trim()).filter(Boolean).join(' · ') || '未指定角色'
+}
+
+function toolCount(value: DigitalHumanCapabilities | null) {
+  if (!value) return 0
+  return value.common_tools.length + value.role_tools.length + value.write_tools.length + (value.workspace_tools?.length || 0)
 }
 
 onMounted(load)
 </script>
 
 <template>
-  <section class="page-section">
-    <header class="section-header">
+  <section class="model-hub digital-human-admin-hub">
+    <header class="model-hub-hero">
       <div>
-        <h2>数字人管理</h2>
-        <p>数字人画像与能力开关（写持仓等）。写持仓开关只是第一道门，聊天时仍要求用户具备 data:write 且经预览确认。</p>
+        <span class="eyebrow">DIGITAL WORKFORCE</span>
+        <h1>数字人管理</h1>
+        <p>统一维护角色画像、工具能力、数据权限与飞书接入状态。</p>
       </div>
-      <button type="button" :disabled="loading" @click="load">{{ loading ? '加载中' : '刷新' }}</button>
+      <button class="primary-action" type="button" :disabled="loading" @click="load"><b>↻</b> {{ loading ? '刷新中…' : '刷新状态' }}</button>
     </header>
 
-    <div class="stat-row">
-      <span>数字人 {{ stats.total }}</span>
-      <span>启用 {{ stats.enabled }}</span>
-      <span>可写持仓 {{ stats.canWrite }}</span>
-      <span>飞书绑定 {{ stats.feishu }}</span>
+    <section v-if="list.length" class="active-model-card settings-overview-card">
+      <div class="active-model-orb">DH</div>
+      <div>
+        <span>数字人团队状态</span>
+        <strong>{{ stats.enabled }} 位数字人正在服务</strong>
+        <code>工具权限与画像独立配置，写操作仍受用户权限和预览确认双重保护</code>
+      </div>
+      <i>{{ stats.feishu }} 个飞书机器人已绑定</i>
+    </section>
+    <section v-else-if="!loading" class="empty-callout">
+      <span>还没有数字人角色</span>
+      <p>请先完成数字人初始化，再在这里维护画像和能力。</p>
+    </section>
+
+    <div class="hub-metrics" aria-label="数字人统计">
+      <div><span>角色总数</span><strong>{{ stats.total }}</strong></div>
+      <div><span>当前启用</span><strong>{{ stats.enabled }}</strong></div>
+      <div><span>可写持仓</span><strong>{{ stats.canWrite }}</strong></div>
+      <div><span>飞书绑定</span><strong>{{ stats.feishu }}</strong></div>
     </div>
 
-    <p v-if="error" class="error-text">{{ error }}</p>
+    <div v-if="message" class="hub-message success" role="status">{{ message }}</div>
+    <div v-if="error && !dialog" class="hub-message error" role="alert">{{ error }}</div>
 
-    <div class="dh-table">
-      <div class="dh-head">
-        <span>名称</span>
-        <span>code</span>
-        <span>状态</span>
-        <span>写持仓</span>
-        <span>飞书</span>
-        <span>操作</span>
+    <section class="hub-section">
+      <header class="hub-section-title">
+        <div><h2>数字人团队</h2><p>查看职责边界，并按角色调整画像和工具权限</p></div>
+      </header>
+      <div class="friendly-model-list settings-entity-list digital-human-list">
+        <article v-for="item in list" :key="item.id" :class="{ disabled: item.status === 'disabled' }">
+          <div class="model-icon entity-avatar">{{ item.name.slice(0, 1) }}</div>
+          <div class="model-identity entity-identity">
+            <strong>{{ item.name }}</strong>
+            <span :title="item.description">{{ item.description || '尚未填写角色描述' }}</span>
+            <code>{{ item.code }} · {{ roleLabel(item.target_roles) }}</code>
+          </div>
+          <div class="entity-badges">
+            <span :class="{ accent: item.can_write_positions }">{{ item.can_write_positions ? '可写持仓' : '只读分析' }}</span>
+            <span v-if="item.feishu_bot_enabled">飞书已绑定</span>
+          </div>
+          <span class="model-health"><i></i>{{ item.status === 'enabled' ? '可用' : '停用' }}</span>
+          <div class="model-row-actions">
+            <button type="button" :disabled="loadingCaps === item.id" @click="openCapabilities(item)">{{ loadingCaps === item.id ? '加载中…' : '能力' }}</button>
+            <button type="button" :disabled="!!togglePending" @click="toggleWrite(item)">{{ item.can_write_positions ? '改为只读' : '允许写持仓' }}</button>
+            <button type="button" @click="openEditor(item)">编辑</button>
+            <button type="button" :disabled="!!togglePending" @click="toggleStatus(item)">{{ item.status === 'enabled' ? '停用' : '启用' }}</button>
+          </div>
+        </article>
+        <div v-if="loading && !list.length" class="friendly-empty">正在加载数字人团队…</div>
       </div>
-      <div v-for="d in list" :key="d.id" class="dh-row">
-        <span><strong>{{ d.name }}</strong></span>
-        <span class="mono">{{ d.code }}</span>
-        <span>{{ d.status === 'enabled' ? '启用' : '停用' }}</span>
-        <span>
-          <button
-            type="button"
-            class="toggle"
-            :class="{ on: d.can_write_positions }"
-            :disabled="!!togglePending"
-            :title="d.can_write_positions ? '已开启写持仓（仍需用户 data:write + 预览确认）' : '点击开启写持仓'"
-            @click="toggleWrite(d)"
-          >{{ d.can_write_positions ? '✓ 开' : '✗ 关' }}</button>
-        </span>
-        <span>{{ d.feishu_bot_enabled ? '✅' : '—' }}</span>
-        <span class="cell-actions">
-          <button type="button" @click="openEditor(d)">编辑</button>
-          <button type="button" :disabled="loadingCaps === d.id" @click="loadCapabilities(d)">
-            {{ capabilities[d.id] ? '收起能力' : '能力' }}
-          </button>
-          <button type="button" :disabled="!!togglePending" @click="toggleStatus(d)">
-            {{ d.status === 'enabled' ? '停用' : '启用' }}
-          </button>
-        </span>
+    </section>
 
-        <section v-if="editingId === d.id && editForm" class="dh-edit">
-          <h3>编辑 {{ editForm.name }}</h3>
-          <label>名称<input v-model="editForm.name" /></label>
-          <label>code（已存在记录置灰，改坏会断工具/调度映射）
-            <input :value="editForm.code" disabled />
+    <div v-if="dialog" class="model-dialog-backdrop" @mousedown.self="closeDialog">
+      <form v-if="dialog === 'profile' && editForm" class="model-dialog model-dialog--wide" @submit.prevent="saveProfile">
+        <header class="dialog-header">
+          <div><small>DIGITAL HUMAN PROFILE</small><h2>编辑 {{ editForm.name }}</h2></div>
+          <button type="button" title="关闭" @click="closeDialog">×</button>
+        </header>
+        <div class="dialog-body digital-human-form">
+          <div class="friendly-tip"><b>角色画像与权限</b><span>Code 已被工具和调度引用，因此不可修改；其他配置保存后立即生效。</span></div>
+          <div class="form-row">
+            <label><span>名称</span><input v-model="editForm.name" required /></label>
+            <label><span>Code</span><input :value="editForm.code" disabled /></label>
+          </div>
+          <div class="form-row">
+            <label><span>表达风格</span><input v-model="editForm.avatar_tone" placeholder="例如：理性、审慎、简洁" /></label>
+            <label><span>可见角色</span><input v-model="editForm.target_roles" placeholder="* 或 admin,researcher" /></label>
+          </div>
+          <label><span>角色描述</span><input v-model="editForm.description" /></label>
+          <label><span>系统提示词</span><textarea v-model="editForm.system_prompt" rows="7"></textarea></label>
+          <label><span>快捷问题 <small>每行一条</small></span><textarea :value="editForm.quick_prompts.join('\n')" rows="4" @input="onQuickPromptsInput"></textarea></label>
+          <div class="form-row">
+            <label><span>显示顺序</span><input v-model.number="editForm.sort_order" type="number" /></label>
+            <label><span>状态</span><select v-model="editForm.status"><option value="enabled">启用</option><option value="disabled">停用</option></select></label>
+          </div>
+          <label class="friendly-switch">
+            <input v-model="editForm.can_write_positions" type="checkbox" /><i></i>
+            <span><b>允许写入持仓</b><small>聊天时仍要求用户具备 data:write 权限，并完成预览确认</small></span>
           </label>
-          <label>风格<input v-model="editForm.avatar_tone" /></label>
-          <label>目标角色（* 表全部，或逗号分隔 admin,researcher,viewer）<input v-model="editForm.target_roles" placeholder="* 或 admin,researcher" /></label>
-          <label>描述<input v-model="editForm.description" /></label>
-          <label>系统提示词<textarea v-model="editForm.system_prompt" rows="6" /></label>
-          <label>快捷问题（每行一条）<textarea :value="editForm.quick_prompts.join('\n')" @input="onQuickPromptsInput" rows="4" /></label>
-          <label>排序<input type="number" v-model.number="editForm.sort_order" /></label>
-          <label>状态<select v-model="editForm.status"><option value="enabled">enabled</option><option value="disabled">disabled</option></select></label>
-          <label class="checkbox-line"><input type="checkbox" v-model="editForm.can_write_positions" /> 允许写持仓（仍需用户 data:write + 预览确认）</label>
-          <div class="cell-actions">
-            <button type="button" :disabled="saving" @click="saveProfile">{{ saving ? '保存中' : '保存' }}</button>
-            <button type="button" @click="closeEditor">取消</button>
-          </div>
-        </section>
+          <div v-if="error" class="test-result fail"><strong>{{ error }}</strong></div>
+        </div>
+        <footer><button type="button" :disabled="saving" @click="closeDialog">取消</button><span></span><button class="primary-action" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存画像' }}</button></footer>
+      </form>
 
-        <section v-if="capabilities[d.id]" class="dh-cap">
-          <h4>工具清单</h4>
-          <p v-if="capabilities[d.id].can_write_positions" class="hint">写持仓工具已开启（仍受 data:write + 预览确认门控）</p>
-          <div class="cap-group">
-            <h5>公共工具</h5>
-            <ul><li v-for="t in capabilities[d.id].common_tools" :key="t.name"><strong>{{ t.display_name }}</strong> — {{ t.description }}</li></ul>
+      <section v-else-if="dialog === 'capabilities' && capabilityHuman" class="model-dialog model-dialog--wide">
+        <header class="dialog-header">
+          <div><small>TOOL CAPABILITIES</small><h2>{{ capabilityHuman.name }} 的能力</h2></div>
+          <button type="button" title="关闭" @click="closeDialog">×</button>
+        </header>
+        <div class="dialog-body capability-dialog-body">
+          <div class="friendly-tip">
+            <b>{{ activeCapabilities ? `共 ${toolCount(activeCapabilities)} 项工具能力` : '正在读取能力清单' }}</b>
+            <span>{{ capabilityHuman.can_write_positions ? '已开放写持仓工具，实际执行仍受用户权限与预览确认保护。' : '当前为只读分析角色，不开放写持仓工具。' }}</span>
           </div>
-          <div class="cap-group">
-            <h5>角色专属</h5>
-            <p v-if="capabilities[d.id].role_fallback_code" class="hint">该角色沿用 {{ capabilities[d.id].role_fallback_code }} 工具包</p>
-            <ul><li v-for="t in capabilities[d.id].role_tools" :key="t.name"><strong>{{ t.display_name }}</strong> — {{ t.description }}</li></ul>
-          </div>
-          <div v-if="capabilities[d.id].write_tools.length" class="cap-group">
-            <h5>写持仓工具</h5>
-            <ul><li v-for="t in capabilities[d.id].write_tools" :key="t.name"><strong>{{ t.display_name }}</strong> — {{ t.description }}</li></ul>
-          </div>
-          <div v-if="capabilities[d.id].workspace_tools?.length" class="cap-group">
-            <h5>工作区工具</h5>
-            <ul><li v-for="t in capabilities[d.id].workspace_tools" :key="t.name"><strong>{{ t.display_name }}</strong> — {{ t.description }}</li></ul>
-          </div>
-        </section>
-      </div>
+          <div v-if="loadingCaps === capabilityHuman.id" class="friendly-empty">正在加载工具清单…</div>
+          <template v-else-if="activeCapabilities">
+            <section class="capability-group">
+              <header><h3>公共工具</h3><span>{{ activeCapabilities.common_tools.length }}</span></header>
+              <ul><li v-for="tool in activeCapabilities.common_tools" :key="tool.name"><strong>{{ tool.display_name }}</strong><span>{{ tool.description }}</span><code>{{ tool.name }}</code></li></ul>
+            </section>
+            <section class="capability-group">
+              <header><h3>角色专属</h3><span>{{ activeCapabilities.role_tools.length }}</span></header>
+              <p v-if="activeCapabilities.role_fallback_code">沿用 {{ activeCapabilities.role_fallback_code }} 工具包</p>
+              <ul><li v-for="tool in activeCapabilities.role_tools" :key="tool.name"><strong>{{ tool.display_name }}</strong><span>{{ tool.description }}</span><code>{{ tool.name }}</code></li></ul>
+            </section>
+            <section v-if="activeCapabilities.write_tools.length" class="capability-group">
+              <header><h3>写持仓工具</h3><span>{{ activeCapabilities.write_tools.length }}</span></header>
+              <ul><li v-for="tool in activeCapabilities.write_tools" :key="tool.name"><strong>{{ tool.display_name }}</strong><span>{{ tool.description }}</span><code>{{ tool.name }}</code></li></ul>
+            </section>
+            <section v-if="activeCapabilities.workspace_tools?.length" class="capability-group">
+              <header><h3>工作区工具</h3><span>{{ activeCapabilities.workspace_tools.length }}</span></header>
+              <ul><li v-for="tool in activeCapabilities.workspace_tools" :key="tool.name"><strong>{{ tool.display_name }}</strong><span>{{ tool.description }}</span><code>{{ tool.name }}</code></li></ul>
+            </section>
+          </template>
+          <div v-if="error" class="test-result fail"><strong>{{ error }}</strong></div>
+        </div>
+        <footer><span></span><button class="primary-action" type="button" @click="closeDialog">完成</button></footer>
+      </section>
     </div>
   </section>
 </template>
-
-<style scoped>
-.stat-row { display: flex; gap: 16px; padding: 8px 0; font-size: 13px; color: var(--muted); }
-.dh-table { display: grid; gap: 2px; }
-.dh-head, .dh-row { display: grid; grid-template-columns: 1.4fr 1fr 0.6fr 0.7fr 0.5fr 1.1fr; gap: 8px; align-items: start; padding: 8px; }
-.dh-head { font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
-.dh-row { border-bottom: 1px solid var(--border); }
-.mono { font-family: monospace; font-size: 12px; }
-.toggle { padding: 2px 10px; border-radius: 6px; border: 1px solid var(--border); background: transparent; cursor: pointer; font-size: 12px; }
-.toggle.on { border-color: #6db985; background: rgba(109, 185, 133, 0.14); color: #6db985; }
-.toggle:disabled { cursor: not-allowed; opacity: 0.5; }
-.cell-actions { display: flex; gap: 6px; }
-.cell-actions button { font-size: 12px; padding: 2px 8px; }
-.dh-edit, .dh-cap { grid-column: 1 / -1; display: grid; gap: 8px; padding: 12px; background: var(--panel, rgba(12,12,13,0.5)); border-radius: 8px; margin-top: 6px; }
-.dh-edit h3, .dh-cap h4 { margin: 0 0 4px; }
-.dh-edit label { display: grid; gap: 4px; font-size: 12px; }
-.dh-edit input, .dh-edit textarea, .dh-edit select { width: 100%; }
-.checkbox-line { flex-direction: row; align-items: center; gap: 6px; }
-.cap-group h5 { margin: 8px 0 4px; font-size: 12px; color: var(--muted); }
-.cap-group ul { margin: 0; padding-left: 16px; font-size: 12px; }
-.cap-group li { margin: 2px 0; }
-.hint { font-size: 12px; color: #d5b46a; }
-.error-text { color: #e06c6c; font-size: 13px; }
-</style>

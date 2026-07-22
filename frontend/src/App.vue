@@ -21,6 +21,7 @@ import type {
   HealthPayload,
   ModelConfig,
   PositionAccount,
+  PositionAgentPendingAction,
   PositionAgentStep,
   PositionAgentStreamEvent,
   PositionItem,
@@ -82,8 +83,10 @@ const selectedChartPosition = ref<PositionItem | null>(null)
 const selectedChartInstrument = ref<{ symbol: string; name: string } | null>(null)
 const chartReturnPage = ref<'positions' | 'watchlist'>('positions')
 const digitalHumanInitialTab = ref<'chat' | 'feishuBots'>('chat')
+const askStockInitialQuestion = ref('')
 const positionAgentTargetAccount = ref<number | null>(null)
 const positionAgentAccounts = ref<PositionAccount[]>([])
+const positionAgentPendingAction = ref<PositionAgentPendingAction | null>(null)
 
 const pageTitle = computed(() => {
   if (activePage.value === 'positionChart') {
@@ -103,6 +106,31 @@ const pageTitle = computed(() => {
     settings: '设置'
   }
   return labels[activePage.value]
+})
+
+const pageSubtitle = computed(() => {
+  if (activePage.value !== 'workbench' || !dashboard.value) {
+    return '问股、数字人、持仓、自选池和模型配置统一入口'
+  }
+  const source = dashboard.value.server_time || dashboard.value.generated_at
+  const parsed = source ? new Date(source) : null
+  if (!parsed || Number.isNaN(parsed.getTime())) {
+    return `${dashboard.value.market_state.label} · 数据状态以各模块更新时间为准`
+  }
+  const dateText = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'short'
+  }).format(parsed)
+  const timeText = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).format(parsed)
+  return `${dateText} · ${dashboard.value.market_state.label} · 数据更新 ${timeText}`
 })
 
 const activePositionModel = computed(
@@ -285,6 +313,7 @@ async function onPositionImageSelected(event: Event) {
   positionAgentMimeType.value = file.type || 'image/png'
   positionAgentFileName.value = file.name
   positionAgentImageBase64.value = await readFileAsDataUrl(file)
+  positionAgentPendingAction.value = null
   if (!positionAgentInstruction.value.trim()) {
     positionAgentInstruction.value = '请识别这张 A 股券商持仓截图，按持仓明细保存。'
   }
@@ -294,6 +323,13 @@ function clearPositionAgentImage() {
   positionAgentImageBase64.value = ''
   positionAgentFileName.value = ''
   positionAgentMimeType.value = 'image/png'
+}
+
+function buildPositionAgentHistory() {
+  return positionAgentChats.value
+    .filter((item) => item.content.trim() && (item.role === 'user' || item.status === 'done'))
+    .map((item) => ({ role: item.role, content: item.content.trim() }))
+    .slice(-8)
 }
 
 async function agentAddPositions() {
@@ -308,6 +344,7 @@ async function agentAddPositions() {
   positionAgentRows.value = []
   const userContent = instruction || fallbackInstruction
   const userImageName = positionAgentFileName.value
+  const history = buildPositionAgentHistory()
   positionAgentChats.value.push({
     id: Date.now(),
     role: 'user',
@@ -331,7 +368,9 @@ async function agentAddPositions() {
         image_base64: positionAgentImageBase64.value || undefined,
         mime_type: positionAgentMimeType.value,
         model_config_id: selectedPositionModelId.value,
-        account_id: positionAgentTargetAccount.value
+        account_id: positionAgentTargetAccount.value,
+        history,
+        pending_action: positionAgentPendingAction.value
       },
       (event) => handlePositionAgentEvent(event, assistantMessageId)
     )
@@ -398,6 +437,7 @@ function handlePositionAgentEvent(event: PositionAgentStreamEvent, messageId: nu
     positionAgentRows.value = rows.filter((row): row is PositionItem => !('error' in row))
     const failedRows = rows.filter((row): row is { error: string; raw?: Record<string, unknown> } => 'error' in row)
     positionAgentMessage.value = event.summary || event.reply || `已保存 ${positionAgentRows.value.length} 条持仓`
+    positionAgentPendingAction.value = event.pending_action || null
     const finalContent = latest.content.trim()
       ? latest.content
       : event.should_save
@@ -485,6 +525,7 @@ function backFromChart() {
 
 function navigate(page: PageKey) {
   if (page === 'digitalHumans') digitalHumanInitialTab.value = 'chat'
+  if (page === 'askStock') askStockInitialQuestion.value = ''
   activePage.value = page
 }
 
@@ -493,9 +534,9 @@ function openFeishuBindings() {
   activePage.value = 'digitalHumans'
 }
 
-async function seedDemo() {
-  await api.seedDemo()
-  await refreshAll()
+function openAskStock(symbol: string) {
+  askStockInitialQuestion.value = `请分析 ${symbol} 的最新行情、趋势、风险和关键价位。`
+  activePage.value = 'askStock'
 }
 
 onMounted(initialize)
@@ -513,6 +554,7 @@ onMounted(initialize)
     v-else
     :active-page="activePage === 'positionChart' ? chartReturnPage : activePage"
     :page-title="pageTitle"
+    :page-subtitle="pageSubtitle"
     :health="health"
     :user="currentUser"
     @navigate="navigate"
@@ -530,10 +572,14 @@ onMounted(initialize)
       <WorkbenchView
         v-if="activePage === 'workbench' && dashboard"
         :dashboard="dashboard"
-        @seed-demo="seedDemo"
+        @navigate="navigate"
+        @open-position-agent="openPositionAgent()"
+        @open-chart="openChartFromPosition"
+        @ask-stock="openAskStock"
+        @refresh="refreshAll"
       />
 
-      <AskStockView v-else-if="activePage === 'askStock'" />
+      <AskStockView v-else-if="activePage === 'askStock'" :initial-question="askStockInitialQuestion" />
       <DigitalHumanCenter
         v-else-if="activePage === 'digitalHumans'"
         :initial-tab="digitalHumanInitialTab"

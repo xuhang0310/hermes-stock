@@ -19,6 +19,7 @@ export type PageKey =
 const props = defineProps<{
   activePage: PageKey
   pageTitle: string
+  pageSubtitle?: string
   health: HealthPayload | null
   user: UserPayload
 }>()
@@ -145,7 +146,7 @@ function handleChildClick(key: PageKey) {
       <header class="topbar">
         <div>
           <h1>{{ pageTitle }}</h1>
-          <p>问股、数字人、持仓、自选池和模型配置统一入口</p>
+          <p>{{ pageSubtitle || '问股、数字人、持仓、自选池和模型配置统一入口' }}</p>
         </div>
         <div class="topbar-status">
           <span>{{ user.display_name }}</span>

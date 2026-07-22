@@ -87,11 +87,11 @@ export type PositionAccount = {
 
 export type PositionSummary = {
   account_count: number
-  total_asset: number
-  available_cash: number
-  holding_market_value: number
-  total_pnl: number
-  day_pnl: number
+  total_asset: number | null
+  available_cash: number | null
+  holding_market_value: number | null
+  total_pnl: number | null
+  day_pnl: number | null
   holding_count: number
 }
 
@@ -160,6 +160,7 @@ export type PositionAgentAddResult = {
   }>
   rows: Array<PositionItem | { error: string; raw?: Record<string, unknown> }>
   summary: string | null
+  pending_action?: PositionAgentPendingAction | null
 }
 
 export type PositionAgentStep = {
@@ -168,6 +169,11 @@ export type PositionAgentStep = {
   display_name?: string
   content: string
   success?: boolean
+}
+
+export type PositionAgentPendingAction = {
+  tool: 'save_position_holdings'
+  arguments: Record<string, unknown>
 }
 
 export type PositionAgentStreamEvent = {
@@ -184,6 +190,7 @@ export type PositionAgentStreamEvent = {
   display_name?: string
   success?: boolean
   step?: PositionAgentStep
+  pending_action?: PositionAgentPendingAction | null
 }
 
 export type AgentItem = {
@@ -218,6 +225,20 @@ export type WatchlistItem = {
   updated_at: string
 }
 
+export type WatchlistAgentPendingAction = {
+  tool: 'add_watchlist_items' | 'remove_watchlist_items'
+  arguments: {
+    rows: Array<{
+      symbol?: string
+      name?: string
+      group_name?: string
+      reason?: string
+    }>
+  }
+  original_instruction?: string
+  candidates?: Array<{ symbol: string; name: string; market?: string }>
+}
+
 export type WatchlistAgentStreamEvent = {
   type: string
   model?: Partial<ModelConfig> | null
@@ -231,6 +252,7 @@ export type WatchlistAgentStreamEvent = {
   display_name?: string
   success?: boolean
   step?: PositionAgentStep
+  pending_action?: WatchlistAgentPendingAction | null
 }
 
 export type ReportItem = {
@@ -261,9 +283,72 @@ export type RiskCheck = {
   created_at: string
 }
 
+export type DashboardMarketItem = {
+  symbol: string
+  name: string
+  price: number | null
+  change_pct: number | null
+  trade_date: string | null
+  source: string
+  updated_at: string | null
+  sparkline: number[]
+}
+
+export type DashboardRiskEvent = {
+  kind: 'risk' | 'event'
+  id: string
+  level: 'high' | 'medium' | 'low'
+  symbol: string | null
+  symbol_name: string | null
+  title: string
+  summary: string | null
+  created_at: string | null
+}
+
+export type DashboardResearch = ReportItem
+
+export type DashboardPosition = PositionItem & {
+  stop_distance_pct: number | null
+  day_pnl_pct: number | null
+  latest_research: DashboardResearch | null
+  latest_risk: RiskCheck | null
+  risk_state: {
+    level: 'high' | 'medium' | 'low'
+    label: string
+  }
+}
+
+export type DashboardRun = {
+  run_id: string
+  job_key: string
+  name: string
+  digital_human_code: string | null
+  trigger_type: string
+  status: string
+  started_at: string | null
+  finished_at: string | null
+  duration_ms: number | null
+  report_id: string | null
+  output_preview: string | null
+  error: string | null
+}
+
+export type DashboardApproval = AgentToolApproval & {
+  session_id: number
+  session_title: string | null
+  created_at: string | null
+}
+
 export type DashboardPayload = {
   title: string
   market_status: string
+  market_state: {
+    code: string
+    label: string
+    tone: 'ok' | 'warning' | 'muted' | string
+  }
+  server_time: string
+  generated_at: string
   pipeline: string[]
   disclaimer: string
   counts: {
@@ -271,10 +356,48 @@ export type DashboardPayload = {
     watchlist: number
     l0_events: number
     reports: number
+    high_risk_24h: number
+    pending_approvals: number
+    running_jobs: number
   }
+  portfolio: PositionSummary & { day_pnl_pct: number | null }
+  market: {
+    source: string
+    items: DashboardMarketItem[]
+  }
+  risk_summary: {
+    high: number
+    medium: number
+    low: number
+    since: string
+  }
+  risk_events: DashboardRiskEvent[]
   recent_events: EventItem[]
-  positions: PositionItem[]
+  positions: DashboardPosition[]
+  reports: DashboardResearch[]
   agents: AgentItem[]
+  runtime: {
+    running: DashboardRun[]
+    recent: DashboardRun[]
+  }
+  approvals: DashboardApproval[]
+  next_job: {
+    job_key: string
+    name: string
+    run_at: string
+    trading_day_only: boolean
+    digital_human_code: string | null
+  } | null
+  data_freshness: {
+    positions: string | null
+    market: string | null
+    risk: string | null
+    reports: string | null
+    runs: string | null
+  }
+  today: {
+    reports: number
+  }
   logs: SystemLog[]
 }
 
@@ -595,14 +718,44 @@ export type AgentSession = {
   status: string
   message_count: number
   updated_at: string
+  source_type: 'web' | 'feishu' | string
+  source_label: string
+  source_identifier: string | null
+  read_only: boolean
 }
 
 export type AgentMessage = {
   id: number
   role: 'user' | 'assistant'
   content: string
+  attachments: AgentAttachment[]
   error: string | null
+  duration_ms: number | null
   created_at: string
+}
+
+export type ApprovalPolicy = 'ask' | 'smart' | 'full'
+
+export type AgentAttachment = {
+  path: string
+  name: string
+  mime_type: string
+  bytes: number
+  kind: 'image' | 'document'
+  preview_url?: string
+}
+
+export type AgentToolApproval = {
+  approval_id: string
+  tool: string
+  display_name: string
+  risk_level: 'low' | 'medium' | 'high'
+  arguments_preview: string
+  expires_at: string
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled'
+  session_id?: number
+  session_title?: string | null
+  created_at?: string | null
 }
 
 export type AgentSessionDetail = {
@@ -613,6 +766,10 @@ export type AgentSessionDetail = {
   digital_human_name: string | null
   model_config_id: number | null
   model_display_name: string | null
+  source_type: 'web' | 'feishu' | string
+  source_label: string
+  source_identifier: string | null
+  read_only: boolean
   messages: AgentMessage[]
 }
 
@@ -638,6 +795,7 @@ export type AgentStreamEvent = {
   status?: string
   success?: boolean
   duration?: number
+  duration_ms?: number
   // tool_progress（工具参数生成进度）：index=第几个工具调用，chars=已生成参数字数，delta=content 明文预览增量
   index?: number
   chars?: number
@@ -646,4 +804,9 @@ export type AgentStreamEvent = {
   name?: string
   bytes?: number
   mtime?: number
+  approval_id?: string
+  risk_level?: 'low' | 'medium' | 'high'
+  arguments_preview?: string
+  expires_at?: string
+  decision?: 'approved' | 'denied' | 'expired' | 'cancelled'
 }

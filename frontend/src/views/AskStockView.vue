@@ -1,11 +1,25 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
-import type { AgentSession, AgentStreamEvent, ModelConfig, PromptRecommendation, StockStrategy } from '../types'
+import AgentApprovalCard from '../components/AgentApprovalCard.vue'
+import AgentProcessDisclosure from '../components/AgentProcessDisclosure.vue'
+import ApprovalPolicyControl from '../components/ApprovalPolicyControl.vue'
+import ChatAttachmentPicker from '../components/ChatAttachmentPicker.vue'
+import type {
+  AgentAttachment,
+  AgentSession,
+  AgentStreamEvent,
+  AgentToolApproval,
+  ApprovalPolicy,
+  ModelConfig,
+  PromptRecommendation,
+  StockStrategy
+} from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
 import { extractGeneratedFiles, type GeneratedFile } from '../utils/workspace'
 import { beijingFromDb } from '../utils/datetime'
+import { elapsedStreamMilliseconds, formatStreamDuration } from '../utils/streamDuration'
 
 type ReactStep = {
   type:
@@ -40,8 +54,25 @@ type ChatMessage = {
   liveContent: string
   liveTool?: LiveToolProgress | null
   files: GeneratedFile[]
+  attachments: AgentAttachment[]
+  approval?: AgentToolApproval | null
+  approvalBusy?: boolean
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
+  startedAt?: number
+  durationMs?: number
+  processExpanded?: boolean
+  processAutoCollapsed?: boolean
 }
+
+type ChatAttachmentPickerHandle = {
+  handlePaste: (event: ClipboardEvent) => Promise<boolean>
+}
+
+const props = withDefaults(defineProps<{
+  initialQuestion?: string
+}>(), {
+  initialQuestion: ''
+})
 
 const quickQuestions = [
   '帮我看看贵州茅台现在能不能买',
@@ -83,7 +114,9 @@ const selectedModelId = ref<number | null>(null)
 const selectedSessionId = ref<number | null>(null)
 const messages = ref<ChatMessage[]>([])
 const question = ref('')
-const allowCodeExecution = ref(false)
+const approvalPolicy = ref<ApprovalPolicy>('ask')
+const pendingAttachments = ref<AgentAttachment[]>([])
+const attachmentPicker = ref<ChatAttachmentPickerHandle | null>(null)
 const workspaceExecAvailable = ref(false)
 const sending = ref(false)
 const abortController = ref<AbortController | null>(null)
@@ -92,6 +125,10 @@ const error = ref('')
 const chatScroll = ref<HTMLElement | null>(null)
 const maxSelectedStrategies = 3
 
+function pasteIntoComposer(event: ClipboardEvent) {
+  void attachmentPicker.value?.handlePaste(event)
+}
+
 const activeModel = computed(
   () =>
     models.value.find((item) => item.id === selectedModelId.value) ||
@@ -99,6 +136,14 @@ const activeModel = computed(
     models.value[0] ||
     null
 )
+
+const pendingApproval = computed<{ message: ChatMessage; approval: AgentToolApproval } | null>(() => {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const message = messages.value[index]
+    if (message.approval?.status === 'pending') return { message, approval: message.approval }
+  }
+  return null
+})
 
 const selectedStrategyText = computed(() =>
   selectedStrategyIds.value.length ? selectedStrategyIds.value.map(strategyLabel).join(' / ') : '通用分析'
@@ -161,7 +206,12 @@ async function openSession(id: number) {
       liveReasoning: '',
       liveContent: '',
       files: [],
-      streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined
+      attachments: item.attachments || [],
+      approval: null,
+      streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined,
+      durationMs: item.duration_ms ?? undefined,
+      processExpanded: false,
+      processAutoCollapsed: true
     }))
     scrollChat(false)
   } catch (err) {
@@ -219,6 +269,8 @@ function newSession() {
   selectedSessionId.value = null
   messages.value = []
   question.value = ''
+  pendingAttachments.value = []
+  approvalPolicy.value = 'ask'
   error.value = ''
 }
 
@@ -362,6 +414,17 @@ function hasDetailSteps(message: ChatMessage) {
   return detailSteps(message).length > 0
 }
 
+function hasProcessDetails(message: ChatMessage) {
+  return hasProgressSteps(message) || hasDetailSteps(message) || Boolean(message.liveReasoning) || Boolean(message.liveTool)
+}
+
+function processStepCount(message: ChatMessage) {
+  return progressSteps(message).length
+    + detailSteps(message).length
+    + Number(Boolean(message.liveReasoning))
+    + Number(Boolean(message.liveTool))
+}
+
 function streamStatusText(message: ChatMessage) {
   if (message.streamStatus === 'connecting') return '正在连接问股 Agent'
   if (message.streamStatus === 'streaming') return '正在接收模型分片'
@@ -369,6 +432,24 @@ function streamStatusText(message: ChatMessage) {
   if (message.streamStatus === 'error') return '问股响应异常'
   if (message.streamStatus === 'done') return '问股响应完成'
   return '等待响应'
+}
+
+function finishStreamDuration(message: ChatMessage, durationMs?: number) {
+  if (typeof durationMs === 'number' && Number.isFinite(durationMs)) {
+    message.durationMs = Math.max(0, Math.round(durationMs))
+    return
+  }
+  if (typeof message.durationMs === 'number') return
+  message.durationMs = elapsedStreamMilliseconds(message.startedAt)
+}
+
+function completeStream(message: ChatMessage, durationMs?: number) {
+  finishStreamDuration(message, durationMs)
+  message.streamStatus = 'done'
+  if (!message.processAutoCollapsed) {
+    message.processExpanded = false
+    message.processAutoCollapsed = true
+  }
 }
 
 function releaseComposer(controller: AbortController) {
@@ -427,19 +508,19 @@ function flushThought(reply: ChatMessage) {
 }
 
 async function send() {
-  const text = question.value.trim()
-  if (!text || sending.value) return
+  const enteredText = question.value.trim()
+  const sentAttachments = pendingAttachments.value.map(({ preview_url: _preview, ...item }) => item)
+  if ((!enteredText && !sentAttachments.length) || sending.value) return
+  const text = enteredText || '请分析我上传的附件。'
 
   const history = messages.value
     .filter((item) => item.content)
     .map((item) => ({ role: item.role, content: item.content }))
     .slice(-8)
-  const executionGranted = workspaceExecAvailable.value && allowCodeExecution.value
-  allowCodeExecution.value = false
-
   sending.value = true
   error.value = ''
   question.value = ''
+  pendingAttachments.value = []
   messages.value.push({
     id: Date.now(),
     role: 'user',
@@ -447,7 +528,8 @@ async function send() {
     steps: [],
     liveReasoning: '',
     liveContent: '',
-    files: []
+    files: [],
+    attachments: sentAttachments
   })
   messages.value.push({
     id: Date.now() + 1,
@@ -457,7 +539,12 @@ async function send() {
     liveReasoning: '',
     liveContent: '',
     files: [],
-    streamStatus: 'connecting'
+    attachments: [],
+    approval: null,
+    streamStatus: 'connecting',
+    startedAt: Date.now(),
+    processExpanded: true,
+    processAutoCollapsed: false
   })
   const reply = messages.value[messages.value.length - 1]
   scrollChat()
@@ -472,7 +559,8 @@ async function send() {
         session_id: selectedSessionId.value,
         model_config_id: selectedModelId.value,
         skills: selectedStrategyIds.value,
-        allow_code_execution: executionGranted
+        attachments: sentAttachments.map((item) => ({ path: item.path })),
+        approval_policy: approvalPolicy.value
       },
       (event: AgentStreamEvent) => {
         if (event.type === 'session') {
@@ -497,7 +585,7 @@ async function send() {
           if (event.role === 'answer') {
             reply.content = reply.liveContent.trim()
             reply.liveContent = ''
-            reply.streamStatus = 'done'
+            completeStream(reply)
           } else {
             flushThought(reply)
             reply.streamStatus = 'tooling'
@@ -506,6 +594,24 @@ async function send() {
           // 模型正在生成工具调用参数（写文件内容等长参数期）：瞬态进度，action 到达即清
           reply.streamStatus = 'tooling'
           reply.liveTool = applyToolProgress(reply.liveTool, event)
+        } else if (event.type === 'approval_required' && event.approval_id) {
+          reply.streamStatus = 'tooling'
+          reply.liveTool = null
+          reply.approval = {
+            approval_id: event.approval_id,
+            tool: event.tool || '',
+            display_name: event.display_name || event.tool || '工具操作',
+            risk_level: event.risk_level || 'high',
+            arguments_preview: event.arguments_preview || '',
+            expires_at: event.expires_at || '',
+            status: 'pending'
+          }
+        } else if (event.type === 'approval_resolved') {
+          const approval = reply.approval
+          if (approval && event.approval_id && approval.approval_id === event.approval_id) {
+            approval.status = event.decision || approval.status
+            reply.approvalBusy = false
+          }
         } else if (isProgressEventType(event.type)) {
           pushProgressEvent(reply, event)
         } else if (event.type === 'action') {
@@ -529,11 +635,17 @@ async function send() {
           reply.liveTool = null
           reply.error = event.content || '问股响应失败'
           reply.streamStatus = 'error'
+          finishStreamDuration(reply)
           pushStep(reply, { type: 'error', content: reply.error })
           error.value = reply.error
         } else if (event.type === 'done') {
           reply.liveTool = null
-          reply.streamStatus = reply.error ? 'error' : 'done'
+          if (reply.error) {
+            reply.streamStatus = 'error'
+            finishStreamDuration(reply, event.duration_ms)
+          } else {
+            completeStream(reply, event.duration_ms)
+          }
           releaseComposer(controller)
         }
         scrollChat()
@@ -552,7 +664,7 @@ async function send() {
         reply.error = '回复未完成，请重试。'
         reply.streamStatus = 'error'
       } else {
-        reply.streamStatus = 'done'
+        completeStream(reply)
       }
     }
     nextTick(() => { refreshSessions().catch(() => {}) })
@@ -566,17 +678,17 @@ async function send() {
         reply.content = reply.liveContent.trim()
         reply.liveContent = ''
       }
-      reply.streamStatus = 'done'
+      completeStream(reply)
     } else {
       reply.error = err instanceof Error ? err.message : '发送失败'
       reply.streamStatus = 'error'
+      finishStreamDuration(reply)
       error.value = reply.error
     }
   } finally {
     releaseComposer(controller)
-    if (!reply.error && reply.streamStatus !== 'done') {
-      reply.streamStatus = 'done'
-    }
+    if (!reply.error) completeStream(reply)
+    else finishStreamDuration(reply)
     scrollChat()
   }
 }
@@ -585,7 +697,37 @@ function stopSending() {
   abortController.value?.abort()
 }
 
-onMounted(load)
+async function resolveApproval(message: ChatMessage, decision: 'approved' | 'denied') {
+  if (!message.approval || message.approval.status !== 'pending' || message.approvalBusy) return
+  message.approvalBusy = true
+  error.value = ''
+  try {
+    const result = await api.resolveAgentApproval(message.approval.approval_id, decision)
+    if (['approved', 'denied', 'expired', 'cancelled'].includes(result.status)) {
+      message.approval.status = result.status as AgentToolApproval['status']
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '审批操作失败'
+  } finally {
+    message.approvalBusy = false
+  }
+}
+
+function resolvePendingApproval(decision: 'approved' | 'denied') {
+  const pending = pendingApproval.value
+  if (pending) void resolveApproval(pending.message, decision)
+}
+
+function submitFromKeyboard(event: KeyboardEvent) {
+  if (event.isComposing || event.shiftKey) return
+  event.preventDefault()
+  void send()
+}
+
+onMounted(async () => {
+  if (props.initialQuestion.trim()) question.value = props.initialQuestion.trim()
+  await load()
+})
 </script>
 
 <template>
@@ -685,6 +827,19 @@ onMounted(load)
       </section>
 
       <section ref="chatScroll" class="message-list stock-message-list">
+        <div v-if="pendingApproval" class="pending-approval-dock">
+          <div class="pending-approval-dock-label">
+            <strong>操作等待审批</strong>
+            <span>Agent 已暂停，确认后将继续执行</span>
+          </div>
+          <AgentApprovalCard
+            :approval="pendingApproval.approval"
+            :busy="pendingApproval.message.approvalBusy"
+            prominent
+            @decide="resolvePendingApproval"
+          />
+        </div>
+
         <div v-if="!messages.length" class="chat-empty">
           <strong>输入股票代码或名称开始问股</strong>
           <span>例：600519、贵州茅台、300750 近期趋势、比亚迪消息面。</span>
@@ -694,48 +849,71 @@ onMounted(load)
           <template v-if="item.role === 'user'">
             <span>你</span>
             <p>{{ item.content }}</p>
+            <div v-if="item.attachments.length" class="message-attachment-list">
+              <button v-for="file in item.attachments" :key="file.path" type="button" @click="downloadFile(file)">
+                <b>{{ file.kind === 'image' ? '图' : '文' }}</b><span>{{ file.name }}</span>
+              </button>
+            </div>
           </template>
           <template v-else>
             <div v-if="item.streamStatus" class="stream-status" :class="item.streamStatus">
               <span class="stream-status-pulse"></span>
               <strong>{{ streamStatusText(item) }}</strong>
+              <span v-if="item.streamStatus === 'done' && typeof item.durationMs === 'number'" class="stream-duration">
+                用时 {{ formatStreamDuration(item.durationMs) }}
+              </span>
             </div>
 
-            <div v-if="hasProgressSteps(item)" class="thinking-progress">
-              <div class="thinking-progress-summary">
-                <span class="thinking-caret">⌄</span>
-                <strong>思考过程</strong>
-                <span>· {{ progressSummary(item) }}</span>
-              </div>
-              <div class="thinking-progress-list">
-                <div
-                  v-for="(step, index) in progressSteps(item)"
-                  :key="index"
-                  class="chat-progress-item"
-                  :class="progressStepClass(step)"
-                >
-                  <span class="chat-progress-dot"></span>
-                  <span>{{ progressStepText(step) }}</span>
+            <AgentApprovalCard
+              v-if="item.approval && item.approval.status !== 'pending'"
+              :approval="item.approval"
+              :busy="item.approvalBusy"
+              @decide="(decision) => resolveApproval(item, decision)"
+            />
+
+            <AgentProcessDisclosure
+              v-if="hasProcessDetails(item)"
+              :completed="item.streamStatus === 'done'"
+              :expanded="Boolean(item.processExpanded)"
+              :step-count="processStepCount(item)"
+              @toggle="item.processExpanded = !item.processExpanded"
+            >
+              <div v-if="hasProgressSteps(item)" class="thinking-progress">
+                <div class="thinking-progress-summary">
+                  <span class="thinking-caret">⌄</span>
+                  <strong>思考过程</strong>
+                  <span>· {{ progressSummary(item) }}</span>
+                </div>
+                <div class="thinking-progress-list">
+                  <div
+                    v-for="(step, index) in progressSteps(item)"
+                    :key="index"
+                    class="chat-progress-item"
+                    :class="progressStepClass(step)"
+                  >
+                    <span class="chat-progress-dot"></span>
+                    <span>{{ progressStepText(step) }}</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div v-if="hasDetailSteps(item)" class="react-steps">
-              <div v-for="(step, index) in detailSteps(item)" :key="index" class="react-step" :class="step.type">
-                <strong>{{ stepLabel(step) }}</strong>
-                <span>{{ step.content }}</span>
+              <div v-if="hasDetailSteps(item)" class="react-steps">
+                <div v-for="(step, index) in detailSteps(item)" :key="index" class="react-step" :class="step.type">
+                  <strong>{{ stepLabel(step) }}</strong>
+                  <span>{{ step.content }}</span>
+                </div>
               </div>
-            </div>
 
-            <div v-if="item.liveReasoning" class="react-step reasoning live">
-              <strong>Reasoning</strong>
-              <span>{{ item.liveReasoning }}</span>
-            </div>
+              <div v-if="item.liveReasoning" class="react-step reasoning live">
+                <strong>Reasoning</strong>
+                <span>{{ item.liveReasoning }}</span>
+              </div>
 
-            <div v-if="item.liveTool" class="react-step action tool-progress">
-              <strong><span class="tool-progress-pulse"></span>正在生成「{{ item.liveTool.displayName }}」· 已 {{ item.liveTool.chars.toLocaleString() }} 字</strong>
-              <pre v-if="item.liveTool.preview" class="tool-progress-preview">{{ item.liveTool.preview }}</pre>
-            </div>
+              <div v-if="item.liveTool" class="react-step action tool-progress">
+                <strong><span class="tool-progress-pulse"></span>正在生成「{{ item.liveTool.displayName }}」· 已 {{ item.liveTool.chars.toLocaleString() }} 字</strong>
+                <pre v-if="item.liveTool.preview" class="tool-progress-preview">{{ item.liveTool.preview }}</pre>
+              </div>
+            </AgentProcessDisclosure>
 
             <div v-if="item.liveContent" class="md-body" v-html="renderMarkdown(item.liveContent)"></div>
             <div v-else-if="item.content" class="md-body" v-html="renderMarkdown(item.content)"></div>
@@ -757,38 +935,33 @@ onMounted(load)
         </article>
       </section>
 
-      <form class="chat-input stock-chat-input sandbox-chat-input" @submit.prevent="send">
-        <input
+      <form class="chat-composer stock-chat-composer" @paste="pasteIntoComposer" @submit.prevent="send">
+        <textarea
           v-model="question"
-          type="text"
-          placeholder="输入股票代码/名称和问题，例如：600519 现在怎么看？"
+          rows="2"
+          placeholder="输入股票代码、问题，或上传研报、表格和图片"
           :disabled="sending"
-        />
-        <select v-model.number="selectedModelId" :disabled="sending || !models.length" :title="modelOptionLabel(activeModel)">
-          <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
-            <option v-for="item in group.rows" :key="item.id" :value="item.id">
-              {{ modelOptionLabel(item) }}
-            </option>
-          </optgroup>
-        </select>
-        <label
-          class="exec-toggle"
-          :class="{ active: allowCodeExecution }"
-          :title="workspaceExecAvailable ? '仅授权当前这一条消息在隔离容器中执行 Python' : 'Python 沙箱当前不可用'"
-        >
-          <input v-model="allowCodeExecution" type="checkbox" :disabled="sending || !workspaceExecAvailable" />
-          <span class="exec-toggle-track"><i></i></span>
-          <strong>本次执行 Python</strong>
-        </label>
-        <button type="button" :disabled="sending" @click="newSession">新会话</button>
-        <button
-          :type="sending ? 'button' : 'submit'"
-          :class="{ 'btn-stop': sending }"
-          :disabled="!sending && !question.trim()"
-          @click="sending ? stopSending() : undefined"
-        >
-          {{ sending ? '⏹ 停止' : '发送' }}
-        </button>
+          @keydown.enter="submitFromKeyboard"
+        ></textarea>
+        <footer class="chat-composer-toolbar">
+          <ChatAttachmentPicker ref="attachmentPicker" v-model="pendingAttachments" :disabled="sending" />
+          <ApprovalPolicyControl v-model="approvalPolicy" :disabled="sending" :exec-available="workspaceExecAvailable" />
+          <span class="chat-composer-spacer"></span>
+          <select v-model.number="selectedModelId" :disabled="sending || !models.length" :title="modelOptionLabel(activeModel)">
+            <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
+              <option v-for="item in group.rows" :key="item.id" :value="item.id">{{ modelOptionLabel(item) }}</option>
+            </optgroup>
+          </select>
+          <button class="chat-composer-command" type="button" :disabled="sending" @click="newSession">新会话</button>
+          <button
+            class="chat-composer-send"
+            :class="{ stop: sending }"
+            :type="sending ? 'button' : 'submit'"
+            :title="sending ? '停止生成' : '发送'"
+            :disabled="!sending && !question.trim() && !pendingAttachments.length"
+            @click="sending ? stopSending() : undefined"
+          >{{ sending ? '■' : '↑' }}</button>
+        </footer>
       </form>
       <p v-if="error" class="chat-page-error">{{ error }}</p>
     </main>

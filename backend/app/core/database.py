@@ -157,6 +157,29 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         # records are scoped to an application user; legacy rows remain unowned
         # and are intentionally not exposed through user-facing endpoints.
         _add_column("workspace_documents", "user_id", "user_id INT NULL")
+        _add_column("ai_chat_messages", "attachments_json", "attachments_json TEXT NULL")
+        _add_column("ai_chat_messages", "duration_ms", "duration_ms INT NULL")
+        _add_column("ai_chat_sessions", "source_type", "source_type VARCHAR(24) NOT NULL DEFAULT 'web'")
+        _add_column(
+            "ai_chat_sessions",
+            "external_conversation_id",
+            "external_conversation_id VARCHAR(160) NULL",
+        )
+        _add_column("ai_chat_sessions", "source_label", "source_label VARCHAR(80) NULL")
+        has_external_session_index = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = 'ai_chat_sessions' "
+                "AND index_name = 'uq_ai_chat_session_external'"
+            )
+        ).scalar()
+        if not has_external_session_index:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_ai_chat_session_external "
+                    "ON ai_chat_sessions (digital_human_id, source_type, external_conversation_id)"
+                )
+            )
         has_workspace_user_index = connection.execute(
             text(
                 "SELECT COUNT(*) FROM information_schema.statistics "

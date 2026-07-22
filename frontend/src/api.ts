@@ -4,6 +4,7 @@ import type {
   EventItem,
   HealthPayload,
   PositionAgentAddResult,
+  PositionAgentPendingAction,
   PositionAgentStreamEvent,
   PositionChartPayload,
   PositionItem,
@@ -35,9 +36,13 @@ import type {
   ScheduleStatus,
   AgentSession,
   AgentSessionDetail,
+  AgentAttachment,
+  AgentToolApproval,
+  ApprovalPolicy,
   AgentStreamEvent,
   ChartResolution,
   StockStrategy,
+  WatchlistAgentPendingAction,
   WatchlistAgentStreamEvent,
   WatchlistItem,
   WorkspaceDoc,
@@ -207,6 +212,9 @@ export const api = {
     image_base64?: string
     mime_type?: string
     model_config_id?: number | null
+    account_id?: number | null
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>
+    pending_action?: PositionAgentPendingAction | null
   }) =>
     request<PositionAgentAddResult>('/api/positions/agent-add', {
       method: 'POST',
@@ -219,6 +227,8 @@ export const api = {
       mime_type?: string
       model_config_id?: number | null
       account_id?: number | null
+      history?: Array<{ role: 'user' | 'assistant'; content: string }>
+      pending_action?: PositionAgentPendingAction | null
     },
     onEvent: (event: PositionAgentStreamEvent) => void
   ) => streamJsonRequest<PositionAgentStreamEvent>('/api/positions/agent-add/stream', payload, onEvent),
@@ -237,6 +247,7 @@ export const api = {
       instruction: string
       model_config_id?: number | null
       history?: Array<{ role: 'user' | 'assistant'; content: string }>
+      pending_action?: WatchlistAgentPendingAction | null
     },
     onEvent: (event: WatchlistAgentStreamEvent) => void
   ) => streamJsonRequest<WatchlistAgentStreamEvent>('/api/watchlist/agent/stream', payload, onEvent),
@@ -391,6 +402,18 @@ export const api = {
     })
   },
   knowledgeUploadStatus: (id: number) => request<{ id: number; filename: string; status: string; chunk_count: number; error: string | null }>(`/api/knowledge/uploads/${id}`),
+  uploadAgentAttachment: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<AgentAttachment>('/api/agent/attachments', { method: 'POST', body: form })
+  },
+  resolveAgentApproval: (approvalId: string, decision: 'approved' | 'denied') =>
+    request<{ approval_id: string; status: string }>(`/api/agent/approvals/${approvalId}`, {
+      method: 'POST',
+      body: JSON.stringify({ decision })
+    }),
+  agentApprovals: (status = 'pending') =>
+    request<AgentToolApproval[]>(`/api/agent/approvals?status=${encodeURIComponent(status)}`),
   agentSessions: (chatMode?: 'research' | 'stock' | 'knowledge', digitalHumanId?: number | null) => {
     const params = new URLSearchParams()
     if (chatMode) params.set('chat_mode', chatMode)
@@ -428,6 +451,8 @@ export const api = {
       model_config_id?: number | null
       chat_mode?: 'research' | 'stock' | 'knowledge'
       skills?: string[]
+      attachments?: Array<{ path: string }>
+      approval_policy?: ApprovalPolicy
       allow_code_execution?: boolean
     },
     onEvent: (event: AgentStreamEvent) => void,
@@ -440,6 +465,8 @@ export const api = {
       session_id?: number | null
       model_config_id?: number | null
       skills?: string[]
+      attachments?: Array<{ path: string }>
+      approval_policy?: ApprovalPolicy
       allow_code_execution?: boolean
     },
     onEvent: (event: AgentStreamEvent) => void,

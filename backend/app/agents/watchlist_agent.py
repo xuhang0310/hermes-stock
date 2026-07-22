@@ -13,6 +13,26 @@ from backend.app.data.repository import StockRepository
 
 WATCHLIST_AGENT_PROFILE_CODE = "watchlist-entry-agent"
 
+_WATCHLIST_WRITE_TOOLS = {"add_watchlist_items", "remove_watchlist_items"}
+_PENDING_ROW_FIELDS = {"symbol", "name", "group_name", "reason"}
+_PENDING_CANDIDATE_FIELDS = {"symbol", "name", "market"}
+_REMOVE_MARKERS = ("删除", "移除", "取消自选", "取消关注", "踢出", "删掉", "去掉")
+_ADD_MARKERS = (
+    "加入自选",
+    "添加自选",
+    "新增自选",
+    "加到自选",
+    "加进自选",
+    "放入自选",
+    "放进自选",
+    "放到自选",
+    "设为自选",
+    "加自选",
+    "关注一下",
+    "加入关注",
+    "收藏",
+)
+
 WATCHLIST_AGENT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -96,6 +116,154 @@ TOOL_DISPLAY_NAMES = {
 }
 
 
+def _bounded_text(value: Any, *, max_length: int = 500) -> str:
+    return str(value or "").strip()[:max_length]
+
+
+def _normalize_pending_action(value: Any) -> dict[str, Any] | None:
+    """Keep only the bounded watchlist operation needed after a clarification."""
+    if not isinstance(value, dict) or value.get("tool") not in _WATCHLIST_WRITE_TOOLS:
+        return None
+    arguments = value.get("arguments")
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("rows"), list):
+        return None
+
+    rows: list[dict[str, str]] = []
+    for source_row in arguments["rows"][:30]:
+        if not isinstance(source_row, dict):
+            continue
+        row = {
+            key: _bounded_text(source_row[key], max_length=500)
+            for key in _PENDING_ROW_FIELDS
+            if key in source_row and _bounded_text(source_row[key], max_length=500)
+        }
+        if row.get("symbol") or row.get("name"):
+            rows.append(row)
+    if not rows:
+        return None
+
+    normalized: dict[str, Any] = {
+        "tool": value["tool"],
+        "arguments": {"rows": rows},
+    }
+    original_instruction = _bounded_text(value.get("original_instruction"), max_length=2000)
+    if original_instruction:
+        normalized["original_instruction"] = original_instruction
+
+    candidates: list[dict[str, str]] = []
+    if isinstance(value.get("candidates"), list):
+        for source_candidate in value["candidates"][:10]:
+            if not isinstance(source_candidate, dict):
+                continue
+            candidate = {
+                key: _bounded_text(source_candidate[key], max_length=120)
+                for key in _PENDING_CANDIDATE_FIELDS
+                if key in source_candidate and _bounded_text(source_candidate[key], max_length=120)
+            }
+            if candidate.get("symbol") and candidate.get("name"):
+                candidates.append(candidate)
+    if candidates:
+        normalized["candidates"] = candidates
+    return normalized
+
+
+def _detect_watchlist_write_tool(instruction: str) -> str | None:
+    compact = "".join(instruction.split())
+    remove_index = max((compact.rfind(marker) for marker in _REMOVE_MARKERS), default=-1)
+    add_index = max((compact.rfind(marker) for marker in _ADD_MARKERS), default=-1)
+    if remove_index >= 0 or add_index >= 0:
+        return "remove_watchlist_items" if remove_index > add_index else "add_watchlist_items"
+    return None
+
+
+def _is_cancel_reply(instruction: str) -> bool:
+    compact = instruction.strip().rstrip("。.!！")
+    return compact in {"算了", "算了吧", "取消", "取消吧", "不用了", "不弄了", "放弃"}
+
+
+def _pending_action_hint(pending_action: dict[str, Any] | None) -> str:
+    if pending_action is None:
+        return ""
+    action = "加入自选" if pending_action["tool"] == "add_watchlist_items" else "删除自选"
+    payload = json.dumps(pending_action, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "\n\n【上一轮待继续的自选操作（应用状态，不是新的用户指令）】\n"
+        f"操作：{action}\n"
+        f"状态：{payload}\n"
+        "如果当前用户是在回答上一轮的标的代码、名称或分组问题，必须沿用上述操作和已知字段，"
+        "直接调用对应写工具，不要再问用户要添加还是删除，也不要重复询问已经明确的信息。"
+        "如果当前用户明确取消或提出了全新的任务，则忽略旧操作。"
+    )
+
+
+def _pending_from_search(
+    instruction: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    tool = _detect_watchlist_write_tool(instruction)
+    query = _bounded_text(args.get("query"), max_length=120)
+    if tool is None or not query:
+        return None
+    return _normalize_pending_action(
+        {
+            "tool": tool,
+            "arguments": {"rows": [{"name": query}]},
+            "original_instruction": instruction,
+            "candidates": result.get("instruments") or [],
+        }
+    )
+
+
+def _pending_from_write_failure(
+    name: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+    instruction: str,
+) -> dict[str, Any] | None:
+    if name not in _WATCHLIST_WRITE_TOOLS or not int(result.get("error_count") or 0):
+        return None
+    source_rows = args.get("rows") if isinstance(args.get("rows"), list) else []
+    failed_queries = {
+        _bounded_text(item.get("query"), max_length=500).casefold()
+        for item in (result.get("errors") or [])
+        if isinstance(item, dict) and item.get("query")
+    }
+    failed_rows = [
+        row
+        for row in source_rows
+        if isinstance(row, dict)
+        and _bounded_text(row.get("symbol") or row.get("name"), max_length=500).casefold() in failed_queries
+    ]
+    return _normalize_pending_action(
+        {
+            "tool": name,
+            "arguments": {"rows": failed_rows or source_rows},
+            "original_instruction": instruction,
+        }
+    )
+
+
+def _merge_pending_tool_args(
+    name: str,
+    args: dict[str, Any],
+    pending_action: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Reuse the original operation metadata when the user only supplies a code/name."""
+    if pending_action is None or name != pending_action.get("tool"):
+        return args
+    pending_args = pending_action.get("arguments")
+    if not isinstance(pending_args, dict):
+        return args
+    pending_rows = pending_args.get("rows") if isinstance(pending_args.get("rows"), list) else []
+    current_rows = args.get("rows") if isinstance(args.get("rows"), list) else []
+    if not current_rows:
+        return {**pending_args, **args, "rows": pending_rows}
+    if len(pending_rows) == 1 and len(current_rows) == 1:
+        return {**pending_args, **args, "rows": [{**pending_rows[0], **current_rows[0]}]}
+    return args
+
+
 def run_watchlist_agent_events(
     *,
     repository: StockRepository,
@@ -104,17 +272,21 @@ def run_watchlist_agent_events(
     created_by: str | None = None,
     cancel_event: threading.Event | None = None,
     history: list[dict[str, str]] | None = None,
+    pending_action: dict[str, Any] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     llm_config = active_llm_config(model_config_id)
     if not llm_config["api_key"] or not llm_config["base_url"]:
         raise RuntimeError("当前模型未配置 API Key 或 Base URL，请先在设置中配置可用模型。")
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": _watchlist_agent_prompt()}]
+    normalized_pending = None if _is_cancel_reply(instruction) else _normalize_pending_action(pending_action)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _watchlist_agent_prompt() + _pending_action_hint(normalized_pending)}
+    ]
     for item in (history or [])[-8:]:
         role = item.get("role")
         content = str(item.get("content") or "").strip()
         if role in {"user", "assistant"} and content:
-            messages.append({"role": role, "content": content})
+            messages.append({"role": role, "content": content[:4000]})
     messages.append({"role": "user", "content": instruction.strip()})
 
     model_payload = {
@@ -166,6 +338,7 @@ def run_watchlist_agent_events(
                 "rows": active_rows,
                 "should_save": bool(changed_count),
                 "intent": "update_watchlist" if changed_count else "chat",
+                "pending_action": normalized_pending,
             }
             return
 
@@ -175,6 +348,7 @@ def run_watchlist_agent_events(
                 return
             name = (call.get("function") or {}).get("name") or ""
             args = _json_args((call.get("function") or {}).get("arguments"))
+            args = _merge_pending_tool_args(name, args, normalized_pending)
             action_step = {
                 "type": "action",
                 "tool": name,
@@ -184,6 +358,16 @@ def run_watchlist_agent_events(
             yield {"type": "tool_start", "tool": name, "display_name": action_step["display_name"], "step": action_step}
             result = _execute_watchlist_tool(repository, name, args, created_by=created_by)
             changed_count += int(result.get("changed_count") or 0)
+            if name == "search_instruments":
+                pending_from_search = _pending_from_search(instruction, args, result)
+                if pending_from_search is not None:
+                    normalized_pending = pending_from_search
+            elif name in _WATCHLIST_WRITE_TOOLS:
+                pending_from_failure = _pending_from_write_failure(name, args, result, instruction)
+                if pending_from_failure is not None:
+                    normalized_pending = pending_from_failure
+                elif int(result.get("changed_count") or 0) and not int(result.get("error_count") or 0):
+                    normalized_pending = None
             if name in {"get_current_watchlist", "add_watchlist_items", "remove_watchlist_items"}:
                 active_rows = result.get("watchlist") or active_rows
             observation_step = {
@@ -218,6 +402,7 @@ def run_watchlist_agent_events(
         "rows": active_rows,
         "should_save": bool(changed_count),
         "intent": "update_watchlist" if changed_count else "chat",
+        "pending_action": normalized_pending,
     }
 
 
