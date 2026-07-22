@@ -90,24 +90,45 @@ class ToolExecutionRepository:
             if existing is not None:
                 return _execution_dict(existing), False
 
-            row = AgentToolExecution(
-                execution_id=uuid.uuid4().hex,
-                run_id=run_id,
-                tool_call_id=normalized_call_id,
-                tool_name=tool_name[:120],
-                tool_version=spec.version[:40],
-                execution_mode=spec.execution_mode,
-                status="queued",
-                idempotency_key=idempotency_key,
-                arguments_sha256=arguments_sha,
-                arguments_json=canonical,
-                has_side_effects=spec.side_effect != "none",
-                attempts=0,
-                max_attempts=max(1, spec.max_attempts),
-                timeout_seconds=max(1, spec.timeout_seconds),
-                available_at=_utcnow(),
+            # The Run event projector creates an audit placeholder as soon as
+            # AgentScope emits ToolCallEndEvent. Promote that same row into the
+            # durable worker execution so one model tool call has one ledger
+            # record instead of an inline placeholder plus a worker duplicate.
+            row = db.scalar(
+                select(AgentToolExecution)
+                .where(
+                    AgentToolExecution.run_id == run_id,
+                    AgentToolExecution.tool_name == tool_name[:120],
+                    AgentToolExecution.arguments_sha256 == arguments_sha,
+                    AgentToolExecution.idempotency_key.is_(None),
+                    AgentToolExecution.execution_mode == "inline",
+                    AgentToolExecution.status == "running",
+                )
+                .order_by(AgentToolExecution.created_at.desc())
+                .with_for_update()
+                .limit(1)
             )
-            db.add(row)
+            if row is None:
+                row = AgentToolExecution(
+                    execution_id=uuid.uuid4().hex,
+                    run_id=run_id,
+                    tool_call_id=normalized_call_id,
+                    tool_name=tool_name[:120],
+                )
+                db.add(row)
+            row.tool_version = spec.version[:40]
+            row.execution_mode = spec.execution_mode
+            row.status = "queued"
+            row.idempotency_key = idempotency_key
+            row.arguments_sha256 = arguments_sha
+            row.arguments_json = canonical
+            row.has_side_effects = spec.side_effect != "none"
+            row.attempts = 0
+            row.max_attempts = max(1, spec.max_attempts)
+            row.timeout_seconds = max(1, spec.timeout_seconds)
+            row.available_at = _utcnow()
+            row.next_retry_at = None
+            row.finished_at = None
             db.add(
                 AgentOutbox(
                     run_id=run_id,

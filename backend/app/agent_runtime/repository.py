@@ -297,12 +297,13 @@ class AgentRunRepository:
             if decision != "approved":
                 tool.finished_at = _utcnow()
         elif event_type == "tool_done":
-            tool.status = "completed" if event.get("success") else "failed"
-            tool.result_json = json.dumps(
-                {"success": bool(event.get("success")), "display_name": event.get("display_name")},
-                ensure_ascii=False,
-            )
-            tool.finished_at = _utcnow()
+            if tool.execution_mode == "inline":
+                tool.status = "completed" if event.get("success") else "failed"
+                tool.result_json = json.dumps(
+                    {"success": bool(event.get("success")), "display_name": event.get("display_name")},
+                    ensure_ascii=False,
+                )
+                tool.finished_at = _utcnow()
 
     def events_after(self, run_id: str, seq: int, *, limit: int = 500) -> list[StoredRunEvent]:
         with self.session_factory() as db:

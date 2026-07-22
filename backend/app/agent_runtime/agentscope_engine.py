@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -467,6 +468,13 @@ async def run_agentscope(
                 parsed_args = json.loads(raw_args or "{}")
             except json.JSONDecodeError:
                 parsed_args = {}
+            canonical_args = json.dumps(
+                parsed_args,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
             risk_level = classify_tool_risk(name, parsed_args, write_names)
             await emit(
                 {
@@ -475,6 +483,7 @@ async def run_agentscope(
                     "tool": name,
                     "display_name": _tool_display_name(name),
                     "content": raw_args,
+                    "arguments_sha256": hashlib.sha256(canonical_args.encode("utf-8")).hexdigest(),
                     "risk_level": risk_level,
                     "has_side_effects": risk_level in {"medium", "high"},
                 }

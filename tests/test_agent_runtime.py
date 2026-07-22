@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 from unittest.mock import patch
 from datetime import datetime, timedelta
@@ -327,7 +328,11 @@ class AgentRuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private body", event["content"])
         self.assertNotIn("secret-value", event["content"])
         self.assertIn("characters", event["content"])
-        self.assertEqual(len(event["arguments_sha256"]), 64)
+        canonical = '{"api_key":"secret-value","content":"private body","path":"report.md"}'
+        self.assertEqual(
+            event["arguments_sha256"],
+            hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        )
 
     async def test_event_sink_coalesces_and_redacts_tool_progress(self) -> None:
         run, _ = self.create_run()

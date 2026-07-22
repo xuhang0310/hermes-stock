@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -14,7 +16,7 @@ from backend.app.agent_runtime.artifact_service import ArtifactService
 from backend.app.agent_runtime.repository import AgentRunRepository
 from backend.app.agent_runtime.tool_repository import ToolExecutionRepository
 from backend.app.agent_runtime.tool_specs import ToolSpec
-from backend.app.agent_runtime.tool_worker import ToolWorker
+from backend.app.agent_runtime.tool_worker import ToolWorker, initialize_tool_worker_runtime
 from backend.app.agent_runtime.transaction_state import TransactionStateService
 from backend.app.core.database import Base
 from backend.app.core.models import (
@@ -122,6 +124,41 @@ class Phase34RuntimeTests(unittest.IsolatedAsyncioTestCase):
             run = db.get(AgentRun, self.run["run_id"])
             self.assertEqual(run.source_type, "scheduler")
             self.assertEqual(run.source_ref, "fire-20260722-1")
+
+    def test_external_tool_promotes_action_placeholder(self) -> None:
+        arguments = {"query": "内部情报", "limit": 8}
+        canonical = '{"limit":8,"query":"内部情报"}'
+        self.run_repository.append_event(
+            self.run["run_id"],
+            {
+                "type": "action",
+                "tool_call_id": "call-intel-1",
+                "tool": "get_intelligence_digest",
+                "content": json.dumps(arguments, ensure_ascii=False),
+                "arguments_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                "risk_level": "low",
+                "has_side_effects": False,
+            },
+        )
+
+        execution, created = self.tool_repository.submit(
+            run_id=self.run["run_id"],
+            tool_name="get_intelligence_digest",
+            arguments=arguments,
+            spec=ToolSpec(name="get_intelligence_digest", execution_mode="worker"),
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(execution["tool_call_id"], "call-intel-1")
+        self.assertEqual(execution["execution_mode"], "worker")
+        with self.SessionFactory() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(AgentToolExecution)), 1)
+            self.assertEqual(db.scalar(select(func.count()).select_from(AgentOutbox)), 1)
+
+    def test_tool_worker_runtime_discovers_skill_executors(self) -> None:
+        with patch("backend.app.agent_runtime.tool_worker.skill_registry.discover") as discover:
+            initialize_tool_worker_runtime()
+        discover.assert_called_once_with()
 
     def test_retry_and_expired_write_lease_have_distinct_outcomes(self) -> None:
         read_spec = ToolSpec(name="read_data", execution_mode="worker", max_attempts=3)

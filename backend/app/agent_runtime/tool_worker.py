@@ -18,9 +18,15 @@ from backend.app.core.applog import get_logger, log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import Heartbeat
 from backend.app.core.settings import settings
+from backend.app.skills.registry import skill_registry
 
 
 logger = get_logger("agent.runtime.tool_worker")
+
+
+def initialize_tool_worker_runtime() -> None:
+    """Load the same skill executors that the FastAPI lifespan registers."""
+    skill_registry.discover()
 
 
 class ToolWorker:
@@ -302,6 +308,7 @@ class ToolWorker:
 
 
 async def _main() -> None:
+    initialize_tool_worker_runtime()
     worker = ToolWorker()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):

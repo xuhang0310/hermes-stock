@@ -91,15 +91,23 @@ class DurableEventSink:
             return safe
 
         raw = str(safe.get("content") or "")
-        safe["arguments_sha256"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         try:
             arguments = json.loads(raw or "{}")
         except json.JSONDecodeError:
+            safe["arguments_sha256"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
             safe["content"] = json.dumps(
                 {"characters": len(raw), "unparseable": True},
                 ensure_ascii=False,
             )
             return safe
+        canonical = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        safe["arguments_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if not isinstance(arguments, dict):
             safe["content"] = json.dumps(
                 {"type": type(arguments).__name__, "characters": len(raw)},
