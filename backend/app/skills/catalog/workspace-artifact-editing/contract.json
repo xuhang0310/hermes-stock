@@ -1,0 +1,16 @@
+{
+  "chat_modes": ["research"],
+  "roles": [],
+  "default_roles": [],
+  "triggers": ["修改文件", "继续修改", "上一版", "刚才的文件", "现有代码", "编辑PPT", "修改Word", "修改Excel", "改报告", "更新文档"],
+  "tool_names": ["ws_glob", "ws_read_file", "ws_edit_file", "ws_write_file"],
+  "criteria": [
+    {
+      "code": "artifact.validated-edit",
+      "description": "对现有工作区产物完成可追溯修改并生成有效新版本。",
+      "tool_names": ["ws_edit_file", "ws_write_file"],
+      "validation_profile": "artifact"
+    }
+  ],
+  "output_contract": ["原文件和版本", "修改范围", "新版本", "SHA256", "变更摘要", "验证状态"]
+}

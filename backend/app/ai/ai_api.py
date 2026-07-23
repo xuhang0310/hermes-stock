@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session, selectinload
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.duration import elapsed_wall_clock_ms
+from backend.app.agent_runtime.evidence_service import research_evidence_service
 from backend.app.agent_runtime.payloads import user_text_from_content
 from backend.app.agent_runtime.repository import agent_run_repository
 from backend.app.agent_runtime.service import agent_runtime_service
@@ -35,6 +36,7 @@ from backend.app.core.models import (
     AgentArtifact,
     AgentRun,
     AgentToolApproval,
+    BacktestRun,
     BackgroundTask,
     DataSourceConfig,
     DigitalHumanProfile,
@@ -65,6 +67,7 @@ from backend.app.agents.stock_agent import run_agent_events
 from backend.app.agents.tool_approval import cancel_pending_run_approvals, normalize_approval_policy
 from backend.app.market.stock_tools import normalize_a_share_symbol, stock_strategy_payload
 from backend.app.core.settings import settings
+from backend.app.skills.registry import skill_registry
 
 
 router = APIRouter(prefix="/api", tags=["ai"])
@@ -1969,6 +1972,7 @@ def stock_strategies(
 def _chat_messages_out(
     messages: list[AiChatMessage],
     run_durations: dict[int, int] | None = None,
+    backtest_runs: dict[int, str] | None = None,
 ) -> list[dict]:
     payloads: list[dict] = []
     last_user_created_at: datetime | None = None
@@ -1988,6 +1992,7 @@ def _chat_messages_out(
                 "attachments": _attachments_from_json(item.attachments_json),
                 "error": item.error,
                 "duration_ms": duration_ms,
+                "backtest_run_id": (backtest_runs or {}).get(item.id),
                 "created_at": item.created_at.isoformat(),
             }
         )
@@ -2012,6 +2017,23 @@ def _run_duration_map(db: Session, session_id: int) -> dict[int, int]:
         if message_id is not None and duration_ms is not None:
             durations[int(message_id)] = duration_ms
     return durations
+
+
+def _message_backtest_map(db: Session, session_id: int) -> dict[int, str]:
+    rows = db.execute(
+        select(AgentRun.result_message_id, BacktestRun.run_id)
+        .join(BacktestRun, BacktestRun.agent_run_id == AgentRun.run_id)
+        .where(
+            AgentRun.session_id == session_id,
+            AgentRun.result_message_id.is_not(None),
+        )
+        .order_by(BacktestRun.created_at.desc())
+    ).all()
+    reports: dict[int, str] = {}
+    for message_id, backtest_run_id in rows:
+        if message_id is not None:
+            reports.setdefault(int(message_id), str(backtest_run_id))
+    return reports
 
 
 def _session_visibility(context: AuthContext):
@@ -2137,7 +2159,11 @@ def agent_session_detail(
         "digital_human_name": row.digital_human.name if row.digital_human else None,
         "model_config_id": row.model_config_id,
         "model_display_name": row.model_config.display_name if row.model_config else None,
-        "messages": _chat_messages_out(messages, _run_duration_map(db, row.id)),
+        "messages": _chat_messages_out(
+            messages,
+            _run_duration_map(db, row.id),
+            _message_backtest_map(db, row.id),
+        ),
         **_session_source_out(row),
     }
 
@@ -2628,6 +2654,61 @@ def agent_run_team_status(
     if team is None:
         raise HTTPException(status_code=404, detail="该 Agent 任务没有 Team 协作记录")
     return team
+
+
+@router.get("/agent/runs/{run_id}/audit")
+def agent_run_research_audit(
+    run_id: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    run = agent_run_repository.get_run(run_id, user_id=context.user.id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
+    bundle = research_evidence_service.audit_bundle(run_id)
+    if bundle is None:
+        return {
+            "goal": None,
+            "criteria": [],
+            "evidence": [],
+            "claims": [],
+            "latest_audit": None,
+            "completion_state": run.get("completion_state", "not_applicable"),
+        }
+    return {**bundle, "completion_state": run.get("completion_state", "not_applicable")}
+
+
+@router.get("/agent/skills/core")
+def core_agent_skills(
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> list[dict]:
+    available_tools = set(skill_registry.all_tool_names()) | {"search_knowledge"}
+    items: list[dict] = []
+    for item in skill_registry.list_manifests():
+        declared = set(item.get("tool_names") or [])
+        missing = sorted(declared - available_tools)
+        available = sorted(declared & available_tools)
+        readiness = 100 if not declared else round(len(available) * 100 / len(declared))
+        items.append(
+            {
+                **item,
+                "available_tool_names": available,
+                "unavailable_tool_names": missing,
+                "availability": "ready" if not missing else "partial",
+                "readiness_percent": readiness,
+            }
+        )
+    return items
+
+
+@router.get("/agent/skills/core/{skill_name}")
+def core_agent_skill_detail(
+    skill_name: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    item = skill_registry.load_manifest(skill_name)
+    if item.get("error"):
+        raise HTTPException(status_code=404, detail=item["error"])
+    return item
 
 
 @router.get("/agent/runs/{run_id}/events")

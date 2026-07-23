@@ -547,6 +547,8 @@ class AgentTeamService:
                         "agent_code": delegation.target_profile_code,
                         "agent_name": delegation.target_profile_name,
                         "status": child.status,
+                        "completion_state": child.completion_state,
+                        "completion": _loads(child.completion_json, {}),
                         "answer": answer,
                         "answer_truncated": answer_truncated,
                         "error": child.error,
@@ -564,6 +566,7 @@ class AgentTeamService:
                         "agent_code": delegation.target_profile_code,
                         "agent_name": delegation.target_profile_name,
                         "status": delegation.status,
+                        "completion_state": child.completion_state,
                     }
                 )
 
@@ -610,6 +613,7 @@ class AgentTeamService:
                 "rejected_tasks": result.get("rejected_tasks", []),
                 "dispatch_stats": result.get("dispatch_stats", {}),
                 "summary": result.get("summary"),
+                "completion_state": result.get("completion_state", "not_applicable"),
                 "error": team.error,
             }
 
@@ -742,6 +746,11 @@ class AgentTeamService:
             for row in delegations
         ]
         completed = sum(1 for row in delegations if row.status == "completed")
+        incomplete_required = sum(
+            1
+            for row, member in zip(delegations, members)
+            if row.required and member.get("completion_state") in {"incomplete", "blocked"}
+        )
         failed = len(delegations) - completed + len(rejected_tasks)
         total = len(delegations) + len(rejected_tasks)
         if completed == total:
@@ -753,11 +762,16 @@ class AgentTeamService:
         team.finished_at = now
         team.error = None if failed == 0 else f"{failed} 个子任务未成功完成。"
         summary = f"{completed}/{total} 个子任务完成"
+        completion_state = "incomplete" if incomplete_required else (
+            "complete" if completed == total else "blocked"
+        )
         team.result_json = json.dumps(
             {
                 "team_id": team.team_id,
                 "status": team.status,
                 "summary": summary,
+                "completion_state": completion_state,
+                "incomplete_required": incomplete_required,
                 "members": members,
                 "rejected_tasks": rejected_tasks,
                 "dispatch_stats": dispatch_stats,

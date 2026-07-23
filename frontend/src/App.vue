@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, ApiError, getAuthToken, setAuthToken } from './api'
 import AppShell from './components/AppShell.vue'
 import PositionsWorkbench from './components/PositionsWorkbench.vue'
@@ -14,6 +14,8 @@ import WorkspaceDocsView from './views/WorkspaceDocsView.vue'
 import KnowledgeSearchView from './views/KnowledgeSearchView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
 import WatchlistView from './views/WatchlistView.vue'
+import SkillSquareView from './views/SkillSquareView.vue'
+import BacktestReportView from './views/BacktestReportView.vue'
 import { renderMarkdown } from './utils/markdown'
 import type {
   AgentItem,
@@ -40,6 +42,8 @@ type PageKey =
   | 'knowledge'
   | 'knowledgeSearch'
   | 'workspaceDocs'
+  | 'skillSquare'
+  | 'backtestReport'
   | 'settings'
 
 type PositionAgentChat = {
@@ -84,6 +88,7 @@ const selectedChartInstrument = ref<{ symbol: string; name: string } | null>(nul
 const chartReturnPage = ref<'positions' | 'watchlist'>('positions')
 const digitalHumanInitialTab = ref<'chat' | 'feishuBots'>('chat')
 const askStockInitialQuestion = ref('')
+const backtestRunId = ref('')
 const positionAgentTargetAccount = ref<number | null>(null)
 const positionAgentAccounts = ref<PositionAccount[]>([])
 const positionAgentPendingAction = ref<PositionAgentPendingAction | null>(null)
@@ -103,6 +108,8 @@ const pageTitle = computed(() => {
     knowledge: '知识库',
     knowledgeSearch: '检索agent',
     workspaceDocs: '生成文档',
+    skillSquare: '技能广场',
+    backtestReport: '策略回测报告',
     settings: '设置'
   }
   return labels[activePage.value]
@@ -526,7 +533,31 @@ function backFromChart() {
 function navigate(page: PageKey) {
   if (page === 'digitalHumans') digitalHumanInitialTab.value = 'chat'
   if (page === 'askStock') askStockInitialQuestion.value = ''
+  if (page !== 'backtestReport' && window.location.pathname.startsWith('/backtests/')) {
+    window.history.pushState({}, '', '/')
+  }
   activePage.value = page
+}
+
+function syncPageFromLocation() {
+  const match = window.location.pathname.match(/^\/backtests\/([a-zA-Z0-9_-]{8,64})\/?$/)
+  if (match) {
+    backtestRunId.value = match[1]
+    activePage.value = 'backtestReport'
+  } else if (activePage.value === 'backtestReport') {
+    activePage.value = 'digitalHumans'
+  }
+}
+
+function openBacktest(runId: string) {
+  backtestRunId.value = runId
+  window.history.pushState({ backtestRunId: runId }, '', `/backtests/${runId}`)
+  activePage.value = 'backtestReport'
+}
+
+function closeBacktest() {
+  window.history.pushState({}, '', '/')
+  activePage.value = 'digitalHumans'
 }
 
 function openFeishuBindings() {
@@ -539,7 +570,12 @@ function openAskStock(symbol: string) {
   activePage.value = 'askStock'
 }
 
-onMounted(initialize)
+onMounted(() => {
+  syncPageFromLocation()
+  window.addEventListener('popstate', syncPageFromLocation)
+  void initialize()
+})
+onBeforeUnmount(() => window.removeEventListener('popstate', syncPageFromLocation))
 </script>
 
 <template>
@@ -552,7 +588,7 @@ onMounted(initialize)
 
   <AppShell
     v-else
-    :active-page="activePage === 'positionChart' ? chartReturnPage : activePage"
+    :active-page="activePage === 'positionChart' ? chartReturnPage : activePage === 'backtestReport' ? 'digitalHumans' : activePage"
     :page-title="pageTitle"
     :page-subtitle="pageSubtitle"
     :health="health"
@@ -580,9 +616,15 @@ onMounted(initialize)
       />
 
       <AskStockView v-else-if="activePage === 'askStock'" :initial-question="askStockInitialQuestion" />
+      <BacktestReportView
+        v-else-if="activePage === 'backtestReport'"
+        :run-id="backtestRunId"
+        @back="closeBacktest"
+      />
       <DigitalHumanCenter
         v-else-if="activePage === 'digitalHumans'"
         :initial-tab="digitalHumanInitialTab"
+        @open-backtest="openBacktest"
       />
 
       <PositionChartView
@@ -617,6 +659,8 @@ onMounted(initialize)
       <KnowledgeSearchView v-else-if="activePage === 'knowledgeSearch'" />
 
       <WorkspaceDocsView v-else-if="activePage === 'workspaceDocs'" />
+
+      <SkillSquareView v-else-if="activePage === 'skillSquare'" />
 
       <SettingsView
         v-else-if="activePage === 'settings'"

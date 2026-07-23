@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["research"],
+  "roles": ["stock-pm", "research-analyst", "intelligence-officer", "watchlist-entry-agent"],
+  "default_roles": ["watchlist-entry-agent"],
+  "triggers": ["自选", "自选池", "入池", "移出", "观察池", "候选股", "自选截图", "增加自选", "删除自选"],
+  "tool_names": ["get_watchlist_snapshot", "get_symbol_context", "search_stock_news"],
+  "criteria": [
+    {
+      "code": "watchlist.current",
+      "description": "取得当前自选池数据或目标标的的入池状态。",
+      "tool_names": ["get_watchlist_snapshot", "get_symbol_context", "search_stock_news"],
+      "validation_profile": "watchlist",
+      "max_age_days": 7
+    }
+  ],
+  "output_contract": ["当前入池状态", "入池理由", "研究覆盖", "催化与风险", "去留条件", "下一研究任务"]
+}

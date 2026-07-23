@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["research"],
+  "roles": ["risk-officer", "stock-pm", "quant-analyst"],
+  "default_roles": ["risk-officer"],
+  "triggers": ["组合", "集中度", "相关性", "行业暴露", "组合风险", "资产配置", "账户风险", "压力测试"],
+  "tool_names": ["get_portfolio_snapshot", "get_risk_context", "get_analysis_context"],
+  "criteria": [
+    {
+      "code": "portfolio.positions",
+      "description": "取得组合持仓或可计算风险暴露的数据。",
+      "tool_names": ["get_portfolio_snapshot", "get_risk_context", "get_analysis_context"],
+      "validation_profile": "positions",
+      "max_age_days": 7
+    }
+  ],
+  "output_contract": ["组合快照", "集中度", "行业暴露", "相关风险", "压力情景", "组合改进方向"]
+}

@@ -41,13 +41,15 @@ import type {
   AgentToolApproval,
   ApprovalPolicy,
   AgentStreamEvent,
+  AgentSkill,
   ChartResolution,
   StockStrategy,
   WatchlistAgentPendingAction,
   WatchlistAgentStreamEvent,
   WatchlistItem,
   WorkspaceDoc,
-  WorkspaceStatus
+  WorkspaceStatus,
+  BacktestRun
 } from './types'
 import { readSseStream } from './utils/sse'
 
@@ -489,6 +491,29 @@ export const api = {
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
   workspaceStatus: () => request<WorkspaceStatus>('/api/workspace/status'),
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
+  backtests: () => request<{ items: Array<Partial<BacktestRun>> }>('/api/backtests'),
+  backtest: (runId: string) =>
+    request<BacktestRun>(`/api/backtests/${encodeURIComponent(runId)}`),
+  createMacdBacktest: (payload: Record<string, unknown>) =>
+    request<BacktestRun>('/api/backtests', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  downloadBacktestFile: async (runId: string, kind: 'trades.csv' | 'metrics.json') => {
+    const response = await fetch(`/api/backtests/${encodeURIComponent(runId)}/${kind}`, {
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+    })
+    if (!response.ok) throw new Error((await response.text()) || `下载失败: ${response.status}`)
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${runId}-${kind}`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  },
   artifactVersions: (artifactId: string) =>
     request<ArtifactVersion[]>(`/api/workspace/artifacts/${encodeURIComponent(artifactId)}/versions`),
   restoreArtifactVersion: (artifactId: string, version: number) =>
@@ -590,6 +615,9 @@ export const api = {
       method: 'POST'
     }),
   stockStrategies: () => request<{ skills: StockStrategy[]; default_skill_id: string }>('/api/agent/stock/strategies'),
+  agentSkills: () => request<AgentSkill[]>('/api/agent/skills/core'),
+  agentSkill: (name: string) =>
+    request<AgentSkill>(`/api/agent/skills/core/${encodeURIComponent(name)}`),
   activeAgentRuns: (params: { chat_mode?: 'research' | 'stock' | 'knowledge'; session_id?: number | null } = {}) => {
     const query = new URLSearchParams()
     if (params.chat_mode) query.set('chat_mode', params.chat_mode)

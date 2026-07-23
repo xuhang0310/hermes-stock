@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["stock", "research"],
+  "roles": ["quant-analyst", "short-term-hunter", "research-analyst", "risk-officer"],
+  "default_roles": ["quant-analyst", "short-term-hunter"],
+  "triggers": ["资金流", "主力", "龙虎榜", "融资融券", "融资盘", "筹码", "换手", "北向", "游资"],
+  "tool_names": ["get_capital_flow", "get_top_list", "get_margin_detail", "get_chip_distribution"],
+  "criteria": [
+    {
+      "code": "capital_flow.flow_data",
+      "description": "取得带日期和来源的资金、融资、龙虎榜或筹码数据。",
+      "tool_names": ["get_capital_flow", "get_top_list", "get_margin_detail", "get_chip_distribution"],
+      "validation_profile": "capital_flow",
+      "max_age_days": 30
+    }
+  ],
+  "output_contract": ["数据口径", "资金方向", "持续性", "量价确认", "反方解释", "失效条件"]
+}

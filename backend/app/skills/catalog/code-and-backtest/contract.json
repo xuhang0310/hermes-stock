@@ -1,0 +1,16 @@
+{
+  "chat_modes": ["research"],
+  "roles": ["quant-analyst", "stock-pm", "research-analyst"],
+  "default_roles": ["quant-analyst"],
+  "triggers": ["Python", "python", "代码", "计算", "回测", "脚本", "执行", "数据分析", "策略验证", "图表"],
+  "tool_names": ["ws_run_python", "ws_write_file", "ws_read_file"],
+  "criteria": [
+    {
+      "code": "code.execution",
+      "description": "取得退出码正常、未超时且有输出或有效产物的代码执行结果。",
+      "tool_names": ["ws_run_python"],
+      "validation_profile": "code_execution"
+    }
+  ],
+  "output_contract": ["脚本和参数", "输入数据", "执行结果", "成本与假设", "产物路径", "错误与局限", "复现说明"]
+}

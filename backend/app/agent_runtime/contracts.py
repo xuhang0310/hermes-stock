@@ -13,6 +13,7 @@ RunStatus = Literal[
     "failed",
     "cancelled",
 ]
+CompletionState = Literal["not_applicable", "complete", "incomplete", "blocked"]
 
 TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
 RUNNABLE_RUN_STATUSES = frozenset({"queued"})
@@ -25,6 +26,8 @@ class EngineOutcome:
     error: str | None = None
     checkpoint_json: str | None = None
     waiting: list[dict[str, Any]] = field(default_factory=list)
+    completion_state: CompletionState = "not_applicable"
+    completion: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

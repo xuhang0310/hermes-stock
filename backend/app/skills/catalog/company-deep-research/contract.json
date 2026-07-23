@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["research", "stock"],
+  "roles": ["research-analyst", "stock-pm"],
+  "default_roles": ["research-analyst", "stock-pm"],
+  "triggers": ["深度研究", "深研", "公司研究", "完整复盘", "投资逻辑", "研究备忘录", "全面分析", "首次覆盖"],
+  "tool_names": ["get_analysis_context", "get_stock_info", "search_knowledge", "search_stock_news"],
+  "criteria": [
+    {
+      "code": "research.context",
+      "description": "取得可支撑公司研究的市场、财务、知识库或事件上下文。",
+      "tool_names": ["get_analysis_context", "get_stock_info", "search_knowledge", "search_stock_news"],
+      "validation_profile": "research_context",
+      "max_age_days": 550
+    }
+  ],
+  "output_contract": ["研究问题", "事实与观点", "财务和估值", "事件与市场预期", "反方论证", "催化与风险", "失效条件"]
+}

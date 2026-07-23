@@ -11,6 +11,7 @@ from sqlalchemy import select
 from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.contracts import EngineOutcome
 from backend.app.agent_runtime.external_tools import external_tool_executor
+from backend.app.agent_runtime.evidence_service import research_evidence_service
 from backend.app.agent_runtime.orchestration_tools import (
     ORCHESTRATION_PROMPT,
     ORCHESTRATION_TOOL_NAMES,
@@ -37,6 +38,7 @@ from backend.app.market.stock_tools import (
     stock_tool_display_name,
 )
 from backend.app.skills.registry import skill_registry
+from backend.app.skills.manifests import LOAD_SKILL_TOOL_SCHEMA
 
 
 Emit = Callable[[dict[str, Any]], Awaitable[None]]
@@ -94,6 +96,12 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
     role_code = request_payload.get("digital_human_code")
     memory_context = str(request_payload.get("memory_context") or "")
     skills = list(request_payload.get("skills") or [])
+    question = str(request_payload.get("user_text") or request_payload.get("question") or "")
+    selected_manifests = skill_registry.resolve_manifests(question, chat_mode, role_code)
+    request_payload["resolved_skills"] = [item.name for item in selected_manifests]
+    progressive_context = skill_registry.build_progressive_context(
+        selected_manifests, chat_mode, role_code
+    )
     write_names: set[str] = set()
     if role_code == "position-entry-agent":
         from backend.app.agents.position_agent import POSITION_AGENT_TOOLS, _position_agent_prompt
@@ -115,14 +123,26 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         )
     if chat_mode == "stock":
         return (
-            stock_system_prompt_with_skills(request_payload.get("digital_human_context"), skills, memory_context),
-            skill_registry.get_tools_for("stock"),
+            stock_system_prompt_with_skills(
+                request_payload.get("digital_human_context"), skills, memory_context
+            )
+            + (f"\n\n{progressive_context}" if progressive_context else ""),
+            [*skill_registry.get_tools_for("stock"), LOAD_SKILL_TOOL_SCHEMA],
             write_names,
         )
     if chat_mode == "knowledge":
-        return _knowledge_system_prompt(memory_context), list(TOOLS), write_names
+        return (
+            _knowledge_system_prompt(memory_context)
+            + (f"\n\n{progressive_context}" if progressive_context else ""),
+            [*TOOLS, LOAD_SKILL_TOOL_SCHEMA],
+            write_names,
+        )
 
-    tools = [*TOOLS, *skill_registry.get_tools_for("research", role_code=role_code)]
+    tools = [
+        *TOOLS,
+        *skill_registry.get_tools_for("research", role_code=role_code),
+        LOAD_SKILL_TOOL_SCHEMA,
+    ]
     if role_code == "stock-pm":
         tools.extend(TEAM_AND_SCHEDULE_TOOL_SCHEMAS)
         write_names.update(SCHEDULE_MUTATION_TOOL_NAMES)
@@ -148,6 +168,8 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         tools = [item for item in tools if item.get("function", {}).get("name") not in blocked]
         write_names.clear()
     system_prompt = _system_prompt(request_payload.get("digital_human_context"), role_code, memory_context)
+    if progressive_context:
+        system_prompt += f"\n\n{progressive_context}"
     if role_code == "stock-pm":
         system_prompt += ORCHESTRATION_PROMPT
     active_artifacts = artifact_service.active_context(
@@ -174,6 +196,11 @@ def _execute_tool(
 
     args, transaction_state = transaction_state_service.before_tool(request_payload, name, args)
     role_code = str(request_payload.get("digital_human_code") or "")
+    if name == "load_skill":
+        return skill_registry.load_manifest(
+            str(args.get("skill_name") or ""),
+            str(args.get("resource_path") or "") or None,
+        )
     if role_code == "position-entry-agent":
         from backend.app.agents.position_agent import _execute_position_tool
         from backend.app.data.repository import StockRepository
@@ -239,6 +266,14 @@ def _execute_tool(
             user_label=str(request_payload.get("user_label") or "unknown"),
             default_account_id=request_payload.get("default_account_id"),
             digital_human_code=request_payload.get("digital_human_code"),
+        )
+    if name == "run_macd_backtest":
+        from backend.app.skills.strategy_backtest import run_backtest_tool
+
+        return run_backtest_tool(
+            args,
+            owner_user_id=int(request_payload["user_id"]),
+            agent_run_id=str(request_payload.get("run_id") or "") or None,
         )
     if skill_registry.has_tool(name):
         if name.startswith("ws_"):
@@ -461,6 +496,15 @@ async def run_agentscope(
     request_payload = {**request_payload, "run_id": run_id}
     system_prompt, schemas, write_names = _build_definition(request_payload)
     request_payload["write_tool_names"] = sorted(write_names)
+    selected_skill_names = list(request_payload.get("resolved_skills") or [])
+    selected_manifests = skill_registry.manifests_by_names(selected_skill_names)
+    goal = await asyncio.to_thread(
+        research_evidence_service.ensure_goal,
+        run_id=run_id,
+        user_id=int(request_payload["user_id"]),
+        objective=str(request_payload.get("question") or request_payload.get("user_text") or ""),
+        selected=selected_manifests,
+    )
     llm = active_llm_config(request_payload.get("model_config_id"))
     if not llm.get("base_url") or not llm.get("api_key"):
         raise RuntimeError("当前模型未配置 API Key 或 Base URL。")
@@ -504,6 +548,15 @@ async def run_agentscope(
         }
     )
     await emit({"type": "stage_start", "stage": "agent_loop", "message": "AgentScope 正在分析..."})
+    if goal:
+        await emit(
+            {
+                "type": "research_goal",
+                "goal_id": goal["goal_id"],
+                "objective": goal["objective"],
+                "selected_skills": goal["selected_skills"],
+            }
+        )
 
     outcome = EngineOutcome()
     text_buffer: list[str] = []
@@ -599,20 +652,39 @@ async def run_agentscope(
                     raw_result = json.loads(text_result)
                 except (TypeError, json.JSONDecodeError):
                     raw_result = {"result": text_result}
+            evidence_ids = []
+            if goal:
+                evidence_ids = await asyncio.to_thread(
+                    research_evidence_service.record_tool_result,
+                    run_id=run_id,
+                    tool_call_id=event.tool_call_id,
+                    tool_name=name,
+                    result=raw_result,
+                    execution_id=execution_id,
+                    criterion_codes=skill_registry.criterion_codes_for_tool(
+                        name, selected_skill_names
+                    ),
+                    success=str(event.state) == "success",
+                )
             await emit({"type": "observation", "content": _tool_preview(name, raw_result)})
             for artifact in raw_result.get("artifacts") or []:
                 if isinstance(artifact, dict) and artifact.get("path"):
                     await emit({"type": "artifact", **artifact})
-            await emit(
-                {
-                    "type": "tool_done",
-                    "tool_call_id": event.tool_call_id,
-                    "tool": name,
-                    "display_name": _tool_display_name(name),
-                    "success": str(event.state) == "success",
-                    "execution_id": execution_id,
-                }
-            )
+            tool_done_event = {
+                "type": "tool_done",
+                "tool_call_id": event.tool_call_id,
+                "tool": name,
+                "display_name": _tool_display_name(name),
+                "success": str(event.state) == "success",
+                "execution_id": execution_id,
+                "evidence_ids": evidence_ids,
+            }
+            if name == "run_macd_backtest" and raw_result.get("run_id"):
+                tool_done_event["report_run_id"] = str(raw_result["run_id"])
+                tool_done_event["report_url"] = str(
+                    raw_result.get("report_url") or f"/backtests/{raw_result['run_id']}"
+                )
+            await emit(tool_done_event)
             await save_checkpoint(agent.state.model_dump_json(), None)
         elif isinstance(event, RequireUserConfirmEvent):
             await close_text("thought")
@@ -713,5 +785,18 @@ async def run_agentscope(
     outcome.checkpoint_json = agent.state.model_dump_json()
     await save_checkpoint(outcome.checkpoint_json, waiting or None)
     if outcome.status == "completed":
+        if goal:
+            completion = await asyncio.to_thread(
+                research_evidence_service.audit, run_id, outcome.final_answer
+            )
+            outcome.completion_state = completion["state"]
+            outcome.completion = completion
+            if completion["state"] == "incomplete":
+                missing_text = "；".join(item["description"] for item in completion["missing"])
+                outcome.final_answer = (
+                    f"{outcome.final_answer.rstrip()}\n\n"
+                    f"> 研究完成度：incomplete。缺少必选证据：{missing_text}"
+                ).strip()
+            await emit({"type": "completion_audit", **completion})
         await emit({"type": "stage_done", "stage": "agent_loop", "status": "completed"})
     return outcome

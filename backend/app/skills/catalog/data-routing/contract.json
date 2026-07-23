@@ -1,0 +1,9 @@
+{
+  "chat_modes": ["research", "stock", "knowledge"],
+  "roles": [],
+  "default_roles": [],
+  "triggers": ["数据", "取数", "行情", "财务", "公告", "新闻", "来源", "联网", "检索", "知识库"],
+  "tool_names": ["resolve_stock", "get_latest_price", "get_realtime_quote", "get_tushare_daily", "get_stock_info", "search_stock_news", "search_market_intel", "search_comprehensive_intel", "search_knowledge"],
+  "criteria": [],
+  "output_contract": ["数据需求", "首选来源", "回退来源", "时效检查", "口径说明"]
+}

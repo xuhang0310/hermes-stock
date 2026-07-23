@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["stock", "research"],
+  "roles": ["research-analyst", "stock-pm"],
+  "default_roles": ["research-analyst"],
+  "triggers": ["基本面", "财务", "财报", "营收", "利润", "现金流", "估值", "PE", "PB", "ROE", "资产负债", "业绩"],
+  "tool_names": ["get_stock_info", "get_analysis_context", "get_income", "get_balancesheet", "get_cashflow"],
+  "criteria": [
+    {
+      "code": "fundamental.company_facts",
+      "description": "取得公司基础资料或财务指标，并保留报告期和统计口径。",
+      "tool_names": ["get_stock_info", "get_analysis_context", "get_income", "get_balancesheet", "get_cashflow"],
+      "validation_profile": "fundamental",
+      "max_age_days": 550
+    }
+  ],
+  "output_contract": ["主营与行业", "财务报告期", "三表核心指标", "盈利质量", "估值口径", "风险与数据缺口"]
+}

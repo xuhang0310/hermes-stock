@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["stock", "research"],
+  "roles": [],
+  "default_roles": ["intelligence-officer", "short-term-hunter"],
+  "triggers": ["新闻", "公告", "事件", "催化", "政策", "舆情", "龙虎榜", "为什么涨", "为什么跌", "异动", "监管"],
+  "tool_names": ["search_stock_news", "search_market_intel", "search_comprehensive_intel", "get_anns"],
+  "criteria": [
+    {
+      "code": "events.source",
+      "description": "取得至少一条带标题、来源以及发布日期或 URL 的事件材料。",
+      "tool_names": ["search_stock_news", "search_market_intel", "search_comprehensive_intel", "get_anns"],
+      "validation_profile": "sourced_list",
+      "max_age_days": 30
+    }
+  ],
+  "output_contract": ["已确认事实", "事件时间线", "影响传导", "反方解释", "来源与发布日期", "未核验项"]
+}

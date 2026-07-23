@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["research"],
+  "roles": ["risk-officer", "stock-pm", "position-entry-agent"],
+  "default_roles": ["risk-officer", "position-entry-agent"],
+  "triggers": ["持仓", "账户", "仓位", "止损", "减仓", "补仓", "成本", "持仓截图", "浮亏", "浮盈"],
+  "tool_names": ["get_portfolio_snapshot", "get_risk_context", "check_stop_loss_status"],
+  "criteria": [
+    {
+      "code": "position.current",
+      "description": "取得用户实际持仓或明确确认当前无持仓。",
+      "tool_names": ["get_portfolio_snapshot", "get_risk_context", "check_stop_loss_status"],
+      "validation_profile": "positions",
+      "max_age_days": 7
+    }
+  ],
+  "output_contract": ["账户和持仓快照", "成本与仓位", "止损距离", "事件风险", "情景触发条件", "行动边界"]
+}

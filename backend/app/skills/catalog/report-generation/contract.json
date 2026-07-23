@@ -1,0 +1,16 @@
+{
+  "chat_modes": ["research"],
+  "roles": [],
+  "default_roles": [],
+  "triggers": ["报告", "研报", "备忘录", "事件点评", "复盘文档", "汇报", "正式文档", "生成PDF", "生成Word", "生成PPT"],
+  "tool_names": ["ws_write_file", "ws_edit_file", "ws_read_file", "ws_glob"],
+  "criteria": [
+    {
+      "code": "artifact.validated",
+      "description": "产生或更新带版本、哈希和验证状态的工作区报告。",
+      "tool_names": ["ws_write_file", "ws_edit_file"],
+      "validation_profile": "artifact"
+    }
+  ],
+  "output_contract": ["执行摘要", "证据化判断", "反方证据", "风险与缺口", "数据截止日", "文件路径与版本", "验证状态"]
+}

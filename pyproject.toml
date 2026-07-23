@@ -24,6 +24,9 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "agentscope[storage]==2.0.4.post1",
     "redis>=5.2.0,<7",
+    "PyYAML>=6.0.2,<7",
+    "numpy>=1.26,<3",
+    "pandas>=2.2,<4",
     "opentelemetry-api==1.42.1",
     "opentelemetry-sdk==1.42.1",
     "opentelemetry-exporter-otlp==1.42.1",
@@ -39,6 +42,12 @@ hermes-api = "backend.app.main:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Vibe-Trading keeps formula modules self-contained with a shared import prelude.
+"backend/app/quant/factors/zoo/**/*.py" = ["E741", "F401", "F841"]
+# These names are provided lazily through module-level __getattr__.
+"backend/app/quant/factors/_backend.py" = ["F822"]
 
 [tool.setuptools.packages.find]
 include = ["backend*"]

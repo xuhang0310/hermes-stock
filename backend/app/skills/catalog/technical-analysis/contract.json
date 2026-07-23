@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["stock", "research"],
+  "roles": ["quant-analyst", "short-term-hunter", "stock-pm", "research-analyst"],
+  "default_roles": ["quant-analyst", "short-term-hunter"],
+  "triggers": ["均线", "MACD", "RSI", "布林", "量价", "技术面", "支撑", "阻力", "趋势", "K线", "形态", "超买", "超卖"],
+  "tool_names": ["get_tushare_daily", "get_analysis_context", "analyze_daily_bars", "calculate_ma", "get_volume_analysis", "analyze_pattern"],
+  "criteria": [
+    {
+      "code": "technical.price_series",
+      "description": "取得足够长度且带日期的价格序列或已计算技术指标。",
+      "tool_names": ["get_tushare_daily", "get_analysis_context", "analyze_daily_bars", "calculate_ma", "get_volume_analysis", "analyze_pattern"],
+      "validation_profile": "technical",
+      "max_age_days": 30
+    }
+  ],
+  "output_contract": ["数据窗口", "趋势位置", "动量与波动", "量价确认", "关键位", "失效条件"]
+}

@@ -14,6 +14,7 @@ export type PageKey =
   | 'knowledge'
   | 'knowledgeSearch'
   | 'workspaceDocs'
+  | 'skillSquare'
   | 'settings'
 
 const props = defineProps<{
@@ -42,6 +43,7 @@ const canViewKnowledge = computed(
 interface NavItem {
   key: PageKey
   label: string
+  icon?: string
   children?: NavItem[]
 }
 
@@ -61,6 +63,7 @@ const navItems = computed<NavItem[]>(() => [
       { key: 'workspaceDocs' as PageKey, label: '生成文档' }
     ]
   }] : []),
+  { key: 'skillSquare', label: '技能广场', icon: 'knowledge' },
   { key: 'settings', label: '设置' }
 ])
 
@@ -114,7 +117,7 @@ function handleChildClick(key: PageKey) {
             type="button"
             @click="handleParentClick(item)"
           >
-            <img class="nav-icon" :src="`/icons/${item.children ? 'knowledge' : item.key}.png`" alt="" aria-hidden="true" @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')" />
+            <img class="nav-icon" :src="`/icons/${item.icon || (item.children ? 'knowledge' : item.key)}.png`" alt="" aria-hidden="true" @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')" />
             <span>{{ item.label }}</span>
             <svg v-if="item.children" class="nav-chevron" :class="{ open: isExpanded(item) }" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
               <path d="M4 2.5L7.5 6L4 9.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />

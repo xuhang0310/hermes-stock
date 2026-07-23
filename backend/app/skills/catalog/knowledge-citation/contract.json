@@ -1,0 +1,16 @@
+{
+  "chat_modes": ["knowledge", "stock", "research"],
+  "roles": [],
+  "default_roles": [],
+  "triggers": ["知识库", "内部资料", "文档", "研报", "引用", "根据资料", "上传文件", "历史研究"],
+  "tool_names": ["search_knowledge"],
+  "criteria": [
+    {
+      "code": "knowledge.citation",
+      "description": "取得带文档或切块标识的知识库证据。",
+      "tool_names": ["search_knowledge"],
+      "validation_profile": "knowledge_hits"
+    }
+  ],
+  "output_contract": ["引用内容", "文档标题", "切块标识", "可信度", "资料日期", "适用范围"]
+}

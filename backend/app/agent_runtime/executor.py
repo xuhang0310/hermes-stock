@@ -134,13 +134,23 @@ class AgentRunExecutor:
                 None,
                 duration_ms,
             )
-            await sink.emit({"type": "done", "status": "completed", "duration_ms": duration_ms})
+            await sink.emit(
+                {
+                    "type": "done",
+                    "status": "completed",
+                    "duration_ms": duration_ms,
+                    "completion_state": outcome.completion_state,
+                    "completion": outcome.completion,
+                }
+            )
             await sink.flush()
             await asyncio.to_thread(
                 self.repository.mark_terminal,
                 run_id,
                 "completed",
                 result_message_id=message_id,
+                completion_state=outcome.completion_state,
+                completion=outcome.completion,
             )
             await self._notify_team_parent(run_id)
             self._schedule_post_run(request_payload)

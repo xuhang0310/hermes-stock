@@ -52,6 +52,8 @@ def _run_dict(row: AgentRun) -> dict[str, Any]:
         "cancel_requested": bool(row.cancel_requested),
         "error": row.error,
         "result_message_id": row.result_message_id,
+        "completion_state": row.completion_state,
+        "completion": json.loads(row.completion_json) if row.completion_json else {},
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -529,6 +531,8 @@ class AgentRunRepository:
         *,
         error: str | None = None,
         result_message_id: int | None = None,
+        completion_state: str | None = None,
+        completion: dict[str, Any] | None = None,
     ) -> None:
         if status not in TERMINAL_RUN_STATUSES:
             raise ValueError(f"Invalid terminal status: {status}")
@@ -540,6 +544,11 @@ class AgentRunRepository:
             row.status = status
             row.error = error[:16000] if error else None
             row.result_message_id = result_message_id
+            if completion_state is not None:
+                row.completion_state = completion_state[:24]
+                row.completion_json = json.dumps(
+                    completion or {}, ensure_ascii=False, default=str
+                )
             row.worker_id = None
             row.finished_at = terminal_at
             row.heartbeat_at = terminal_at

@@ -1,0 +1,9 @@
+{
+  "chat_modes": ["research", "stock", "knowledge"],
+  "roles": [],
+  "default_roles": ["research-analyst", "risk-officer", "stock-pm"],
+  "triggers": ["研究", "分析", "筛选", "看多", "看空", "投资逻辑", "公司深研", "行业研究", "组合复盘"],
+  "tool_names": [],
+  "criteria": [],
+  "output_contract": ["事实与推断分离", "反方证据", "失效条件", "数据缺口", "置信边界"]
+}

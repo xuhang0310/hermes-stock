@@ -171,6 +171,30 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         _add_column("agent_runs", "team_id", "team_id VARCHAR(64) NULL")
         _add_column("agent_runs", "orchestration_depth", "orchestration_depth INT NOT NULL DEFAULT 0")
         _add_column("agent_runs", "deadline_at", "deadline_at DATETIME NULL")
+        _add_column(
+            "agent_runs",
+            "completion_state",
+            "completion_state VARCHAR(24) NOT NULL DEFAULT 'not_applicable'",
+        )
+        _add_column("agent_runs", "completion_json", "completion_json LONGTEXT NULL")
+        for column, ddl in (
+            ("source_type", "source_type VARCHAR(80) NULL"),
+            ("source_uri", "source_uri VARCHAR(1000) NULL"),
+            ("symbol_universe_json", "symbol_universe_json LONGTEXT NULL"),
+            ("timeframe", "timeframe VARCHAR(120) NULL"),
+            ("method", "method VARCHAR(240) NULL"),
+            ("assumptions_json", "assumptions_json LONGTEXT NULL"),
+            ("data_as_of", "data_as_of VARCHAR(80) NULL"),
+            ("freshness_status", "freshness_status VARCHAR(24) NOT NULL DEFAULT 'unknown'"),
+            (
+                "verification_status",
+                "verification_status VARCHAR(24) NOT NULL DEFAULT 'unverified'",
+            ),
+            ("confidence", "confidence VARCHAR(24) NULL"),
+            ("caveat", "caveat LONGTEXT NULL"),
+            ("validation_json", "validation_json LONGTEXT NULL"),
+        ):
+            _add_column("research_evidence", column, ddl)
         for column, ddl in (
             ("execution_mode", "execution_mode VARCHAR(24) NOT NULL DEFAULT 'inline'"),
             ("max_attempts", "max_attempts INT NOT NULL DEFAULT 1"),

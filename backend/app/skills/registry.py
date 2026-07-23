@@ -10,12 +10,19 @@ if/elif 分发链；本中心只注册、不接管，确保现有对话行为零
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import pkgutil
 from pathlib import Path
 from typing import Any, Callable
 
 from backend.app.core.applog import get_logger
+from backend.app.skills.manifests import (
+    CORE_SKILL_MANIFESTS,
+    LEGACY_SKILL_ALIASES,
+    SkillManifest,
+    load_core_skill_manifests,
+)
 
 logger = get_logger("skills")
 
@@ -30,6 +37,9 @@ class SkillRegistry:
         self._tool_to_skill: dict[str, str] = {}                  # tool_name -> skill_name
         self._tool_executors: dict[str, Callable[[dict], dict]] = {}
         self._module_paths: list[str] = []                       # 已成功加载的技能模块路径（热加载用）
+        self._manifests: dict[str, SkillManifest] = {
+            item.name: item for item in CORE_SKILL_MANIFESTS
+        }
 
     # ------------------------------------------------------------------ 发现
     def discover(self, package: str = "backend.app.skills") -> None:
@@ -171,6 +181,189 @@ class SkillRegistry:
             for s in self._skills.values()
         ]
 
+    def resolve_manifests(
+        self,
+        question: str,
+        chat_mode: str,
+        role_code: str | None = None,
+        *,
+        limit: int = 4,
+    ) -> list[SkillManifest]:
+        """Select a small, deterministic capability set for the current task."""
+
+        normalized = (question or "").lower()
+        ranked: list[tuple[int, int, SkillManifest]] = []
+        for index, manifest in enumerate(self._manifests.values()):
+            if chat_mode not in manifest.chat_modes:
+                continue
+            if manifest.roles and role_code not in manifest.roles:
+                continue
+            keyword_score = sum(3 for keyword in manifest.keywords if keyword.lower() in normalized)
+            if manifest.name in normalized:
+                keyword_score += 5
+            role_score = 2 if role_code in manifest.default_roles else 0
+            score = keyword_score + role_score
+            if score:
+                ranked.append((score, -index, manifest))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [item[2] for item in ranked[: max(1, min(limit, 4))]]
+
+    def build_progressive_context(
+        self,
+        selected: list[SkillManifest],
+        chat_mode: str,
+        role_code: str | None,
+    ) -> str:
+        available = [
+            item
+            for item in self._manifests.values()
+            if chat_mode in item.chat_modes and (not item.roles or role_code in item.roles)
+        ]
+        if not available:
+            return ""
+        selected_names = {item.name for item in selected}
+        lines = [
+            "## Agent Skills",
+            "以下技能按 Agent Skills 规范渐进加载。已激活技能的完整 SKILL.md "
+            "已进入上下文；其他技能只暴露名称和触发描述。需要细节时调用 load_skill，"
+            "需要引用资料时再传 resource_path。",
+            "### 已激活",
+        ]
+        for item in selected:
+            lines.append(
+                f'\n<skill name="{item.name}" version="{item.version}">\n'
+                f"{item.instructions}\n"
+                "</skill>"
+            )
+        lines.append("### 可按需加载")
+        for item in available:
+            if item.name not in selected_names:
+                lines.append(f"- {item.name}：{item.summary}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _canonical_manifest_name(name: str) -> str:
+        normalized = (name or "").strip()
+        return LEGACY_SKILL_ALIASES.get(normalized, normalized)
+
+    def load_manifest(self, name: str, resource_path: str | None = None) -> dict[str, Any]:
+        canonical_name = self._canonical_manifest_name(name)
+        manifest = self._manifests.get(canonical_name)
+        if manifest is None:
+            return {"error": f"Unknown skill: {name}", "available": sorted(self._manifests)}
+        if resource_path:
+            candidate = (manifest.skill_dir / resource_path).resolve()
+            skill_root = manifest.skill_dir.resolve()
+            if candidate == skill_root or skill_root not in candidate.parents:
+                return {"error": "resource_path escapes the skill directory"}
+            if not candidate.is_file():
+                return {
+                    "error": f"Unknown resource: {resource_path}",
+                    "available_resources": list(manifest.resources),
+                }
+            relative = candidate.relative_to(skill_root)
+            if len(relative.parts) > 2:
+                return {"error": "resources must be referenced one level deep from SKILL.md"}
+            try:
+                content = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return {"error": "resource is not readable UTF-8 text"}
+            return {
+                "name": manifest.name,
+                "resource_path": str(relative).replace("\\", "/"),
+                "content": content,
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            }
+        return {
+            "name": manifest.name,
+            "display_name": manifest.display_name,
+            "summary": manifest.summary,
+            "description": manifest.summary,
+            "instructions": manifest.instructions,
+            "professional_body": manifest.instructions,
+            "content_sha256": manifest.content_sha256,
+            "version": manifest.version,
+            "category": manifest.category,
+            "risk_level": manifest.risk_level,
+            "compatibility": manifest.compatibility,
+            "license": manifest.license,
+            "metadata": manifest.metadata,
+            "allowed_tools": list(manifest.allowed_tools),
+            "resources": list(manifest.resources),
+            "output_contract": list(manifest.output_contract),
+            "criteria": [
+                {
+                    "code": item.code,
+                    "description": item.description,
+                    "required": item.required,
+                    "min_evidence": item.min_evidence,
+                    "tool_names": list(item.tool_names),
+                    "validation_profile": item.validation_profile,
+                    "max_age_days": item.max_age_days,
+                }
+                for item in manifest.criteria
+            ],
+            "tool_names": list(manifest.tool_names),
+        }
+
+    def manifests_by_names(self, names: list[str] | tuple[str, ...]) -> list[SkillManifest]:
+        manifests: list[SkillManifest] = []
+        for name in names:
+            manifest = self._manifests.get(self._canonical_manifest_name(name))
+            if manifest and manifest not in manifests:
+                manifests.append(manifest)
+        return manifests
+
+    def list_manifests(self) -> list[dict[str, Any]]:
+        manifests: list[dict[str, Any]] = []
+        for item in self._manifests.values():
+            manifests.append(
+                {
+                    "name": item.name,
+                    "display_name": item.display_name,
+                    "summary": item.summary,
+                    "description": item.summary,
+                    "version": item.version,
+                    "category": item.category,
+                    "risk_level": item.risk_level,
+                    "compatibility": item.compatibility,
+                    "license": item.license,
+                    "chat_modes": list(item.chat_modes),
+                    "roles": list(item.roles),
+                    "tool_names": list(item.tool_names),
+                    "allowed_tools": list(item.allowed_tools),
+                    "resources": list(item.resources),
+                    "output_contract": list(item.output_contract),
+                    "professional_body_available": bool(item.instructions),
+                    "content_sha256": item.content_sha256,
+                    "criteria": [
+                        {
+                            "code": criterion.code,
+                            "description": criterion.description,
+                            "required": criterion.required,
+                            "min_evidence": criterion.min_evidence,
+                            "validation_profile": criterion.validation_profile,
+                            "max_age_days": criterion.max_age_days,
+                        }
+                        for criterion in item.criteria
+                    ],
+                }
+            )
+        return manifests
+
+    def criterion_codes_for_tool(
+        self, tool_name: str, selected_skill_names: list[str] | tuple[str, ...]
+    ) -> list[str]:
+        codes: list[str] = []
+        for skill_name in selected_skill_names:
+            manifest = self._manifests.get(self._canonical_manifest_name(skill_name))
+            if manifest is None:
+                continue
+            for criterion in manifest.criteria:
+                if tool_name in criterion.tool_names:
+                    codes.append(criterion.code)
+        return codes
+
     def skill_names(self) -> list[str]:
         return list(self._skills.keys())
 
@@ -201,6 +394,9 @@ class SkillRegistry:
             except Exception as exc:
                 logger.warning("热加载技能模块 %s 失败: %s", path, exc)
         self.discover(package)
+        self._manifests = {
+            item.name: item for item in load_core_skill_manifests()
+        }
 
 
 skill_registry = SkillRegistry()

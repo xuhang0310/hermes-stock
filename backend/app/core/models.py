@@ -242,6 +242,36 @@ class DailyBar(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class BacktestRun(Base):
+    """Immutable strategy backtest result used by chat cards and full reports."""
+
+    __tablename__ = "backtest_runs"
+    __table_args__ = (
+        Index("ix_backtest_runs_owner_created", "owner_user_id", "created_at"),
+        Index("ix_backtest_runs_symbol_created", "symbol", "created_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    agent_run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="completed")
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    strategy_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(24), nullable=False, default="1D")
+    start_date: Mapped[str] = mapped_column(String(16), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(16), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(24), nullable=False, default="insufficient")
+    config_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    metrics_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    result_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    summary_markdown: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    source_code: Mapped[str | None] = mapped_column(LONG_TEXT)
+    data_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class StockLatestPrice(Base):
     """全体 Agent 共用的最新价缓存：开盘时段按 TTL 从 TuShare 刷新，非开盘时间只读缓存不外呼。"""
 
@@ -595,6 +625,10 @@ class AgentRun(Base):
     request_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
     result_message_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("ai_chat_messages.id"))
+    completion_state: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="not_applicable"
+    )
+    completion_json: Mapped[str | None] = mapped_column(LONG_TEXT)
     last_event_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
@@ -605,6 +639,134 @@ class AgentRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ResearchGoal(Base):
+    """Evidence-driven objective attached to one durable Agent run."""
+
+    __tablename__ = "research_goals"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_research_goal_run"),
+        Index("ix_research_goals_status_created", "status", "created_at"),
+    )
+
+    goal_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    objective: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    selected_skills_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ResearchGoalCriterion(Base):
+    """A deterministic completion gate for a research goal."""
+
+    __tablename__ = "research_goal_criteria"
+    __table_args__ = (
+        UniqueConstraint("goal_id", "criterion_code", name="uq_research_criterion_code"),
+        Index("ix_research_criteria_goal_required", "goal_id", "required"),
+    )
+
+    criterion_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(64), ForeignKey("research_goals.goal_id"), nullable=False)
+    criterion_code: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    min_evidence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ResearchClaim(Base):
+    """A material conclusion produced by an Agent and linked to evidence."""
+
+    __tablename__ = "research_claims"
+    __table_args__ = (Index("ix_research_claims_goal_created", "goal_id", "created_at"),)
+
+    claim_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(64), ForeignKey("research_goals.goal_id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    statement: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    claim_type: Mapped[str] = mapped_column(String(40), nullable=False, default="conclusion")
+    confidence: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="draft")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ResearchEvidence(Base):
+    """Immutable provenance for one tool result used by a research run."""
+
+    __tablename__ = "research_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "goal_id",
+            "tool_call_id",
+            "criterion_id",
+            name="uq_research_evidence_tool_criterion",
+        ),
+        Index("ix_research_evidence_goal_criterion", "goal_id", "criterion_id"),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(64), ForeignKey("research_goals.goal_id"), nullable=False)
+    criterion_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("research_goal_criteria.criterion_id")
+    )
+    claim_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("research_claims.claim_id"))
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    tool_execution_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("agent_tool_executions.execution_id")
+    )
+    tool_call_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_provider: Mapped[str | None] = mapped_column(String(120))
+    source_ref: Mapped[str | None] = mapped_column(String(500))
+    source_type: Mapped[str | None] = mapped_column(String(80))
+    source_uri: Mapped[str | None] = mapped_column(String(1000))
+    symbol_universe_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    timeframe: Mapped[str | None] = mapped_column(String(120))
+    method: Mapped[str | None] = mapped_column(String(240))
+    assumptions_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    data_as_of: Mapped[str | None] = mapped_column(String(80))
+    freshness_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="unknown"
+    )
+    verification_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="unverified"
+    )
+    confidence: Mapped[str | None] = mapped_column(String(24))
+    caveat: Mapped[str | None] = mapped_column(LONG_TEXT)
+    validation_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    valid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ResearchCompletionAudit(Base):
+    """Immutable snapshot explaining why a run is complete or incomplete."""
+
+    __tablename__ = "research_completion_audits"
+    __table_args__ = (
+        UniqueConstraint("goal_id", "sequence", name="uq_research_audit_goal_sequence"),
+        Index("ix_research_audits_run_created", "run_id", "created_at"),
+    )
+
+    audit_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(64), ForeignKey("research_goals.goal_id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    completion_state: Mapped[str] = mapped_column(String(24), nullable=False)
+    required_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    satisfied_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    missing_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    summary_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class AgentTeamRun(Base):

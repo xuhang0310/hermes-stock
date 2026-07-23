@@ -1,0 +1,24 @@
+{
+  "chat_modes": ["research"],
+  "roles": ["quant-analyst", "research-analyst", "stock-pm"],
+  "default_roles": ["quant-analyst"],
+  "triggers": ["因子", "Alpha101", "国泰191", "Qlib", "IC", "IR", "量化选股", "横截面", "多因子"],
+  "tool_names": ["list_factor_alphas", "get_factor_alpha", "score_factor_universe", "benchmark_factor_alphas"],
+  "criteria": [
+    {
+      "code": "factor.definition",
+      "description": "明确因子公式、所需字段、预热周期和适用市场。",
+      "tool_names": ["get_factor_alpha"],
+      "validation_profile": "quantitative"
+    },
+    {
+      "code": "factor.validation",
+      "description": "提供指定股票池和研究区间上的IC、IR、正IC比例及样本数量。",
+      "tool_names": ["benchmark_factor_alphas"],
+      "validation_profile": "quantitative",
+      "max_age_days": 30
+    }
+  ],
+  "output_contract": ["研究股票池", "候选因子", "数据覆盖", "IC/IR", "因子方向", "样本外建议", "限制"]
+}
+

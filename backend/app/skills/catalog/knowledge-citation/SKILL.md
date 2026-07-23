@@ -1,0 +1,41 @@
+---
+name: knowledge-citation
+description: 检索系统知识库中的新闻缓存、内部报告、上传文档和切块，并以可追溯引用支撑回答。用户要求“根据知识库/内部资料/上传文档回答”、查找研报、引用原文或核对系统已有研究时使用。
+compatibility: Requires Hermes Stock knowledge index and its configured vector or keyword retrieval backend.
+metadata:
+  hermes-display-name: 知识库检索与引用
+  hermes-category: knowledge
+  hermes-version: "3.0.0"
+  hermes-risk-level: low
+allowed-tools: search_knowledge
+---
+
+# 知识库检索与引用
+
+内部资料可能比公开网页更贴近系统上下文，但也可能陈旧、重复或可信等级不同。检索命中不是事实认证。
+
+## 检索流程
+
+1. 从问题中提取公司、代码、时间、文档类型和核心概念。
+2. 使用具体查询词检索，必要时分别搜索实体、事件和指标。
+3. 检查命中的文档标题、切块 ID、文档类型、可信等级和相关分数。
+4. 阅读命中上下文，避免只根据标题下结论。
+5. 相邻切块可能属于同一段材料，合并时去重。
+6. 涉及时效性事实时再用外部或结构化来源验证。
+7. 引用时保留文档和切块标识。
+
+## 可信度
+
+- 内部正式报告和原始上传材料优先于新闻缓存；
+- 同一材料的多个切块不算多个独立证据；
+- 低相关度命中不应强行纳入回答；
+- 知识库无结果时明确说明，不用模型记忆补造内部事实；
+- 文档观点与当前数据冲突时同时展示并标明日期差异。
+
+## 引用格式
+
+```text
+[内部资料：文档标题，chunk_id=123，数据/发布日期=YYYY-MM-DD]
+```
+
+输出应说明引用支持哪一项判断，以及它不能证明什么。

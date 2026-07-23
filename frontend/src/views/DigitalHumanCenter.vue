@@ -4,6 +4,7 @@ import { api } from '../api'
 import AgentApprovalCard from '../components/AgentApprovalCard.vue'
 import AgentProcessDisclosure from '../components/AgentProcessDisclosure.vue'
 import ApprovalPolicyControl from '../components/ApprovalPolicyControl.vue'
+import BacktestSummaryCard from '../components/BacktestSummaryCard.vue'
 import ChatAttachmentPicker from '../components/ChatAttachmentPicker.vue'
 import FeishuBotPanel from './FeishuBotPanel.vue'
 import type {
@@ -28,6 +29,10 @@ const props = withDefaults(defineProps<{
 }>(), {
   initialTab: 'chat'
 })
+
+const emit = defineEmits<{
+  openBacktest: [runId: string]
+}>()
 
 const activeCenterTab = ref<'chat' | 'feishuBots'>(props.initialTab)
 
@@ -55,6 +60,7 @@ type ChatMessage = {
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
   startedAt?: number
   durationMs?: number
+  backtestRunId?: string
   processExpanded?: boolean
   processAutoCollapsed?: boolean
 }
@@ -226,6 +232,7 @@ function toChatMessages(items: AgentMessage[]): ChatMessage[] {
     approval: null,
     streamStatus: item.role === 'assistant' ? (item.error ? 'error' : 'done') : undefined,
     durationMs: item.duration_ms ?? undefined,
+    backtestRunId: item.backtest_run_id || undefined,
     processExpanded: false,
     processAutoCollapsed: true
   }))
@@ -473,6 +480,12 @@ function generatedFiles(item: ChatMessage): GeneratedFile[] {
   return rows.filter((file, index) => rows.findIndex((candidate) => candidate.path === file.path) === index)
 }
 
+function backtestRunId(item: ChatMessage) {
+  if (item.backtestRunId) return item.backtestRunId
+  const content = `${item.content || ''}\n${item.liveContent || ''}`
+  return content.match(/\/backtests\/([a-zA-Z0-9_-]{8,64})/)?.[1] || ''
+}
+
 async function downloadFile(file: GeneratedFile) {
   try {
     await api.downloadWorkspaceDoc(file.path, file.name)
@@ -585,6 +598,8 @@ function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: A
     if (path && !reply.files.some((file) => file.path === path)) {
       reply.files.push({ path, name: event.name || path.split('/').pop() || path, bytes: event.bytes })
     }
+  } else if (event.type === 'tool_done' && event.report_run_id) {
+    reply.backtestRunId = event.report_run_id
   } else if (event.type === 'error') {
     flushReasoning(reply)
     flushThought(reply)
@@ -1038,6 +1053,12 @@ function requestIsVisible(request: ActiveChatRequest) {
             <div v-else-if="item.content" class="md-body" v-html="renderMarkdown(item.content)"></div>
             <div v-else-if="item.error" class="chat-error">{{ item.error }}</div>
             <div v-else-if="!item.steps.length && !item.liveReasoning" class="chat-typing">正在思考与查询...</div>
+
+            <BacktestSummaryCard
+              v-if="backtestRunId(item) && (!item.streamStatus || item.streamStatus === 'done')"
+              :run-id="backtestRunId(item)"
+              @open="emit('openBacktest', $event)"
+            />
 
             <div v-if="!item.liveContent && generatedFiles(item).length" class="msg-actions">
               <button

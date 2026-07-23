@@ -1,0 +1,30 @@
+{
+  "chat_modes": ["research", "stock"],
+  "roles": [],
+  "default_roles": ["quant-analyst"],
+  "triggers": [
+    "MACD回测",
+    "MACD测试",
+    "策略回测",
+    "回归测试",
+    "收益测试",
+    "历史回测",
+    "历史数据测试",
+    "跑历史数据",
+    "净值曲线",
+    "最大回撤",
+    "Sharpe",
+    "交易明细",
+    "策略验证"
+  ],
+  "tool_names": ["run_macd_backtest"],
+  "criteria": [
+    {
+      "code": "backtest.result",
+      "description": "取得包含数据区间、参数、指标、交易和完整报告链接的确定性回测结果。",
+      "tool_names": ["run_macd_backtest"],
+      "validation_profile": "backtest"
+    }
+  ],
+  "output_contract": ["策略参数", "数据区间", "核心指标", "逐笔交易", "置信度", "局限", "完整报告链接"]
+}

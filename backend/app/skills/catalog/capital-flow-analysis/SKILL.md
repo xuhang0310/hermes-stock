@@ -1,0 +1,54 @@
+---
+name: capital-flow-analysis
+description: 分析 A 股资金流向、龙虎榜、融资融券、筹码分布、换手和量价资金行为。用户询问主力资金、北向资金、游资、融资盘、筹码、龙虎榜或极端波动背后的资金结构时使用。
+compatibility: Requires configured TuShare or equivalent capital-flow data endpoints.
+metadata:
+  hermes-display-name: 资金行为与筹码分析
+  hermes-category: quantitative
+  hermes-version: "3.0.0"
+  hermes-risk-level: medium
+allowed-tools: get_capital_flow get_top_list get_margin_detail get_chip_distribution
+---
+
+# 资金行为与筹码分析
+
+资金数据的统计口径差异很大。先解释“这组数据统计了什么”，再解释它可能意味着什么。
+
+## 执行流程
+
+1. 确认标的、日期窗口和是否存在停牌、除权或异常换手。
+2. 获取资金流、龙虎榜、融资融券或筹码数据。
+3. 记录来源、统计口径、单位和数据日期。
+4. 将单日数据放入至少 5 至 20 个交易日的背景中。
+5. 用价格、成交量和换手率交叉验证。
+6. 区分方向性证据、情绪性证据和无法归因的数据。
+
+## 口径纪律
+
+- “主力净流入”通常是按成交单大小分类，不等于某个可识别机构真实买入。
+- 龙虎榜只覆盖满足披露条件的交易日和席位，不代表全部资金。
+- 融资余额增长可能来自看多，也可能是价格上涨带来的余额变化。
+- 筹码分布是模型估算，不是账户级真实持仓。
+- 不同平台资金流数值不可直接拼接。
+
+详细口径见 [references/caliber.md](references/caliber.md)。
+
+## 组合判断
+
+至少回答：
+
+- 资金行为是单日异常还是持续趋势？
+- 价格是否确认资金方向？
+- 融资、龙虎榜和筹码信号是否相互一致？
+- 是否存在事件驱动造成的短期失真？
+- 如果结论错误，下一步会看到什么信号？
+
+## 输出结构
+
+```markdown
+## 数据窗口与来源口径
+## 资金流和交易结构
+## 融资融券 / 龙虎榜 / 筹码
+## 与价格量能的交叉确认
+## 可能解释、反方解释与失效条件
+```

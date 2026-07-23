@@ -758,6 +758,7 @@ export type AgentMessage = {
   attachments: AgentAttachment[]
   error: string | null
   duration_ms: number | null
+  backtest_run_id: string | null
   created_at: string
 }
 
@@ -806,6 +807,43 @@ export type StockStrategy = {
   id: string
   name: string
   description: string
+}
+
+export type AgentSkillCriterion = {
+  code: string
+  description: string
+  required: boolean
+  min_evidence: number
+  validation_profile: string
+  max_age_days: number | null
+}
+
+export type AgentSkill = {
+  name: string
+  display_name: string
+  summary: string
+  description: string
+  version: string
+  category: string
+  risk_level: 'low' | 'medium' | 'high' | string
+  compatibility: string
+  license: string
+  chat_modes: string[]
+  roles: string[]
+  tool_names: string[]
+  allowed_tools: string[]
+  resources: string[]
+  output_contract: string[]
+  professional_body_available: boolean
+  content_sha256: string
+  criteria: AgentSkillCriterion[]
+  available_tool_names: string[]
+  unavailable_tool_names: string[]
+  availability: 'ready' | 'partial'
+  readiness_percent: number
+  instructions?: string
+  professional_body?: string
+  metadata?: Record<string, string>
 }
 
 export type AgentStreamEvent = {
@@ -859,4 +897,106 @@ export type AgentStreamEvent = {
   total?: number
   summary?: string
   deadline_at?: string
+  report_run_id?: string
+  report_url?: string
+}
+
+export type BacktestMetrics = {
+  initial_cash: number
+  final_equity: number
+  total_return: number
+  annual_return: number
+  max_drawdown: number
+  sharpe: number
+  sortino: number
+  calmar: number
+  win_rate: number
+  profit_loss_ratio: number
+  trade_count: number
+  winning_trades: number
+  losing_trades: number
+  avg_holding_days: number
+  benchmark_return?: number | null
+  excess_return?: number | null
+  information_ratio?: number | null
+  alpha_daily?: number | null
+  alpha_annual?: number | null
+  alpha_t_stat?: number | null
+  beta?: number | null
+  r_squared?: number | null
+}
+
+export type BacktestPricePoint = {
+  time: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  macd: number
+  signal: number
+  histogram: number
+}
+
+export type BacktestTrade = {
+  symbol: string
+  direction: 'long' | 'short'
+  entry_date: string
+  exit_date: string
+  entry_price: number
+  exit_price: number
+  quantity: number
+  holding_days: number
+  gross_pnl: number
+  fees: number
+  pnl: number
+  return_pct: number
+  exit_reason: string
+}
+
+export type BacktestRun = {
+  run_id: string
+  report_url: string
+  status: string
+  symbol: string
+  strategy: {
+    code: string
+    name: string
+    timeframe: string
+    source: string
+  }
+  period: {
+    start_date: string
+    end_date: string
+    trading_days: number
+  }
+  config: Record<string, string | number>
+  metrics: BacktestMetrics
+  confidence: 'insufficient' | 'low' | 'medium' | string
+  rating: string
+  warnings: string[]
+  price_series: BacktestPricePoint[]
+  trade_markers: Array<{
+    time: string
+    position: 'aboveBar' | 'belowBar'
+    shape: 'arrowUp' | 'arrowDown'
+    text: string
+  }>
+  equity_curve: Array<{ time: string; equity: number; drawdown: number }>
+  trades: BacktestTrade[]
+  attribution: {
+    top_winner?: BacktestTrade | null
+    top_loser?: BacktestTrade | null
+    remove_top_winner_pnl?: number | null
+    exit_reasons: Array<{
+      reason: string
+      count: number
+      total_pnl: number
+      avg_pnl: number
+      win_rate: number
+    }>
+  }
+  summary_markdown: string
+  source_code?: string | null
+  data_fingerprint: string
 }

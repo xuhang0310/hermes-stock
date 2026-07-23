@@ -1,0 +1,17 @@
+{
+  "chat_modes": ["stock", "research"],
+  "roles": [],
+  "default_roles": ["research-analyst", "quant-analyst", "short-term-hunter"],
+  "triggers": ["股价", "行情", "走势", "k线", "K线", "涨跌", "最新价", "复盘", "成交量", "收盘价"],
+  "tool_names": ["resolve_stock", "get_latest_price", "get_realtime_quote", "get_tushare_daily"],
+  "criteria": [
+    {
+      "code": "market.current_price",
+      "description": "取得可追溯的标的行情或近期价格序列，并明确数据日期。",
+      "tool_names": ["get_latest_price", "get_realtime_quote", "get_tushare_daily"],
+      "validation_profile": "market_data",
+      "max_age_days": 7
+    }
+  ],
+  "output_contract": ["标的代码", "数据日期", "价格或K线序列", "量价状态", "数据来源与实时性"]
+}
