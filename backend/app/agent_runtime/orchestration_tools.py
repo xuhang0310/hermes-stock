@@ -16,6 +16,47 @@ def _tool(name: str, description: str, parameters: dict[str, Any]) -> dict[str, 
 
 TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
     _tool(
+        "list_workflow_templates",
+        "列出系统内置、已审核的 Swarm DAG 工作流模板、变量、角色和依赖关系。"
+        "当任务需要固定研究流程、阶段依赖、风控签核或可恢复执行时，先调用本工具。",
+        {"properties": {}, "required": []},
+    ),
+    _tool(
+        "run_agent_workflow",
+        "启动一个持久化 Swarm DAG 工作流。工作流节点按依赖自动解锁，同层并行执行，"
+        "失败会阻断下游，所有节点都保留独立数字人会话。调用后总调度挂起，工作流结束后自动恢复。",
+        {
+            "properties": {
+                "template_code": {
+                    "type": "string",
+                    "enum": [
+                        "quant_strategy_desk",
+                        "portfolio_review_board",
+                        "investment_committee",
+                        "fundamental_research_team",
+                        "risk_committee",
+                    ],
+                    "description": "必须使用 list_workflow_templates 返回的模板 code。",
+                },
+                "objective": {"type": "string", "description": "本次工作流要完成的总目标。"},
+                "variables": {
+                    "type": "object",
+                    "description": "模板变量，例如 target、market、period、horizon。",
+                    "additionalProperties": {
+                        "type": ["string", "number", "boolean"],
+                    },
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 300,
+                    "maximum": 7200,
+                    "default": 1800,
+                },
+            },
+            "required": ["template_code", "objective", "variables"],
+        },
+    ),
+    _tool(
         "list_delegatable_agents",
         "列出总调度当前可以委派的数字人、职责和只读限制。拆分复杂任务前先调用。",
         {"properties": {}, "required": []},
@@ -164,6 +205,12 @@ SCHEDULE_MUTATION_TOOL_NAMES = frozenset(
 
 ORCHESTRATION_PROMPT = """
 
+Swarm 工作流规则：
+- 对量化策略、组合复盘、投资决策、基本面深研或风险审计，先调用 list_workflow_templates，
+  命中模板时优先使用 run_agent_workflow。
+- Swarm 节点和依赖由模板决定，不要再把同一模板重复拆成动态 Agent Team。
+- 只有临时、动态、无法套用标准模板的并行协作才使用 dispatch_agent_tasks。
+
 总调度编排规则：
 1. 简单问题直接回答；只有跨专业、可并行且需要汇总证据的复杂任务才创建 Agent Team。
 2. 委派前先调用 list_delegatable_agents，必须逐字复制返回的 agent_code，禁止翻译、改成下划线或自行创造代码。一轮调度中每个 agent_code 只能出现一次；同一数字人的多个工作要求必须合并为一个编号工作包，禁止为不同股票或不同步骤重复创建同一数字人的子任务。最多使用 20 个不同数字人。
@@ -176,6 +223,8 @@ ORCHESTRATION_PROMPT = """
 
 
 TOOL_DISPLAY_NAMES = {
+    "list_workflow_templates": "查看 Swarm 工作流模板",
+    "run_agent_workflow": "运行 Swarm 工作流",
     "list_delegatable_agents": "查看可委派数字人",
     "dispatch_agent_tasks": "派发 Agent Team",
     "list_agent_schedules": "查看定时 Agent 任务",

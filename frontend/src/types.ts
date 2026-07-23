@@ -743,7 +743,7 @@ export type AgentSession = {
   status: string
   message_count: number
   updated_at: string
-  source_type: 'web' | 'feishu' | 'scheduler' | 'delegation' | string
+  source_type: 'web' | 'feishu' | 'scheduler' | 'delegation' | 'workflow' | string
   source_label: string
   source_identifier: string | null
   read_only: boolean
@@ -794,7 +794,7 @@ export type AgentSessionDetail = {
   digital_human_name: string | null
   model_config_id: number | null
   model_display_name: string | null
-  source_type: 'web' | 'feishu' | 'scheduler' | 'delegation' | string
+  source_type: 'web' | 'feishu' | 'scheduler' | 'delegation' | 'workflow' | string
   source_label: string
   source_identifier: string | null
   read_only: boolean
@@ -846,6 +846,50 @@ export type AgentSkill = {
   metadata?: Record<string, string>
 }
 
+export type AgentWorkflowTemplate = {
+  code: string
+  name: string
+  description: string
+  category: string
+  version: number
+  variables: Record<string, { required?: boolean; default?: string; description?: string }>
+  nodes: Array<{
+    key: string
+    role: string
+    agent_code: string
+    depends_on: string[]
+    expected_output?: string | null
+  }>
+}
+
+export type AgentWorkflowRun = {
+  workflow_run_id: string
+  template_code: string
+  template_version: number
+  objective: string
+  variables: Record<string, unknown>
+  status: string
+  deadline_at: string | null
+  finished_at: string | null
+  summary: string | null
+  nodes: Array<{
+    node_key: string
+    node_index: number
+    role_name: string
+    agent_code: string
+    depends_on: string[]
+    child_run_id: string | null
+    status: string
+    attempt: number
+    max_attempts: number
+    result: Record<string, unknown>
+    error: string | null
+    started_at: string | null
+    finished_at: string | null
+  }>
+  error: string | null
+}
+
 export type AgentStreamEvent = {
   type: string
   run_id?: string
@@ -884,6 +928,13 @@ export type AgentStreamEvent = {
   retry_after_ms?: number
   reset_stream?: boolean
   team_id?: string
+  workflow_run_id?: string
+  template_code?: string
+  template_version?: number
+  node_key?: string
+  node_count?: number
+  role_name?: string
+  depends_on?: string[]
   child_run_id?: string
   agent_code?: string
   agent_name?: string

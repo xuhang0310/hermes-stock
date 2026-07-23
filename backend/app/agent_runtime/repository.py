@@ -20,6 +20,8 @@ from backend.app.core.models import (
     AgentRunStep,
     AgentDelegation,
     AgentTeamRun,
+    AgentWorkflowRun,
+    AgentWorkflowNodeRun,
     AgentToolApproval,
     AgentToolExecution,
 )
@@ -415,6 +417,14 @@ class AgentRunRepository:
             if delegation is not None and delegation.status == "queued":
                 delegation.status = "running"
                 delegation.started_at = now
+            workflow_node = db.scalar(
+                select(AgentWorkflowNodeRun).where(
+                    AgentWorkflowNodeRun.child_run_id == row.run_id
+                ).limit(1)
+            )
+            if workflow_node is not None and workflow_node.status == "queued":
+                workflow_node.status = "running"
+                workflow_node.started_at = workflow_node.started_at or now
             db.commit()
             db.refresh(row)
             return _run_dict(row)
@@ -499,11 +509,18 @@ class AgentRunRepository:
                     AgentTeamRun.status == "running",
                 ).limit(1)
             )
-            row.status = "waiting_children" if active_team else "queued"
+            active_workflow = db.scalar(
+                select(AgentWorkflowRun.workflow_run_id).where(
+                    AgentWorkflowRun.leader_run_id == run_id,
+                    AgentWorkflowRun.status == "running",
+                ).limit(1)
+            )
+            has_children = bool(active_team or active_workflow)
+            row.status = "waiting_children" if has_children else "queued"
             row.worker_id = None
             row.heartbeat_at = _utcnow()
             db.commit()
-            return active_team is None
+            return not has_children
 
     def requeue(self, run_id: str, *, error: str | None = None) -> bool:
         with self.session_factory() as db:

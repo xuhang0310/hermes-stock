@@ -261,14 +261,25 @@ class AgentRunExecutor:
         log_event("agent", "ERROR", "Durable Agent worker failed", run_id=run_id, error=error[:500])
 
     async def _notify_team_parent(self, run_id: str) -> None:
-        result = await asyncio.to_thread(self.team_service.on_child_terminal, run_id)
-        if not result or not result.get("parent_run_id"):
-            return
-        parent_run_id = str(result["parent_run_id"])
-        for seq in result.get("event_seqs") or []:
-            await self.broker.publish_event(parent_run_id, int(seq))
-        if result.get("parent_requeued"):
-            await self.broker.enqueue(parent_run_id)
+        results = [await asyncio.to_thread(self.team_service.on_child_terminal, run_id)]
+        from backend.app.agent_runtime.workflow_service import AgentWorkflowService
+
+        workflow_service = AgentWorkflowService(
+            self.repository.session_factory,
+            self.repository,
+        )
+        results.append(await asyncio.to_thread(workflow_service.on_child_terminal, run_id))
+        for result in results:
+            if not result:
+                continue
+            parent_run_id = str(result.get("parent_run_id") or "")
+            if parent_run_id:
+                for seq in result.get("event_seqs") or []:
+                    await self.broker.publish_event(parent_run_id, int(seq))
+            for child_run_id in result.get("queued_run_ids") or []:
+                await self.broker.enqueue(str(child_run_id))
+            if result.get("parent_requeued") and parent_run_id:
+                await self.broker.enqueue(parent_run_id)
 
     @staticmethod
     def _total_duration_ms(run: dict[str, Any], attempt_started: float) -> int:

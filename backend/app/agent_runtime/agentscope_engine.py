@@ -74,6 +74,10 @@ def _tool_display_name(name: str) -> str:
 def _tool_preview(name: str, result: dict[str, Any]) -> str:
     if "error" in result:
         return str(result["error"])
+    if name == "list_workflow_templates":
+        return f"可用 Swarm 工作流模板 {len(result.get('templates', []))} 套。"
+    if name == "run_agent_workflow":
+        return str(result.get("summary") or f"Swarm 工作流 {result.get('status', '已完成')}。")
     if name == "list_delegatable_agents":
         return f"可委派数字人 {len(result.get('agents', []))} 个。"
     if name == "dispatch_agent_tasks":
@@ -254,6 +258,10 @@ def _execute_tool(
                 int(request_payload["user_id"]),
             )
         }
+    if name == "list_workflow_templates":
+        from backend.app.agent_runtime.workflow_service import agent_workflow_service
+
+        return {"templates": agent_workflow_service.list_templates()}
     if name in SCHEDULE_MUTATION_TOOL_NAMES or name == "list_agent_schedules":
         from backend.app.scheduler.schedule_service import agent_schedule_service
 
@@ -304,7 +312,7 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
             self.spec = tool_spec(self.name, write_names=write_names)
             self.is_concurrency_safe = self.spec.is_concurrency_safe
             self.is_read_only = self.spec.is_read_only
-            self.is_external_tool = self.name == "dispatch_agent_tasks"
+            self.is_external_tool = self.name in {"dispatch_agent_tasks", "run_agent_workflow"}
 
         async def check_permissions(self, tool_input, _context):
             risk = classify_tool_risk(self.name, tool_input, write_names)
@@ -423,12 +431,16 @@ def _resume_event(run_id: str, state):
         return UserConfirmResultEvent(reply_id=state.reply_id, confirm_results=results), resolved_events
 
     from backend.app.agent_runtime.team_service import agent_team_service
+    from backend.app.agent_runtime.workflow_service import agent_workflow_service
 
     execution_results = []
     for tool_call in pending_calls:
         if str(tool_call.state) != "submitted":
             continue
-        result = agent_team_service.result_for_tool_call(run_id, tool_call.id)
+        if tool_call.name == "run_agent_workflow":
+            result = agent_workflow_service.result_for_tool_call(run_id, tool_call.id)
+        else:
+            result = agent_team_service.result_for_tool_call(run_id, tool_call.id)
         if result is None:
             raise RuntimeError("Agent Team 尚未完成，拒绝提前恢复总调度。")
         failed = result.get("status") == "failed"
@@ -443,8 +455,13 @@ def _resume_event(run_id: str, state):
         )
         resolved_events.append(
             {
-                "type": "team_resumed",
+                "type": (
+                    "workflow_resumed"
+                    if tool_call.name == "run_agent_workflow"
+                    else "team_resumed"
+                ),
                 "team_id": result.get("team_id"),
+                "workflow_run_id": result.get("workflow_run_id"),
                 "tool_call_id": tool_call.id,
                 "status": result.get("status"),
                 "summary": result.get("summary"),
@@ -712,10 +729,11 @@ async def run_agentscope(
         elif isinstance(event, RequireExternalExecutionEvent):
             from backend.app.agent_runtime.redis_broker import redis_broker
             from backend.app.agent_runtime.team_service import agent_team_service
+            from backend.app.agent_runtime.workflow_service import agent_workflow_service
 
             await close_text("thought")
             for tool_call in event.tool_calls:
-                if tool_call.name != "dispatch_agent_tasks":
+                if tool_call.name not in {"dispatch_agent_tasks", "run_agent_workflow"}:
                     raise RuntimeError(f"不支持的外部编排工具：{tool_call.name}")
                 try:
                     args = json.loads(tool_call.input or "{}")
@@ -725,6 +743,49 @@ async def run_agentscope(
                     agent.state.model_dump_json(),
                     [{"type": "team", "tool_call_id": tool_call.id, "status": "creating"}],
                 )
+                if tool_call.name == "run_agent_workflow":
+                    workflow = await asyncio.to_thread(
+                        agent_workflow_service.start_workflow,
+                        leader_run_id=run_id,
+                        tool_call_id=tool_call.id,
+                        arguments=args,
+                    )
+                    waiting.append(
+                        {
+                            "type": "workflow",
+                            "workflow_run_id": workflow["workflow_run_id"],
+                            "tool_call_id": tool_call.id,
+                            "status": workflow["status"],
+                            "deadline_at": workflow["deadline_at"],
+                        }
+                    )
+                    await emit(
+                        {
+                            "type": "workflow_created",
+                            "workflow_run_id": workflow["workflow_run_id"],
+                            "template_code": workflow["template_code"],
+                            "template_version": workflow["template_version"],
+                            "objective": workflow["objective"],
+                            "node_count": len(workflow["nodes"]),
+                            "deadline_at": workflow["deadline_at"],
+                        }
+                    )
+                    for node in workflow["nodes"]:
+                        await emit(
+                            {
+                                "type": "workflow_node_status",
+                                "workflow_run_id": workflow["workflow_run_id"],
+                                "node_key": node["node_key"],
+                                "role_name": node["role_name"],
+                                "agent_code": node["agent_code"],
+                                "status": node["status"],
+                                "depends_on": node["depends_on"],
+                                "child_run_id": node["child_run_id"],
+                            }
+                        )
+                    for child_run_id in workflow.get("queued_run_ids") or []:
+                        await redis_broker.enqueue(child_run_id)
+                    continue
                 team = await asyncio.to_thread(
                     agent_team_service.start_team,
                     leader_run_id=run_id,

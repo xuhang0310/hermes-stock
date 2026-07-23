@@ -2040,14 +2040,14 @@ def _session_visibility(context: AuthContext):
     owned_session = and_(
         AiChatSession.user_id == context.user.id,
         or_(
-            AiChatSession.source_type.in_(["web", "delegation"]),
+            AiChatSession.source_type.in_(["web", "delegation", "workflow"]),
             AiChatSession.source_type.is_(None),
         ),
     )
     if "all" in context.permissions or "digital_human:manage" in context.permissions:
         return or_(
             owned_session,
-            AiChatSession.source_type.in_(["feishu", "scheduler", "delegation"]),
+            AiChatSession.source_type.in_(["feishu", "scheduler", "delegation", "workflow"]),
         )
     return owned_session
 
@@ -2072,12 +2072,20 @@ def _session_source_out(row: AiChatSession) -> dict:
         team_marker = (team_id or row.external_conversation_id)[:8].upper()
         index_marker = f"-{child_task_index:02d}" if child_task_index is not None else ""
         source_identifier = f"TEAM-{team_marker}{index_marker}"
-    is_child_task = source_type == "delegation"
+    elif source_type == "workflow" and row.external_conversation_id:
+        workflow_id, _, remainder = row.external_conversation_id.partition(":")
+        node_key, _, attempt = remainder.partition(":")
+        workflow_marker = (workflow_id or row.external_conversation_id)[:8].upper()
+        attempt_marker = f"-{attempt.upper()}" if attempt else ""
+        source_identifier = f"SWARM-{workflow_marker}-{node_key[:16].upper()}{attempt_marker}"
+    is_child_task = source_type in {"delegation", "workflow"}
     return {
         "source_type": source_type,
         "source_label": (
             "Agent Team 子任务"
-            if is_child_task
+            if is_child_task and source_type == "delegation"
+            else "Swarm 工作流子任务"
+            if source_type == "workflow"
             else row.source_label or ("网页" if source_type == "web" else source_type)
         ),
         "source_identifier": source_identifier,
@@ -2656,6 +2664,56 @@ def agent_run_team_status(
     return team
 
 
+@router.get("/agent/workflows/templates")
+def agent_workflow_templates(
+    _context: AuthContext = Depends(require_permission("agent:use")),
+) -> list[dict]:
+    from backend.app.agent_runtime.workflow_service import agent_workflow_service
+
+    return agent_workflow_service.list_templates()
+
+
+@router.get("/agent/runs/{run_id}/workflow")
+def agent_run_workflow_status(
+    run_id: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    from backend.app.agent_runtime.workflow_service import agent_workflow_service
+
+    run = agent_run_repository.get_run(run_id, user_id=context.user.id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
+    workflow = agent_workflow_service.workflow_for_run(run_id, user_id=context.user.id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="该 Agent 任务没有 Swarm 工作流记录")
+    return workflow
+
+
+@router.post("/agent/workflows/{workflow_run_id}/nodes/{node_key}/retry")
+async def retry_agent_workflow_node(
+    workflow_run_id: str,
+    node_key: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    from backend.app.agent_runtime.redis_broker import redis_broker
+    from backend.app.agent_runtime.workflow_service import agent_workflow_service
+
+    try:
+        workflow = await asyncio.to_thread(
+            agent_workflow_service.retry_node,
+            workflow_run_id,
+            node_key,
+            user_id=context.user.id,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="工作流或节点不存在") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    for child_run_id in workflow.pop("queued_run_ids", []):
+        await redis_broker.enqueue(child_run_id)
+    return workflow
+
+
 @router.get("/agent/runs/{run_id}/audit")
 def agent_run_research_audit(
     run_id: str,
@@ -2752,6 +2810,9 @@ async def cancel_agent_run(
     from backend.app.agent_runtime.team_service import agent_team_service
 
     await asyncio.to_thread(agent_team_service.cancel_for_parent, run_id)
+    from backend.app.agent_runtime.workflow_service import agent_workflow_service
+
+    await asyncio.to_thread(agent_workflow_service.cancel_for_parent, run_id)
     from backend.app.agent_runtime.tool_repository import tool_execution_repository
 
     await asyncio.to_thread(tool_execution_repository.cancel_for_run, run_id)

@@ -25,8 +25,10 @@ class AgentRuntimeWorker:
         self.broker = broker
         self.executor = AgentRunExecutor(repository, broker)
         from backend.app.agent_runtime.team_service import AgentTeamService
+        from backend.app.agent_runtime.workflow_service import AgentWorkflowService
 
         self.team_service = AgentTeamService(repository.session_factory, repository)
+        self.workflow_service = AgentWorkflowService(repository.session_factory, repository)
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._running: set[asyncio.Task[bool]] = set()
@@ -101,6 +103,9 @@ class AgentRuntimeWorker:
                         await self.broker.enqueue(run_id)
                 resumed_team_runs = await asyncio.to_thread(self.team_service.reconcile)
                 for run_id in resumed_team_runs:
+                    await self.broker.enqueue(run_id)
+                resumed_workflow_runs = await asyncio.to_thread(self.workflow_service.reconcile)
+                for run_id in resumed_workflow_runs:
                     await self.broker.enqueue(run_id)
             if now - last_cleanup >= 3600:
                 last_cleanup = now

@@ -825,6 +825,111 @@ class AgentDelegation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class AgentWorkflowTemplate(Base):
+    """Stable identity for a reviewed, reusable Agent workflow."""
+
+    __tablename__ = "agent_workflow_templates"
+
+    template_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    code: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    category: Mapped[str] = mapped_column(String(80), nullable=False, default="research")
+    current_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="enabled", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentWorkflowTemplateVersion(Base):
+    """Immutable DAG definition for one workflow template version."""
+
+    __tablename__ = "agent_workflow_template_versions"
+    __table_args__ = (
+        UniqueConstraint("template_id", "version", name="uq_agent_workflow_template_version"),
+    )
+
+    version_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    template_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("agent_workflow_templates.template_id"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    definition_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AgentWorkflowRun(Base):
+    """Durable execution of a versioned DAG, owned by a leader Agent run."""
+
+    __tablename__ = "agent_workflow_runs"
+    __table_args__ = (
+        UniqueConstraint("leader_run_id", "tool_call_id", name="uq_agent_workflow_leader_call"),
+        Index("ix_agent_workflow_runs_status_deadline", "status", "deadline_at"),
+    )
+
+    workflow_run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    template_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("agent_workflow_templates.template_id"), nullable=False
+    )
+    template_version_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("agent_workflow_template_versions.version_id"), nullable=False
+    )
+    template_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    template_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    leader_run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    root_run_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    objective: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    variables_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    result_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AgentWorkflowNodeRun(Base):
+    """One durable node in a workflow run; child AgentRun is created when dependencies unlock."""
+
+    __tablename__ = "agent_workflow_node_runs"
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id", "node_key", name="uq_agent_workflow_node"),
+        UniqueConstraint("child_run_id", name="uq_agent_workflow_child_run"),
+        Index("ix_agent_workflow_nodes_status", "workflow_run_id", "status"),
+    )
+
+    node_run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("agent_workflow_runs.workflow_run_id"), nullable=False
+    )
+    node_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    node_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    role_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    target_profile_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_profile_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("digital_human_profiles.id")
+    )
+    instruction_template: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    expected_output: Mapped[str | None] = mapped_column(LONG_TEXT)
+    dependencies_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    child_run_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("agent_runs.run_id")
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="waiting_dependency")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    result_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class AgentRunEvent(Base):
     """Ordered, replayable events for a durable Agent run."""
 

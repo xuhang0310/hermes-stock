@@ -42,6 +42,8 @@ import type {
   ApprovalPolicy,
   AgentStreamEvent,
   AgentSkill,
+  AgentWorkflowRun,
+  AgentWorkflowTemplate,
   ChartResolution,
   StockStrategy,
   WatchlistAgentPendingAction,
@@ -618,6 +620,15 @@ export const api = {
   agentSkills: () => request<AgentSkill[]>('/api/agent/skills/core'),
   agentSkill: (name: string) =>
     request<AgentSkill>(`/api/agent/skills/core/${encodeURIComponent(name)}`),
+  agentWorkflowTemplates: () =>
+    request<AgentWorkflowTemplate[]>('/api/agent/workflows/templates'),
+  agentWorkflow: (runId: string) =>
+    request<AgentWorkflowRun>(`/api/agent/runs/${encodeURIComponent(runId)}/workflow`),
+  retryAgentWorkflowNode: (workflowRunId: string, nodeKey: string) =>
+    request<AgentWorkflowRun>(
+      `/api/agent/workflows/${encodeURIComponent(workflowRunId)}/nodes/${encodeURIComponent(nodeKey)}/retry`,
+      { method: 'POST' }
+    ),
   activeAgentRuns: (params: { chat_mode?: 'research' | 'stock' | 'knowledge'; session_id?: number | null } = {}) => {
     const query = new URLSearchParams()
     if (params.chat_mode) query.set('chat_mode', params.chat_mode)

@@ -398,6 +398,23 @@ function teamEventText(event: AgentStreamEvent) {
   return event.summary || '子任务结果已回流，总调度继续统稿'
 }
 
+function workflowEventText(event: AgentStreamEvent) {
+  if (event.type === 'workflow_created') {
+    return `已启动 ${event.template_code || 'Swarm'} 工作流，共 ${event.node_count || 0} 个节点`
+  }
+  if (event.type === 'workflow_node_status') {
+    const dependencies = event.depends_on?.length ? `，依赖 ${event.depends_on.join('、')}` : ''
+    return `${event.role_name || event.node_key || '工作流节点'}：${event.status || '等待'}${dependencies}`
+  }
+  if (event.type === 'workflow_node_done') {
+    return `${event.role_name || event.node_key || '工作流节点'}：${event.status || '完成'}`
+  }
+  if (event.type === 'workflow_done') {
+    return event.summary || `工作流完成 ${event.completed || 0}/${event.total || 0}`
+  }
+  return event.summary || 'Swarm 工作流结果已回流，总调度继续统稿'
+}
+
 function streamStatusText(message: ChatMessage) {
   if (message.streamStatus === 'connecting') return 'Stream 连接中'
   if (message.streamStatus === 'streaming') return '正在接收模型分片'
@@ -583,6 +600,12 @@ function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: A
     flushReasoning(reply)
     flushThought(reply)
     pushStep(reply, { type: 'team', content: teamEventText(event) })
+  } else if (event.type.startsWith('workflow_')) {
+    reply.streamStatus = 'tooling'
+    reply.liveTool = null
+    flushReasoning(reply)
+    flushThought(reply)
+    pushStep(reply, { type: 'team', content: workflowEventText(event) })
   } else if (event.type === 'action') {
     reply.streamStatus = 'tooling'
     reply.liveTool = null
