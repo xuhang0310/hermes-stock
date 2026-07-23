@@ -12,6 +12,8 @@ from backend.app.data.repository import StockRepository
 
 
 WATCHLIST_AGENT_PROFILE_CODE = "watchlist-entry-agent"
+WATCHLIST_AGENT_GROUP = "我的自选"
+WATCHLIST_AGENT_DEFAULT_REASON = "Agent录入"
 
 _WATCHLIST_WRITE_TOOLS = {"add_watchlist_items", "remove_watchlist_items"}
 _PENDING_ROW_FIELDS = {"symbol", "name", "group_name", "reason"}
@@ -72,8 +74,14 @@ WATCHLIST_AGENT_TOOLS: list[dict[str, Any]] = [
                             "properties": {
                                 "symbol": {"type": "string", "description": "A股代码，如 600519.SH 或 600519"},
                                 "name": {"type": "string", "description": "股票名称；没有代码时用于精确检索"},
-                                "group_name": {"type": "string", "description": "分组，默认 default"},
-                                "reason": {"type": "string", "description": "加入自选的理由，可空"},
+                                "group_name": {
+                                    "type": "string",
+                                    "description": "无需填写；Agent 新增的标的统一归入“我的自选”",
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "用户明确说明的入选理由；用户未说明时无需填写",
+                                },
                             },
                         },
                     }
@@ -413,12 +421,13 @@ def _watchlist_agent_prompt() -> str:
 
 规则：
 1. 用户只给股票名称或代码不确定时，先调用 search_instruments；有多个候选时列出候选并追问，绝不猜测。
-2. 加入自选时尽量记录用户给出的入池理由；未给理由可以留空，不需要追问。
-3. 只有用户明确说“删除、移除、取消自选、踢出”时才调用 remove_watchlist_items；分析、看 K 线、觉得不好都不代表删除。
-4. 删除前先调用 get_current_watchlist 核对当前记录。用户已经明确要求删除时无需二次确认。
-5. 用户只是问能力、打招呼或信息不足时，直接简短回复或追问，不调用写工具。
-6. 是否真正写入以工具 observation 为准，绝不能假装成功。
-7. 只处理 A 股自选池，不执行买卖，不修改持仓。
+2. 加入自选时统一归入“我的自选”分组，不创建其他分组。
+3. 用户明确给出入池理由时原样记录；未给理由时使用“Agent录入”，不需要追问。
+4. 只有用户明确说“删除、移除、取消自选、踢出”时才调用 remove_watchlist_items；分析、看 K 线、觉得不好都不代表删除。
+5. 删除前先调用 get_current_watchlist 核对当前记录。用户已经明确要求删除时无需二次确认。
+6. 用户只是问能力、打招呼或信息不足时，直接简短回复或追问，不调用写工具。
+7. 是否真正写入以工具 observation 为准，绝不能假装成功。
+8. 只处理 A 股自选池，不执行买卖，不修改持仓。
 
 A 股代码规范：6 开头通常为 .SH，0/3 开头通常为 .SZ，4/8 开头通常为 .BJ。
 回复使用简短中文 Markdown，写入后明确列出标的代码、名称和结果。"""
@@ -457,11 +466,12 @@ def _execute_watchlist_tool(
             continue
         try:
             if name == "add_watchlist_items":
+                reason = _bounded_text(raw.get("reason"), max_length=500) or WATCHLIST_AGENT_DEFAULT_REASON
                 changed.append(
                     repository.add_watchlist_item(
                         instrument["symbol"],
-                        str(raw.get("group_name") or "default"),
-                        str(raw.get("reason")).strip() if raw.get("reason") is not None else None,
+                        WATCHLIST_AGENT_GROUP,
+                        reason,
                         added_by=actor,
                         commit=False,
                     )

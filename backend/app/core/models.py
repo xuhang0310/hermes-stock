@@ -29,9 +29,11 @@ class Instrument(Base):
 
 class WatchlistGroup(Base):
     __tablename__ = "watchlist_groups"
+    __table_args__ = (UniqueConstraint("owner_user_id", "name", name="uq_watchlist_group_owner_name"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     max_items: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
@@ -43,9 +45,12 @@ class WatchlistGroup(Base):
 
 class WatchlistItem(Base):
     __tablename__ = "watchlist_items"
-    __table_args__ = (UniqueConstraint("symbol", "group_id", name="uq_watchlist_symbol_group"),)
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "symbol", "group_id", name="uq_watchlist_owner_symbol_group"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     symbol: Mapped[str] = mapped_column(String(24), ForeignKey("instruments.symbol"), nullable=False)
     group_id: Mapped[int] = mapped_column(Integer, ForeignKey("watchlist_groups.id"), nullable=False)
     reason: Mapped[str | None] = mapped_column(Text)
@@ -63,6 +68,7 @@ class Position(Base):
     __tablename__ = "positions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     account_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("position_accounts.id"))
     symbol: Mapped[str] = mapped_column(String(24), ForeignKey("instruments.symbol"), nullable=False)
     position_pct: Mapped[float] = mapped_column(Float, nullable=False)
@@ -83,9 +89,18 @@ class Position(Base):
 
 class PositionAccount(Base):
     __tablename__ = "position_accounts"
-    __table_args__ = (UniqueConstraint("broker_name", "account_no_masked", "account_type", name="uq_position_account"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "broker_name",
+            "account_no_masked",
+            "account_type",
+            name="uq_position_account_owner",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     broker_name: Mapped[str] = mapped_column(String(120), nullable=False, default="manual")
     account_name: Mapped[str | None] = mapped_column(String(120))
     account_no_masked: Mapped[str | None] = mapped_column(String(80))
@@ -111,6 +126,7 @@ class PositionImportBatch(Base):
     __tablename__ = "position_import_batches"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     source_type: Mapped[str] = mapped_column(String(40), nullable=False, default="manual")
     source_name: Mapped[str | None] = mapped_column(String(160))
     account_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("position_accounts.id"))
@@ -130,6 +146,7 @@ class PositionHoldingSnapshot(Base):
     __tablename__ = "position_holding_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     account_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("position_accounts.id"))
     import_batch_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("position_import_batches.id"))
     symbol: Mapped[str] = mapped_column(String(24), ForeignKey("instruments.symbol"), nullable=False)
@@ -187,6 +204,7 @@ class PositionTrade(Base):
     __tablename__ = "position_trades"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     account_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("position_accounts.id"))
     position_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("positions.id"))
     symbol: Mapped[str] = mapped_column(String(24), ForeignKey("instruments.symbol"), nullable=False)

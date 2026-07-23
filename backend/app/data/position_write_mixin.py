@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import desc, select, update
 
 from backend.app.core.models import (
     DailyBar,
@@ -77,13 +77,25 @@ class PositionWriteMixin:
                 _, acc_id = self._unique_open_account_for(norm)
             position = self.db.scalar(
                 select(Position)
-                .where(Position.symbol == norm, Position.status == "open", _account_eq(acc_id))
+                .where(
+                    Position.symbol == norm,
+                    Position.status == "open",
+                    _account_eq(acc_id),
+                    self._owner_clause(Position),
+                )
                 .order_by(desc(Position.id))
                 .limit(1)
             )
             if position is None:
                 position = self.db.scalar(
-                    select(Position).where(Position.symbol == norm, _account_eq(acc_id)).order_by(desc(Position.id)).limit(1)
+                    select(Position)
+                    .where(
+                        Position.symbol == norm,
+                        _account_eq(acc_id),
+                        self._owner_clause(Position),
+                    )
+                    .order_by(desc(Position.id))
+                    .limit(1)
                 )
             if position is not None:
                 # 已关仓的持仓 → 幂等返回，不重复关仓/记流水
@@ -147,7 +159,12 @@ class PositionWriteMixin:
             # 查现有 open position 做累加
             position = self.db.scalar(
                 select(Position)
-                .where(Position.symbol == norm, Position.status == "open", _account_eq(acc_id))
+                .where(
+                    Position.symbol == norm,
+                    Position.status == "open",
+                    _account_eq(acc_id),
+                    self._owner_clause(Position),
+                )
                 .order_by(desc(Position.id))
                 .limit(1)
             )
@@ -205,7 +222,12 @@ class PositionWriteMixin:
                 payload["account_id"] = acc_id
             position = self.db.scalar(
                 select(Position)
-                .where(Position.symbol == norm, Position.status == "open", _account_eq(acc_id))
+                .where(
+                    Position.symbol == norm,
+                    Position.status == "open",
+                    _account_eq(acc_id),
+                    self._owner_clause(Position),
+                )
                 .order_by(desc(Position.id))
                 .limit(1)
             )
@@ -258,6 +280,7 @@ class PositionWriteMixin:
         pr = number_or_none(price)
         self.db.add(
             PositionTrade(
+                owner_user_id=self.owner_user_id,
                 account_id=account_id,
                 position_id=position_id,
                 symbol=symbol,
@@ -279,6 +302,7 @@ class PositionWriteMixin:
             select(PositionTrade, PositionAccount, Instrument)
             .outerjoin(PositionAccount, PositionAccount.id == PositionTrade.account_id)
             .outerjoin(Instrument, Instrument.symbol == PositionTrade.symbol)
+            .where(self._owner_clause(PositionTrade))
             .order_by(desc(PositionTrade.created_at), desc(PositionTrade.id))
             .limit(limit)
         )
@@ -311,7 +335,7 @@ class PositionWriteMixin:
     def delete_position_trade(self, trade_id: int) -> dict[str, Any]:
         """删单条流水（不回滚持仓，仅删流水行）。"""
         trade = self.db.get(PositionTrade, trade_id)
-        if trade is None:
+        if trade is None or not self._owns(trade):
             return {"deleted": False, "id": trade_id}
         self.db.add(
             SystemLog(
@@ -356,6 +380,7 @@ class PositionWriteMixin:
         created_by: str | None,
     ) -> PositionImportBatch:
         batch = PositionImportBatch(
+            owner_user_id=self.owner_user_id,
             source_type="ai_ocr",
             source_name=source_name,
             status="pending",
@@ -417,7 +442,11 @@ class PositionWriteMixin:
             return {"error": f"multiple or no open accounts for {norm}; specify account_id"}
         snap = self.db.scalar(
             select(PositionHoldingSnapshot)
-            .where(PositionHoldingSnapshot.symbol == norm, _account_eq(effective_id, PositionHoldingSnapshot))
+            .where(
+                PositionHoldingSnapshot.symbol == norm,
+                _account_eq(effective_id, PositionHoldingSnapshot),
+                self._owner_clause(PositionHoldingSnapshot),
+            )
             .order_by(desc(PositionHoldingSnapshot.as_of_date), desc(PositionHoldingSnapshot.captured_at), desc(PositionHoldingSnapshot.id))
             .limit(1)
         )
@@ -432,7 +461,14 @@ class PositionWriteMixin:
             coerced = str(value).strip() if value is not None else None
         setattr(snap, field, coerced)
         position = self.db.scalar(
-            select(Position).where(Position.symbol == norm, _account_eq(effective_id)).order_by(desc(Position.id)).limit(1)
+            select(Position)
+            .where(
+                Position.symbol == norm,
+                _account_eq(effective_id),
+                self._owner_clause(Position),
+            )
+            .order_by(desc(Position.id))
+            .limit(1)
         )
         if position is not None and hasattr(position, field):
             setattr(position, field, coerced)
@@ -446,14 +482,20 @@ class PositionWriteMixin:
         """
         batch = self.db.scalar(
             select(PositionImportBatch)
-            .where(PositionImportBatch.status.in_(("done", "failed")))
+            .where(
+                PositionImportBatch.status.in_(("done", "failed")),
+                self._owner_clause(PositionImportBatch),
+            )
             .order_by(desc(PositionImportBatch.id))
             .limit(1)
         )
         if batch is None:
             return {"error": "无导入批次可撤销"}
         snaps = self.db.scalars(
-            select(PositionHoldingSnapshot).where(PositionHoldingSnapshot.import_batch_id == batch.id)
+            select(PositionHoldingSnapshot).where(
+                PositionHoldingSnapshot.import_batch_id == batch.id,
+                self._owner_clause(PositionHoldingSnapshot),
+            )
         ).all()
         affected_accounts = {snap.account_id for snap in snaps}
         affected_pairs = {(snap.symbol, snap.account_id) for snap in snaps}
@@ -464,17 +506,31 @@ class PositionWriteMixin:
         for symbol, account_id in affected_pairs:
             latest = self.db.scalar(
                 select(PositionHoldingSnapshot)
-                .where(PositionHoldingSnapshot.symbol == symbol, PositionHoldingSnapshot.account_id == account_id)
+                .where(
+                    PositionHoldingSnapshot.symbol == symbol,
+                    PositionHoldingSnapshot.account_id == account_id,
+                    self._owner_clause(PositionHoldingSnapshot),
+                )
                 .order_by(desc(PositionHoldingSnapshot.as_of_date), desc(PositionHoldingSnapshot.captured_at), desc(PositionHoldingSnapshot.id))
                 .limit(1)
             )
-            positions = self.db.scalars(select(Position).where(Position.symbol == symbol, _account_eq(account_id))).all()
+            positions = self.db.scalars(
+                select(Position).where(
+                    Position.symbol == symbol,
+                    _account_eq(account_id),
+                    self._owner_clause(Position),
+                )
+            ).all()
             if latest is None:
                 for position in positions:
                     self.db.delete(position)
                 continue
             position = positions[0] if positions else Position(
-                symbol=symbol, account_id=account_id, position_pct=latest.position_pct or 0, status=latest.status
+                owner_user_id=self.owner_user_id,
+                symbol=symbol,
+                account_id=account_id,
+                position_pct=latest.position_pct or 0,
+                status=latest.status,
             )
             if not positions:
                 self.db.add(position)
@@ -490,7 +546,7 @@ class PositionWriteMixin:
         for account_id in affected_accounts:
             if account_id is not None:
                 account = self.db.get(PositionAccount, account_id)
-                if account is not None:
+                if account is not None and self._owns(account):
                     self._recompute_account_funds(account)
         self.db.commit()
         return {"batch_id": batch.id, "rolled_back_count": len(snaps)}
@@ -512,7 +568,11 @@ class PositionWriteMixin:
 
         # 删该 symbol+account 的所有 Position 行
         positions = self.db.scalars(
-            select(Position).where(Position.symbol == norm, _account_eq(acc_id))
+            select(Position).where(
+                Position.symbol == norm,
+                _account_eq(acc_id),
+                self._owner_clause(Position),
+            )
         ).all()
         if not positions:
             return {"error": f"未找到 {norm} 的持仓记录", "symbol": norm}
@@ -529,7 +589,9 @@ class PositionWriteMixin:
         # 删该 symbol+account 的所有快照
         snaps = self.db.scalars(
             select(PositionHoldingSnapshot).where(
-                PositionHoldingSnapshot.symbol == norm, _account_eq(acc_id, PositionHoldingSnapshot)
+                PositionHoldingSnapshot.symbol == norm,
+                _account_eq(acc_id, PositionHoldingSnapshot),
+                self._owner_clause(PositionHoldingSnapshot),
             )
         ).all()
         snap_count = len(snaps)
@@ -551,7 +613,7 @@ class PositionWriteMixin:
         # 重算受影响账户资金
         if acc_id is not None:
             account = self.db.get(PositionAccount, acc_id)
-            if account is not None:
+            if account is not None and self._owns(account):
                 self._recompute_account_funds(account)
         self.db.commit()
         return {
@@ -632,6 +694,7 @@ class PositionWriteMixin:
             status = "closed"
 
         snapshot = PositionHoldingSnapshot(
+            owner_user_id=self.owner_user_id,
             account_id=account.id if account else None,
             import_batch_id=import_batch.id if import_batch else None,
             symbol=symbol,
@@ -669,16 +732,32 @@ class PositionWriteMixin:
         acc_id = account.id if account else None
         position = self.db.scalar(
             select(Position)
-            .where(Position.symbol == symbol, Position.status == "open", _account_eq(acc_id))
+            .where(
+                Position.symbol == symbol,
+                Position.status == "open",
+                _account_eq(acc_id),
+                self._owner_clause(Position),
+            )
             .limit(1)
         )
         if position is None:
             position = self.db.scalar(
-                select(Position).where(Position.symbol == symbol, _account_eq(acc_id)).order_by(desc(Position.id)).limit(1)
+                select(Position)
+                .where(
+                    Position.symbol == symbol,
+                    _account_eq(acc_id),
+                    self._owner_clause(Position),
+                )
+                .order_by(desc(Position.id))
+                .limit(1)
             )
         latest_snapshot = self.db.scalar(
             select(PositionHoldingSnapshot)
-            .where(PositionHoldingSnapshot.symbol == symbol, _account_eq(acc_id, PositionHoldingSnapshot))
+            .where(
+                PositionHoldingSnapshot.symbol == symbol,
+                _account_eq(acc_id, PositionHoldingSnapshot),
+                self._owner_clause(PositionHoldingSnapshot),
+            )
             .order_by(
                 desc(PositionHoldingSnapshot.as_of_date),
                 desc(PositionHoldingSnapshot.captured_at),
@@ -688,6 +767,7 @@ class PositionWriteMixin:
         ) or snapshot
         if position is None:
             position = Position(
+                owner_user_id=self.owner_user_id,
                 symbol=symbol,
                 account_id=acc_id,
                 position_pct=latest_snapshot.position_pct or 0,

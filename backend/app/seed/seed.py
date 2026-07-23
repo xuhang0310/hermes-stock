@@ -122,11 +122,27 @@ def seed_notify_channels(db: Session) -> None:
 
 def seed_position_accounts(db: Session) -> None:
     """预置当前在用的券商账户（方正/广发/中信）。按 broker_code 幂等，不覆盖已有资金。"""
+    owner_user_id = db.scalar(
+        select(User.id)
+        .where(User.is_enabled.is_(True))
+        .order_by((User.username == "admin").desc(), User.id)
+        .limit(1)
+    )
+    if owner_user_id is None:
+        return
     for index, code in enumerate(DEFAULT_BROKER_CODES):
-        existing = db.scalar(select(PositionAccount).where(PositionAccount.broker_code == code).limit(1))
+        existing = db.scalar(
+            select(PositionAccount)
+            .where(
+                PositionAccount.owner_user_id == owner_user_id,
+                PositionAccount.broker_code == code,
+            )
+            .limit(1)
+        )
         if existing is None:
             db.add(
                 PositionAccount(
+                    owner_user_id=owner_user_id,
                     broker_code=code,
                     broker_name=broker_name_for(code) or code,
                     account_type="cash",
@@ -447,9 +463,26 @@ def seed_instruments(db: Session) -> None:
 
 
 def seed_watchlist_and_position(db: Session, timestamp: datetime) -> None:
-    group = db.scalar(select(WatchlistGroup).where(WatchlistGroup.name == "默认"))
+    owner_user_id = db.scalar(
+        select(User.id)
+        .where(User.is_enabled.is_(True))
+        .order_by((User.username == "admin").desc(), User.id)
+        .limit(1)
+    )
+    if owner_user_id is None:
+        return
+    group = db.scalar(
+        select(WatchlistGroup).where(
+            WatchlistGroup.owner_user_id == owner_user_id,
+            WatchlistGroup.name == "我的自选",
+        )
+    )
     if group is None:
-        group = WatchlistGroup(name="默认", description="第一阶段仅监控持仓、自选池和核心指数")
+        group = WatchlistGroup(
+            owner_user_id=owner_user_id,
+            name="我的自选",
+            description="用户自选标的与核心观察池",
+        )
         db.add(group)
         db.flush()
 
@@ -461,19 +494,35 @@ def seed_watchlist_and_position(db: Session, timestamp: datetime) -> None:
             select(WatchlistItem).where(
                 WatchlistItem.symbol == symbol,
                 WatchlistItem.group_id == group.id,
+                WatchlistItem.owner_user_id == owner_user_id,
             )
         )
         if item is None:
-            db.add(WatchlistItem(symbol=symbol, group_id=group.id, reason=reason, status="active"))
+            db.add(
+                WatchlistItem(
+                    owner_user_id=owner_user_id,
+                    symbol=symbol,
+                    group_id=group.id,
+                    reason=reason,
+                    status="active",
+                )
+            )
         else:
             item.reason = reason
             item.status = "active"
             item.removed_at = None
 
-    position = db.scalar(select(Position).where(Position.symbol == "000001.SZ", Position.status == "open"))
+    position = db.scalar(
+        select(Position).where(
+            Position.owner_user_id == owner_user_id,
+            Position.symbol == "000001.SZ",
+            Position.status == "open",
+        )
+    )
     if position is None:
         db.add(
             Position(
+                owner_user_id=owner_user_id,
                 symbol="000001.SZ",
                 position_pct=8.0,
                 cost_price=10.20,

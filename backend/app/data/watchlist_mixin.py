@@ -17,7 +17,7 @@ class WatchlistMixin:
             select(WatchlistItem, Instrument.name, WatchlistGroup.name.label("group_name"))
             .join(Instrument, Instrument.symbol == WatchlistItem.symbol)
             .join(WatchlistGroup, WatchlistGroup.id == WatchlistItem.group_id)
-            .where(WatchlistItem.status == "active")
+            .where(WatchlistItem.status == "active", self._owner_clause(WatchlistItem))
             .order_by(desc(WatchlistItem.updated_at))
         ).all()
         return [
@@ -49,19 +49,33 @@ class WatchlistMixin:
         if instrument is None:
             raise ValueError(f"unknown instrument: {normalized_symbol}")
 
-        group = self.db.scalar(select(WatchlistGroup).where(WatchlistGroup.name == normalized_group))
+        group = self.db.scalar(
+            select(WatchlistGroup).where(
+                WatchlistGroup.name == normalized_group,
+                self._owner_clause(WatchlistGroup),
+            )
+        )
         if group is None:
-            group = WatchlistGroup(name=normalized_group, description="用户创建的自选池分组")
+            group = WatchlistGroup(
+                owner_user_id=self.owner_user_id,
+                name=normalized_group,
+                description="用户创建的自选池分组",
+            )
             self.db.add(group)
             self.db.flush()
 
         item = self.db.scalar(
-            select(WatchlistItem).where(WatchlistItem.symbol == normalized_symbol, WatchlistItem.group_id == group.id)
+            select(WatchlistItem).where(
+                WatchlistItem.symbol == normalized_symbol,
+                WatchlistItem.group_id == group.id,
+                self._owner_clause(WatchlistItem),
+            )
         )
         if item is None:
             item = WatchlistItem(
                 symbol=normalized_symbol,
                 group_id=group.id,
+                owner_user_id=self.owner_user_id,
                 reason=reason,
                 added_by=added_by[:80] or "user",
                 status="active",
@@ -109,7 +123,7 @@ class WatchlistMixin:
         query = (
             select(WatchlistItem, WatchlistGroup.name.label("group_name"))
             .join(WatchlistGroup, WatchlistGroup.id == WatchlistItem.group_id)
-            .where(WatchlistItem.status == "active")
+            .where(WatchlistItem.status == "active", self._owner_clause(WatchlistItem))
         )
         if item_id is not None:
             query = query.where(WatchlistItem.id == item_id)

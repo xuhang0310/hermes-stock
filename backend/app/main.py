@@ -282,7 +282,7 @@ def create_app(init_db: bool = True) -> FastAPI:
         repository: StockRepository = Depends(repo),
         context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> dict:
-        return repository.dashboard(user_id=context.user.id)
+        return repository.for_user(context.user.id).dashboard(user_id=context.user.id)
 
     @app.get("/api/events")
     def events(
@@ -307,9 +307,9 @@ def create_app(init_db: bool = True) -> FastAPI:
     def positions(
         account_id: int | None = Query(default=None),
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("dashboard:view")),
+        context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> list[dict]:
-        return repository.positions(account_id)
+        return repository.for_user(context.user.id).positions(account_id)
 
     @app.get("/api/positions/brokers")
     def position_brokers(
@@ -322,27 +322,30 @@ def create_app(init_db: bool = True) -> FastAPI:
     @app.get("/api/positions/accounts")
     def position_accounts(
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("dashboard:view")),
+        context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> list[dict]:
-        return repository.list_position_accounts()
+        return repository.for_user(context.user.id).list_position_accounts()
 
     @app.post("/api/positions/accounts")
     def create_position_account(
         payload: PositionAccountIn,
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("data:write")),
+        context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
-        return repository.create_position_account(payload.model_dump())
+        return repository.for_user(context.user.id).create_position_account(payload.model_dump())
 
     @app.patch("/api/positions/accounts/{account_id}")
     def update_position_account(
         account_id: int,
         payload: PositionAccountPatchIn,
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("data:write")),
+        context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
-            return repository.update_position_account(account_id, payload.model_dump(exclude_none=True))
+            return repository.for_user(context.user.id).update_position_account(
+                account_id,
+                payload.model_dump(exclude_none=True),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -351,10 +354,13 @@ def create_app(init_db: bool = True) -> FastAPI:
         account_id: int,
         payload: AccountFundsIn,
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("data:write")),
+        context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
-            return repository.update_account_funds(account_id, payload.available_cash)
+            return repository.for_user(context.user.id).update_account_funds(
+                account_id,
+                payload.available_cash,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -362,9 +368,9 @@ def create_app(init_db: bool = True) -> FastAPI:
     def positions_summary(
         account_id: int | None = Query(default=None),
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("dashboard:view")),
+        context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> dict:
-        return repository.positions_summary(account_id)
+        return repository.for_user(context.user.id).positions_summary(account_id)
 
     @app.get("/api/positions/trades")
     def position_trades(
@@ -372,19 +378,23 @@ def create_app(init_db: bool = True) -> FastAPI:
         account_id: int | None = Query(default=None),
         limit: int = Query(default=100, ge=1, le=500),
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("dashboard:view")),
+        context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> list[dict]:
         """买卖交易流水查询，按时间倒序。"""
-        return repository.position_trades(symbol=symbol, account_id=account_id, limit=limit)
+        return repository.for_user(context.user.id).position_trades(
+            symbol=symbol,
+            account_id=account_id,
+            limit=limit,
+        )
 
     @app.delete("/api/positions/trades/{trade_id}")
     def delete_position_trade(
         trade_id: int,
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("data:write")),
+        context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         """删单条交易流水（不回滚持仓，仅删流水行）。用于删错单。"""
-        result = repository.delete_position_trade(trade_id)
+        result = repository.for_user(context.user.id).delete_position_trade(trade_id)
         if not result.get("deleted"):
             raise HTTPException(status_code=404, detail="交易流水不存在")
         return result
@@ -396,10 +406,15 @@ def create_app(init_db: bool = True) -> FastAPI:
         refresh: bool = Query(default=False),
         resolution: str = Query(default="1D", max_length=8),
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("dashboard:view")),
+        context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> dict:
         try:
-            return repository.position_chart(symbol, limit=limit, refresh=refresh, resolution=resolution)
+            return repository.for_user(context.user.id).position_chart(
+                symbol,
+                limit=limit,
+                refresh=refresh,
+                resolution=resolution,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -407,12 +422,17 @@ def create_app(init_db: bool = True) -> FastAPI:
     def add_position(
         payload: PositionHoldingIn,
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("data:write")),
+        context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
             data = payload.model_dump(exclude_none=True)
             action = data.pop("action", None)
-            return repository.merge_position_holding(data, action=action, source_type="manual", commit=True)
+            return repository.for_user(context.user.id).merge_position_holding(
+                data,
+                action=action,
+                source_type="manual",
+                commit=True,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -421,11 +441,14 @@ def create_app(init_db: bool = True) -> FastAPI:
         symbol: str,
         account_id: int | None = Query(default=None),
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("data:write")),
+        context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         """物理删除一条持仓记录及其历史快照（不可逆）。用于录错重来的场景。"""
         try:
-            result = repository.delete_position(symbol, account_id=account_id)
+            result = repository.for_user(context.user.id).delete_position(
+                symbol,
+                account_id=account_id,
+            )
             if "error" in result:
                 raise HTTPException(status_code=404, detail=result["error"])
             return result
@@ -444,6 +467,7 @@ def create_app(init_db: bool = True) -> FastAPI:
                 mime_type=payload.mime_type,
                 model_config_id=payload.model_config_id,
             )
+            repository = repository.for_user(context.user.id)
             batch = repository.create_position_import_batch(
                 source_name=parsed["model"].get("display_name") or parsed["model"].get("model_name") or "vision_model",
                 image_mime_type=payload.mime_type,
@@ -480,7 +504,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     ) -> dict:
         try:
             result = run_position_agent(
-                repository=repository,
+                repository=repository.for_user(context.user.id),
                 instruction=payload.instruction,
                 image_base64=payload.image_base64,
                 mime_type=payload.mime_type,
@@ -546,9 +570,9 @@ def create_app(init_db: bool = True) -> FastAPI:
     @app.get("/api/watchlist")
     def watchlist(
         repository: StockRepository = Depends(repo),
-        _context: AuthContext = Depends(require_permission("dashboard:view")),
+        context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> list[dict]:
-        return repository.watchlist()
+        return repository.for_user(context.user.id).watchlist()
 
     @app.post("/api/watchlist")
     def add_watchlist_item(
@@ -557,7 +581,7 @@ def create_app(init_db: bool = True) -> FastAPI:
         context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
-            return repository.add_watchlist_item(
+            return repository.for_user(context.user.id).add_watchlist_item(
                 payload.symbol,
                 payload.group_name,
                 payload.reason,
@@ -573,7 +597,10 @@ def create_app(init_db: bool = True) -> FastAPI:
         context: AuthContext = Depends(require_permission("data:write")),
     ) -> dict:
         try:
-            return repository.remove_watchlist_item(item_id, removed_by=context.user.username)
+            return repository.for_user(context.user.id).remove_watchlist_item(
+                item_id,
+                removed_by=context.user.username,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

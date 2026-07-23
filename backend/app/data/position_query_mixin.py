@@ -12,7 +12,8 @@ from backend.app.data._helpers import dt
 class PositionQueryMixin:
     def positions(self, account_id: int | None = None) -> list[dict[str, Any]]:
         # 按 (账户, 标的) 取最新快照，使同一 symbol 在不同券商账户各保留一条
-        ranked_snapshots = select(
+        ranked_snapshots = (
+            select(
             PositionHoldingSnapshot.id.label("snapshot_id"),
             PositionHoldingSnapshot.account_id.label("account_id"),
             PositionHoldingSnapshot.symbol.label("symbol"),
@@ -24,7 +25,10 @@ class PositionQueryMixin:
                     desc(PositionHoldingSnapshot.id),
                 ),
             ).label("rank"),
-        ).subquery()
+            )
+            .where(self._owner_clause(PositionHoldingSnapshot))
+            .subquery()
+        )
         query = (
             select(Position, Instrument.name, PositionHoldingSnapshot, PositionAccount)
             .join(Instrument, Instrument.symbol == Position.symbol)
@@ -38,6 +42,7 @@ class PositionQueryMixin:
             )
             .outerjoin(PositionHoldingSnapshot, PositionHoldingSnapshot.id == ranked_snapshots.c.snapshot_id)
             .outerjoin(PositionAccount, PositionAccount.id == Position.account_id)
+            .where(self._owner_clause(Position))
             .order_by(
                 Position.status,
                 desc(func.coalesce(PositionHoldingSnapshot.position_pct, Position.position_pct)),

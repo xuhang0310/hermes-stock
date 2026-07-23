@@ -213,7 +213,7 @@ def _execute_tool(
         account_id = request_payload.get("default_account_id") or account_id
         with SessionLocal() as db:
             result = _execute_position_tool(
-                repository=StockRepository(db),
+                repository=StockRepository(db, owner_user_id=int(request_payload["user_id"])),
                 name=name,
                 args=args,
                 created_by=str(request_payload.get("user_label") or "agent"),
@@ -230,7 +230,7 @@ def _execute_tool(
 
         with SessionLocal() as db:
             result = _execute_watchlist_tool(
-                StockRepository(db),
+                StockRepository(db, owner_user_id=int(request_payload["user_id"])),
                 name,
                 args,
                 created_by=str(request_payload.get("user_label") or "agent"),
@@ -284,14 +284,19 @@ def _execute_tool(
             agent_run_id=str(request_payload.get("run_id") or "") or None,
         )
     if skill_registry.has_tool(name):
+        from backend.app.data.user_scope import data_user_scope
+
         if name.startswith("ws_"):
             from backend.app.skills.agent_workspace import workspace_execution_scope, workspace_user_scope
 
-            with workspace_user_scope(int(request_payload["user_id"])), workspace_execution_scope(
-                bool(request_payload.get("allow_code_execution"))
+            with (
+                data_user_scope(int(request_payload["user_id"])),
+                workspace_user_scope(int(request_payload["user_id"])),
+                workspace_execution_scope(bool(request_payload.get("allow_code_execution"))),
             ):
                 return skill_registry.execute(name, args)
-        return skill_registry.execute(name, args)
+        with data_user_scope(int(request_payload["user_id"])):
+            return skill_registry.execute(name, args)
     return {"error": f"未知工具 {name}"}
 
 

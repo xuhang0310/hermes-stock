@@ -17,7 +17,6 @@ from backend.app.core.models import (
     EventEvidence,
     Instrument,
     JobRun,
-    Position,
     PositionAccount,
     RiskCheck,
     ScheduledJob,
@@ -233,7 +232,10 @@ class SystemMixin:
             "counts": {
                 "open_positions": summary.get("holding_count") or 0,
                 "watchlist": self.db.scalar(
-                    select(func.count(WatchlistItem.id)).where(WatchlistItem.status == "active")
+                    select(func.count(WatchlistItem.id)).where(
+                        WatchlistItem.status == "active",
+                        self._owner_clause(WatchlistItem),
+                    )
                 )
                 or 0,
                 "l0_events": self.db.scalar(select(func.count(Event.id)).where(Event.level == "L0")) or 0,
@@ -283,7 +285,10 @@ class SystemMixin:
         accounts = list(
             self.db.scalars(
                 select(PositionAccount)
-                .where(PositionAccount.status != "archived")
+                .where(
+                    PositionAccount.status != "archived",
+                    self._owner_clause(PositionAccount),
+                )
                 .order_by(PositionAccount.sort_order, PositionAccount.id)
             ).all()
         )

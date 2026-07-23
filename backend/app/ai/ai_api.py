@@ -2460,7 +2460,12 @@ def _prepare_agent_chat(
     default_account_id: int | None = None
     if can_write_positions:
         default_account_id = db.scalar(
-            text("SELECT id FROM position_accounts WHERE is_default = 1 ORDER BY id LIMIT 1")
+            text(
+                "SELECT id FROM position_accounts "
+                "WHERE owner_user_id = :owner_user_id AND is_default = 1 "
+                "ORDER BY id LIMIT 1"
+            ),
+            {"owner_user_id": context.user.id},
         )
 
     return {

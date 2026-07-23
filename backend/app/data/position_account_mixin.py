@@ -9,7 +9,7 @@ from sqlalchemy import desc, func, select, update
 
 from backend.app.data.broker_presets import broker_code_for_name, broker_name_for
 from backend.app.core.models import DailyBar, Position, PositionAccount, PositionHoldingSnapshot, SystemLog
-from backend.app.data._helpers import _account_eq, dt, normalize_a_share_symbol, number_or_none
+from backend.app.data._helpers import dt
 
 
 class PositionAccountMixin:
@@ -19,6 +19,7 @@ class PositionAccountMixin:
             p.account_id
             for p in self.db.scalars(
                 select(Position).where(Position.symbol == symbol, Position.status == "open")
+                .where(self._owner_clause(Position))
             ).all()
         }
         if len(accounts) == 1:
@@ -30,7 +31,7 @@ class PositionAccountMixin:
         acc_id = payload.get("account_id")
         if acc_id is not None:
             existing = self.db.get(PositionAccount, int(acc_id))
-            if existing is not None:
+            if existing is not None and self._owns(existing):
                 return existing
             raise ValueError(f"position account not found: {acc_id}")
         # 2) 未给任何账户信息时，自动匹配该标的现有 open 持仓的账户——清仓/卖出/调仓必须命中
@@ -45,13 +46,13 @@ class PositionAccountMixin:
                 if matched_id is None:
                     return None  # 原持仓本就未挂账户，跟随之，不落默认/manual 账户
                 existing = self.db.get(PositionAccount, matched_id)
-                if existing is not None:
+                if existing is not None and self._owns(existing):
                     return existing
         # 3) 数字人链路注入的默认账户（弱提示）：仅在无法匹配现有持仓时兜底
         fallback_id = payload.get("default_account_id")
         if fallback_id:
             existing = self.db.get(PositionAccount, int(fallback_id))
-            if existing is not None:
+            if existing is not None and self._owns(existing):
                 return existing
         broker_code = payload.get("broker_code")
         broker_name = str(
@@ -60,7 +61,11 @@ class PositionAccountMixin:
         account_type = str(payload.get("account_type") or "cash").strip() or "cash"
         account_no_masked = payload.get("account_no_masked") or payload.get("account_no")
         account_name = payload.get("account_name")
-        query = select(PositionAccount).where(PositionAccount.broker_name == broker_name, PositionAccount.account_type == account_type)
+        query = select(PositionAccount).where(
+            PositionAccount.broker_name == broker_name,
+            PositionAccount.account_type == account_type,
+            self._owner_clause(PositionAccount),
+        )
         if account_no_masked:
             query = query.where(PositionAccount.account_no_masked == str(account_no_masked))
         else:
@@ -68,6 +73,7 @@ class PositionAccountMixin:
         account = self.db.scalar(query.limit(1))
         if account is None:
             account = PositionAccount(
+                owner_user_id=self.owner_user_id,
                 broker_name=broker_name,
                 broker_code=broker_code or broker_code_for_name(broker_name),
                 account_name=str(account_name) if account_name else None,
@@ -92,7 +98,10 @@ class PositionAccountMixin:
         """
         ordered = self.db.scalars(
             select(PositionHoldingSnapshot)
-            .where(PositionHoldingSnapshot.account_id == account.id)
+            .where(
+                PositionHoldingSnapshot.account_id == account.id,
+                self._owner_clause(PositionHoldingSnapshot),
+            )
             .order_by(
                 PositionHoldingSnapshot.symbol,
                 desc(PositionHoldingSnapshot.as_of_date),
@@ -130,7 +139,9 @@ class PositionAccountMixin:
         holding_count = (
             self.db.scalar(
                 select(func.count(func.distinct(Position.symbol))).where(
-                    Position.account_id == account.id, Position.status == "open"
+                    Position.account_id == account.id,
+                    Position.status == "open",
+                    self._owner_clause(Position),
                 )
             )
             or 0
@@ -160,7 +171,10 @@ class PositionAccountMixin:
     def list_position_accounts(self) -> list[dict[str, Any]]:
         accounts = self.db.scalars(
             select(PositionAccount)
-            .where(PositionAccount.status != "archived")
+            .where(
+                PositionAccount.status != "archived",
+                self._owner_clause(PositionAccount),
+            )
             .order_by(PositionAccount.sort_order, PositionAccount.id)
         ).all()
         for account in accounts:
@@ -174,7 +188,9 @@ class PositionAccountMixin:
         account_type = str(payload.get("account_type") or "cash").strip() or "cash"
         account_no = payload.get("account_no_masked")
         query = select(PositionAccount).where(
-            PositionAccount.broker_name == broker_name, PositionAccount.account_type == account_type
+            PositionAccount.broker_name == broker_name,
+            PositionAccount.account_type == account_type,
+            self._owner_clause(PositionAccount),
         )
         query = query.where(
             PositionAccount.account_no_masked == str(account_no) if account_no else PositionAccount.account_no_masked.is_(None)
@@ -188,8 +204,13 @@ class PositionAccountMixin:
             self.db.commit()
             return self._account_out(existing)
         if payload.get("is_default"):
-            self.db.execute(update(PositionAccount).values(is_default=False))
+            self.db.execute(
+                update(PositionAccount)
+                .where(self._owner_clause(PositionAccount))
+                .values(is_default=False)
+            )
         account = PositionAccount(
+            owner_user_id=self.owner_user_id,
             broker_code=broker_code,
             broker_name=broker_name,
             account_name=str(payload["account_name"]) if payload.get("account_name") else None,
@@ -205,13 +226,20 @@ class PositionAccountMixin:
 
     def update_position_account(self, account_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         account = self.db.get(PositionAccount, account_id)
-        if account is None:
+        if account is None or not self._owns(account):
             raise ValueError("账户不存在")
         for field in ("account_name", "account_no_masked", "account_type", "status", "remark", "sort_order"):
             if payload.get(field) is not None:
                 setattr(account, field, payload[field])
         if payload.get("is_default"):
-            self.db.execute(update(PositionAccount).where(PositionAccount.id != account_id).values(is_default=False))
+            self.db.execute(
+                update(PositionAccount)
+                .where(
+                    PositionAccount.id != account_id,
+                    self._owner_clause(PositionAccount),
+                )
+                .values(is_default=False)
+            )
             account.is_default = True
         self.db.commit()
         return self._account_out(account)
@@ -219,7 +247,7 @@ class PositionAccountMixin:
     def update_account_funds(self, account_id: int, available_cash: float | None) -> dict[str, Any]:
         """维护"可用现金"（券商 App 现金数）。总资产由 _recompute 按 现金+市值 推算。"""
         account = self.db.get(PositionAccount, account_id)
-        if account is None:
+        if account is None or not self._owns(account):
             raise ValueError("账户不存在")
         account.available_cash = float(available_cash) if available_cash is not None else None
         self._recompute_account_funds(account)
@@ -236,14 +264,20 @@ class PositionAccountMixin:
         return self._account_out(account)
 
     def positions_summary(self, account_id: int | None = None) -> dict[str, Any]:
-        query = select(PositionAccount).where(PositionAccount.status != "archived")
+        query = select(PositionAccount).where(
+            PositionAccount.status != "archived",
+            self._owner_clause(PositionAccount),
+        )
         if account_id is not None:
             query = query.where(PositionAccount.id == account_id)
         accounts = self.db.scalars(query).all()
         for account in accounts:
             self._recompute_account_funds(account)
         self.db.commit()
-        count_query = select(func.count(func.distinct(Position.symbol))).where(Position.status == "open")
+        count_query = select(func.count(func.distinct(Position.symbol))).where(
+            Position.status == "open",
+            self._owner_clause(Position),
+        )
         if account_id is not None:
             count_query = count_query.where(Position.account_id == account_id)
         return {

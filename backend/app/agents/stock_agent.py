@@ -509,7 +509,7 @@ def _execute_position_write_tool(
     started = time.monotonic()
     try:
         with SessionLocal() as session:
-            repository = StockRepository(session)
+            repository = StockRepository(session, owner_user_id=user_id)
             batch = repository.create_position_import_batch(
                 source_name=source_name,
                 image_mime_type="",
@@ -553,7 +553,7 @@ def _do_update_position_field(args: dict[str, Any], *, user_id: int, default_acc
     started = time.monotonic()
     try:
         with SessionLocal() as session:
-            repository = StockRepository(session)
+            repository = StockRepository(session, owner_user_id=user_id)
             result = repository.update_position_field(symbol, field, value, account_id=default_account_id)
             session.commit()
     except Exception as exc:  # noqa: BLE001
@@ -573,7 +573,7 @@ def _do_rollback_last_batch(args: dict[str, Any], *, user_id: int, digital_human
     started = time.monotonic()
     try:
         with SessionLocal() as session:
-            repository = StockRepository(session)
+            repository = StockRepository(session, owner_user_id=user_id)
             result = repository.rollback_last_position_batch()
             session.commit()
     except Exception as exc:  # noqa: BLE001
@@ -837,12 +837,20 @@ def run_agent_events(
                 yield {"type": "action", "tool": name, "content": json.dumps(args, ensure_ascii=False)}
                 tool_started = time.monotonic()
                 if name.startswith("ws_"):
+                    from backend.app.data.user_scope import data_user_scope
                     from backend.app.skills.agent_workspace import workspace_execution_scope, workspace_user_scope
 
-                    with workspace_user_scope(user_id), workspace_execution_scope(allow_code_execution):
+                    with (
+                        data_user_scope(user_id),
+                        workspace_user_scope(user_id),
+                        workspace_execution_scope(allow_code_execution),
+                    ):
                         result = skill_registry.execute(name, args)
                 else:
-                    result = skill_registry.execute(name, args)
+                    from backend.app.data.user_scope import data_user_scope
+
+                    with data_user_scope(user_id):
+                        result = skill_registry.execute(name, args)
                 duration = round(time.monotonic() - tool_started, 2)
                 yield {"type": "observation", "content": _registry_observation_preview(name, result)}
                 if isinstance(result, dict):

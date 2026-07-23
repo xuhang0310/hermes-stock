@@ -205,11 +205,13 @@ class WatchlistReliabilityTests(unittest.TestCase):
         added = _execute_watchlist_tool(
             self.repo,
             "add_watchlist_items",
-            {"rows": [{"name": "平安银行", "reason": "测试 Agent"}]},
+            {"rows": [{"name": "平安银行", "group_name": "default", "reason": "测试 Agent"}]},
             created_by="feishu:test",
         )
         self.assertEqual(added["changed_count"], 1)
         self.assertEqual(added["watchlist"][0]["symbol"], "000001.SZ")
+        self.assertEqual(added["watchlist"][0]["group_name"], "我的自选")
+        self.assertEqual(added["watchlist"][0]["reason"], "测试 Agent")
 
         removed = _execute_watchlist_tool(
             self.repo,
@@ -219,6 +221,18 @@ class WatchlistReliabilityTests(unittest.TestCase):
         )
         self.assertEqual(removed["changed_count"], 1)
         self.assertEqual(removed["watchlist"], [])
+
+    def test_watchlist_agent_uses_default_reason_when_user_did_not_provide_one(self) -> None:
+        added = _execute_watchlist_tool(
+            self.repo,
+            "add_watchlist_items",
+            {"rows": [{"symbol": "600036.SH", "group_name": "临时分组", "reason": "  "}]},
+            created_by="web:test",
+        )
+
+        self.assertEqual(added["changed_count"], 1)
+        self.assertEqual(added["watchlist"][0]["group_name"], "我的自选")
+        self.assertEqual(added["watchlist"][0]["reason"], "Agent录入")
 
 
 if __name__ == "__main__":

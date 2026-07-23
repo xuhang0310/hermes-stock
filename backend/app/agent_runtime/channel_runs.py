@@ -43,7 +43,12 @@ def build_channel_request(
             )
         if default_account_id is None and digital_human_code == "position-entry-agent":
             default_account_id = db.scalar(
-                text("SELECT id FROM position_accounts WHERE is_default = 1 ORDER BY id LIMIT 1")
+                text(
+                    "SELECT id FROM position_accounts "
+                    "WHERE owner_user_id = :owner_user_id AND is_default = 1 "
+                    "ORDER BY id LIMIT 1"
+                ),
+                {"owner_user_id": int(user_id or chat_session.user_id)},
             )
     digital_context = None
     if profile is not None:

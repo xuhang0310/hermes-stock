@@ -110,7 +110,13 @@ class TransactionStateService:
             account_hint = ""
             if account_id:
                 with self.session_factory() as db:
-                    account_hint = _selected_account_hint(StockRepository(db), int(account_id))
+                    account_hint = _selected_account_hint(
+                        StockRepository(
+                            db,
+                            owner_user_id=int(request_payload["user_id"]),
+                        ),
+                        int(account_id),
+                    )
             return account_hint + _pending_action_hint(pending)
         from backend.app.agents.watchlist_agent import _pending_action_hint
 

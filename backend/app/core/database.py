@@ -155,6 +155,111 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         ):
             _add_column("position_accounts", column, ddl)
         _add_column("positions", "account_id", "account_id INT NULL")
+        for table in (
+            "watchlist_groups",
+            "watchlist_items",
+            "positions",
+            "position_accounts",
+            "position_import_batches",
+            "position_holding_snapshots",
+            "position_trades",
+        ):
+            _add_column(table, "owner_user_id", "owner_user_id INT NULL")
+
+        legacy_owner_sql = (
+            "COALESCE("
+            "(SELECT id FROM users WHERE username = 'admin' ORDER BY id LIMIT 1),"
+            "(SELECT id FROM users WHERE is_enabled = 1 ORDER BY id LIMIT 1),"
+            "(SELECT MIN(id) FROM users)"
+            ")"
+        )
+        for table in (
+            "watchlist_groups",
+            "watchlist_items",
+            "positions",
+            "position_accounts",
+            "position_import_batches",
+            "position_holding_snapshots",
+            "position_trades",
+        ):
+            connection.execute(
+                text(
+                    f"UPDATE {table} SET owner_user_id = {legacy_owner_sql} "
+                    "WHERE owner_user_id IS NULL"
+                )
+            )
+
+        # Merge legacy Agent-created `default` groups into the canonical
+        # per-user group. Duplicates are soft-removed before moving rows.
+        owners = list(
+            connection.execute(
+                text(
+                    "SELECT DISTINCT owner_user_id FROM watchlist_groups "
+                    "WHERE owner_user_id IS NOT NULL"
+                )
+            ).scalars()
+        )
+        for owner_user_id in owners:
+            target_id = connection.execute(
+                text(
+                    "SELECT id FROM watchlist_groups "
+                    "WHERE owner_user_id = :owner_user_id AND name = '我的自选' LIMIT 1"
+                ),
+                {"owner_user_id": owner_user_id},
+            ).scalar()
+            legacy_ids = list(
+                connection.execute(
+                    text(
+                        "SELECT id FROM watchlist_groups "
+                        "WHERE owner_user_id = :owner_user_id AND name IN ('default', '默认')"
+                    ),
+                    {"owner_user_id": owner_user_id},
+                ).scalars()
+            )
+            if target_id is None and legacy_ids:
+                target_id = legacy_ids.pop(0)
+                connection.execute(
+                    text("UPDATE watchlist_groups SET name = '我的自选' WHERE id = :group_id"),
+                    {"group_id": target_id},
+                )
+                connection.execute(
+                    text(
+                        "UPDATE watchlist_items SET "
+                        "reason = COALESCE(NULLIF(TRIM(reason), ''), 'Agent录入') "
+                        "WHERE group_id = :group_id AND status = 'active'"
+                    ),
+                    {"group_id": target_id},
+                )
+            if target_id is None:
+                continue
+            for legacy_id in legacy_ids:
+                connection.execute(
+                    text(
+                        "UPDATE watchlist_items source "
+                        "JOIN watchlist_items target "
+                        "ON target.owner_user_id = source.owner_user_id "
+                        "AND target.group_id = :target_id "
+                        "AND target.symbol = source.symbol "
+                        "SET source.status = 'removed', source.removed_at = COALESCE(source.removed_at, NOW()) "
+                        "WHERE source.group_id = :legacy_id AND source.status = 'active'"
+                    ),
+                    {"target_id": target_id, "legacy_id": legacy_id},
+                )
+                connection.execute(
+                    text(
+                        "UPDATE watchlist_items SET group_id = :target_id, "
+                        "reason = COALESCE(NULLIF(TRIM(reason), ''), 'Agent录入') "
+                        "WHERE group_id = :legacy_id AND status = 'active'"
+                    ),
+                    {"target_id": target_id, "legacy_id": legacy_id},
+                )
+                connection.execute(
+                    text(
+                        "UPDATE watchlist_groups SET status = 'archived' "
+                        "WHERE id = :legacy_id"
+                    ),
+                    {"legacy_id": legacy_id},
+                )
         # Workspace documents used to share one global filesystem namespace. New
         # records are scoped to an application user; legacy rows remain unowned
         # and are intentionally not exposed through user-facing endpoints.
@@ -275,8 +380,62 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             if not exists:
                 connection.execute(text(f"CREATE INDEX {index_name} ON {table} ({columns})"))
 
+        def _drop_index(table: str, index_name: str) -> None:
+            exists = connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE table_schema = DATABASE() AND table_name = :t AND index_name = :i"
+                ),
+                {"t": table, "i": index_name},
+            ).scalar()
+            if exists:
+                connection.execute(text(f"ALTER TABLE {table} DROP INDEX {index_name}"))
+
+        def _add_unique_index(table: str, index_name: str, columns: str) -> None:
+            exists = connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE table_schema = DATABASE() AND table_name = :t AND index_name = :i"
+                ),
+                {"t": table, "i": index_name},
+            ).scalar()
+            if not exists:
+                connection.execute(
+                    text(f"CREATE UNIQUE INDEX {index_name} ON {table} ({columns})")
+                )
+
         _add_index("agent_runs", "ix_agent_runs_team_id", "team_id")
         _add_index("scheduled_jobs", "ix_scheduled_jobs_owner_user_id", "owner_user_id")
+        for table in (
+            "watchlist_groups",
+            "watchlist_items",
+            "positions",
+            "position_accounts",
+            "position_import_batches",
+            "position_holding_snapshots",
+            "position_trades",
+        ):
+            _add_index(table, f"ix_{table}_owner_user_id", "owner_user_id")
+        _add_index("watchlist_items", "ix_watchlist_items_symbol", "symbol")
+
+        _drop_index("watchlist_groups", "name")
+        _drop_index("watchlist_items", "uq_watchlist_symbol_group")
+        _drop_index("position_accounts", "uq_position_account")
+        _add_unique_index(
+            "watchlist_groups",
+            "uq_watchlist_group_owner_name",
+            "owner_user_id, name",
+        )
+        _add_unique_index(
+            "watchlist_items",
+            "uq_watchlist_owner_symbol_group",
+            "owner_user_id, symbol, group_id",
+        )
+        _add_unique_index(
+            "position_accounts",
+            "uq_position_account_owner",
+            "owner_user_id, broker_name, account_no_masked, account_type",
+        )
 
         # 回填 broker_code（按中文券商名反查），positions.account_id（关联该 symbol 最新快照账户）
         connection.execute(
@@ -292,7 +451,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             text(
                 "UPDATE positions p SET p.account_id = ("
                 "SELECT s.account_id FROM position_holding_snapshots s "
-                "WHERE s.symbol = p.symbol AND s.account_id IS NOT NULL "
+                "WHERE s.symbol = p.symbol AND s.owner_user_id = p.owner_user_id "
+                "AND s.account_id IS NOT NULL "
                 "ORDER BY s.id DESC LIMIT 1) "
                 "WHERE p.account_id IS NULL"
             )

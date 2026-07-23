@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -8,6 +7,7 @@ from typing import Any
 from sqlalchemy import text
 
 from backend.app.core.database import engine
+from backend.app.data.user_scope import current_data_owner_user_id
 from backend.app.market.stock_tools import STOCK_TOOL_SCHEMAS, execute_stock_tool, normalize_a_share_symbol, stock_observation_preview, stock_tool_display_name
 
 
@@ -524,8 +524,13 @@ def get_my_universe() -> dict:
 
 
 def get_portfolio_snapshot() -> dict:
+    owner_user_id = current_data_owner_user_id()
+    owner_filter = "" if owner_user_id is None else "AND p.owner_user_id = :owner_user_id"
+    snapshot_owner_filter = (
+        "" if owner_user_id is None else "WHERE owner_user_id = :owner_user_id"
+    )
     rows = _query(
-        """
+        f"""
         SELECT p.id,
                p.symbol,
                COALESCE(s.symbol_name, i.name) AS name,
@@ -555,14 +560,16 @@ def get_portfolio_snapshot() -> dict:
         LEFT JOIN (
           SELECT symbol, MAX(id) AS snapshot_id
           FROM position_holding_snapshots
+          {snapshot_owner_filter}
           GROUP BY symbol
         ) latest ON latest.symbol = p.symbol
         LEFT JOIN position_holding_snapshots s ON s.id = latest.snapshot_id
         LEFT JOIN position_accounts a ON a.id = s.account_id
-        WHERE p.status = 'open'
+        WHERE p.status = 'open' {owner_filter}
         ORDER BY COALESCE(s.position_pct, p.position_pct) DESC, COALESCE(s.captured_at, p.updated_at) DESC
         LIMIT 100
-        """
+        """,
+        {"owner_user_id": owner_user_id} if owner_user_id is not None else None,
     )
     risk_flags = []
     for row in rows:
@@ -574,16 +581,19 @@ def get_portfolio_snapshot() -> dict:
 
 
 def get_watchlist_snapshot() -> dict:
+    owner_user_id = current_data_owner_user_id()
+    owner_filter = "" if owner_user_id is None else "AND w.owner_user_id = :owner_user_id"
     rows = _query(
-        """
+        f"""
         SELECT w.id, w.symbol, i.name, g.name AS group_name, w.reason, w.status, w.added_at, w.updated_at
         FROM watchlist_items w
         JOIN instruments i ON i.symbol = w.symbol
         JOIN watchlist_groups g ON g.id = w.group_id
-        WHERE w.status = 'active'
+        WHERE w.status = 'active' {owner_filter}
         ORDER BY w.updated_at DESC
         LIMIT 100
-        """
+        """,
+        {"owner_user_id": owner_user_id} if owner_user_id is not None else None,
     )
     return {"source": "watchlist_items", "watchlist": rows}
 
@@ -596,8 +606,17 @@ def get_symbol_context(symbol: str) -> dict:
         "SELECT symbol, name, market, type, status, list_date FROM instruments WHERE symbol = :symbol",
         {"symbol": ts_code},
     )
+    owner_user_id = current_data_owner_user_id()
+    position_owner_filter = "" if owner_user_id is None else "AND p.owner_user_id = :owner_user_id"
+    snapshot_owner_filter = (
+        "" if owner_user_id is None else "WHERE owner_user_id = :owner_user_id"
+    )
+    watchlist_owner_filter = "" if owner_user_id is None else "AND w.owner_user_id = :owner_user_id"
+    owner_params = {"symbol": ts_code}
+    if owner_user_id is not None:
+        owner_params["owner_user_id"] = owner_user_id
     position = _one(
-        """
+        f"""
         SELECT p.id,
                p.symbol,
                COALESCE(s.position_pct, p.position_pct) AS position_pct,
@@ -625,23 +644,25 @@ def get_symbol_context(symbol: str) -> dict:
         LEFT JOIN (
           SELECT symbol, MAX(id) AS snapshot_id
           FROM position_holding_snapshots
+          {snapshot_owner_filter}
           GROUP BY symbol
         ) latest ON latest.symbol = p.symbol
         LEFT JOIN position_holding_snapshots s ON s.id = latest.snapshot_id
         LEFT JOIN position_accounts a ON a.id = s.account_id
-        WHERE p.symbol = :symbol
+        WHERE p.symbol = :symbol {position_owner_filter}
         ORDER BY COALESCE(s.captured_at, p.updated_at) DESC
         LIMIT 1
         """,
-        {"symbol": ts_code},
+        owner_params,
     )
     watchlist = _query(
-        """
+        f"""
         SELECT w.id, w.symbol, g.name AS group_name, w.reason, w.status, w.added_at, w.updated_at
         FROM watchlist_items w JOIN watchlist_groups g ON g.id = w.group_id
-        WHERE w.symbol = :symbol ORDER BY w.updated_at DESC LIMIT 5
+        WHERE w.symbol = :symbol {watchlist_owner_filter}
+        ORDER BY w.updated_at DESC LIMIT 5
         """,
-        {"symbol": ts_code},
+        owner_params,
     )
     bars = _query(
         """

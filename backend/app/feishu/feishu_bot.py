@@ -737,8 +737,11 @@ def _consume_position_agent_with_history(question: str, history: list[dict], cre
     answer = ""
     error = None
     with SessionLocal() as session:
+        owner_user_id = _feishu_session_owner_id(session)
+        if owner_user_id is None:
+            return "", "系统没有可用的数据归属用户，已拒绝写入持仓"
         generator = run_position_agent_events(
-            repository=StockRepository(session),
+            repository=StockRepository(session, owner_user_id=owner_user_id),
             instruction=question,
             created_by=created_by,
             history=history,
@@ -767,8 +770,11 @@ def _consume_watchlist_agent_with_history(question: str, history: list[dict], cr
     answer = ""
     error = None
     with SessionLocal() as session:
+        owner_user_id = _feishu_session_owner_id(session)
+        if owner_user_id is None:
+            return "", "系统没有可用的数据归属用户，已拒绝写入自选"
         generator = run_watchlist_agent_events(
-            repository=StockRepository(session),
+            repository=StockRepository(session, owner_user_id=owner_user_id),
             instruction=question,
             created_by=created_by,
             history=history,

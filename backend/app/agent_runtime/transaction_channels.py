@@ -254,7 +254,9 @@ def _transaction_result(run_id: str, code: str) -> dict[str, Any]:
             rows = tool_result.get("rows") or []
             changed = int(tool_result.get("saved_count") or 0)
         else:
-            rows = tool_result.get("watchlist") or (StockRepository(db).watchlist() if user_id else [])
+            rows = tool_result.get("watchlist") or (
+                StockRepository(db, owner_user_id=user_id).watchlist() if user_id else []
+            )
             changed = int(tool_result.get("changed_count") or 0)
     state = transaction_state_service.load(session_id, code) if session_id else None
     return {
