@@ -173,7 +173,26 @@ export type PositionAgentStep = {
 
 export type PositionAgentPendingAction = {
   tool: 'save_position_holdings'
-  arguments: Record<string, unknown>
+  arguments: {
+    rows?: Array<Record<string, unknown>>
+    account?: Record<string, unknown>
+    as_of_date?: string
+    [key: string]: unknown
+  }
+  review_required?: boolean
+  validations?: PositionSymbolValidation[]
+}
+
+export type PositionSymbolValidation = {
+  index?: number
+  valid: boolean
+  status: string
+  input_symbol: string
+  normalized_symbol: string
+  canonical_name?: string | null
+  message: string
+  suggested_symbol?: string | null
+  suggested_name?: string | null
 }
 
 export type PositionAgentStreamEvent = {
@@ -547,6 +566,7 @@ export type ScheduleJob = {
 export type JobRun = {
   run_id: string
   job_key: string
+  job_name?: string | null
   trigger_type: string
   status: string
   started_at: string | null
@@ -558,6 +578,18 @@ export type JobRun = {
   output_content?: string | null
   error: string | null
   created_at: string | null
+}
+
+export type PageResult<T> = {
+  items: T[]
+  page: number
+  page_size: number
+  total: number
+  pages: number
+}
+
+export type ScheduleJobPage = PageResult<ScheduleJob> & {
+  enabled_total: number
 }
 
 export type ScheduleStatus = {
@@ -975,6 +1007,10 @@ export type BacktestMetrics = {
   alpha_t_stat?: number | null
   beta?: number | null
   r_squared?: number | null
+  annual_volatility?: number
+  rebalance_count?: number
+  turnover?: number
+  total_cost?: number
 }
 
 export type BacktestPricePoint = {
@@ -1009,7 +1045,10 @@ export type BacktestRun = {
   run_id: string
   report_url: string
   status: string
+  report_type?: 'single' | 'portfolio'
   symbol: string
+  symbols?: string[]
+  benchmark_label?: string
   strategy: {
     code: string
     name: string
@@ -1021,8 +1060,9 @@ export type BacktestRun = {
     end_date: string
     trading_days: number
   }
-  config: Record<string, string | number>
+  config: Record<string, unknown>
   metrics: BacktestMetrics
+  benchmark_metrics?: BacktestMetrics
   confidence: 'insufficient' | 'low' | 'medium' | string
   rating: string
   warnings: string[]
@@ -1034,6 +1074,22 @@ export type BacktestRun = {
     text: string
   }>
   equity_curve: Array<{ time: string; equity: number; drawdown: number }>
+  benchmark_curve?: Array<{ time: string; equity: number }>
+  asset_curves?: Array<{
+    symbol: string
+    points: Array<{ time: string; value: number }>
+  }>
+  weight_series?: Array<{
+    time: string
+    weights: Record<string, number>
+  }>
+  rebalance_history?: Array<{
+    time: string
+    turnover: number
+    cost: number
+    weights: Record<string, number>
+    risk_contributions: Record<string, number>
+  }>
   trades: BacktestTrade[]
   attribution: {
     top_winner?: BacktestTrade | null
@@ -1046,6 +1102,55 @@ export type BacktestRun = {
       avg_pnl: number
       win_rate: number
     }>
+    asset_stats?: Array<{
+      symbol: string
+      asset_return: number
+      average_weight: number
+      average_risk_contribution: number
+      pnl_contribution: number
+      return_contribution: number
+    }>
+    concentration?: {
+      net_profit: number
+      top_contributor?: {
+        symbol: string
+        pnl_contribution: number
+        return_contribution: number
+      } | null
+      top_positive_share?: number | null
+      remove_top_contributor_pnl?: number | null
+      total_cost: number
+    }
+    market_regression?: {
+      benchmark: string
+      beta?: number | null
+      alpha_annual?: number | null
+      alpha_t_stat?: number | null
+      r_squared?: number | null
+    }
+    regime_analysis?: {
+      status: string
+      reason?: string
+      window_days?: number
+      regimes?: Array<{
+        code: string
+        label: string
+        trading_days: number
+        annual_return?: number | null
+        sharpe?: number | null
+      }>
+    }
+    statistical_tests?: {
+      status: string
+      reason?: string
+      method?: string
+      iterations?: number
+      annual_excess_return?: number
+      excess_return_p_value?: number
+      significant?: boolean
+      actual_max_drawdown?: number
+      drawdown_worse_percentile?: number
+    }
   }
   summary_markdown: string
   source_code?: string | null

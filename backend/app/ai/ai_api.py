@@ -1705,6 +1705,8 @@ def _prepare_agent_attachments(
             "bytes": len(content),
             "kind": kind,
         }
+        if kind == "image":
+            item["sha256"] = hashlib.sha256(content).hexdigest()
         metadata.append(item)
         if kind == "image":
             encoded = base64.b64encode(content).decode("ascii")
@@ -1738,6 +1740,23 @@ def _prepare_agent_attachments(
     else:
         user_content = user_text
     return effective_question, user_content, metadata
+
+
+def _profile_can_write_positions(
+    profile: DigitalHumanProfile | None,
+    *,
+    chat_mode: str,
+    permissions: set[str] | list[str],
+) -> bool:
+    if profile is None or chat_mode != "research":
+        return False
+    is_position_agent = str(profile.code or "") == "position-entry-agent"
+    has_capability = is_position_agent or bool(profile.can_write_positions)
+    return bool(has_capability and ("data:write" in permissions or "all" in permissions))
+
+
+def _position_agent_uses_default_account(profile: DigitalHumanProfile | None) -> bool:
+    return bool(profile and str(profile.code or "") != "position-entry-agent")
 
 
 def _attachments_from_json(value: str | None) -> list[dict]:
@@ -2451,14 +2470,13 @@ def _prepare_agent_chat(
         and (explicit_approval_policy or payload.allow_code_execution)
         and payload.chat_mode in ("research", "stock")
     )
-    can_write_positions = bool(
-        profile
-        and profile.can_write_positions
-        and payload.chat_mode == "research"
-        and ("data:write" in context.permissions or "all" in context.permissions)
+    can_write_positions = _profile_can_write_positions(
+        profile,
+        chat_mode=payload.chat_mode,
+        permissions=context.permissions,
     )
     default_account_id: int | None = None
-    if can_write_positions:
+    if can_write_positions and _position_agent_uses_default_account(profile):
         default_account_id = db.scalar(
             text(
                 "SELECT id FROM position_accounts "
@@ -2468,6 +2486,10 @@ def _prepare_agent_chat(
             {"owner_user_id": context.user.id},
         )
 
+    first_image = next(
+        (item for item in attachment_metadata if item.get("kind") == "image"),
+        None,
+    )
     return {
         "session_id": session_id,
         "created_session": created_session,
@@ -2493,6 +2515,8 @@ def _prepare_agent_chat(
             "question": effective_question,
             "user_text": user_text_from_content(prepared_user_content),
             "attachments": attachment_metadata,
+            "image_sha256": first_image.get("sha256") if first_image else None,
+            "image_mime_type": first_image.get("mime_type") if first_image else None,
             "history": history,
             "digital_human_id": profile.id if profile else None,
             "digital_human_code": profile.code if profile else None,

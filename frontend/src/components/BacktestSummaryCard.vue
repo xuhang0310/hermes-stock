@@ -8,6 +8,11 @@ const emit = defineEmits<{ open: [runId: string] }>()
 
 const run = ref<BacktestRun | null>(null)
 const error = ref('')
+const isPortfolio = computed(() => run.value?.report_type === 'portfolio')
+const reportSubject = computed(() => {
+  if (!run.value) return ''
+  return isPortfolio.value ? (run.value.symbols || []).join(' · ') : run.value.symbol
+})
 
 const curvePoints = computed(() => {
   const rows = run.value?.equity_curve || []
@@ -49,7 +54,7 @@ onMounted(async () => {
     <header>
       <div>
         <span class="backtest-summary-kicker">STRATEGY BACKTEST</span>
-        <strong>{{ run.strategy.name }} · {{ run.symbol }}</strong>
+        <strong>{{ run.strategy.name }} · {{ reportSubject }}</strong>
       </div>
       <span class="backtest-confidence" :class="run.confidence">{{ run.rating }}</span>
     </header>
@@ -58,8 +63,8 @@ onMounted(async () => {
       <div><span>年化</span><b>{{ percent(run.metrics.annual_return) }}</b></div>
       <div><span>Sharpe</span><b>{{ number(run.metrics.sharpe) }}</b></div>
       <div><span>最大回撤</span><b class="negative">{{ percent(run.metrics.max_drawdown) }}</b></div>
-      <div><span>胜率</span><b>{{ percent(run.metrics.win_rate) }}</b></div>
-      <div><span>交易</span><b>{{ run.metrics.trade_count }}</b></div>
+      <div><span>{{ isPortfolio ? '正收益日' : '胜率' }}</span><b>{{ percent(run.metrics.win_rate) }}</b></div>
+      <div><span>{{ isPortfolio ? '调仓' : '交易' }}</span><b>{{ isPortfolio ? run.metrics.rebalance_count : run.metrics.trade_count }}</b></div>
     </div>
     <svg class="backtest-mini-curve" viewBox="0 0 100 38" preserveAspectRatio="none" aria-hidden="true">
       <polyline :points="curvePoints" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke" />

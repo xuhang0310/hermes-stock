@@ -16,7 +16,13 @@ from backend.app.feishu.feishu import (
     _gen_sign,
 )
 from backend.app.scheduler import rhythm_scheduler
-from backend.app.scheduler.rhythm_api import _activate_agent_report_jobs, _looks_like_utf8_mojibake
+from backend.app.scheduler.rhythm_api import (
+    _activate_agent_report_jobs,
+    clear_schedule_runs,
+    _looks_like_utf8_mojibake,
+    schedule_jobs_paged,
+    schedule_runs_paged,
+)
 from backend.app.seed.seed import seed_notify_channels
 
 
@@ -64,6 +70,71 @@ class FeishuChannelMigrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
+
+    def test_schedule_jobs_and_runs_support_stable_pagination(self) -> None:
+        for index in range(11):
+            self.db.add(
+                ScheduledJob(
+                    job_key=f"job-{index:02d}",
+                    name=f"任务 {index:02d}",
+                    job_kind="agent_task",
+                    schedule_type="daily",
+                    enabled=index % 2 == 0,
+                    sort_order=index,
+                )
+            )
+        for index in range(25):
+            self.db.add(
+                JobRun(
+                    run_id=f"run-{index:02d}",
+                    job_key=f"job-{index % 3:02d}",
+                    fire_key=f"fire-{index:02d}",
+                    trigger_type="schedule",
+                    status="success" if index % 2 == 0 else "failed",
+                    started_at=datetime(2026, 7, 23, 8, index),
+                )
+            )
+        self.db.commit()
+
+        jobs_page = schedule_jobs_paged(page=2, page_size=4, enabled=None, keyword=None, db=self.db)
+        self.assertEqual(jobs_page["total"], 11)
+        self.assertEqual(jobs_page["pages"], 3)
+        self.assertEqual(jobs_page["enabled_total"], 6)
+        self.assertEqual([item["job_key"] for item in jobs_page["items"]], ["job-04", "job-05", "job-06", "job-07"])
+
+        runs_page = schedule_runs_paged(
+            page=2,
+            page_size=5,
+            job_key="job-00",
+            status=None,
+            db=self.db,
+        )
+        self.assertEqual(runs_page["total"], 9)
+        self.assertEqual(runs_page["pages"], 2)
+        self.assertEqual(len(runs_page["items"]), 4)
+        self.assertTrue(all(item["job_name"] == "任务 00" for item in runs_page["items"]))
+
+        cleared = clear_schedule_runs(job_key="job-00", status=None, db=self.db)
+        self.assertEqual(cleared["deleted"], 9)
+        self.assertEqual(cleared["skipped_running"], 0)
+
+        self.db.add(
+            JobRun(
+                run_id="run-active",
+                job_key="job-01",
+                fire_key="fire-active",
+                trigger_type="manual",
+                status="running",
+                started_at=datetime(2026, 7, 23, 9, 0),
+            )
+        )
+        self.db.commit()
+        cleared_all = clear_schedule_runs(job_key=None, status=None, db=self.db)
+        self.assertEqual(cleared_all["deleted"], 16)
+        self.assertEqual(cleared_all["skipped_running"], 1)
+        self.assertIsNotNone(
+            self.db.scalar(select(JobRun).where(JobRun.run_id == "run-active"))
+        )
 
     def test_legacy_channel_and_jobs_migrate_to_single_schedule_channel(self) -> None:
         self.db.add(

@@ -25,6 +25,190 @@ class PositionWriteMixin:
         saved = self._save_position_holding(payload, source_type=source_type, commit=True)
         return saved
 
+    def correct_position_holding(self, position_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Correct the identity and latest values of an existing position."""
+        position = self.db.scalar(
+            select(Position).where(
+                Position.id == position_id,
+                self._owner_clause(Position),
+            )
+        )
+        if position is None:
+            raise ValueError("持仓不存在或不属于当前用户")
+
+        old_symbol = position.symbol
+        old_name = next(
+            (
+                item.symbol_name
+                for item in self.db.scalars(
+                    select(PositionHoldingSnapshot)
+                    .where(
+                        PositionHoldingSnapshot.symbol == old_symbol,
+                        _account_eq(position.account_id, PositionHoldingSnapshot),
+                        self._owner_clause(PositionHoldingSnapshot),
+                    )
+                    .order_by(
+                        desc(PositionHoldingSnapshot.as_of_date),
+                        desc(PositionHoldingSnapshot.captured_at),
+                        desc(PositionHoldingSnapshot.id),
+                    )
+                    .limit(1)
+                ).all()
+                if item.symbol_name
+            ),
+            None,
+        )
+        account_id = position.account_id
+        symbol = normalize_a_share_symbol(str(payload.get("symbol") or old_symbol))
+        name = str(payload.get("name") or symbol).strip()[:120] or symbol
+        quantity = number_or_none(payload.get("position_quantity"))
+        cost_price = number_or_none(payload.get("cost_price"))
+        if quantity is None or quantity < 0:
+            raise ValueError("持仓数量必须是大于等于 0 的数字")
+        if cost_price is None or cost_price < 0:
+            raise ValueError("成本价必须是大于等于 0 的数字")
+
+        collision = self.db.scalar(
+            select(Position).where(
+                Position.id != position.id,
+                Position.symbol == symbol,
+                _account_eq(account_id),
+                self._owner_clause(Position),
+                Position.status == "open",
+            )
+        )
+        if collision is not None:
+            raise ValueError("该证券账户已经存在目标标的持仓，请先合并或删除重复记录")
+
+        instrument = self.db.get(Instrument, symbol)
+        if instrument is None:
+            instrument = Instrument(
+                symbol=symbol,
+                name=name,
+                market=exchange_from_symbol(symbol),
+                type="stock",
+                status="active",
+            )
+            self.db.add(instrument)
+        elif instrument.name != name:
+            instrument.name = name
+
+        snapshots = self.db.scalars(
+            select(PositionHoldingSnapshot)
+            .where(
+                PositionHoldingSnapshot.symbol == old_symbol,
+                _account_eq(account_id, PositionHoldingSnapshot),
+                self._owner_clause(PositionHoldingSnapshot),
+            )
+            .order_by(
+                desc(PositionHoldingSnapshot.as_of_date),
+                desc(PositionHoldingSnapshot.captured_at),
+                desc(PositionHoldingSnapshot.id),
+            )
+        ).all()
+        if not snapshots:
+            raise ValueError("持仓缺少可编辑的快照记录")
+
+        latest = snapshots[0]
+        old_quantity = float(latest.position_quantity or 0)
+        for snapshot in snapshots:
+            snapshot.symbol = symbol
+            snapshot.symbol_name = name
+            snapshot.exchange = exchange_from_symbol(symbol)
+
+        latest.position_quantity = quantity
+        if latest.available_quantity is not None:
+            if float(latest.available_quantity) == old_quantity:
+                latest.available_quantity = quantity
+            elif float(latest.available_quantity) > quantity:
+                latest.available_quantity = quantity
+        latest.cost_price = cost_price
+        latest.cost_amount = round(cost_price * quantity, 4)
+        if symbol != old_symbol:
+            latest_price = self.db.scalar(
+                select(DailyBar.close)
+                .where(DailyBar.symbol == symbol, DailyBar.close.isnot(None))
+                .order_by(desc(DailyBar.trade_date), desc(DailyBar.id))
+                .limit(1)
+            )
+            latest.latest_price = float(latest_price) if latest_price is not None else None
+            latest.day_pnl = None
+        latest.market_value = (
+            round(float(latest.latest_price) * quantity, 4)
+            if latest.latest_price is not None
+            else None
+        )
+        latest.floating_pnl = (
+            round(float(latest.market_value) - float(latest.cost_amount), 4)
+            if latest.market_value is not None
+            else None
+        )
+        latest.floating_pnl_pct = (
+            round(float(latest.floating_pnl) / float(latest.cost_amount) * 100, 4)
+            if latest.floating_pnl is not None and latest.cost_amount
+            else None
+        )
+        latest.source_type = "manual_correction"
+        latest.raw_json = json.dumps(
+            {
+                "corrected_from": {
+                    "symbol": old_symbol,
+                    "name": old_name,
+                    "position_quantity": old_quantity,
+                    "cost_price": position.cost_price,
+                },
+                "corrected_to": {
+                    "symbol": symbol,
+                    "name": name,
+                    "position_quantity": quantity,
+                    "cost_price": cost_price,
+                },
+            },
+            ensure_ascii=False,
+        )
+
+        position.symbol = symbol
+        position.quantity = quantity
+        position.cost_price = cost_price
+        position.status = "open" if quantity > 0 else "closed"
+        position.closed_at = None if quantity > 0 else datetime.now()
+
+        trades = self.db.scalars(
+            select(PositionTrade).where(
+                PositionTrade.position_id == position.id,
+                self._owner_clause(PositionTrade),
+            )
+        ).all()
+        for trade in trades:
+            trade.symbol = symbol
+            trade.name = name
+
+        self.db.add(
+            SystemLog(
+                level="INFO",
+                module="positions",
+                message="position holding corrected",
+                context_json=json.dumps(
+                    {
+                        "position_id": position.id,
+                        "old_symbol": old_symbol,
+                        "old_name": old_name,
+                        "symbol": symbol,
+                        "name": name,
+                        "quantity": quantity,
+                        "cost_price": cost_price,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        account = self.db.get(PositionAccount, account_id) if account_id else None
+        self.db.flush()
+        if account is not None:
+            self._recompute_account_funds(account)
+        self.db.commit()
+        return self._position_snapshot_out(latest, position_id=position.id, account=account)
+
     # ---- merge_position_holding ----
 
     # 合并动作，不做数量/成本的拆分计算
@@ -40,6 +224,7 @@ class PositionWriteMixin:
         *,
         action: str | None = None,
         source_type: str = "manual",
+        import_batch: PositionImportBatch | None = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         """按交易动作合并持仓，买入/加仓自动同步自选。
@@ -66,7 +251,12 @@ class PositionWriteMixin:
 
         # ---- replace / 无 action → 直接保存（向后兼容）----
         if not action or action == "replace":
-            return self._save_position_holding(payload, source_type=source_type, commit=commit)
+            return self._save_position_holding(
+                payload,
+                source_type=source_type,
+                import_batch=import_batch,
+                commit=commit,
+            )
 
         # ---- close → 强制关仓 ----
         if action == "close":
@@ -118,6 +308,7 @@ class PositionWriteMixin:
                         "status": "closed",
                     },
                     source_type=source_type,
+                    import_batch=import_batch,
                     commit=False,
                 )
                 self._record_trade(
@@ -196,7 +387,12 @@ class PositionWriteMixin:
                 price=execution_price,
                 source_type=source_type,
             )
-            saved = self._save_position_holding(payload, source_type=source_type, commit=commit)
+            saved = self._save_position_holding(
+                payload,
+                source_type=source_type,
+                import_batch=import_batch,
+                commit=commit,
+            )
 
             # 买入/加仓 → 自动加入自选
             symbol_name = str(payload.get("name") or "").strip()
@@ -256,7 +452,12 @@ class PositionWriteMixin:
                 price=execution_price,
                 source_type=source_type,
             )
-            saved = self._save_position_holding(payload, source_type=source_type, commit=commit)
+            saved = self._save_position_holding(
+                payload,
+                source_type=source_type,
+                import_batch=import_batch,
+                commit=commit,
+            )
             return saved
 
         # 未知 action → 退化到覆盖

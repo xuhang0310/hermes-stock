@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError, getAuthToken, setAuthToken } from './api'
 import AppShell from './components/AppShell.vue'
 import PositionsWorkbench from './components/PositionsWorkbench.vue'
@@ -27,6 +27,7 @@ import type {
   PositionAgentStep,
   PositionAgentStreamEvent,
   PositionItem,
+  PositionSymbolValidation,
   UserPayload,
   WatchlistItem
 } from './types'
@@ -55,6 +56,13 @@ type PositionAgentChat = {
   steps?: PositionAgentStep[]
   status?: 'thinking' | 'done' | 'error'
   error?: string
+}
+
+type PositionAgentReviewRow = Record<string, unknown> & {
+  symbol: string
+  name: string
+  validation: PositionSymbolValidation
+  validating: boolean
 }
 
 const activePage = ref<PageKey>('workbench')
@@ -92,6 +100,103 @@ const backtestRunId = ref('')
 const positionAgentTargetAccount = ref<number | null>(null)
 const positionAgentAccounts = ref<PositionAccount[]>([])
 const positionAgentPendingAction = ref<PositionAgentPendingAction | null>(null)
+const positionAgentReviewRows = ref<PositionAgentReviewRow[]>([])
+const positionAgentConfirming = ref(false)
+let restoredPositionAgentUserId: number | null = null
+
+function positionAgentStorageKey(userId: number) {
+  return `sixrabbits:position-agent:v1:${userId}`
+}
+
+function persistPositionAgentSession() {
+  const userId = currentUser.value?.id
+  if (!userId) return
+  const reviewRows = positionAgentReviewRows.value.map((row) => ({
+    ...row,
+    validating: false
+  }))
+  const session = {
+    updatedAt: Date.now(),
+    chats: positionAgentChats.value.slice(-40),
+    pendingAction: positionAgentPendingAction.value,
+    reviewRows,
+    targetAccount: positionAgentTargetAccount.value
+  }
+  try {
+    window.localStorage.setItem(positionAgentStorageKey(userId), JSON.stringify(session))
+  } catch {
+    const compactSession = {
+      updatedAt: Date.now(),
+      chats: positionAgentChats.value.slice(-12).map((item) => ({
+        ...item,
+        content: item.content.slice(-20000),
+        steps: item.steps?.slice(-12)
+      })),
+      pendingAction: positionAgentPendingAction.value,
+      reviewRows,
+      targetAccount: positionAgentTargetAccount.value
+    }
+    try {
+      window.localStorage.setItem(
+        positionAgentStorageKey(userId),
+        JSON.stringify(compactSession)
+      )
+    } catch {
+      // Storage can be unavailable in private browsing; the active in-memory chat still works.
+    }
+  }
+}
+
+function restorePositionAgentSession() {
+  const userId = currentUser.value?.id
+  if (!userId || restoredPositionAgentUserId === userId) return
+  restoredPositionAgentUserId = userId
+  try {
+    const raw = window.localStorage.getItem(positionAgentStorageKey(userId))
+    if (!raw) return
+    const stored = JSON.parse(raw) as {
+      updatedAt?: number
+      chats?: PositionAgentChat[]
+      pendingAction?: PositionAgentPendingAction | null
+      reviewRows?: PositionAgentReviewRow[]
+      targetAccount?: number | null
+    }
+    if (stored.updatedAt && Date.now() - stored.updatedAt > 30 * 24 * 60 * 60 * 1000) {
+      window.localStorage.removeItem(positionAgentStorageKey(userId))
+      return
+    }
+    positionAgentChats.value = Array.isArray(stored.chats) ? stored.chats.slice(-40) : []
+    positionAgentPendingAction.value = stored.pendingAction || null
+    positionAgentReviewRows.value = Array.isArray(stored.reviewRows)
+      ? stored.reviewRows.map((row) => ({ ...row, validating: false }))
+      : []
+    positionAgentTargetAccount.value = Number.isInteger(stored.targetAccount)
+      ? Number(stored.targetAccount)
+      : null
+  } catch {
+    window.localStorage.removeItem(positionAgentStorageKey(userId))
+  }
+}
+
+function resetPositionAgentSessionMemory() {
+  restoredPositionAgentUserId = null
+  positionAgentInstruction.value = ''
+  positionAgentImageBase64.value = ''
+  positionAgentFileName.value = ''
+  positionAgentMessage.value = ''
+  positionAgentRows.value = []
+  positionAgentChats.value = []
+  positionAgentPendingAction.value = null
+  positionAgentReviewRows.value = []
+  positionAgentTargetAccount.value = null
+  positionDrawerOpen.value = false
+}
+
+watch(
+  [positionAgentChats, positionAgentPendingAction, positionAgentReviewRows, positionAgentTargetAccount],
+  persistPositionAgentSession,
+  { deep: true }
+)
 
 const pageTitle = computed(() => {
   if (activePage.value === 'positionChart') {
@@ -147,6 +252,19 @@ const activePositionModel = computed(
     positionModels.value[0] ||
     null
 )
+
+const positionAgentComposerMessage = computed(() => {
+  const text = positionAgentMessage.value.trim()
+  if (!text) return ''
+  const lastAssistant = [...positionAgentChats.value].reverse().find((item) => item.role === 'assistant')
+  if (
+    lastAssistant?.status === 'done'
+    && (text.length > 240 || lastAssistant.content.includes(text))
+  ) {
+    return ''
+  }
+  return text
+})
 
 const positionModelGroups = computed(() => {
   const groups = new Map<string, ModelConfig[]>()
@@ -213,6 +331,7 @@ async function login(payload: { username: string; password: string }) {
     const result = await api.login(payload)
     setAuthToken(result.access_token)
     currentUser.value = result.user
+    restorePositionAgentSession()
     await refreshAll()
   } catch (err) {
     loginError.value = err instanceof Error ? err.message : '登录失败'
@@ -222,8 +341,10 @@ async function login(payload: { username: string; password: string }) {
 }
 
 function logout() {
+  persistPositionAgentSession()
   setAuthToken('')
   currentUser.value = null
+  resetPositionAgentSessionMemory()
   dashboard.value = null
   activePage.value = 'workbench'
 }
@@ -237,6 +358,7 @@ async function initialize() {
     for (let attempt = 1; ; attempt++) {
       try {
         currentUser.value = await api.me()
+        restorePositionAgentSession()
         break
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
@@ -271,7 +393,10 @@ async function loadPositionModels() {
 }
 
 async function openPositionAgent(accountId: number | null = null) {
-  positionAgentTargetAccount.value = accountId
+  restorePositionAgentSession()
+  if (accountId !== null) {
+    positionAgentTargetAccount.value = accountId
+  }
   positionDrawerOpen.value = true
   positionAgentMessage.value = ''
   try {
@@ -293,7 +418,7 @@ function positionAccountLabel(account: PositionAccount) {
 }
 
 function closePositionAgent() {
-  if (positionAgentBusy.value) return
+  if (positionAgentBusy.value || positionAgentConfirming.value) return
   positionDrawerOpen.value = false
 }
 
@@ -321,6 +446,12 @@ async function onPositionImageSelected(event: Event) {
   positionAgentFileName.value = file.name
   positionAgentImageBase64.value = await readFileAsDataUrl(file)
   positionAgentPendingAction.value = null
+  positionAgentReviewRows.value = []
+  try {
+    await api.discardPositionAgentDraft()
+  } catch (err) {
+    positionAgentMessage.value = err instanceof Error ? err.message : '旧的 OCR 草稿清理失败，请重试'
+  }
   if (!positionAgentInstruction.value.trim()) {
     positionAgentInstruction.value = '请识别这张 A 股券商持仓截图，按持仓明细保存。'
   }
@@ -330,6 +461,146 @@ function clearPositionAgentImage() {
   positionAgentImageBase64.value = ''
   positionAgentFileName.value = ''
   positionAgentMimeType.value = 'image/png'
+}
+
+function setPositionAgentReviewDraft(pending: PositionAgentPendingAction | null) {
+  if (!pending?.review_required || !Array.isArray(pending.arguments.rows)) {
+    positionAgentReviewRows.value = []
+    return
+  }
+  const validations = pending.validations || []
+  positionAgentReviewRows.value = pending.arguments.rows.map((source, index) => {
+    const validation = validations.find((item) => Number(item.index) === index) || {
+      index,
+      valid: false,
+      status: 'unchecked',
+      input_symbol: String(source.symbol || ''),
+      normalized_symbol: String(source.symbol || ''),
+      message: '等待校验'
+    }
+    return {
+      ...source,
+      symbol: String(source.symbol || ''),
+      name: String(source.name || ''),
+      validation,
+      validating: false
+    }
+  })
+}
+
+function markPositionSymbolEdited(row: PositionAgentReviewRow) {
+  row.validation = {
+    valid: false,
+    status: 'unchecked',
+    input_symbol: row.symbol,
+    normalized_symbol: row.symbol,
+    message: '代码已修改，请重新校验'
+  }
+}
+
+function applyPositionCorrection(corrected: PositionItem) {
+  const index = positions.value.findIndex((item) => item.id === corrected.id)
+  if (index < 0) {
+    void refreshPositions()
+    return
+  }
+  positions.value = positions.value.map((item, itemIndex) =>
+    itemIndex === index ? { ...item, ...corrected } : item
+  )
+}
+
+async function validatePositionReviewRow(index: number) {
+  const row = positionAgentReviewRows.value[index]
+  if (!row || row.validating) return
+  row.validating = true
+  try {
+    const validation = await api.validatePositionAgentSymbol({
+      symbol: row.symbol.trim(),
+      name: row.name.trim() || null
+    })
+    row.validation = validation
+    if (validation.valid) {
+      row.symbol = validation.normalized_symbol
+      row.name = validation.canonical_name || row.name
+    }
+  } catch (err) {
+    row.validation = {
+      valid: false,
+      status: 'validation_error',
+      input_symbol: row.symbol,
+      normalized_symbol: row.symbol,
+      message: err instanceof Error ? err.message : '股票代码校验失败'
+    }
+  } finally {
+    row.validating = false
+  }
+}
+
+async function applyPositionSymbolSuggestion(index: number) {
+  const row = positionAgentReviewRows.value[index]
+  const suggestion = row?.validation.suggested_symbol
+  if (!row || !suggestion) return
+  row.symbol = suggestion
+  if (row.validation.suggested_name) row.name = row.validation.suggested_name
+  await validatePositionReviewRow(index)
+}
+
+async function cancelPositionAgentReview() {
+  positionAgentConfirming.value = true
+  try {
+    await api.discardPositionAgentDraft()
+    positionAgentPendingAction.value = null
+    positionAgentReviewRows.value = []
+    positionAgentMessage.value = '已取消本次 OCR 录入，未写入任何持仓。'
+  } catch (err) {
+    positionAgentMessage.value = err instanceof Error ? err.message : 'OCR 草稿取消失败'
+  } finally {
+    positionAgentConfirming.value = false
+  }
+}
+
+async function confirmPositionAgentReview() {
+  if (!positionAgentPendingAction.value || positionAgentConfirming.value) return
+  positionAgentConfirming.value = true
+  positionAgentMessage.value = ''
+  try {
+    await Promise.all(positionAgentReviewRows.value.map((_, index) => validatePositionReviewRow(index)))
+    const invalidRows = positionAgentReviewRows.value.filter((row) => !row.validation.valid)
+    if (invalidRows.length) {
+      positionAgentMessage.value = `还有 ${invalidRows.length} 条股票代码未通过校验，请修正后再入库。`
+      return
+    }
+    const pendingArguments = positionAgentPendingAction.value.arguments
+    const rows = positionAgentReviewRows.value.map(({ validation: _validation, validating: _validating, ...row }) => row)
+    const result = await api.confirmPositionAgentDraft({
+      rows,
+      account: pendingArguments.account,
+      as_of_date: pendingArguments.as_of_date,
+      account_id: positionAgentTargetAccount.value
+    })
+    positionAgentRows.value = result.rows
+    positionAgentPendingAction.value = null
+    positionAgentReviewRows.value = []
+    positionAgentMessage.value = result.summary
+    positionAgentChats.value.push({
+      id: Date.now(),
+      role: 'assistant',
+      status: 'done',
+      kind: 'saved',
+      content: positionAgentResultMarkdown(result.rows, [], result.summary)
+    })
+    await refreshAll()
+    scrollPositionChat()
+  } catch (err) {
+    positionAgentMessage.value = err instanceof Error ? err.message : '复核后的持仓保存失败'
+  } finally {
+    positionAgentConfirming.value = false
+  }
+}
+
+function positionReviewNumber(value: unknown, digits = 2) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? formatNumber(parsed, digits) : '-'
 }
 
 function buildPositionAgentHistory() {
@@ -445,6 +716,7 @@ function handlePositionAgentEvent(event: PositionAgentStreamEvent, messageId: nu
     const failedRows = rows.filter((row): row is { error: string; raw?: Record<string, unknown> } => 'error' in row)
     positionAgentMessage.value = event.summary || event.reply || `已保存 ${positionAgentRows.value.length} 条持仓`
     positionAgentPendingAction.value = event.pending_action || null
+    setPositionAgentReviewDraft(positionAgentPendingAction.value)
     const finalContent = latest.content.trim()
       ? latest.content
       : event.should_save
@@ -640,6 +912,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', syncPageFromLocatio
         :positions="positions"
         @refresh="refreshAll"
         @refresh-positions="refreshPositions"
+        @position-corrected="applyPositionCorrection"
         @open-agent="openPositionAgent"
         @open-chart="openChartFromPosition"
       />
@@ -677,7 +950,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', syncPageFromLocatio
             <h2>持仓录入 Agent</h2>
             <p>可以直接输入持仓描述，也可以上传券商持仓截图后让模型识别入库。</p>
           </div>
-          <button type="button" :disabled="positionAgentBusy" @click="closePositionAgent">关闭</button>
+          <button type="button" :disabled="positionAgentBusy || positionAgentConfirming" @click="closePositionAgent">关闭</button>
         </header>
 
         <section ref="positionChatScroll" class="message-list position-agent-messages">
@@ -708,6 +981,63 @@ onBeforeUnmount(() => window.removeEventListener('popstate', syncPageFromLocatio
               <div v-else class="chat-typing">正在识别并写入持仓...</div>
             </template>
           </article>
+
+          <section v-if="positionAgentReviewRows.length" class="position-ocr-review">
+            <header>
+              <div>
+                <span>OCR 识别复核</span>
+                <strong>确认股票代码后再写入持仓</strong>
+              </div>
+              <small>{{ positionAgentReviewRows.filter((row) => row.validation.valid).length }}/{{ positionAgentReviewRows.length }} 已通过</small>
+            </header>
+            <div class="position-ocr-review-list">
+              <article
+                v-for="(row, index) in positionAgentReviewRows"
+                :key="index"
+                class="position-ocr-review-row"
+                :class="{ valid: row.validation.valid, invalid: !row.validation.valid && row.validation.status !== 'unchecked' }"
+              >
+                <div class="position-ocr-code">
+                  <label :for="`position-ocr-symbol-${index}`">股票代码</label>
+                  <div>
+                    <input
+                      :id="`position-ocr-symbol-${index}`"
+                      v-model.trim="row.symbol"
+                      maxlength="16"
+                      :disabled="row.validating || positionAgentConfirming"
+                      @input="markPositionSymbolEdited(row)"
+                      @keyup.enter.prevent="validatePositionReviewRow(index)"
+                    />
+                    <button type="button" :disabled="row.validating || positionAgentConfirming" @click="validatePositionReviewRow(index)">
+                      {{ row.validating ? '校验中' : '校验' }}
+                    </button>
+                  </div>
+                </div>
+                <div class="position-ocr-stock">
+                  <span>{{ row.name || '未识别名称' }}</span>
+                  <small>持仓 {{ positionReviewNumber(row.position_quantity, 0) }} 股 · 成本 {{ positionReviewNumber(row.cost_price) }}</small>
+                </div>
+                <div class="position-ocr-validation" :class="{ valid: row.validation.valid }">
+                  <strong>{{ row.validation.valid ? '校验通过' : '需要核对' }}</strong>
+                  <span>{{ row.validation.message }}</span>
+                  <button
+                    v-if="row.validation.suggested_symbol"
+                    type="button"
+                    :disabled="positionAgentConfirming"
+                    @click="applyPositionSymbolSuggestion(index)"
+                  >
+                    使用建议 {{ row.validation.suggested_symbol }} {{ row.validation.suggested_name || '' }}
+                  </button>
+                </div>
+              </article>
+            </div>
+            <footer>
+              <button type="button" class="secondary" :disabled="positionAgentConfirming" @click="cancelPositionAgentReview">取消本次录入</button>
+              <button type="button" class="primary" :disabled="positionAgentConfirming || positionAgentReviewRows.some((row) => row.validating)" @click="confirmPositionAgentReview">
+                {{ positionAgentConfirming ? '正在入库' : '确认无误并入库' }}
+              </button>
+            </footer>
+          </section>
         </section>
 
         <form class="position-agent-composer" @submit.prevent="agentAddPositions">
@@ -743,7 +1073,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', syncPageFromLocatio
               {{ positionAgentBusy ? '识别中' : '发送' }}
             </button>
           </div>
-          <p v-if="positionAgentMessage && !positionAgentBusy" class="form-message">{{ positionAgentMessage }}</p>
+          <p v-if="positionAgentComposerMessage && !positionAgentBusy" class="form-message">{{ positionAgentComposerMessage }}</p>
         </form>
       </aside>
     </div>

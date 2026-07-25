@@ -64,13 +64,32 @@ class PositionAccountMixin:
         query = select(PositionAccount).where(
             PositionAccount.broker_name == broker_name,
             PositionAccount.account_type == account_type,
+            PositionAccount.status == "active",
             self._owner_clause(PositionAccount),
         )
         if account_no_masked:
             query = query.where(PositionAccount.account_no_masked == str(account_no_masked))
+            account = self.db.scalar(query.limit(1))
         else:
-            query = query.where(PositionAccount.account_no_masked.is_(None))
-        account = self.db.scalar(query.limit(1))
+            candidates = self.db.scalars(query.order_by(PositionAccount.id)).all()
+            named = [
+                item
+                for item in candidates
+                if account_name and (item.account_name or "").strip() == str(account_name).strip()
+            ]
+            if len(named) == 1:
+                account = named[0]
+            elif len(candidates) == 1:
+                # A broker often has a masked account number in the database
+                # while the user only says "方正证券账户". Reuse the sole
+                # active account instead of silently creating a duplicate.
+                account = candidates[0]
+            elif len(candidates) > 1:
+                raise ValueError(
+                    f"{broker_name} 存在多个证券账户，请明确选择 account_id 或脱敏账号后再保存"
+                )
+            else:
+                account = None
         if account is None:
             account = PositionAccount(
                 owner_user_id=self.owner_user_id,

@@ -25,6 +25,11 @@ const activeTab = ref<ReportTab>('chart')
 const priceHost = ref<HTMLElement | null>(null)
 const equityHost = ref<HTMLElement | null>(null)
 const macdHost = ref<HTMLElement | null>(null)
+const isPortfolio = computed(() => run.value?.report_type === 'portfolio')
+const reportSubject = computed(() => {
+  if (!run.value) return ''
+  return isPortfolio.value ? (run.value.symbols || []).join(' · ') : run.value.symbol
+})
 
 let priceChart: ReturnType<typeof createChart> | null = null
 let equityChart: ReturnType<typeof createChart> | null = null
@@ -63,6 +68,16 @@ function tradeReason(reason: string) {
 const primaryMetrics = computed(() => {
   const metrics = run.value?.metrics
   if (!metrics) return []
+  if (isPortfolio.value) {
+    return [
+      { label: '风险平价收益', value: percent(metrics.total_return), tone: tone(metrics.total_return), detail: '计入调仓成本' },
+      { label: '等权基准', value: percent(metrics.benchmark_return), tone: tone(metrics.benchmark_return), detail: '同标的同频率' },
+      { label: '超额收益', value: percent(metrics.excess_return), tone: tone(metrics.excess_return), detail: '风险平价减等权' },
+      { label: '最大回撤', value: percent(metrics.max_drawdown, false), tone: 'negative' as MetricTone, detail: '峰值至谷值' },
+      { label: 'Sharpe', value: number(metrics.sharpe), tone: tone(metrics.sharpe), detail: '风险调整收益' },
+      { label: '调仓次数', value: String(metrics.rebalance_count || 0), tone: 'accent' as MetricTone, detail: `累计换手 ${number(metrics.turnover, 2)}` }
+    ]
+  }
   return [
     { label: '总收益率', value: percent(metrics.total_return), tone: tone(metrics.total_return), detail: '策略区间收益' },
     { label: '超额收益', value: percent(metrics.excess_return), tone: tone(metrics.excess_return), detail: '相对沪深300' },
@@ -76,18 +91,23 @@ const primaryMetrics = computed(() => {
 const secondaryMetrics = computed(() => {
   const metrics = run.value?.metrics
   if (!metrics) return []
-  return [
+  const rows: Array<[string, string, MetricTone]> = [
     ['年化收益', percent(metrics.annual_return), tone(metrics.annual_return)],
+    ['年化波动', percent(metrics.annual_volatility, false), 'neutral'],
     ['Sortino', number(metrics.sortino), tone(metrics.sortino)],
     ['Calmar', number(metrics.calmar), tone(metrics.calmar)],
-    ['盈亏比', number(metrics.profit_loss_ratio), tone(metrics.profit_loss_ratio - 1)],
-    ['基准收益', percent(metrics.benchmark_return), tone(metrics.benchmark_return)],
+    [isPortfolio.value ? '累计换手' : '盈亏比', isPortfolio.value ? number(metrics.turnover, 2) : number(metrics.profit_loss_ratio), isPortfolio.value ? 'neutral' : tone(metrics.profit_loss_ratio - 1)],
+    [run.value?.benchmark_label || '沪深300', percent(metrics.benchmark_return), tone(metrics.benchmark_return)],
     ['信息比率', number(metrics.information_ratio), tone(metrics.information_ratio)],
     ['Beta', number(metrics.beta), 'neutral' as MetricTone],
     ['Alpha 年化', percent(metrics.alpha_annual), tone(metrics.alpha_annual)],
     ['Alpha t-stat', number(metrics.alpha_t_stat), Math.abs(metrics.alpha_t_stat || 0) >= 2 ? 'positive' as MetricTone : 'negative' as MetricTone],
     ['最终权益', currency(metrics.final_equity), tone(metrics.final_equity - metrics.initial_cash)]
   ]
+  if (isPortfolio.value) {
+    rows.splice(5, 0, ['调仓成本', currency(metrics.total_cost), 'negative'])
+  }
+  return rows
 })
 
 const confidenceMeta = computed(() => {
@@ -106,12 +126,18 @@ const totalProfit = computed(() => {
   return run.value.metrics.final_equity - run.value.metrics.initial_cash
 })
 
-const tabs: Array<{ key: ReportTab; label: string; detail: string }> = [
+const tabs = computed<Array<{ key: ReportTab; label: string; detail: string }>>(() => [
   { key: 'chart', label: '图表分析', detail: 'K线 / 指标 / 净值' },
-  { key: 'trades', label: '逐笔交易', detail: '成交与费用' },
+  { key: 'trades', label: isPortfolio.value ? '调仓记录' : '逐笔交易', detail: isPortfolio.value ? '权重与成本' : '成交与费用' },
   { key: 'attribution', label: '归因检验', detail: '稳健性与风险' },
   { key: 'code', label: '代码参数', detail: '可复现配置' }
-]
+])
+
+function formatConfigValue(value: unknown) {
+  if (Array.isArray(value)) return value.join('、')
+  if (value && typeof value === 'object') return JSON.stringify(value)
+  return String(value ?? '-')
+}
 
 function destroyCharts() {
   resizeObserver?.disconnect()
@@ -151,6 +177,11 @@ function baseChart(host: HTMLElement, height: number) {
 function renderCharts() {
   if (!run.value || activeTab.value !== 'chart' || !priceHost.value || !equityHost.value || !macdHost.value) return
   destroyCharts()
+
+  if (isPortfolio.value) {
+    renderPortfolioCharts()
+    return
+  }
 
   priceChart = baseChart(priceHost.value, 430)
   const candles = priceChart.addSeries(CandlestickSeries, {
@@ -228,17 +259,78 @@ function renderCharts() {
   resizeObserver.observe(equityHost.value)
 }
 
+function renderPortfolioCharts() {
+  if (!run.value || !priceHost.value || !equityHost.value || !macdHost.value) return
+  const palette = ['#dfb65c', '#4dd0be', '#ff6b70', '#70a5ff', '#c78cff', '#9cd36a', '#f39754', '#65c9d5']
+
+  priceChart = baseChart(priceHost.value, 430)
+  ;(run.value.asset_curves || []).forEach((asset, index) => {
+    const series = priceChart!.addSeries(LineSeries, {
+      color: palette[index % palette.length],
+      lineWidth: 2,
+      priceLineVisible: false,
+      title: asset.symbol
+    })
+    series.setData(asset.points.map((point) => ({ time: point.time as Time, value: point.value })))
+  })
+  priceChart.timeScale().fitContent()
+
+  macdChart = baseChart(macdHost.value, 220)
+  const weightRows = run.value.weight_series || []
+  ;(run.value.symbols || []).forEach((symbol, index) => {
+    const series = macdChart!.addSeries(LineSeries, {
+      color: palette[index % palette.length],
+      lineWidth: 2,
+      priceLineVisible: false,
+      title: symbol
+    })
+    series.setData(weightRows.map((row) => ({
+      time: row.time as Time,
+      value: (row.weights[symbol] || 0) * 100
+    })))
+  })
+  macdChart.timeScale().fitContent()
+
+  equityChart = baseChart(equityHost.value, 280)
+  const strategy = equityChart.addSeries(LineSeries, {
+    color: '#dfb65c',
+    lineWidth: 2,
+    priceLineVisible: false,
+    title: '风险平价'
+  })
+  const benchmark = equityChart.addSeries(LineSeries, {
+    color: '#4dd0be',
+    lineWidth: 2,
+    priceLineVisible: false,
+    title: run.value.benchmark_label || '等权组合'
+  })
+  strategy.setData(run.value.equity_curve.map((item) => ({ time: item.time as Time, value: item.equity })))
+  benchmark.setData((run.value.benchmark_curve || []).map((item) => ({ time: item.time as Time, value: item.equity })))
+  equityChart.timeScale().fitContent()
+
+  resizeObserver = new ResizeObserver(() => {
+    if (priceChart && priceHost.value) priceChart.applyOptions({ width: priceHost.value.clientWidth })
+    if (macdChart && macdHost.value) macdChart.applyOptions({ width: macdHost.value.clientWidth })
+    if (equityChart && equityHost.value) equityChart.applyOptions({ width: equityHost.value.clientWidth })
+  })
+  resizeObserver.observe(priceHost.value)
+  resizeObserver.observe(macdHost.value)
+  resizeObserver.observe(equityHost.value)
+}
+
 async function load() {
   loading.value = true
   error.value = ''
   try {
     run.value = await api.backtest(props.runId)
-    await nextTick()
-    renderCharts()
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : '完整回测报告加载失败'
   } finally {
     loading.value = false
+  }
+  if (run.value && !error.value) {
+    await nextTick()
+    renderCharts()
   }
 }
 
@@ -264,7 +356,7 @@ onBeforeUnmount(destroyCharts)
         <div class="report-title-line">
           <span class="strategy-tag">策略回测</span>
           <h2>{{ run.strategy.name }}</h2>
-          <strong>{{ run.symbol }}</strong>
+          <strong>{{ reportSubject }}</strong>
         </div>
         <p>{{ run.period.start_date }} — {{ run.period.end_date }} · 日线 · {{ run.period.trading_days }} 个交易日</p>
       </div>
@@ -299,7 +391,7 @@ onBeforeUnmount(destroyCharts)
             <strong :class="tone(run.metrics.total_return)">{{ percent(run.metrics.total_return) }}</strong>
           </div>
           <div>
-            <span>沪深300</span>
+            <span>{{ run.benchmark_label || '沪深300' }}</span>
             <strong :class="tone(run.metrics.benchmark_return)">{{ percent(run.metrics.benchmark_return) }}</strong>
           </div>
           <div class="excess">
@@ -340,12 +432,13 @@ onBeforeUnmount(destroyCharts)
           <header>
             <div>
               <span>PRICE ACTION</span>
-              <strong>{{ run.symbol }} K线与成交量</strong>
+              <strong>{{ isPortfolio ? '标的归一化走势（起点 = 100）' : `${run.symbol} K线与成交量` }}</strong>
             </div>
-            <div class="chart-legend">
+            <div v-if="!isPortfolio" class="chart-legend">
               <span class="buy">● 买入</span>
               <span class="sell">● 卖出</span>
             </div>
+            <div v-else class="chart-legend"><span class="equity">各资产相对表现</span></div>
           </header>
           <div ref="priceHost" class="report-chart price"></div>
         </article>
@@ -354,10 +447,11 @@ onBeforeUnmount(destroyCharts)
           <article class="chart-panel">
             <header>
               <div>
-                <span>MOMENTUM</span>
-                <strong>MACD 动量结构</strong>
+              <span>MOMENTUM</span>
+                <strong>{{ isPortfolio ? '动态组合权重（%）' : 'MACD 动量结构' }}</strong>
               </div>
-              <div class="chart-legend"><span class="dif">DIF</span><span class="dea">DEA</span></div>
+              <div v-if="!isPortfolio" class="chart-legend"><span class="dif">DIF</span><span class="dea">DEA</span></div>
+              <div v-else class="chart-legend"><span class="dif">仅调仓日更新</span></div>
             </header>
             <div ref="macdHost" class="report-chart macd"></div>
           </article>
@@ -365,9 +459,12 @@ onBeforeUnmount(destroyCharts)
             <header>
               <div>
                 <span>RISK PATH</span>
-                <strong>净值与动态回撤</strong>
+                <strong>{{ isPortfolio ? '风险平价与等权基准净值' : '净值与动态回撤' }}</strong>
               </div>
-              <div class="chart-legend"><span class="equity">净值</span><span class="sell">回撤%</span></div>
+              <div class="chart-legend">
+                <span class="equity">{{ isPortfolio ? '风险平价' : '净值' }}</span>
+                <span :class="isPortfolio ? 'buy' : 'sell'">{{ isPortfolio ? (run.benchmark_label || '等权') : '回撤%' }}</span>
+              </div>
             </header>
             <div ref="equityHost" class="report-chart equity"></div>
           </article>
@@ -383,18 +480,42 @@ onBeforeUnmount(destroyCharts)
         <section class="execution-notes">
           <div>
             <span>执行口径</span>
-            <strong>收盘确认信号，下一交易日开盘执行</strong>
+            <strong>{{ isPortfolio ? '仅用调仓日前历史数据估计风险，按设定频率调仓' : '收盘确认信号，下一交易日开盘执行' }}</strong>
           </div>
-          <p>已模拟 A 股 T+1、100 股整手、佣金最低 5 元、印花税、过户费与滑点，避免未来函数。</p>
+          <p v-if="isPortfolio">风险平价与等权基准使用相同标的、相同调仓频率和相同费用口径；组合按权重级别模拟并计入佣金与滑点。</p>
+          <p v-else>已模拟 A 股 T+1、100 股整手、佣金最低 5 元、印花税、过户费与滑点，避免未来函数。</p>
         </section>
       </div>
 
       <div v-if="activeTab === 'trades'" class="trade-section">
         <header class="section-heading">
-          <div><span>EXECUTION LEDGER</span><h3>逐笔交易与成本</h3></div>
-          <p>共 {{ run.trades.length }} 笔完整交易 · 费用已计入最终收益</p>
+          <div><span>EXECUTION LEDGER</span><h3>{{ isPortfolio ? '调仓权重与成本' : '逐笔交易与成本' }}</h3></div>
+          <p v-if="isPortfolio">共 {{ run.rebalance_history?.length || 0 }} 次调仓 · 成本已计入最终收益</p>
+          <p v-else>共 {{ run.trades.length }} 笔完整交易 · 费用已计入最终收益</p>
         </header>
-        <div class="table-shell">
+        <div v-if="isPortfolio" class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>调仓日</th><th>换手</th><th>成本</th>
+                <th v-for="symbol in run.symbols" :key="symbol">{{ symbol }} 权重 / 风险贡献</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, index) in run.rebalance_history" :key="row.time">
+                <td class="sequence">{{ String(index + 1).padStart(2, '0') }}</td>
+                <td>{{ row.time }}</td>
+                <td>{{ number(row.turnover, 4) }}</td>
+                <td class="negative">{{ currency(row.cost) }}</td>
+                <td v-for="symbol in run.symbols" :key="symbol">
+                  {{ percent(row.weights[symbol], false) }} / {{ percent(row.risk_contributions[symbol], false) }}
+                </td>
+              </tr>
+              <tr v-if="!run.rebalance_history?.length"><td :colspan="4 + (run.symbols?.length || 0)" class="empty-row">该区间没有调仓记录。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="table-shell">
           <table>
             <thead>
               <tr>
@@ -423,7 +544,33 @@ onBeforeUnmount(destroyCharts)
           <div><span>ROBUSTNESS AUDIT</span><h3>收益归因与稳健性检查</h3></div>
           <p>不只看收益，也检查收益从哪里来、是否依赖偶然交易</p>
         </header>
-        <section class="attribution-metrics">
+        <section v-if="isPortfolio" class="attribution-metrics">
+          <article>
+            <span>第一贡献标的</span>
+            <strong>{{ run.attribution.concentration?.top_contributor?.symbol || '-' }}</strong>
+            <small>{{ currency(run.attribution.concentration?.top_contributor?.pnl_contribution) }}</small>
+          </article>
+          <article>
+            <span>第一名正贡献占比</span>
+            <strong :class="(run.attribution.concentration?.top_positive_share || 0) > 0.7 ? 'negative' : 'positive'">
+              {{ percent(run.attribution.concentration?.top_positive_share, false) }}
+            </strong>
+            <small>识别伪分散和单标的依赖</small>
+          </article>
+          <article>
+            <span>移除第一贡献后</span>
+            <strong :class="tone(run.attribution.concentration?.remove_top_contributor_pnl)">
+              {{ currency(run.attribution.concentration?.remove_top_contributor_pnl) }}
+            </strong>
+            <small>组合利润稳健性压力测试</small>
+          </article>
+          <article>
+            <span>Beta / Alpha t-stat</span>
+            <strong>{{ number(run.metrics.beta) }} / {{ number(run.metrics.alpha_t_stat) }}</strong>
+            <small>相对沪深300 · |t| ≥ 2 才具初步显著性</small>
+          </article>
+        </section>
+        <section v-else class="attribution-metrics">
           <article>
             <span>最佳交易</span>
             <strong :class="tone(run.attribution.top_winner?.pnl)">
@@ -450,7 +597,71 @@ onBeforeUnmount(destroyCharts)
           </article>
         </section>
 
-        <section class="audit-grid">
+        <section v-if="isPortfolio" class="portfolio-attribution">
+          <article class="reason-table">
+            <header><span>LAYER 1</span><h3>资产收益与风险贡献</h3></header>
+            <div class="table-shell">
+              <table>
+                <thead><tr><th>标的</th><th>区间涨跌</th><th>平均权重</th><th>平均风险贡献</th><th>PnL 贡献</th><th>收益贡献</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in run.attribution.asset_stats" :key="row.symbol">
+                    <td class="sequence">{{ row.symbol }}</td>
+                    <td :class="tone(row.asset_return)">{{ percent(row.asset_return) }}</td>
+                    <td>{{ percent(row.average_weight, false) }}</td>
+                    <td>{{ percent(row.average_risk_contribution, false) }}</td>
+                    <td :class="tone(row.pnl_contribution)">{{ currency(row.pnl_contribution) }}</td>
+                    <td :class="tone(row.return_contribution)">{{ percent(row.return_contribution) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+          <div class="audit-grid">
+            <article class="risk-list">
+              <header><span>LAYER 2 · MARKET REGRESSION</span><h3>市场暴露回归</h3></header>
+              <dl class="audit-values">
+                <div><dt>基准</dt><dd>{{ run.attribution.market_regression?.benchmark || '000300.SH' }}</dd></div>
+                <div><dt>Beta</dt><dd>{{ number(run.attribution.market_regression?.beta) }}</dd></div>
+                <div><dt>Alpha 年化</dt><dd>{{ percent(run.attribution.market_regression?.alpha_annual) }}</dd></div>
+                <div><dt>Alpha t-stat</dt><dd>{{ number(run.attribution.market_regression?.alpha_t_stat) }}</dd></div>
+                <div><dt>R²</dt><dd>{{ number(run.attribution.market_regression?.r_squared, 3) }}</dd></div>
+              </dl>
+            </article>
+            <article class="risk-list">
+              <header><span>LAYER 3 · REGIME</span><h3>市场状态分析</h3></header>
+              <p v-if="run.attribution.regime_analysis?.status === 'skipped'" class="audit-reason">
+                {{ run.attribution.regime_analysis.reason }}
+              </p>
+              <dl v-else class="audit-values">
+                <div v-for="regime in run.attribution.regime_analysis?.regimes" :key="regime.code">
+                  <dt>{{ regime.label }} · {{ regime.trading_days }} 日</dt>
+                  <dd>{{ percent(regime.annual_return) }} / Sharpe {{ number(regime.sharpe) }}</dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+          <div class="audit-grid">
+            <article class="risk-list">
+              <header><span>LAYER 4 · SIGNIFICANCE</span><h3>区块自助法与路径检验</h3></header>
+              <p v-if="run.attribution.statistical_tests?.status === 'skipped'" class="audit-reason">
+                {{ run.attribution.statistical_tests.reason }}
+              </p>
+              <dl v-else class="audit-values">
+                <div><dt>方法</dt><dd>{{ run.attribution.statistical_tests?.method }}</dd></div>
+                <div><dt>主动收益 p-value</dt><dd>{{ number(run.attribution.statistical_tests?.excess_return_p_value, 3) }}</dd></div>
+                <div><dt>显著性</dt><dd :class="run.attribution.statistical_tests?.significant ? 'positive' : 'negative'">{{ run.attribution.statistical_tests?.significant ? '通过' : '未通过' }}</dd></div>
+                <div><dt>实际最大回撤</dt><dd>{{ percent(run.attribution.statistical_tests?.actual_max_drawdown, false) }}</dd></div>
+                <div><dt>回撤更差路径占比</dt><dd>{{ percent(run.attribution.statistical_tests?.drawdown_worse_percentile, false) }}</dd></div>
+              </dl>
+            </article>
+            <article class="risk-list">
+              <header><span>MODEL LIMITS</span><h3>风险、假设与局限</h3></header>
+              <ol><li v-for="warning in run.warnings" :key="warning">{{ warning }}</li></ol>
+            </article>
+          </div>
+        </section>
+
+        <section v-else class="audit-grid">
           <article class="risk-list">
             <header><span>MODEL LIMITS</span><h3>风险与局限</h3></header>
             <ol><li v-for="warning in run.warnings" :key="warning">{{ warning }}</li></ol>
@@ -482,7 +693,7 @@ onBeforeUnmount(destroyCharts)
           <header><span>RUN MANIFEST</span><h3>参数与数据指纹</h3></header>
           <dl>
             <template v-for="(value, key) in run.config" :key="key">
-              <dt>{{ key }}</dt><dd>{{ value }}</dd>
+              <dt>{{ key }}</dt><dd>{{ formatConfigValue(value) }}</dd>
             </template>
           </dl>
           <div class="fingerprint">
@@ -728,12 +939,23 @@ tbody tr:hover { background: rgba(77, 208, 190, .035); }
 .attribution-metrics small { color: var(--report-muted); font-size: 9px; }
 .attribution-metrics strong { color: #e0ddd5; font-family: "Cascadia Mono", Consolas, monospace; font-size: 19px; }
 
+.portfolio-attribution { display: grid; gap: 12px; }
+.portfolio-attribution > .reason-table { min-width: 0; border: 1px solid var(--report-border); background: var(--report-surface); }
+.portfolio-attribution > .reason-table > header { padding: 14px 16px; border-bottom: 1px solid var(--report-border-soft); }
+.portfolio-attribution h3 { margin: 4px 0 0; color: #e5e2d9; font-size: 15px; }
+.portfolio-attribution header > span { color: #858c90; font-size: 9px; letter-spacing: .14em; }
 .audit-grid { display: grid; grid-template-columns: minmax(320px, .75fr) minmax(0, 1.25fr); gap: 12px; }
 .audit-grid > article { min-width: 0; border: 1px solid var(--report-border); background: var(--report-surface); }
 .audit-grid article > header,
 .code-section article > header { padding: 14px 16px; border-bottom: 1px solid var(--report-border-soft); }
 .risk-list ol { display: grid; gap: 10px; margin: 0; padding: 16px 20px 18px 44px; color: #aeb4b4; font-size: 11px; line-height: 1.65; }
 .risk-list li::marker { color: var(--report-red); font-family: "Cascadia Mono", Consolas, monospace; }
+.audit-values { display: grid; margin: 0; padding: 10px 16px 16px; }
+.audit-values > div { display: grid; grid-template-columns: minmax(120px, .6fr) minmax(0, 1.4fr); gap: 14px; padding: 9px 0; border-bottom: 1px solid var(--report-border-soft); }
+.audit-values > div:last-child { border-bottom: 0; }
+.audit-values dt { color: var(--report-muted); font-size: 10px; }
+.audit-values dd { margin: 0; overflow-wrap: anywhere; color: #d7dbd9; font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; text-align: right; }
+.audit-reason { margin: 0; padding: 18px 16px; color: #aeb4b4; font-size: 11px; line-height: 1.7; }
 
 .code-section { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 12px; }
 .code-section > article { min-width: 0; border: 1px solid var(--report-border); background: var(--report-surface); }

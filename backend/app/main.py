@@ -20,7 +20,11 @@ from backend.app.core.applog import configure_logging, get_logger, log_event, pr
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.auth.auth_api import router as auth_router
 from backend.app.core.database import get_db, initialize_default_database, session_scope
-from backend.app.agents.position_agent import run_position_agent
+from backend.app.agents.position_agent import (
+    _execute_position_tool,
+    run_position_agent,
+    validate_position_symbol,
+)
 from backend.app.agents.position_import import parse_position_screenshot
 from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
@@ -44,6 +48,7 @@ from backend.app.agent_runtime.transaction_channels import (
     create_transaction_run,
     stream_transaction_run,
 )
+from backend.app.agent_runtime.transaction_state import transaction_state_service
 from backend.app.agent_runtime.worker import agent_runtime_worker
 
 
@@ -118,6 +123,13 @@ class PositionHoldingIn(BaseModel):
     action: str | None = Field(default=None, max_length=24, description="交易动作: buy/sell/add/reduce/close/replace/update_field")
 
 
+class PositionCorrectionIn(BaseModel):
+    symbol: str = Field(min_length=2, max_length=24)
+    name: str = Field(min_length=1, max_length=120)
+    position_quantity: float = Field(ge=0)
+    cost_price: float = Field(ge=0)
+
+
 class PositionAiImportIn(BaseModel):
     image_base64: str = Field(min_length=100)
     mime_type: str = Field(default="image/png", max_length=80)
@@ -133,6 +145,18 @@ class PositionAgentAddIn(BaseModel):
     model_config_id: int | None = None
     history: list[dict[str, str]] = Field(default_factory=list, max_length=8)
     pending_action: dict | None = None
+
+
+class PositionSymbolValidateIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=32)
+    name: str | None = Field(default=None, max_length=120)
+
+
+class PositionAgentConfirmIn(BaseModel):
+    rows: list[dict] = Field(min_length=1, max_length=100)
+    account: dict | None = None
+    as_of_date: str | None = Field(default=None, max_length=32)
+    account_id: int | None = Field(default=None, ge=1)
 
 
 def _sse_event(event: dict) -> str:
@@ -436,6 +460,35 @@ def create_app(init_db: bool = True) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.patch("/api/positions/by-id/{position_id}")
+    def correct_position(
+        position_id: int,
+        payload: PositionCorrectionIn,
+        repository: StockRepository = Depends(repo),
+        context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        user_repository = repository.for_user(context.user.id)
+        current = next(
+            (item for item in user_repository.positions() if int(item.get("id") or 0) == position_id),
+            None,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="持仓不存在或不属于当前用户")
+        validation = validate_position_symbol(payload.symbol, payload.name)
+        same_existing_symbol = (
+            validation.get("normalized_symbol") == current.get("symbol")
+            and validation.get("status") == "catalog_unavailable"
+        )
+        if not validation.get("valid") and not same_existing_symbol:
+            raise HTTPException(status_code=400, detail=validation.get("message") or "股票代码校验失败")
+        data = payload.model_dump()
+        data["symbol"] = validation.get("normalized_symbol") or current["symbol"]
+        data["name"] = payload.name.strip()
+        try:
+            return user_repository.correct_position_holding(position_id, data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.delete("/api/positions/{symbol}")
     def delete_position(
         symbol: str,
@@ -529,6 +582,60 @@ def create_app(init_db: bool = True) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/positions/agent-validate-symbol")
+    def validate_agent_position_symbol(
+        payload: PositionSymbolValidateIn,
+        _context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        return validate_position_symbol(payload.symbol, payload.name)
+
+    @app.post("/api/positions/agent-confirm")
+    def confirm_agent_positions(
+        payload: PositionAgentConfirmIn,
+        repository: StockRepository = Depends(repo),
+        context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        arguments: dict = {"rows": payload.rows}
+        if payload.account:
+            arguments["account"] = payload.account
+        if payload.as_of_date:
+            arguments["as_of_date"] = payload.as_of_date
+        result = _execute_position_tool(
+            repository=repository.for_user(context.user.id),
+            name="save_position_holdings",
+            args=arguments,
+            created_by=context.user.username,
+            source_name="AgentScope OCR 人工复核",
+            image_mime_type="image/ocr-reviewed",
+            image_sha256=None,
+            account_id=payload.account_id,
+        )
+        if result.get("need_account"):
+            raise HTTPException(status_code=400, detail=result.get("message"))
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+        saved_count = int(result.get("saved_count") or 0)
+        if saved_count:
+            transaction_state_service.clear_pending_for_user(
+                context.user.id,
+                "position-entry-agent",
+            )
+        return {
+            "rows": result.get("rows") or [],
+            "should_save": saved_count > 0,
+            "summary": f"复核完成，已保存 {saved_count} 条持仓。",
+        }
+
+    @app.delete("/api/positions/agent-draft")
+    def discard_agent_position_draft(
+        context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        cleared = transaction_state_service.clear_pending_for_user(
+            context.user.id,
+            "position-entry-agent",
+        )
+        return {"cleared": cleared}
 
     @app.post("/api/positions/agent-add/stream")
     async def stream_agent_add_positions(

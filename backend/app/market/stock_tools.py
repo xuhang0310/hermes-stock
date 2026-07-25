@@ -2674,6 +2674,27 @@ def _stock_basic_item(ts_code: str) -> dict[str, Any] | None:
     return None
 
 
+def lookup_a_share_instrument(ts_code: str) -> dict[str, Any]:
+    """Look up one listed A-share in the authoritative TuShare stock catalog."""
+    normalized = normalize_a_share_symbol(ts_code)
+    rows = _stock_basic_rows()
+    if not rows:
+        return {
+            "available": False,
+            "normalized_symbol": normalized,
+            "instrument": None,
+        }
+    item = next(
+        (row for row in rows if str(row.get("ts_code") or "") == normalized),
+        None,
+    )
+    return {
+        "available": True,
+        "normalized_symbol": normalized,
+        "instrument": item,
+    }
+
+
 def _latest_daily_basic(ts_code: str, end_date: str | None = None) -> dict[str, Any]:
     end = _valid_yyyymmdd(end_date) or date.today().strftime("%Y%m%d")
     start = (datetime.strptime(end, "%Y%m%d").date() - timedelta(days=45)).strftime("%Y%m%d")

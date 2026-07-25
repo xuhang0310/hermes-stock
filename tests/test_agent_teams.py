@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, func, select
@@ -369,6 +370,27 @@ class AgentTeamRuntimeTests(unittest.TestCase):
         self.assertFalse(by_code["watchlist-entry-agent"]["delegation_read_only"])
         self.assertFalse(by_code["watchlist-entry-agent"]["allow_code_execution"])
 
+    def test_builtin_position_agent_keeps_write_access_without_forcing_default_account(self) -> None:
+        profile = SimpleNamespace(
+            code="position-entry-agent",
+            can_write_positions=False,
+        )
+        self.assertTrue(
+            ai_api._profile_can_write_positions(
+                profile,
+                chat_mode="research",
+                permissions={"agent:use", "data:write"},
+            )
+        )
+        self.assertFalse(ai_api._position_agent_uses_default_account(profile))
+        self.assertFalse(
+            ai_api._profile_can_write_positions(
+                profile,
+                chat_mode="research",
+                permissions={"agent:use"},
+            )
+        )
+
     def test_unknown_agent_rejects_only_that_member(self) -> None:
         team = self.team_service.start_team(
             leader_run_id=self.parent["run_id"],
@@ -711,6 +733,7 @@ class AgentScheduleServiceTests(unittest.TestCase):
                     job_kind="agent_task",
                     schedule_type="once",
                     run_once_at=run_at,
+                    trading_day_only=False,
                     enabled=False,
                 )
             )

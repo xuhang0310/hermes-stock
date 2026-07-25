@@ -518,7 +518,24 @@ def _execute_position_write_tool(
                 parsed_json=json.dumps(args, ensure_ascii=False),
                 created_by=user_label,
             )
-            saved_rows = repository.import_position_rows(rows, batch, default_account)
+            saved_rows: list[dict[str, Any]] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                merged = {**default_account, **row}
+                action = merged.pop("action", None)
+                try:
+                    saved_rows.append(
+                        repository.merge_position_holding(
+                            merged,
+                            action=action,
+                            source_type="digital_human",
+                            import_batch=batch,
+                            commit=False,
+                        )
+                    )
+                except ValueError as exc:
+                    saved_rows.append({"error": str(exc), "raw": row})
             repository.finish_position_import_batch(batch, saved_rows)
             session.commit()
     except Exception as exc:  # noqa: BLE001

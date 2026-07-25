@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from backend.app.auth.auth import AuthContext, require_permission
@@ -261,10 +261,16 @@ def _job_out(job: ScheduledJob) -> dict:
     }
 
 
-def _run_out(run: JobRun, *, output_content: str | None = None) -> dict:
+def _run_out(
+    run: JobRun,
+    *,
+    output_content: str | None = None,
+    job_name: str | None = None,
+) -> dict:
     payload = {
         "run_id": run.run_id,
         "job_key": run.job_key,
+        "job_name": job_name,
         "trigger_type": run.trigger_type,
         "status": run.status,
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -279,6 +285,18 @@ def _run_out(run: JobRun, *, output_content: str | None = None) -> dict:
     if output_content is not None:
         payload["output_content"] = output_content
     return payload
+
+
+def _page_out(items: list[dict], *, page: int, page_size: int, total: int, **extra: int) -> dict:
+    pages = (total + page_size - 1) // page_size if total else 0
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": pages,
+        **extra,
+    }
 
 
 def _run_output_content(db: Session, run: JobRun) -> str | None:
@@ -300,6 +318,45 @@ def schedule_jobs(
 ) -> list[dict]:
     rows = db.scalars(select(ScheduledJob).order_by(ScheduledJob.sort_order, ScheduledJob.id)).all()
     return [_job_out(row) for row in rows]
+
+
+@router.get("/schedule/jobs/paged")
+def schedule_jobs_paged(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=8, ge=1, le=50),
+    enabled: bool | None = Query(default=None),
+    keyword: str | None = Query(default=None, max_length=100),
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    filters = []
+    if enabled is not None:
+        filters.append(ScheduledJob.enabled.is_(enabled))
+    if keyword and keyword.strip():
+        filters.append(ScheduledJob.name.ilike(f"%{keyword.strip()}%"))
+
+    query = select(ScheduledJob)
+    count_query = select(func.count()).select_from(ScheduledJob)
+    if filters:
+        query = query.where(*filters)
+        count_query = count_query.where(*filters)
+
+    total = int(db.scalar(count_query) or 0)
+    enabled_total = int(
+        db.scalar(select(func.count()).select_from(ScheduledJob).where(ScheduledJob.enabled.is_(True))) or 0
+    )
+    rows = db.scalars(
+        query.order_by(ScheduledJob.sort_order, ScheduledJob.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return _page_out(
+        [_job_out(row) for row in rows],
+        page=page,
+        page_size=page_size,
+        total=total,
+        enabled_total=enabled_total,
+    )
 
 
 @router.post("/schedule/jobs")
@@ -396,6 +453,13 @@ def delete_schedule_job(
     job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
     if job is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    running = db.scalar(
+        select(JobRun.id)
+        .where(JobRun.job_key == job_key, JobRun.status == "running")
+        .limit(1)
+    )
+    if running is not None:
+        raise HTTPException(status_code=409, detail="任务正在运行，结束后才能删除")
     db.delete(job)
     db.commit()
     return {"deleted": True, "job_key": job_key}
@@ -455,6 +519,80 @@ def schedule_runs(
         query = query.where(JobRun.status == status)
     rows = db.scalars(query.order_by(JobRun.created_at.desc(), JobRun.id.desc()).limit(limit)).all()
     return [_run_out(row) for row in rows]
+
+
+@router.get("/schedule/runs/paged")
+def schedule_runs_paged(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=12, ge=1, le=100),
+    job_key: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("system:view")),
+) -> dict:
+    filters = []
+    if job_key:
+        filters.append(JobRun.job_key == job_key)
+    if status:
+        filters.append(JobRun.status == status)
+
+    query = select(JobRun)
+    count_query = select(func.count()).select_from(JobRun)
+    if filters:
+        query = query.where(*filters)
+        count_query = count_query.where(*filters)
+
+    total = int(db.scalar(count_query) or 0)
+    rows = list(
+        db.scalars(
+            query.order_by(JobRun.created_at.desc(), JobRun.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+    )
+    job_keys = {row.job_key for row in rows}
+    job_names = {}
+    if job_keys:
+        job_names = dict(
+            db.execute(
+                select(ScheduledJob.job_key, ScheduledJob.name).where(ScheduledJob.job_key.in_(job_keys))
+            ).all()
+        )
+    return _page_out(
+        [_run_out(row, job_name=job_names.get(row.job_key)) for row in rows],
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.delete("/schedule/runs")
+def clear_schedule_runs(
+    job_key: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("model:manage")),
+) -> dict:
+    filters = [JobRun.status != "running"]
+    running_filters = [JobRun.status == "running"]
+    if job_key:
+        filters.append(JobRun.job_key == job_key)
+        running_filters.append(JobRun.job_key == job_key)
+    if status:
+        filters.append(JobRun.status == status)
+        running_filters.append(JobRun.status == status)
+
+    skipped_running = int(
+        db.scalar(select(func.count()).select_from(JobRun).where(*running_filters)) or 0
+    )
+    result = db.execute(delete(JobRun).where(*filters))
+    db.commit()
+    return {
+        "deleted": int(result.rowcount or 0),
+        "skipped_running": skipped_running,
+        "job_key": job_key,
+        "status": status,
+    }
 
 
 @router.get("/schedule/runs/{run_id}")

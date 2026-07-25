@@ -490,6 +490,15 @@ def create_backtest(
     agent_run_id: str | None = None,
     db: Session | None = None,
 ) -> dict[str, Any]:
+    if isinstance(payload.get("symbols"), (list, tuple)) or str(payload.get("strategy") or "").lower() == "risk_parity":
+        from backend.app.quant.portfolio_backtest import create_portfolio_backtest
+
+        return create_portfolio_backtest(
+            payload,
+            owner_user_id=owner_user_id,
+            agent_run_id=agent_run_id,
+            db=db,
+        )
     config = normalize_config(payload)
     frame, benchmark_returns, warnings = load_market_data(config)
     result = run_macd_backtest(config, frame, benchmark_returns, warnings)

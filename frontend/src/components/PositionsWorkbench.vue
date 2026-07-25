@@ -1,12 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import DataTable from './DataTable.vue'
-import type { BrokerPreset, PositionAccount, PositionItem, PositionSummary, PositionTrade } from '../types'
+import type { BrokerPreset, PositionAccount, PositionItem, PositionSummary, PositionSymbolValidation, PositionTrade } from '../types'
 import { beijingFromDb } from '../utils/datetime'
 
 const props = defineProps<{ positions: PositionItem[] }>()
-const emit = defineEmits<{ refresh: []; refreshPositions: []; openAgent: [accountId: number | null]; openChart: [position: PositionItem] }>()
+const emit = defineEmits<{
+  refresh: []
+  refreshPositions: []
+  positionCorrected: [position: PositionItem]
+  openAgent: [accountId: number | null]
+  openChart: [position: PositionItem]
+}>()
 
 const accounts = ref<PositionAccount[]>([])
 const brokers = ref<BrokerPreset[]>([])
@@ -21,6 +27,16 @@ const accountModalOpen = ref(false)
 const fundModalOpen = ref(false)
 const tradeModalOpen = ref(false)
 const tradeSaving = ref(false)
+const correctionModalOpen = ref(false)
+const correctionSaving = ref(false)
+const correctionPositionId = ref<number | null>(null)
+const correctionValidation = ref<PositionSymbolValidation | null>(null)
+const correctionOriginal = ref<{
+  symbol: string
+  name: string
+  position_quantity: number
+  cost_price: number
+} | null>(null)
 const editingAccountId = ref<number | null>(null)
 const accountForm = reactive({ broker_code: 'manual', account_name: '', account_no_masked: '', is_default: false })
 const fundForm = reactive({ account_id: 0, account_label: '', available_cash: null as number | null, holding_market_value: 0 })
@@ -34,6 +50,12 @@ const tradeForm = reactive({
   account_id: null as number | null,
   latest_price: 0,
   current_quantity: 0
+})
+const correctionForm = reactive({
+  symbol: '',
+  name: '',
+  position_quantity: 0,
+  cost_price: 0
 })
 const tradeTitle = computed(() => {
   const act = tradeForm.action === 'buy' ? '买入' : '卖出'
@@ -49,6 +71,159 @@ const tradeEstimate = computed(() => {
 const selectedAccount = computed(() => accounts.value.find((a) => a.id === selectedAccountId.value) || null)
 const filteredPositions = computed(() =>
   selectedAccountId.value === null ? props.positions : props.positions.filter((p) => p.account_id === selectedAccountId.value)
+)
+type PositionSortKey = 'market_value' | 'position_quantity' | 'floating_pnl' | 'floating_pnl_pct'
+type PositionSortDirection = 'asc' | 'desc'
+
+const positionSortKey = ref<PositionSortKey | null>(null)
+const positionSortDirection = ref<PositionSortDirection>('desc')
+const positionSortOptions: Array<{ key: PositionSortKey; label: string }> = [
+  { key: 'market_value', label: '市值' },
+  { key: 'position_quantity', label: '持仓' },
+  { key: 'floating_pnl', label: '浮盈' },
+  { key: 'floating_pnl_pct', label: '盈亏率' }
+]
+
+function positionSortValue(position: PositionItem, key: PositionSortKey) {
+  const value = key === 'position_quantity'
+    ? position.position_quantity ?? position.quantity
+    : position[key]
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null
+  return Number(value)
+}
+
+function togglePositionSort(key: PositionSortKey) {
+  if (positionSortKey.value === key) {
+    positionSortDirection.value = positionSortDirection.value === 'desc' ? 'asc' : 'desc'
+    return
+  }
+  positionSortKey.value = key
+  positionSortDirection.value = 'desc'
+}
+
+const displayedPositions = computed(() => {
+  const key = positionSortKey.value
+  if (!key) return filteredPositions.value
+  const direction = positionSortDirection.value === 'desc' ? -1 : 1
+  return filteredPositions.value
+    .map((position, originalIndex) => ({ position, originalIndex }))
+    .sort((left, right) => {
+      const leftValue = positionSortValue(left.position, key)
+      const rightValue = positionSortValue(right.position, key)
+      if (leftValue === null && rightValue === null) return left.originalIndex - right.originalIndex
+      if (leftValue === null) return 1
+      if (rightValue === null) return -1
+      const result = (leftValue - rightValue) * direction
+      return result || left.originalIndex - right.originalIndex
+    })
+    .map((item) => item.position)
+})
+
+type PositionColumnKey =
+  | 'broker_name'
+  | 'symbol'
+  | 'name'
+  | 'position_quantity'
+  | 'available_quantity'
+  | 'cost_price'
+  | 'latest_price'
+  | 'market_value'
+  | 'floating_pnl'
+  | 'floating_pnl_pct'
+  | 'stop_price'
+  | 'status'
+
+type PositionTableColumn = {
+  key: PositionColumnKey
+  label: string
+}
+
+const allPositionColumnDefaults: PositionColumnKey[] = [
+  'broker_name',
+  'symbol',
+  'name',
+  'position_quantity',
+  'latest_price',
+  'cost_price',
+  'market_value',
+  'floating_pnl',
+  'floating_pnl_pct',
+  'status'
+]
+const accountPositionColumnDefaults: PositionColumnKey[] = [
+  'symbol',
+  'name',
+  'position_quantity',
+  'available_quantity',
+  'latest_price',
+  'cost_price',
+  'market_value',
+  'floating_pnl',
+  'floating_pnl_pct',
+  'stop_price'
+]
+const positionColumnLabels: Record<PositionColumnKey, string> = {
+  broker_name: '账户',
+  symbol: '标的',
+  name: '名称',
+  position_quantity: '持仓',
+  available_quantity: '可用',
+  latest_price: '现价',
+  cost_price: '成本',
+  market_value: '市值',
+  floating_pnl: '浮盈',
+  floating_pnl_pct: '盈亏率',
+  stop_price: '止损',
+  status: '状态'
+}
+const positionColumnStorageKey = 'sixrabbits:positions:column-order:v1'
+
+function normalizePositionColumnOrder(value: unknown, defaults: PositionColumnKey[]) {
+  const allowed = new Set(defaults)
+  const stored = Array.isArray(value)
+    ? value.filter((item): item is PositionColumnKey => typeof item === 'string' && allowed.has(item as PositionColumnKey))
+    : []
+  return [...new Set(stored), ...defaults.filter((item) => !stored.includes(item))]
+}
+
+function loadPositionColumnOrders() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(positionColumnStorageKey) || '{}') as {
+      all?: PositionColumnKey[]
+      account?: PositionColumnKey[]
+    }
+    return {
+      all: normalizePositionColumnOrder(stored.all, allPositionColumnDefaults),
+      account: normalizePositionColumnOrder(stored.account, accountPositionColumnDefaults)
+    }
+  } catch {
+    return {
+      all: [...allPositionColumnDefaults],
+      account: [...accountPositionColumnDefaults]
+    }
+  }
+}
+
+const initialPositionColumnOrders = loadPositionColumnOrders()
+const allPositionColumnOrder = ref<PositionColumnKey[]>(initialPositionColumnOrders.all)
+const accountPositionColumnOrder = ref<PositionColumnKey[]>(initialPositionColumnOrders.account)
+
+watch(
+  [allPositionColumnOrder, accountPositionColumnOrder],
+  () => {
+    try {
+      window.localStorage.setItem(
+        positionColumnStorageKey,
+        JSON.stringify({
+          all: allPositionColumnOrder.value,
+          account: accountPositionColumnOrder.value
+        })
+      )
+    } catch {
+      // Column order remains active in memory when browser storage is unavailable.
+    }
+  },
+  { deep: true }
 )
 
 function fmtMoney(v: number | null | undefined) {
@@ -92,44 +267,53 @@ const fundCards = computed(() => {
   ]
 })
 
-const tableColumns = computed(() => {
-  const base =
-    selectedAccountId.value === null
-      ? ['账户', '标的', '名称', '持仓', '成本', '现价', '市值', '浮盈', '盈亏率', '状态']
-      : ['标的', '名称', '持仓', '可用', '成本', '现价', '市值', '浮盈', '盈亏率', '止损']
-  return [...base, '操作']
+const tableColumnDefinitions = computed<PositionTableColumn[]>(() => {
+  const order = selectedAccountId.value === null
+    ? allPositionColumnOrder.value
+    : accountPositionColumnOrder.value
+  return order.map((key) => ({ key, label: positionColumnLabels[key] }))
 })
+
+const tableColumns = computed(() => [
+  ...tableColumnDefinitions.value.map((column) => column.label),
+  '操作'
+])
+
+function positionColumnValue(position: PositionItem, key: PositionColumnKey) {
+  if (key === 'broker_name') return position.broker_name || '—'
+  if (key === 'symbol') return position.symbol
+  if (key === 'name') return position.name || '—'
+  if (key === 'position_quantity') return fmtNum(position.position_quantity ?? position.quantity)
+  if (key === 'available_quantity') return fmtNum(position.available_quantity)
+  if (key === 'latest_price') return fmtNum(position.latest_price, 2)
+  if (key === 'cost_price') return fmtNum(position.cost_price, 2)
+  if (key === 'market_value') return fmtNum(position.market_value, 2)
+  if (key === 'floating_pnl') return fmtNum(position.floating_pnl, 2)
+  if (key === 'floating_pnl_pct') return fmtPct(position.floating_pnl_pct)
+  if (key === 'stop_price') return fmtNum(position.stop_price, 2)
+  return position.status
+}
+
+function reorderPositionColumns(fromIndex: number, toIndex: number) {
+  const target = selectedAccountId.value === null
+    ? allPositionColumnOrder
+    : accountPositionColumnOrder
+  if (fromIndex < 0 || toIndex < 0 || fromIndex >= target.value.length || toIndex >= target.value.length) {
+    return
+  }
+  const next = [...target.value]
+  const [moved] = next.splice(fromIndex, 1)
+  next.splice(toIndex, 0, moved)
+  target.value = next
+}
+
 const tableRows = computed(() =>
-  filteredPositions.value.map((p) =>
-    selectedAccountId.value === null
-      ? [
-          p.broker_name || '—',
-          p.symbol,
-          p.name,
-          fmtNum(p.position_quantity ?? p.quantity),
-          fmtNum(p.cost_price, 2),
-          fmtNum(p.latest_price, 2),
-          fmtNum(p.market_value, 2),
-          fmtNum(p.floating_pnl, 2),
-          fmtPct(p.floating_pnl_pct),
-          p.status
-        ]
-      : [
-          p.symbol,
-          p.name,
-          fmtNum(p.position_quantity ?? p.quantity),
-          fmtNum(p.available_quantity),
-          fmtNum(p.cost_price, 2),
-          fmtNum(p.latest_price, 2),
-          fmtNum(p.market_value, 2),
-          fmtNum(p.floating_pnl, 2),
-          fmtPct(p.floating_pnl_pct),
-          fmtNum(p.stop_price, 2)
-        ]
-  )
-  .map((row) => {
-    const actions = `<button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button>`
-    return [...row, actions]
+  displayedPositions.value.map((position) => {
+    const actions = `<button class="wb-trade-btn edit" data-action="edit">编辑</button><button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button>`
+    return [
+      ...tableColumnDefinitions.value.map((column) => positionColumnValue(position, column.key)),
+      actions
+    ]
   })
 )
 
@@ -245,22 +429,129 @@ async function saveFund() {
 }
 
 function onRowClick(index: number) {
-  const position = filteredPositions.value[index]
+  const position = displayedPositions.value[index]
   if (position) emit('openChart', position)
 }
 
 function onCellClick(rowIndex: number, cellIndex: number, target: HTMLElement) {
   const actionCol = tableColumns.value.length - 1
   if (cellIndex !== actionCol) return
-  const pos = filteredPositions.value[rowIndex]
+  const pos = displayedPositions.value[rowIndex]
   if (!pos) return
   const action = target.getAttribute('data-action')
-  if (action === 'buy') {
+  if (action === 'edit') {
+    openCorrectionModal(pos)
+  } else if (action === 'buy') {
     openTradeModal(pos, 'buy')
   } else if (action === 'sell') {
     openTradeModal(pos, 'sell')
   } else if (action === 'delete') {
     void confirmDelete(pos)
+  }
+}
+
+function openCorrectionModal(pos: PositionItem) {
+  correctionPositionId.value = pos.id
+  const original = {
+    symbol: pos.symbol,
+    name: pos.name || '',
+    position_quantity: Number(pos.position_quantity ?? pos.quantity ?? 0),
+    cost_price: Number(pos.cost_price ?? 0)
+  }
+  Object.assign(correctionForm, original)
+  correctionOriginal.value = original
+  correctionValidation.value = null
+  message.value = ''
+  correctionModalOpen.value = true
+}
+
+function markCorrectionSymbolEdited() {
+  correctionValidation.value = null
+}
+
+async function validateCorrectionSymbol(applyCanonicalName = true) {
+  if (!correctionForm.symbol.trim()) {
+    message.value = '请输入股票代码'
+    return false
+  }
+  message.value = ''
+  try {
+    const validation = await api.validatePositionAgentSymbol({
+      symbol: correctionForm.symbol.trim(),
+      name: correctionForm.name.trim() || null
+    })
+    correctionValidation.value = validation
+    if (validation.valid) {
+      correctionForm.symbol = validation.normalized_symbol
+      if (applyCanonicalName && validation.canonical_name) {
+        correctionForm.name = validation.canonical_name
+      }
+    }
+    return validation.valid
+  } catch (error) {
+    message.value = `校验失败：${error instanceof Error ? error.message : String(error)}`
+    return false
+  }
+}
+
+async function savePositionCorrection() {
+  if (!correctionPositionId.value) return
+  if (!correctionForm.name.trim()) {
+    message.value = '请输入股票名称'
+    return
+  }
+  if (!Number.isFinite(correctionForm.position_quantity) || correctionForm.position_quantity < 0) {
+    message.value = '持仓数量必须大于等于 0'
+    return
+  }
+  if (!Number.isFinite(correctionForm.cost_price) || correctionForm.cost_price < 0) {
+    message.value = '成本价必须大于等于 0'
+    return
+  }
+  correctionSaving.value = true
+  message.value = ''
+  try {
+    const validation = await api.validatePositionAgentSymbol({
+      symbol: correctionForm.symbol.trim(),
+      name: correctionForm.name.trim()
+    })
+    correctionValidation.value = validation
+    const sameExistingSymbol =
+      validation.normalized_symbol === correctionOriginal.value?.symbol &&
+      validation.status === 'catalog_unavailable'
+    if (!validation.valid && !sameExistingSymbol) {
+      message.value = validation.message || '股票代码校验失败'
+      return
+    }
+
+    const normalizedSymbol = validation.normalized_symbol || correctionForm.symbol.trim().toUpperCase()
+    correctionForm.symbol = normalizedSymbol
+    const original = correctionOriginal.value
+    const unchanged =
+      original &&
+      normalizedSymbol === original.symbol &&
+      correctionForm.name.trim() === original.name &&
+      Number(correctionForm.position_quantity) === original.position_quantity &&
+      Number(correctionForm.cost_price) === original.cost_price
+    if (unchanged) {
+      message.value = '没有检测到修改，请先更改需要纠正的内容'
+      return
+    }
+
+    const corrected = await api.correctPosition(correctionPositionId.value, {
+      symbol: normalizedSymbol,
+      name: correctionForm.name.trim(),
+      position_quantity: correctionForm.position_quantity,
+      cost_price: correctionForm.cost_price
+    })
+    emit('positionCorrected', corrected)
+    correctionModalOpen.value = false
+    await loadAccounts()
+    emit('refreshPositions')
+  } catch (error) {
+    message.value = `纠正失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    correctionSaving.value = false
   }
 }
 
@@ -417,7 +708,7 @@ onMounted(async () => {
       <header class="section-header">
         <div>
           <h2>{{ selectedAccount ? selectedAccount.broker_name + ' 持仓' : '全部持仓' }}</h2>
-          <p>只读台账。点击持仓行查看 K 线图表。</p>
+          <p>点击持仓行查看 K 线图表；录入有误时可使用“编辑”纠正。</p>
         </div>
         <div class="wb-actions">
           <button v-if="selectedAccount" type="button" @click="openFund(selectedAccount)">维护资金</button>
@@ -430,7 +721,34 @@ onMounted(async () => {
         <button type="button" :class="{ active: activeTab === 'positions' }" @click="switchTab('positions')">持仓</button>
         <button type="button" :class="{ active: activeTab === 'trades' }" @click="switchTab('trades')">交易记录</button>
       </div>
-      <DataTable v-if="activeTab === 'positions'" :columns="tableColumns" :rows="tableRows" clickable @row-click="onRowClick" @cell-click="onCellClick" />
+      <div v-if="activeTab === 'positions'" class="position-sort-toolbar" aria-label="持仓排序">
+        <span>排序</span>
+        <button
+          v-for="option in positionSortOptions"
+          :key="option.key"
+          type="button"
+          :class="{ active: positionSortKey === option.key }"
+          :aria-pressed="positionSortKey === option.key"
+          :title="`按${option.label}${positionSortKey === option.key && positionSortDirection === 'asc' ? '升序' : '降序'}排列`"
+          @click="togglePositionSort(option.key)"
+        >
+          {{ option.label }}
+          <span v-if="positionSortKey === option.key" aria-hidden="true">
+            {{ positionSortDirection === 'desc' ? '↓' : '↑' }}
+          </span>
+        </button>
+      </div>
+      <DataTable
+        v-if="activeTab === 'positions'"
+        :columns="tableColumns"
+        :rows="tableRows"
+        :fixed-column-indexes="[tableColumns.length - 1]"
+        clickable
+        reorderable
+        @column-reorder="reorderPositionColumns"
+        @row-click="onRowClick"
+        @cell-click="onCellClick"
+      />
       <div v-else-if="tradesLoading" class="trade-empty">加载中…</div>
       <DataTable v-else :columns="tradeColumns" :rows="tradeRows" @cell-click="onTradeCellClick" />
     </section>
@@ -476,6 +794,44 @@ onMounted(async () => {
           <span class="wb-spacer"></span>
           <button type="button" @click="accountModalOpen = false">取消</button>
           <button type="button" class="primary" @click="saveAccount">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="correctionModalOpen" class="wb-modal-backdrop" @click.self="!correctionSaving && (correctionModalOpen = false)">
+      <div class="wb-modal position-correction-modal">
+        <h3>纠正持仓信息</h3>
+        <p class="position-correction-hint">修改会同步当前持仓、历史快照身份和关联交易流水，并重新计算账户汇总。</p>
+        <label>
+          <span>股票代码 <em class="required">*</em></span>
+          <div class="position-correction-symbol">
+            <input v-model.trim="correctionForm.symbol" maxlength="16" placeholder="如 600519.SH" @input="markCorrectionSymbolEdited" @keyup.enter.prevent="validateCorrectionSymbol(true)" />
+            <button type="button" :disabled="correctionSaving" @click="validateCorrectionSymbol(true)">校验代码</button>
+          </div>
+        </label>
+        <div v-if="correctionValidation" class="position-correction-validation" :class="{ valid: correctionValidation.valid }">
+          <strong>{{ correctionValidation.valid ? '代码校验通过' : '代码需要核对' }}</strong>
+          <span>{{ correctionValidation.message }}</span>
+        </div>
+        <label>
+          <span>股票名称 <em class="required">*</em></span>
+          <input v-model.trim="correctionForm.name" maxlength="120" placeholder="校验代码后自动匹配证券名称" />
+        </label>
+        <label>
+          <span>持仓数量 <em class="required">*</em></span>
+          <input v-model.number="correctionForm.position_quantity" type="number" min="0" step="1" />
+        </label>
+        <label>
+          <span>成本价 <em class="required">*</em></span>
+          <input v-model.number="correctionForm.cost_price" type="number" min="0" step="0.0001" />
+        </label>
+        <p v-if="message" class="form-message">{{ message }}</p>
+        <div class="wb-modal-actions">
+          <span class="wb-spacer"></span>
+          <button type="button" :disabled="correctionSaving" @click="correctionModalOpen = false">取消</button>
+          <button type="button" class="primary" :disabled="correctionSaving" @click="savePositionCorrection">
+            {{ correctionSaving ? '正在保存' : '确认纠正' }}
+          </button>
         </div>
       </div>
     </div>

@@ -86,7 +86,7 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "任务拆解: 先判断问题属于持仓、自选、单票研究、风险还是日报，再选择最少工具。",
             "优先级排序: 优先处理持仓，其次自选池；有止损、L0/L1事件、缺研究证据的标的优先。",
             "统稿输出: 把事实、推断、风险、下一步动作分开，不替用户自动下单。",
-            "持仓写入（若可用 update_my_positions 工具）: 先 get_portfolio_snapshot 读现状；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
+            "持仓写入（若可用 update_my_positions 工具）: 先 get_portfolio_snapshot 读现状；rows 只传用户本次明确变更的标的，严禁把未变化的已有持仓重复提交；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
         ],
         "output": "输出固定包含: 今日重点、持仓观察、自选池观察、风险/缺口、下一步动作。",
     },
@@ -447,9 +447,9 @@ DIGITAL_HUMAN_TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "update_my_positions",
-        "更新/录入当前用户的持仓快照（整仓覆盖式，与截图录入一致）。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；账户事实字段（代码/数量/成本价）缺失才追问，不臆造；最新价/市值/浮盈属行情数据，系统每个交易日自动同步，绝不为此追问用户，用户给了就顺带填、没给留空。清仓某标的：该标的行传 position_quantity=0（状态自动转 closed）；部分卖出：传卖出后的剩余数量。用户没说账户时系统会自动匹配该标的现有持仓所在账户，不必追问；同一标的在多个账户都有持仓时才先问清是哪个账户。只维护记录不替用户下单。首次调用不传 confirmed 返回预览（不落库），复述给用户确认后再以 confirmed=true 调用才真正写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
+        "增量更新/录入当前用户持仓。rows 只能包含用户本次明确新增、加减仓、清仓或修改的标的，严禁回传未变化的完整持仓清单。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；账户事实字段（代码/数量/成本价）缺失才追问，不臆造；最新价/市值/浮盈由系统自动同步。买入/加仓/卖出/减仓时 position_quantity 表示本次变动数量并设置对应 action；清仓传 action=close。用户没说账户时系统自动匹配该标的现有持仓所在账户；同一标的在多个账户都有持仓时才追问。首次调用不传 confirmed 返回预览，用户确认后再以 confirmed=true 写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
         {
-            "rows": {"type": "array", "description": "持仓明细数组，每项含 symbol/position_quantity/available_quantity/cost_price/position_pct/stop_price 等；latest_price/market_value/floating_pnl 仅用户主动给出时才填（缺失由系统自动同步行情补齐）。", "items": {"type": "object"}},
+            "rows": {"type": "array", "description": "仅包含本次变更标的的数组。每项含 symbol、action、position_quantity、cost_price 等；action=buy/add/sell/reduce 时 position_quantity 是本次变动数量，不是变更后的总持仓。", "items": {"type": "object"}},
             "account": {"type": "object", "description": "账户信息，含 account_id/broker_name/account_name/as_of_date 等。"},
             "as_of_date": {"type": "string", "description": "快照日期 YYYYMMDD。"},
             "confirmed": {"type": "boolean", "description": "是否真正写入。默认 false 返回预览不落库；用户确认后传 true 才落库。"},

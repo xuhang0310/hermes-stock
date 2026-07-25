@@ -24,6 +24,7 @@ from backend.app.core.models import (
     AgentArtifactVersion,
     AgentOutbox,
     AgentRun,
+    AgentTransactionState,
     AgentToolExecution,
     AiChatSession,
     User,
@@ -337,6 +338,32 @@ class Phase34RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted["slots"]["account_id"], 7)
         self.assertIsNone(persisted["pending_action"])
         self.assertEqual(persisted["status"], "completed")
+
+    def test_position_transaction_drops_unattributed_legacy_default_account(self) -> None:
+        service = TransactionStateService(self.SessionFactory)
+        with self.SessionFactory() as db:
+            db.add(
+                AgentTransactionState(
+                    session_id=self.session_id,
+                    user_id=self.user_id,
+                    agent_code="position-entry-agent",
+                    slots_json=json.dumps({"account_id": 7}),
+                    evidence_json="[]",
+                    missing_fields_json="[]",
+                    status="collecting",
+                )
+            )
+            db.commit()
+
+        state = service.initialize(
+            {
+                "session_id": self.session_id,
+                "user_id": self.user_id,
+                "digital_human_code": "position-entry-agent",
+            }
+        )
+
+        self.assertNotIn("account_id", state["slots"])
 
     def test_position_transaction_result_uses_execution_uuid_ordering(self) -> None:
         with self.SessionFactory() as db:

@@ -15,16 +15,22 @@
     "最大回撤",
     "Sharpe",
     "交易明细",
-    "策略验证"
+    "策略验证",
+    "风险平价",
+    "等权组合",
+    "等权基准",
+    "组合回测",
+    "组合归因",
+    "多标的回测"
   ],
-  "tool_names": ["run_macd_backtest"],
+  "tool_names": ["run_macd_backtest", "run_portfolio_backtest"],
   "criteria": [
     {
       "code": "backtest.result",
       "description": "取得包含数据区间、参数、指标、交易和完整报告链接的确定性回测结果。",
-      "tool_names": ["run_macd_backtest"],
+      "tool_names": ["run_macd_backtest", "run_portfolio_backtest"],
       "validation_profile": "backtest"
     }
   ],
-  "output_contract": ["策略参数", "数据区间", "核心指标", "逐笔交易", "置信度", "局限", "完整报告链接"]
+  "output_contract": ["策略参数", "数据区间", "核心指标", "基准对比", "交易或调仓明细", "归因检验", "置信度", "局限", "完整报告链接"]
 }

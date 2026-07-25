@@ -12,6 +12,11 @@ from backend.app.data.repository import StockRepository
 from backend.app.agents.stock_agent import _stream_chat
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.llm_config import active_llm_config, resolve_vision_model_config_id
+from backend.app.market.stock_tools import (
+    lookup_a_share_instrument,
+    normalize_a_share_symbol,
+    resolve_stock,
+)
 
 
 POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
@@ -35,7 +40,11 @@ POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "save_position_holdings",
-            "description": "把已确认的 A 股持仓明细保存到系统。只有识别到真实持仓记录且字段足够时才能调用。",
+            "description": (
+                "增量保存本次已确认的 A 股持仓变更。rows 只能包含用户本次明确要求新增、"
+                "加减仓、清仓或修改的标的；已有但未发生变化的持仓只作为读取上下文，严禁重复提交。"
+                "只有识别到真实持仓记录且字段足够时才能调用。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -52,13 +61,22 @@ POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
                     "as_of_date": {"type": "string", "description": "持仓日期，格式 YYYY-MM-DD，可空"},
                     "rows": {
                         "type": "array",
-                        "description": "持仓明细行。数值必须是纯数字，不要带元、股、逗号或百分号。",
+                        "description": (
+                            "本次发生变更的持仓明细行，不是完整持仓清单。数值必须是纯数字，"
+                            "不要带元、股、逗号或百分号。"
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "symbol": {"type": "string", "description": "A股代码，如 600519.SH、000001.SZ，也可传 6 位代码"},
                                 "name": {"type": "string", "description": "证券名称"},
-                                "position_quantity": {"type": "number", "description": "持仓数量/股份余额"},
+                                "position_quantity": {
+                                    "type": "number",
+                                    "description": (
+                                        "数量。action=buy/add/sell/reduce 时表示本次买入、加仓、卖出或减仓的数量；"
+                                        "action=replace 时才表示变更后的完整持仓数量；action=close 时传 0。"
+                                    ),
+                                },
                                 "available_quantity": {"type": "number", "description": "可用数量/可卖数量"},
                                 "frozen_quantity": {"type": "number", "description": "冻结数量"},
                                 "today_buy_quantity": {"type": "number", "description": "今日买入数量"},
@@ -187,7 +205,34 @@ def _normalize_pending_action(value: Any) -> dict[str, Any] | None:
         normalized_arguments["account"] = account
     if arguments.get("as_of_date"):
         normalized_arguments["as_of_date"] = str(arguments["as_of_date"])[:32]
-    return {"tool": "save_position_holdings", "arguments": normalized_arguments}
+    normalized: dict[str, Any] = {
+        "tool": "save_position_holdings",
+        "arguments": normalized_arguments,
+    }
+    if value.get("review_required"):
+        normalized["review_required"] = True
+    validations = value.get("validations")
+    if isinstance(validations, list):
+        normalized["validations"] = [
+            {
+                key: _bounded_pending_value(item[key], max_length=200)
+                for key in (
+                    "index",
+                    "valid",
+                    "status",
+                    "input_symbol",
+                    "normalized_symbol",
+                    "canonical_name",
+                    "message",
+                    "suggested_symbol",
+                    "suggested_name",
+                )
+                if key in item
+            }
+            for item in validations[:100]
+            if isinstance(item, dict)
+        ]
+    return normalized
 
 
 def _selected_account_hint(repository: StockRepository, account_id: int | None) -> str:
@@ -241,9 +286,141 @@ def _build_position_messages(
 
 
 def _pending_from_tool_result(name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] | None:
-    if name != "save_position_holdings" or not result.get("need_account"):
+    if name != "save_position_holdings":
         return None
-    return _normalize_pending_action({"tool": name, "arguments": args})
+    if result.get("need_review"):
+        return _normalize_pending_action(
+            {
+                "tool": name,
+                "arguments": args,
+                "review_required": True,
+                "validations": result.get("validations") or [],
+            }
+        )
+    if result.get("need_account"):
+        return _normalize_pending_action({"tool": name, "arguments": args})
+    return None
+
+
+def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, Any]:
+    """Validate one OCR symbol against the authoritative A-share instrument catalog."""
+    input_symbol = str(symbol or "").strip()
+    input_name = str(name or "").strip()
+    normalized = normalize_a_share_symbol(input_symbol)
+    base = {
+        "input_symbol": input_symbol,
+        "normalized_symbol": normalized,
+        "valid": False,
+    }
+    if not normalized or not normalized.endswith((".SH", ".SZ", ".BJ")) or len(normalized) != 9:
+        return {
+            **base,
+            "status": "invalid_format",
+            "message": "股票代码格式不正确，请输入 6 位 A 股代码。",
+        }
+
+    lookup = lookup_a_share_instrument(normalized)
+    if not lookup.get("available"):
+        return {
+            **base,
+            "status": "catalog_unavailable",
+            "message": "上市证券目录暂时不可用，当前不能可靠校验，请稍后重试。",
+        }
+    exact = lookup.get("instrument")
+    if exact:
+        canonical_name = str(exact.get("name") or input_name or normalized)
+        message = "代码校验通过"
+        status = "valid"
+        if input_name and canonical_name and input_name != canonical_name:
+            status = "name_corrected"
+            message = f"代码有效，证券名称已校正为“{canonical_name}”。"
+        return {
+            **base,
+            "valid": True,
+            "status": status,
+            "normalized_symbol": normalized,
+            "canonical_name": canonical_name,
+            "message": message,
+        }
+
+    suggestion = None
+    if input_name:
+        by_name = resolve_stock(input_name)
+        name_candidates = by_name.get("candidates") if isinstance(by_name, dict) else []
+        if len(name_candidates or []) == 1:
+            suggestion = name_candidates[0]
+    return {
+        **base,
+        "status": "not_found",
+        "message": "未在 A 股证券目录中查到该代码，请核对 OCR 识别结果。",
+        "suggested_symbol": str(suggestion.get("ts_code") or "") if suggestion else None,
+        "suggested_name": str(suggestion.get("name") or "") if suggestion else None,
+    }
+
+
+def validate_position_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized_rows: list[dict[str, Any]] = []
+    validations: list[dict[str, Any]] = []
+    for index, source_row in enumerate(rows):
+        row = dict(source_row)
+        validation = {"index": index, **validate_position_symbol(row.get("symbol", ""), row.get("name"))}
+        if validation["valid"]:
+            row["symbol"] = validation["normalized_symbol"]
+            row["name"] = validation.get("canonical_name") or row.get("name")
+        normalized_rows.append(row)
+        validations.append(validation)
+    return normalized_rows, validations
+
+
+_COLLECTIVE_POSITION_WRITE_HINTS = (
+    "整仓",
+    "全部持仓",
+    "所有持仓",
+    "完整持仓",
+    "整批",
+    "批量录入",
+    "整张截图",
+)
+
+
+def _restrict_rows_to_explicit_targets(
+    rows: list[dict[str, Any]],
+    instruction: str | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keep a text-driven incremental write scoped to symbols named by the user.
+
+    Current positions may be read for context, but an LLM must not echo those
+    unchanged rows into a one-symbol write. Screenshot/full-portfolio imports
+    remain multi-row operations.
+    """
+    if len(rows) <= 1:
+        return rows, []
+    text = str(instruction or "").strip()
+    if not text or any(hint in text for hint in _COLLECTIVE_POSITION_WRITE_HINTS):
+        return rows, []
+
+    upper_text = text.upper()
+    matched: list[dict[str, Any]] = []
+    omitted: list[str] = []
+    for row in rows:
+        symbol = normalize_a_share_symbol(
+            str(row.get("symbol") or row.get("ts_code") or row.get("code") or "")
+        )
+        digits = symbol.split(".", 1)[0] if symbol else ""
+        name = str(row.get("name") or row.get("symbol_name") or "").strip()
+        is_target = bool(
+            (symbol and symbol in upper_text)
+            or (digits and digits in upper_text)
+            or (len(name) >= 2 and name in text)
+        )
+        if is_target:
+            matched.append(row)
+        else:
+            omitted.append(name or symbol or "未命名标的")
+
+    if matched and len(matched) < len(rows):
+        return matched, omitted
+    return rows, []
 
 
 def _merge_pending_tool_args(
@@ -356,6 +533,7 @@ def run_position_agent(
                 image_mime_type=mime_type if image_base64 else "text/plain",
                 image_sha256=image_hash,
                 account_id=account_id,
+                instruction=text,
             )
             pending_from_result = _pending_from_tool_result(name, args, result)
             if pending_from_result is not None:
@@ -530,6 +708,7 @@ def run_position_agent_events(
                 image_mime_type=mime_type if image_base64 else "text/plain",
                 image_sha256=image_hash,
                 account_id=account_id,
+                instruction=text,
             )
             pending_from_result = _pending_from_tool_result(name, args, result)
             if pending_from_result is not None:
@@ -587,20 +766,22 @@ def _position_agent_prompt() -> str:
 5. **【账户确认 — 必须遵守】保存前必须明确证券账户。系统提示界面已预选账户时，该账户已经确认，直接使用且不得再次追问。如果没有预选账户、截图也没有账户信息，但持仓明细已经识别完整，仍调用一次 save_position_holdings 提交解析结果；工具会在不写库的情况下返回 need_account 并保留待续草稿，然后只追问"这批持仓保存到哪个证券账户？"。下一轮用户补充账户后必须沿用待续草稿，不得要求重传图片。卖出/减仓命中原有持仓账户除外。
 6. 识别到真实持仓明细且账户已明确后，调用 save_position_holdings 工具保存。
 7. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失（行情类字段缺失不必提醒，说明系统会自动同步即可）。
+8. save_position_holdings 是增量工具。rows 只允许包含用户本轮明确要求变更的标的；
+   get_current_positions 返回的其他已有持仓只能用于核对，严禁原样塞回 rows 重复写入。
 
 【交易动作识别规则 — 必须严格遵守】
 当用户表达以下意图时，按对应规则处理，不要混淆动作：
 
 1. **买入/建仓**（关键词：买入、买进、建仓、开仓、想买、新开）:
    用户要新建一个标的的持仓。先确认标的代码和名称（用户只给名称时追问代码），
-   再确认数量和成本价。保存时 rows 中必须同时包含该新标的行和所有已有持仓行
-  （从 get_current_positions 获取完整列表），不能只传新标的导致其他持仓被覆盖。
-   新标的 position_quantity=买入数量，status="open"。
+   再确认数量和成本价。保存时 rows 只传该新标的一行，action="buy"，
+   position_quantity=本次买入数量。绝不能附带其他未变化的已有持仓。
 
 2. **卖出/减仓**（关键词：卖出、减持、减仓、出一部分、抛）:
    用户要减少某标的的持仓数量。必须先用 get_current_positions 读取该标的
-   当前 quantity，新 quantity = 当前数量 - 卖出数量。保存时 rows 含所有持仓行。
-   若卖出后剩余 quantity=0，则等同于清仓（见第3条）。
+   当前 quantity 并校验不超卖。保存时 rows 只传该目标标的一行，action="sell" 或
+   action="reduce"，position_quantity=本次卖出/减仓数量；后端负责计算剩余持仓。
+   不要自行计算后再传剩余数量，也不要附带其他持仓。
 
 3. **清仓**（关键词：清仓、全出、全部卖出、全抛、止损出场、不拿了）:
    用户要完全退出某标的。先用 get_current_positions 确认该持仓存在，
@@ -610,9 +791,8 @@ def _position_agent_prompt() -> str:
 
 4. **加仓/补仓**（关键词：加仓、补仓、增持、多买、再买）:
    用户要对已有持仓增加数量。先用 get_current_positions 获取当前 quantity，
-   新 quantity = 当前数量 + 加仓数量。成本价按全仓加权平均：
-   新成本 = (原成本*原数量 + 新价格*新数量) / (原数量+新数量)。
-   用户没给新成交价时，追问新买入价格。
+   保存时 rows 只传该目标标的一行，action="add"，position_quantity=本次加仓数量，
+   cost_price=本次成交价；后端负责累加数量和计算加权成本。用户没给成交价时追问。
 
 5. **改止损/止盈/逻辑**（关键词：改止损、设止损、调整止损、修改止盈）:
    这是字段级微调，用 update_position_field 工具（如果有），
@@ -650,6 +830,7 @@ def _execute_position_tool(
     image_mime_type: str,
     image_sha256: str | None,
     account_id: int | None = None,
+    instruction: str | None = None,
 ) -> dict[str, Any]:
     if name == "get_position_schema":
         return {
@@ -669,6 +850,42 @@ def _execute_position_tool(
         rows = args.get("rows") if isinstance(args.get("rows"), list) else []
         if not rows:
             return {"error": "没有可保存的持仓明细 rows"}
+        ignored_rows: list[str] = []
+        if not image_sha256:
+            rows, ignored_rows = _restrict_rows_to_explicit_targets(
+                [row for row in rows if isinstance(row, dict)],
+                instruction,
+            )
+        rows, validations = validate_position_rows(
+            [row for row in rows if isinstance(row, dict)]
+        )
+        args["rows"] = rows
+        invalid = [item for item in validations if not item.get("valid")]
+        if image_sha256:
+            return {
+                "need_review": True,
+                "message": (
+                    f"OCR 已识别 {len(rows)} 条持仓，其中 {len(invalid)} 条代码需要修正。"
+                    if invalid
+                    else f"OCR 已识别并校验 {len(rows)} 条持仓，请确认后再入库。"
+                ),
+                "saved_count": 0,
+                "error_count": len(invalid),
+                "rows": rows,
+                "validations": validations,
+            }
+        if invalid:
+            details = "；".join(
+                f"第 {int(item['index']) + 1} 行 {item.get('input_symbol') or '-'}：{item.get('message')}"
+                for item in invalid
+            )
+            return {
+                "error": f"股票代码校验未通过：{details}",
+                "saved_count": 0,
+                "error_count": len(invalid),
+                "rows": rows,
+                "validations": validations,
+            }
         account = args.get("account") if isinstance(args.get("account"), dict) else {}
         default_account = {**account}
         if account_id:
@@ -702,7 +919,11 @@ def _execute_position_tool(
             try:
                 saved_rows.append(
                     repository.merge_position_holding(
-                        merged, action=action, source_type="ai_ocr", commit=False
+                        merged,
+                        action=action,
+                        source_type="ai_ocr",
+                        import_batch=batch,
+                        commit=False,
                     )
                 )
             except ValueError as exc:
@@ -716,6 +937,8 @@ def _execute_position_tool(
             "saved_count": len(ok_rows),
             "error_count": len(errors),
             "rows": saved_rows,
+            "ignored_unchanged_count": len(ignored_rows),
+            "ignored_unchanged_rows": ignored_rows,
         }
     return {"error": f"未知持仓工具: {name}"}
 
@@ -744,9 +967,16 @@ def _tool_result_preview(name: str, result: dict[str, Any]) -> str:
     if "error" in result:
         return str(result["error"])
     if name == "save_position_holdings":
+        if result.get("need_review"):
+            return str(result.get("message") or "OCR 识别完成，等待核对股票代码后入库。")
         if result.get("need_account"):
             return str(result.get("message") or "等待用户确认证券账户。")
-        return f"保存完成: 成功 {result.get('saved_count', 0)} 条，失败 {result.get('error_count', 0)} 条。"
+        ignored = int(result.get("ignored_unchanged_count") or 0)
+        suffix = f"；已拦截 {ignored} 条非本次目标持仓的重复提交。" if ignored else ""
+        return (
+            f"保存完成: 成功 {result.get('saved_count', 0)} 条，"
+            f"失败 {result.get('error_count', 0)} 条{suffix}"
+        )
     if name == "get_current_positions":
         return f"当前持仓 {len(result.get('positions') or [])} 条。"
     return "工具返回字段说明。"

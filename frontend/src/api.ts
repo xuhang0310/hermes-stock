@@ -7,6 +7,7 @@ import type {
   PositionAgentAddResult,
   PositionAgentPendingAction,
   PositionAgentStreamEvent,
+  PositionSymbolValidation,
   PositionChartPayload,
   PositionItem,
   PositionAccount,
@@ -33,7 +34,9 @@ import type {
   FeishuBotBinding,
   FeishuBotTestResult,
   ScheduleJob,
+  ScheduleJobPage,
   JobRun,
+  PageResult,
   ScheduleStatus,
   AgentSession,
   AgentSessionDetail,
@@ -313,6 +316,14 @@ export const api = {
     account_id?: number | null
   }) =>
     request<PositionItem>('/api/positions', { method: 'POST', body: JSON.stringify(payload) }),
+  correctPosition: (
+    positionId: number,
+    payload: { symbol: string; name: string; position_quantity: number; cost_price: number }
+  ) =>
+    request<PositionItem>(`/api/positions/by-id/${positionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    }),
   deletePosition: (symbol: string, accountId?: number | null) => {
     const q = accountId ? `?account_id=${accountId}` : ''
     return request<{ symbol: string; deleted_positions: number; deleted_snapshots: number }>(
@@ -375,6 +386,23 @@ export const api = {
     },
     onEvent: (event: PositionAgentStreamEvent) => void
   ) => streamJsonRequest<PositionAgentStreamEvent>('/api/positions/agent-add/stream', payload, onEvent),
+  validatePositionAgentSymbol: (payload: { symbol: string; name?: string | null }) =>
+    request<PositionSymbolValidation>('/api/positions/agent-validate-symbol', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  confirmPositionAgentDraft: (payload: {
+    rows: Array<Record<string, unknown>>
+    account?: Record<string, unknown>
+    as_of_date?: string
+    account_id?: number | null
+  }) =>
+    request<{ rows: PositionItem[]; should_save: boolean; summary: string }>('/api/positions/agent-confirm', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  discardPositionAgentDraft: () =>
+    request<{ cleared: number }>('/api/positions/agent-draft', { method: 'DELETE' }),
   watchlist: () => request<WatchlistItem[]>('/api/watchlist'),
   addWatchlist: (payload: { symbol: string; group_name: string; reason?: string }) =>
     request<WatchlistItem>('/api/watchlist', {
@@ -458,10 +486,22 @@ export const api = {
   unbindFeishuBot: (profileId: number) =>
     request<{ ok: boolean }>(`/api/feishu-bots/${profileId}`, { method: 'DELETE' }),
   scheduleJobs: () => request<ScheduleJob[]>('/api/schedule/jobs'),
+  scheduleJobsPaged: (params: { page?: number; page_size?: number; enabled?: boolean; keyword?: string } = {}) => {
+    const query = new URLSearchParams()
+    if (params.page) query.set('page', String(params.page))
+    if (params.page_size) query.set('page_size', String(params.page_size))
+    if (params.enabled !== undefined) query.set('enabled', String(params.enabled))
+    if (params.keyword) query.set('keyword', params.keyword)
+    return request<ScheduleJobPage>(`/api/schedule/jobs/paged?${query.toString()}`)
+  },
   saveScheduleJob: (jobKey: string, payload: Record<string, unknown>) =>
     request<ScheduleJob>(`/api/schedule/jobs/${jobKey}`, {
       method: 'PUT',
       body: JSON.stringify(payload)
+    }),
+  deleteScheduleJob: (jobKey: string) =>
+    request<{ deleted: boolean; job_key: string }>(`/api/schedule/jobs/${encodeURIComponent(jobKey)}`, {
+      method: 'DELETE'
     }),
   toggleScheduleJob: (jobKey: string) =>
     request<ScheduleJob>(`/api/schedule/jobs/${jobKey}/toggle`, { method: 'POST' }),
@@ -472,6 +512,26 @@ export const api = {
     if (jobKey) params.set('job_key', jobKey)
     const suffix = params.toString()
     return request<JobRun[]>(`/api/schedule/runs${suffix ? `?${suffix}` : ''}`)
+  },
+  scheduleRunsPaged: (
+    params: { page?: number; page_size?: number; job_key?: string; status?: string } = {}
+  ) => {
+    const query = new URLSearchParams()
+    if (params.page) query.set('page', String(params.page))
+    if (params.page_size) query.set('page_size', String(params.page_size))
+    if (params.job_key) query.set('job_key', params.job_key)
+    if (params.status) query.set('status', params.status)
+    return request<PageResult<JobRun>>(`/api/schedule/runs/paged?${query.toString()}`)
+  },
+  clearScheduleRuns: (params: { job_key?: string; status?: string } = {}) => {
+    const query = new URLSearchParams()
+    if (params.job_key) query.set('job_key', params.job_key)
+    if (params.status) query.set('status', params.status)
+    const suffix = query.toString()
+    return request<{ deleted: number; skipped_running: number }>(
+      `/api/schedule/runs${suffix ? `?${suffix}` : ''}`,
+      { method: 'DELETE' }
+    )
   },
   scheduleRun: (runId: string) =>
     request<JobRun>(`/api/schedule/runs/${encodeURIComponent(runId)}`),

@@ -5,12 +5,16 @@ import type { JobRun, ScheduleJob, ScheduleStatus } from '../types'
 import { beijingFromDb } from '../utils/datetime'
 
 type MessageTone = 'success' | 'error' | 'info'
+type RhythmViewMode = 'settings' | 'history'
 
 const jobs = ref<ScheduleJob[]>([])
+const jobOptions = ref<ScheduleJob[]>([])
 const runs = ref<JobRun[]>([])
 const status = ref<ScheduleStatus | null>(null)
+const activeView = ref<RhythmViewMode>('settings')
 const editingKey = ref('')
 const runsJobKey = ref('')
+const runsStatus = ref('')
 const editorOpen = ref(false)
 const selectedRun = ref<JobRun | null>(null)
 const runDetailLoading = ref(false)
@@ -19,7 +23,15 @@ const saving = ref(false)
 const actionKey = ref('')
 const message = ref('')
 const messageTone = ref<MessageTone>('info')
-const historySection = ref<HTMLElement | null>(null)
+const jobPage = ref(1)
+const jobPageSize = 8
+const jobTotal = ref(0)
+const enabledJobTotal = ref(0)
+const jobPages = ref(0)
+const runPage = ref(1)
+const runPageSize = 12
+const runTotal = ref(0)
+const runPages = ref(0)
 let timer: number | undefined
 let runDetailRequest = 0
 
@@ -69,7 +81,6 @@ const form = reactive({
 })
 
 const editingJob = computed(() => jobs.value.find((item) => item.job_key === editingKey.value) || null)
-const enabledJobs = computed(() => jobs.value.filter((item) => item.enabled).length)
 const todayExecutions = computed(() => {
   if (!status.value) return 0
   return status.value.today.success + status.value.today.failed + status.value.today.running
@@ -88,7 +99,9 @@ const notifyState = computed(() => {
   const channel = status.value?.notify_channel
   return channel?.configured && channel.enabled ? '已启用' : '未配置'
 })
-const historyJob = computed(() => jobs.value.find((item) => item.job_key === runsJobKey.value) || null)
+const historyJob = computed(() => jobOptions.value.find((item) => item.job_key === runsJobKey.value) || null)
+const jobPageText = computed(() => `${jobTotal.value ? jobPage.value : 0} / ${jobPages.value || 0}`)
+const runPageText = computed(() => `${runTotal.value ? runPage.value : 0} / ${runPages.value || 0}`)
 
 watch([editorOpen, selectedRun], ([isEditorOpen, run]) => {
   document.body.classList.toggle('rhythm-modal-open', isEditorOpen || Boolean(run))
@@ -236,18 +249,89 @@ async function loadStatus() {
 
 async function loadJobs() {
   try {
-    jobs.value = await api.scheduleJobs()
+    const result = await api.scheduleJobsPaged({ page: jobPage.value, page_size: jobPageSize })
+    jobs.value = result.items
+    jobTotal.value = result.total
+    enabledJobTotal.value = result.enabled_total
+    jobPages.value = result.pages
+    if (result.pages && jobPage.value > result.pages) {
+      jobPage.value = result.pages
+      await loadJobs()
+    }
   } catch (error) {
     setMessage(`加载任务失败：${error instanceof Error ? error.message : String(error)}`, 'error')
   }
 }
 
-async function loadRuns(jobKey?: string) {
+async function loadJobOptions() {
   try {
-    runsJobKey.value = jobKey || ''
-    runs.value = await api.scheduleRuns(jobKey)
+    jobOptions.value = await api.scheduleJobs()
+  } catch {
+    jobOptions.value = [...jobs.value]
+  }
+}
+
+async function loadRuns() {
+  try {
+    const result = await api.scheduleRunsPaged({
+      page: runPage.value,
+      page_size: runPageSize,
+      job_key: runsJobKey.value || undefined,
+      status: runsStatus.value || undefined
+    })
+    runs.value = result.items
+    runTotal.value = result.total
+    runPages.value = result.pages
+    if (result.pages && runPage.value > result.pages) {
+      runPage.value = result.pages
+      await loadRuns()
+    }
   } catch (error) {
     setMessage(`加载历史失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+  }
+}
+
+async function setJobPage(page: number) {
+  if (page < 1 || page > jobPages.value || page === jobPage.value) return
+  jobPage.value = page
+  await loadJobs()
+}
+
+async function setRunPage(page: number) {
+  if (page < 1 || page > runPages.value || page === runPage.value) return
+  runPage.value = page
+  await loadRuns()
+}
+
+async function applyHistoryFilters() {
+  runPage.value = 1
+  await loadRuns()
+}
+
+async function clearHistory() {
+  if (actionKey.value || !runTotal.value) return
+  const scope = [
+    historyJob.value ? `任务“${historyJob.value.name}”` : '全部任务',
+    runsStatus.value ? `状态“${statusText(runsStatus.value)}”` : ''
+  ].filter(Boolean).join('、')
+  const confirmed = window.confirm(
+    `确定清空${scope}的历史记录吗？\n\n正在运行的记录会自动保留，此操作不可恢复。`
+  )
+  if (!confirmed) return
+  actionKey.value = 'clear-runs'
+  try {
+    const result = await api.clearScheduleRuns({
+      job_key: runsJobKey.value || undefined,
+      status: runsStatus.value || undefined
+    })
+    runPage.value = 1
+    await Promise.all([loadRuns(), loadStatus()])
+    const skipped = result.skipped_running ? `，保留 ${result.skipped_running} 条运行中记录` : ''
+    setMessage(`已清空 ${result.deleted} 条历史记录${skipped}。`, 'success')
+  } catch (error) {
+    setMessage(`清空失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+  } finally {
+    actionKey.value = ''
   }
 }
 
@@ -301,7 +385,7 @@ async function save() {
       allow_code_execution: form.allow_code_execution,
       sort_order: form.sort_order
     })
-    await loadJobs()
+    await Promise.all([loadJobs(), loadJobOptions()])
     editorOpen.value = false
     setMessage(`${form.name} 已保存，新的调度配置立即生效。`, 'success')
   } catch (error) {
@@ -316,10 +400,29 @@ async function toggle(job: ScheduleJob) {
   actionKey.value = `toggle:${job.job_key}`
   try {
     await api.toggleScheduleJob(job.job_key)
-    await loadJobs()
+    await Promise.all([loadJobs(), loadJobOptions()])
     setMessage(`${job.name} 已${job.enabled ? '停用' : '启用'}。`, 'success')
   } catch (error) {
     setMessage(`启停失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+  } finally {
+    actionKey.value = ''
+  }
+}
+
+async function removeJob(job: ScheduleJob) {
+  if (actionKey.value) return
+  const confirmed = window.confirm(
+    `确定删除定时任务“${job.name}”吗？\n\n任务删除后不会再自动执行，已有历史记录仍会保留。`
+  )
+  if (!confirmed) return
+  actionKey.value = `delete:${job.job_key}`
+  try {
+    await api.deleteScheduleJob(job.job_key)
+    if (runsJobKey.value === job.job_key) runsJobKey.value = ''
+    await Promise.all([loadJobs(), loadJobOptions()])
+    setMessage(`${job.name} 已删除，已有执行历史仍可查询或清空。`, 'success')
+  } catch (error) {
+    setMessage(`删除失败：${error instanceof Error ? error.message : String(error)}`, 'error')
   } finally {
     actionKey.value = ''
   }
@@ -330,8 +433,8 @@ async function runNow(job: ScheduleJob) {
   actionKey.value = `run:${job.job_key}`
   try {
     await api.runScheduleJob(job.job_key)
-    setMessage(`${job.name} 已进入执行队列，可在下方查看进度。`, 'success')
-    await loadRuns(job.job_key)
+    setMessage(`${job.name} 已进入执行队列，正在打开执行历史。`, 'success')
+    await showHistory(job)
   } catch (error) {
     setMessage(`触发失败：${error instanceof Error ? error.message : String(error)}`, 'error')
   } finally {
@@ -340,17 +443,28 @@ async function runNow(job: ScheduleJob) {
 }
 
 async function showHistory(job: ScheduleJob) {
-  await loadRuns(job.job_key)
-  window.requestAnimationFrame(() => historySection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  activeView.value = 'history'
+  runsJobKey.value = job.job_key
+  runsStatus.value = ''
+  runPage.value = 1
+  await loadRuns()
+}
+
+async function showAllHistory() {
+  activeView.value = 'history'
+  runsJobKey.value = ''
+  runsStatus.value = ''
+  runPage.value = 1
+  await loadRuns()
 }
 
 onMounted(async () => {
-  await Promise.all([loadStatus(), loadJobs()])
+  await Promise.all([loadStatus(), loadJobs(), loadJobOptions()])
   await loadRuns()
   timer = window.setInterval(() => {
     void loadStatus()
-    if (runs.value.some((item) => item.status === 'running')) {
-      void loadRuns(runsJobKey.value || undefined)
+    if (activeView.value === 'history' && runs.value.some((item) => item.status === 'running')) {
+      void loadRuns()
     }
   }, 5000)
 })
@@ -376,7 +490,7 @@ onUnmounted(() => {
     </header>
 
     <section v-if="status" class="hub-metrics rhythm-metrics" aria-label="调度概览">
-      <div><span>启用任务</span><strong>{{ enabledJobs }} / {{ jobs.length }}</strong></div>
+      <div><span>启用任务</span><strong>{{ enabledJobTotal }} / {{ jobTotal }}</strong></div>
       <div><span>今日执行</span><strong>{{ todayExecutions }}</strong></div>
       <div><span>今日成功率</span><strong>{{ todaySuccessRate }}</strong></div>
       <div><span>飞书任务群</span><strong>{{ notifyState }}</strong></div>
@@ -390,12 +504,23 @@ onUnmounted(() => {
       <span>最近心跳 {{ beijingFromDb(status.heartbeat_at) }}</span>
     </div>
 
+    <nav class="rhythm-view-tabs" aria-label="定时任务功能">
+      <button type="button" :class="{ active: activeView === 'settings' }" @click="activeView = 'settings'">
+        <span>任务设置</span>
+        <small>计划、执行内容与启停管理</small>
+      </button>
+      <button type="button" :class="{ active: activeView === 'history' }" @click="showAllHistory">
+        <span>执行历史</span>
+        <small>运行状态、耗时与完整结果</small>
+      </button>
+    </nav>
+
     <p v-if="message" class="hub-message" :class="messageTone">{{ message }}</p>
 
-    <section class="hub-section">
+    <section v-if="activeView === 'settings'" class="hub-section">
       <header class="hub-section-title">
-        <div><h2>任务编排</h2><p>任务按计划自动执行，也可以随时手动验收。</p></div>
-        <span class="rhythm-section-count">{{ enabledJobs }} 个正在运行</span>
+        <div><h2>定时任务设置</h2><p>维护执行计划、数字人、推送方式和安全权限。</p></div>
+        <span class="rhythm-section-count">共 {{ jobTotal }} 项，{{ enabledJobTotal }} 项已启用</span>
       </header>
 
       <div class="rhythm-job-list">
@@ -440,20 +565,65 @@ onUnmounted(() => {
               {{ isActionBusy('run', job) ? '执行中' : '立即执行' }}
             </button>
             <button type="button" @click="showHistory(job)">运行记录</button>
+            <button
+              class="danger"
+              type="button"
+              :disabled="Boolean(actionKey)"
+              @click="removeJob(job)"
+            >
+              {{ isActionBusy('delete', job) ? '删除中' : '删除' }}
+            </button>
           </div>
         </article>
         <div v-if="!jobs.length" class="rhythm-empty">暂时没有可管理的任务。</div>
       </div>
+
+      <footer v-if="jobPages > 1" class="rhythm-pagination" aria-label="任务设置分页">
+        <span>第 {{ jobPageText }} 页 · 共 {{ jobTotal }} 项</span>
+        <div>
+          <button type="button" :disabled="jobPage <= 1" @click="setJobPage(jobPage - 1)">上一页</button>
+          <button type="button" :disabled="jobPage >= jobPages" @click="setJobPage(jobPage + 1)">下一页</button>
+        </div>
+      </footer>
     </section>
 
-    <section ref="historySection" class="hub-section rhythm-history-section">
+    <section v-else class="hub-section rhythm-history-section">
       <header class="hub-section-title">
         <div>
-          <h2>运行记录</h2>
-          <p>{{ historyJob ? `正在查看「${historyJob.name}」` : '最近的自动执行和手动验收记录' }}</p>
+          <h2>定时任务执行历史</h2>
+          <p>{{ historyJob ? `当前筛选：${historyJob.name}` : '查看全部自动调度与手动执行记录' }}</p>
         </div>
-        <button v-if="runsJobKey" class="quiet-action" type="button" @click="loadRuns()">查看全部任务</button>
+        <span class="rhythm-section-count">共 {{ runTotal }} 条记录</span>
       </header>
+
+      <div class="rhythm-history-toolbar">
+        <label>
+          <span>任务</span>
+          <select v-model="runsJobKey" @change="applyHistoryFilters">
+            <option value="">全部任务</option>
+            <option v-for="job in jobOptions" :key="job.job_key" :value="job.job_key">{{ job.name }}</option>
+          </select>
+        </label>
+        <label>
+          <span>状态</span>
+          <select v-model="runsStatus" @change="applyHistoryFilters">
+            <option value="">全部状态</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="running">运行中</option>
+            <option value="skipped">已跳过</option>
+          </select>
+        </label>
+        <button class="quiet-action" type="button" @click="applyHistoryFilters">刷新记录</button>
+        <button
+          class="quiet-action danger"
+          type="button"
+          :disabled="Boolean(actionKey) || !runTotal"
+          @click="clearHistory"
+        >
+          {{ actionKey === 'clear-runs' ? '清空中' : '清空记录' }}
+        </button>
+      </div>
 
       <div class="rhythm-run-list">
         <div class="rhythm-run-head" aria-hidden="true">
@@ -462,7 +632,7 @@ onUnmounted(() => {
         <article v-for="run in runs" :key="run.run_id">
           <span class="rhythm-run-state" :class="run.status"><i></i>{{ statusText(run.status) }}</span>
           <time>{{ beijingFromDb(run.started_at || run.created_at) }}</time>
-          <strong>{{ jobs.find((job) => job.job_key === run.job_key)?.name || run.job_key }}</strong>
+          <strong>{{ run.job_name || jobOptions.find((job) => job.job_key === run.job_key)?.name || run.job_key }}</strong>
           <span>{{ triggerText(run.trigger_type) }}</span>
           <span>{{ durationText(run.duration_ms) }}</span>
           <p :class="{ error: Boolean(run.error) }">{{ runPreview(run) }}</p>
@@ -470,6 +640,14 @@ onUnmounted(() => {
         </article>
         <div v-if="!runs.length" class="rhythm-empty">暂无运行记录。</div>
       </div>
+
+      <footer v-if="runPages > 1" class="rhythm-pagination" aria-label="执行历史分页">
+        <span>第 {{ runPageText }} 页 · 共 {{ runTotal }} 条</span>
+        <div>
+          <button type="button" :disabled="runPage <= 1" @click="setRunPage(runPage - 1)">上一页</button>
+          <button type="button" :disabled="runPage >= runPages" @click="setRunPage(runPage + 1)">下一页</button>
+        </div>
+      </footer>
     </section>
 
     <div v-if="editorOpen && editingJob" class="model-dialog-backdrop rhythm-dialog-backdrop" @mousedown.self="closeEditor">
@@ -548,7 +726,7 @@ onUnmounted(() => {
         </header>
         <div class="dialog-body">
           <div class="rhythm-run-meta">
-            <div><span>任务</span><strong>{{ jobs.find((job) => job.job_key === selectedRun?.job_key)?.name || selectedRun.job_key }}</strong></div>
+            <div><span>任务</span><strong>{{ selectedRun.job_name || jobOptions.find((job) => job.job_key === selectedRun?.job_key)?.name || selectedRun.job_key }}</strong></div>
             <div><span>状态</span><strong class="job-status" :class="selectedRun.status">{{ statusText(selectedRun.status) }}</strong></div>
             <div><span>开始时间</span><strong>{{ beijingFromDb(selectedRun.started_at || selectedRun.created_at) }}</strong></div>
             <div><span>运行耗时</span><strong>{{ durationText(selectedRun.duration_ms) }}</strong></div>

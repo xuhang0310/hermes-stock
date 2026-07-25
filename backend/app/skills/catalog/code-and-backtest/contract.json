@@ -2,7 +2,7 @@
   "chat_modes": ["research"],
   "roles": ["quant-analyst", "stock-pm", "research-analyst"],
   "default_roles": ["quant-analyst"],
-  "triggers": ["Python", "python", "代码", "计算", "回测", "脚本", "执行", "数据分析", "策略验证", "图表"],
+  "triggers": ["Python", "python", "代码", "自定义策略", "自定义计算", "脚本", "执行代码", "数据分析脚本", "绘图代码"],
   "tool_names": ["ws_run_python", "ws_write_file", "ws_read_file"],
   "criteria": [
     {

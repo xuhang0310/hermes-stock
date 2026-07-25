@@ -148,6 +148,42 @@ class PositionReliabilityTests(unittest.TestCase):
         self.assertEqual(position.quantity, 100)
         self.assertEqual(self.repo.positions()[0]["quantity"], 100)
 
+    def test_incremental_merge_snapshot_is_linked_to_import_batch(self) -> None:
+        batch = self.repo.create_position_import_batch(
+            source_name="position-entry-agent",
+            image_mime_type="text/plain",
+            image_sha256=None,
+            raw_text=None,
+            parsed_json=None,
+            created_by="tester",
+        )
+
+        self.repo.merge_position_holding(
+            self._holding(100),
+            action="buy",
+            source_type="ai_ocr",
+            import_batch=batch,
+        )
+
+        snapshot = self.db.scalar(select(PositionHoldingSnapshot))
+        self.assertEqual(snapshot.import_batch_id, batch.id)
+
+    def test_broker_only_reference_reuses_the_sole_active_account(self) -> None:
+        self.account.broker_name = "方正证券"
+        self.account.account_no_masked = "****1234"
+        self.db.commit()
+
+        resolved = self.repo._ensure_position_account(
+            {"broker_name": "方正证券"},
+            symbol="002594.SZ",
+        )
+
+        self.assertEqual(resolved.id, self.account.id)
+        self.assertEqual(
+            len(self.db.scalars(select(PositionAccount).where(PositionAccount.status == "active")).all()),
+            1,
+        )
+
     def test_rollback_restores_previous_snapshot_and_cannot_repeat(self) -> None:
         self.repo.save_position_holding(self._holding(100, as_of_date="2026-07-10"))
         batch = self.repo.create_position_import_batch(

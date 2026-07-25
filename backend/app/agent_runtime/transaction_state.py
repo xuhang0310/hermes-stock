@@ -41,6 +41,28 @@ class TransactionStateService:
                 return None
             return self._dict(row)
 
+    def clear_pending_for_user(self, user_id: int, agent_code: str) -> int:
+        if agent_code not in TRANSACTION_AGENT_CODES:
+            return 0
+        with self.session_factory() as db:
+            rows = db.scalars(
+                select(AgentTransactionState).where(
+                    AgentTransactionState.user_id == user_id,
+                    AgentTransactionState.agent_code == agent_code,
+                    AgentTransactionState.pending_action_json.is_not(None),
+                )
+            ).all()
+            for row in rows:
+                slots = _load_json(row.slots_json, {})
+                slots.pop("rows", None)
+                row.slots_json = json.dumps(slots, ensure_ascii=False, default=str)
+                row.pending_action_json = None
+                row.missing_fields_json = "[]"
+                row.status = "completed"
+            if rows:
+                db.commit()
+            return len(rows)
+
     @staticmethod
     def _dict(row: AgentTransactionState) -> dict[str, Any]:
         return {
@@ -84,9 +106,16 @@ class TransactionStateService:
                 db.add(row)
                 db.flush()
             slots = _load_json(row.slots_json, {})
-            account_id = request_payload.get("default_account_id") or request_payload.get("account_id")
+            explicit_account_id = request_payload.get("account_id")
+            default_account_id = request_payload.get("default_account_id")
+            account_id = explicit_account_id or default_account_id
             if account_id:
                 slots["account_id"] = int(account_id)
+                slots["account_source"] = "explicit" if explicit_account_id else "default"
+            elif code == "position-entry-agent" and slots.get("account_id") and not slots.get("account_source"):
+                # Older versions silently cached the user's default account in this slot.
+                # Its origin cannot be proven, so do not keep forcing it onto future OCR imports.
+                slots.pop("account_id", None)
             row.slots_json = json.dumps(slots, ensure_ascii=False, default=str)
             supplied_pending = request_payload.get("pending_action")
             if supplied_pending and not row.pending_action_json:
@@ -172,14 +201,43 @@ class TransactionStateService:
             if code == "position-entry-agent":
                 from backend.app.agents.position_agent import _pending_from_tool_result
 
-                account_id = request_payload.get("default_account_id") or slots.get("account_id")
+                argument_account = (
+                    arguments.get("account")
+                    if isinstance(arguments.get("account"), dict)
+                    else {}
+                )
+                result_rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+                written_account_id = next(
+                    (
+                        item.get("account_id")
+                        for item in result_rows
+                        if isinstance(item, dict) and item.get("account_id")
+                    ),
+                    None,
+                )
+                account_id = (
+                    request_payload.get("account_id")
+                    or request_payload.get("default_account_id")
+                    or argument_account.get("account_id")
+                    or written_account_id
+                    or slots.get("account_id")
+                )
                 if account_id:
                     slots["account_id"] = int(account_id)
+                    slots["account_source"] = (
+                        "explicit"
+                        if request_payload.get("account_id") or argument_account.get("account_id")
+                        else "resolved"
+                    )
                 next_pending = _pending_from_tool_result(tool_name, arguments, result)
                 if next_pending is not None:
                     pending = next_pending
                     slots["rows"] = next_pending.get("arguments", {}).get("rows", [])
-                    missing = ["account_id"]
+                    missing = (
+                        ["symbol_review"]
+                        if next_pending.get("review_required")
+                        else ["account_id"]
+                    )
                     row.status = "waiting_input"
                 elif tool_name == "save_position_holdings" and int(result.get("saved_count") or 0):
                     pending = None

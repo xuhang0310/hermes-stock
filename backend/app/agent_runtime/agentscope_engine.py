@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -62,6 +63,55 @@ def select_engine(chat_mode: str, configured_mode: str) -> str:
     if mode == "agentscope-stock" and chat_mode == "stock":
         return "agentscope"
     return "legacy"
+
+
+def _builtin_backtest_route(question: str) -> str | None:
+    normalized = str(question or "").strip()
+    if not normalized:
+        return None
+    has_backtest_intent = any(
+        term in normalized
+        for term in ("回测", "历史验证", "策略验证", "收益测试", "净值曲线")
+    )
+    if not has_backtest_intent:
+        return None
+    symbols = re.findall(r"(?<!\d)\d{6}(?:\.(?:SH|SZ|BJ))?(?!\d)", normalized.upper())
+    if (
+        any(term in normalized for term in ("风险平价", "等权", "组合回测", "组合归因"))
+        or len(set(symbols)) >= 2
+    ):
+        return "run_portfolio_backtest"
+    if "MACD" in normalized.upper():
+        return "run_macd_backtest"
+    return None
+
+
+def _apply_builtin_backtest_route(
+    system_prompt: str,
+    tools: list[dict],
+    question: str,
+) -> tuple[str, list[dict]]:
+    route = _builtin_backtest_route(question)
+    if not route:
+        return system_prompt, tools
+    blocked = {
+        "ws_run_python",
+        "ws_write_file",
+        "ws_edit_file",
+        "run_macd_backtest" if route == "run_portfolio_backtest" else "run_portfolio_backtest",
+    }
+    routed_tools = [
+        item
+        for item in tools
+        if item.get("function", {}).get("name") not in blocked
+    ]
+    route_label = "风险平价组合" if route == "run_portfolio_backtest" else "MACD"
+    system_prompt += (
+        f"\n\n当前请求已命中系统内置{route_label}回测能力。"
+        f"必须直接调用 `{route}`，禁止编写、修改或执行临时 Python 回测脚本。"
+        "工具返回后应优先展示结构化摘要与完整报告链接。"
+    )
+    return system_prompt, routed_tools
 
 
 def _tool_display_name(name: str) -> str:
@@ -126,19 +176,29 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
             write_names,
         )
     if chat_mode == "stock":
-        return (
+        system_prompt, tools = _apply_builtin_backtest_route(
             stock_system_prompt_with_skills(
                 request_payload.get("digital_human_context"), skills, memory_context
             )
             + (f"\n\n{progressive_context}" if progressive_context else ""),
             [*skill_registry.get_tools_for("stock"), LOAD_SKILL_TOOL_SCHEMA],
+            question,
+        )
+        return (
+            system_prompt,
+            tools,
             write_names,
         )
     if chat_mode == "knowledge":
-        return (
+        system_prompt, tools = _apply_builtin_backtest_route(
             _knowledge_system_prompt(memory_context)
             + (f"\n\n{progressive_context}" if progressive_context else ""),
             [*TOOLS, LOAD_SKILL_TOOL_SCHEMA],
+            question,
+        )
+        return (
+            system_prompt,
+            tools,
             write_names,
         )
 
@@ -182,6 +242,7 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
     )
     if active_artifacts:
         system_prompt += f"\n\n{active_artifacts}"
+    system_prompt, tools = _apply_builtin_backtest_route(system_prompt, tools, question)
     return system_prompt, tools, write_names
 
 
@@ -221,6 +282,7 @@ def _execute_tool(
                 image_mime_type=str(request_payload.get("image_mime_type") or "image/png"),
                 image_sha256=request_payload.get("image_sha256"),
                 account_id=int(account_id) if account_id else None,
+                instruction=str(request_payload.get("user_text") or request_payload.get("question") or ""),
             )
         transaction_state_service.after_tool(request_payload, name, args, result)
         return result
@@ -275,10 +337,18 @@ def _execute_tool(
             default_account_id=request_payload.get("default_account_id"),
             digital_human_code=request_payload.get("digital_human_code"),
         )
-    if name == "run_macd_backtest":
-        from backend.app.skills.strategy_backtest import run_backtest_tool
+    if name in {"run_macd_backtest", "run_portfolio_backtest"}:
+        from backend.app.skills.strategy_backtest import (
+            run_backtest_tool,
+            run_portfolio_backtest_tool,
+        )
 
-        return run_backtest_tool(
+        executor = (
+            run_portfolio_backtest_tool
+            if name == "run_portfolio_backtest"
+            else run_backtest_tool
+        )
+        return executor(
             args,
             owner_user_id=int(request_payload["user_id"]),
             agent_run_id=str(request_payload.get("run_id") or "") or None,
@@ -701,7 +771,7 @@ async def run_agentscope(
                 "execution_id": execution_id,
                 "evidence_ids": evidence_ids,
             }
-            if name == "run_macd_backtest" and raw_result.get("run_id"):
+            if name in {"run_macd_backtest", "run_portfolio_backtest"} and raw_result.get("run_id"):
                 tool_done_event["report_run_id"] = str(raw_result["run_id"])
                 tool_done_event["report_url"] = str(
                     raw_result.get("report_url") or f"/backtests/{raw_result['run_id']}"
