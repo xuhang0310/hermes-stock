@@ -7,7 +7,7 @@ metadata:
   hermes-category: market
   hermes-version: "3.0.0"
   hermes-risk-level: low
-allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_daily
+allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_daily get_limit_list
 ---
 
 # 行情快照
@@ -22,6 +22,7 @@ allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_dai
 4. 涉及趋势、波动或复盘时，用 `get_tushare_daily` 获取足够长度的日线。
 5. 检查交易日、OHLC、成交量、数据来源、缓存和陈旧标记。
 6. 将事实性行情与原因推断分开；价格本身不能证明事件因果。
+7. 开盘时若 `trade_date` 早于当前交易日，或返回 `stale` / `intraday_unavailable`，不得用上一交易日收盘数据否定用户描述的今日盘中事件。
 
 ## 最低分析维度
 
@@ -35,6 +36,7 @@ allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_dai
 ## 边界
 
 - 停牌、节假日或盘前阶段没有新成交，不把最后收盘价写成实时成交。
+- 用户询问今日涨跌停、炸板或连板时，必须用带 `symbol` 和目标交易日的涨跌停数据交叉核验；盘中空结果不等于“没有发生”。
 - 复权口径不明确时，不直接比较跨除权日价格。
 - 单日涨跌不能自动推导基本面变化。
 - 日线缺口、零成交量或异常价格先标记数据问题。

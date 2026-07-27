@@ -148,11 +148,9 @@ class PositionAccountMixin:
             if bar and bar.close is not None and bar.pre_close is not None:
                 day_pnl += (float(bar.close) - float(bar.pre_close)) * (s.position_quantity or 0)
         account.day_pnl = round(day_pnl, 4)
-        # 总资产 = 可用现金 + 持仓市值；available_cash 未维护时总资产无法计算（前端显示 —）
-        if account.available_cash is not None:
-            account.total_asset = round(account.available_cash + hmv, 4)
-        else:
-            account.total_asset = None
+        # 现金未知时仍以持仓市值作为账户资产下限，避免账户和总览资产被整项漏算。
+        # 一旦用户维护可用现金，继续使用“现金 + 持仓市值”的完整口径。
+        account.total_asset = round((account.available_cash or 0) + hmv, 4)
 
     def _account_out(self, account: PositionAccount) -> dict[str, Any]:
         holding_count = (
@@ -301,8 +299,15 @@ class PositionAccountMixin:
             count_query = count_query.where(Position.account_id == account_id)
         return {
             "account_count": len(accounts),
-            # total_asset/available_cash 没维护时返回 None（前端显示 —），不把 None 当 0 误导
-            "total_asset": round(sum(a.total_asset for a in accounts if a.total_asset is not None), 2) if any(a.total_asset is not None for a in accounts) else None,
+            "total_asset": round(
+                sum(
+                    a.total_asset
+                    if a.total_asset is not None
+                    else (a.holding_market_value or 0)
+                    for a in accounts
+                ),
+                2,
+            ),
             "available_cash": round(sum(a.available_cash for a in accounts if a.available_cash is not None), 2) if any(a.available_cash is not None for a in accounts) else None,
             "holding_market_value": round(sum(a.holding_market_value or 0 for a in accounts), 2),
             "total_pnl": round(sum(a.total_pnl or 0 for a in accounts), 2),

@@ -175,6 +175,7 @@ SKILL = {
             trade_date=_optional_str(a.get("trade_date")),
             start_date=_optional_str(a.get("start_date")),
             end_date=_optional_str(a.get("end_date")),
+            ts_code=_optional_str(a.get("symbol")),
         ),
         "get_limit_step": lambda a: get_limit_step(trade_date=_optional_str(a.get("trade_date"))),
         "get_margin_detail": lambda a: get_margin_detail(

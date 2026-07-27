@@ -643,8 +643,8 @@ STOCK_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_limit_list",
-            "description": "TuShare 涨跌停和炸板数据（limit_list_d）：涨跌停状态、炸板次数、首封/最后封板时间。",
-            "parameters": {"type": "object", "properties": {"trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
+            "description": "TuShare 涨跌停和炸板数据（limit_list_d）：涨跌停状态、炸板次数、首封/最后封板时间。查询具体股票时必须传 symbol，避免全市场结果截断。",
+            "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "可选 A 股代码或 ts_code；分析具体股票涨停时必须传。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
         },
     },
     {
@@ -844,7 +844,9 @@ STOCK_TOOL_SCHEMAS = [
 
 def stock_system_prompt(extra_context: str | None = None) -> str:
     context = f"\n\n当前用户与数字人上下文:\n{extra_context.strip()}" if extra_context and extra_context.strip() else ""
-    return f"""你是 SixRabbits Stock 的问股助手——既是有温度、会聊天的人，也是严谨的A股问股专家，采用 ReAct 工具调用方式工作。今天日期: {date.today().isoformat()}
+    shanghai_now = _sh_now()
+    market_state = "开盘中" if _in_market_window(shanghai_now) else "非交易时段"
+    return f"""你是 SixRabbits Stock 的问股助手——既是有温度、会聊天的人，也是严谨的A股问股专家，采用 ReAct 工具调用方式工作。当前上海时间: {shanghai_now.isoformat(timespec="minutes")}（{market_state}）
 
 可用数据源:
 - TuShare: A股基础信息、最近交易日行情、历史K线、筹码、资金流，只能通过股票工具调用获取。
@@ -904,8 +906,10 @@ def stock_system_prompt_with_skills(extra_context: str | None = None, skills: li
 3. 【必做】凡回答涉及具体股票的问题，先调用 get_latest_price 拿该标的最新价格（数据库缓存，开盘时段自动刷新、收盘后走缓存），回答中标注价格与所属交易日，绝不引用记忆里的旧价。
 4. 参考 daily_stock_analysis 的问股路径：先 get_analysis_context，再 get_realtime_quote / get_daily_history，然后 analyze_trend / calculate_ma / get_volume_analysis / analyze_pattern；需要筹码、资金、基本面时继续调用 get_chip_distribution / get_capital_flow / get_stock_info。
 5. 用户问消息面、催化、利空、近期发生了什么时，调用 search_stock_news；需要行业、政策、公告、研报、风险的综合情报时调用 search_comprehensive_intel。
-6. 最终回答用中文 Markdown，固定包含：标的识别、数据来源、技术/价格结构、筹码/资金/基本面、消息面、风险、观察动作。
-7. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{skill_rules_block}{context}"""
+6. 用户询问“今日/当前涨停、跌停、炸板、连板或异动”时，必须调用 get_limit_list，并同时传 symbol 与目标 trade_date。不能用上一交易日收盘价否定用户描述的当日盘中事件。
+7. 若行情结果 stale=true、intraday_unavailable=true，或 trade_date 早于开盘中的当前交易日，只能说“当前数据源尚未覆盖今日盘中，无法核实”，严禁断言“今天没有涨停/没有异动”。
+8. 最终回答用中文 Markdown，固定包含：标的识别、数据来源、技术/价格结构、筹码/资金/基本面、消息面、风险、观察动作。
+9. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{skill_rules_block}{context}"""
 
 
 def normalize_a_share_symbol(raw: str) -> str:
@@ -1494,16 +1498,38 @@ def _price_needs_refresh(row: dict | None, now: datetime, market_open: bool) -> 
 
 def _latest_price_out(row: dict, *, market_open: bool, from_cache: bool) -> dict:
     fetched_at = row.get("fetched_at")
+    now = _sh_now()
+    expected_trade_date = (
+        now.strftime("%Y%m%d")
+        if market_open
+        else _latest_completed_trade_date(now)
+    )
+    trade_date = str(row.get("trade_date") or "")
+    stale = not trade_date or trade_date < expected_trade_date
+    intraday_unavailable = bool(market_open and stale)
     return {
         "symbol": row.get("symbol"),
         "name": row.get("name"),
         "price": row.get("price"),
         "pre_close": row.get("pre_close"),
         "pct_chg": row.get("pct_chg"),
-        "trade_date": row.get("trade_date"),
+        "trade_date": trade_date,
         "fetched_at": fetched_at.isoformat(timespec="seconds") if isinstance(fetched_at, datetime) else str(fetched_at or ""),
         "market_open": market_open,
         "from_cache": from_cache,
+        "expected_trade_date": expected_trade_date,
+        "stale": stale,
+        "intraday_unavailable": intraday_unavailable,
+        "freshness_note": (
+            f"当前处于交易时段，但数据仅到 {trade_date or '未知日期'}；"
+            "不能据此判断今日盘中是否涨停、跌停、炸板或发生异动。"
+            if intraday_unavailable
+            else (
+                f"行情日期早于最近应有交易日 {expected_trade_date}。"
+                if stale
+                else "行情日期已覆盖当前应有交易日。"
+            )
+        ),
         "source": "stock_latest_prices(tushare)",
     }
 
@@ -1523,10 +1549,20 @@ def get_realtime_quote(symbol: str) -> dict:
     if pct_chg is None and previous.get("close"):
         pct_chg = _pct(float(latest["close"]), float(previous["close"]))
     info = _stock_basic_item(ts_code) or {}
+    now = _sh_now()
+    market_open = _in_market_window(now)
+    trade_date = str(latest.get("trade_date") or "")
+    expected_trade_date = (
+        now.strftime("%Y%m%d")
+        if market_open
+        else _latest_completed_trade_date(now)
+    )
+    stale = not trade_date or trade_date < expected_trade_date
+    intraday_unavailable = bool(market_open and stale)
     return {
         "symbol": ts_code,
         "name": info.get("name"),
-        "trade_date": latest.get("trade_date"),
+        "trade_date": trade_date,
         "price": latest.get("close"),
         "open": latest.get("open"),
         "high": latest.get("high"),
@@ -1544,7 +1580,145 @@ def get_realtime_quote(symbol: str) -> dict:
         "circ_mv": basic.get("circ_mv"),
         "source": "tushare.daily+tushare.daily_basic",
         "is_realtime": False,
-        "freshness_note": "TuShare 当前接入为最近交易日快照，不保证盘中实时。",
+        "market_open": market_open,
+        "expected_trade_date": expected_trade_date,
+        "stale": stale,
+        "intraday_unavailable": intraday_unavailable,
+        "freshness_note": (
+            f"当前处于交易时段，但该快照仅到 {trade_date or '未知日期'}，"
+            "不是今日盘中实时行情，不能用于否定用户描述的当日涨跌停或异动。"
+            if intraday_unavailable
+            else "TuShare 当前接入为最近交易日快照，不保证盘中实时。"
+        ),
+    }
+
+
+def get_realtime_quotes(symbols: list[str] | tuple[str, ...]) -> dict:
+    """批量获取 A 股盘中最新价，并刷新全局最新价缓存。
+
+    TuShare ``rt_k`` 支持一次查询多个代码。持仓分钟同步使用此函数，避免按账户、
+    按标的重复请求。部分标的缺失时返回 ``missing_symbols``，整批请求失败时返回
+    ``error``，调用方可保留上一轮价格而不写入空值。
+    """
+    requested: list[str] = []
+    for raw_symbol in symbols:
+        symbol = normalize_a_share_symbol(str(raw_symbol or ""))
+        if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) and symbol not in requested:
+            requested.append(symbol)
+    if not requested:
+        return {
+            "source": "tushare.rt_k",
+            "fetched_at": _sh_now().isoformat(timespec="seconds"),
+            "requested_count": 0,
+            "quote_count": 0,
+            "quotes": {},
+            "rows": [],
+            "missing_symbols": [],
+            "ms": 0,
+        }
+
+    fields = (
+        "ts_code,name,pre_close,high,open,low,close,vol,amount,num,"
+        "ask_price1,ask_volume1,bid_price1,bid_volume1,trade_time"
+    )
+    started = time.monotonic()
+    raw_rows: list[dict[str, Any]] = []
+    for offset in range(0, len(requested), 100):
+        chunk = requested[offset : offset + 100]
+        result = _tushare_request("rt_k", {"ts_code": ",".join(chunk)}, fields)
+        if "error" in result:
+            return {
+                "error": result["error"],
+                "source": "tushare.rt_k",
+                "requested_count": len(requested),
+                "quote_count": 0,
+                "missing_symbols": requested,
+                "ms": int((time.monotonic() - started) * 1000),
+            }
+        raw_rows.extend(result.get("rows") or [])
+
+    fetched_at = _sh_now()
+    quotes: dict[str, dict[str, Any]] = {}
+    cache_rows: list[dict[str, Any]] = []
+    for row in raw_rows:
+        symbol = normalize_a_share_symbol(str(row.get("ts_code") or ""))
+        price = _float(row.get("close"))
+        if symbol not in requested or price is None or price <= 0:
+            continue
+        pre_close = _float(row.get("pre_close"))
+        pct_chg = _pct(price, pre_close) if pre_close else None
+        trade_time = str(row.get("trade_time") or "").strip()
+        trade_date = (
+            trade_time[:10].replace("-", "")
+            if re.match(r"^\d{4}-\d{2}-\d{2}", trade_time)
+            else fetched_at.strftime("%Y%m%d")
+        )
+        quote = {
+            "symbol": symbol,
+            "name": row.get("name"),
+            "trade_date": trade_date,
+            "trade_time": trade_time,
+            "price": price,
+            "pre_close": pre_close,
+            "pct_chg": pct_chg,
+            "open": _float(row.get("open")),
+            "high": _float(row.get("high")),
+            "low": _float(row.get("low")),
+            "volume": _float(row.get("vol")),
+            "amount": _float(row.get("amount")),
+            "source": "tushare.rt_k",
+            "is_realtime": True,
+            "fetched_at": fetched_at.isoformat(timespec="seconds"),
+        }
+        quotes[symbol] = quote
+        cache_rows.append(
+            {
+                "symbol": symbol,
+                "name": row.get("name"),
+                "price": price,
+                "pre_close": pre_close,
+                "pct_chg": pct_chg,
+                "trade_date": trade_date,
+                "source": "tushare.rt_k",
+                "fetched_at": fetched_at,
+            }
+        )
+
+    if cache_rows:
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO stock_latest_prices "
+                        "(symbol, name, price, pre_close, pct_chg, trade_date, source, fetched_at) "
+                        "VALUES (:symbol, :name, :price, :pre_close, :pct_chg, :trade_date, :source, :fetched_at) "
+                        "ON DUPLICATE KEY UPDATE name = VALUES(name), price = VALUES(price), "
+                        "pre_close = VALUES(pre_close), pct_chg = VALUES(pct_chg), "
+                        "trade_date = VALUES(trade_date), source = VALUES(source), "
+                        "fetched_at = VALUES(fetched_at), updated_at = VALUES(fetched_at)"
+                    ),
+                    cache_rows,
+                )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "error": f"实时行情已获取，但最新价缓存写入失败: {str(exc)[:300]}",
+                "source": "tushare.rt_k",
+                "requested_count": len(requested),
+                "quote_count": len(quotes),
+                "missing_symbols": [symbol for symbol in requested if symbol not in quotes],
+                "ms": int((time.monotonic() - started) * 1000),
+            }
+
+    missing_symbols = [symbol for symbol in requested if symbol not in quotes]
+    return {
+        "source": "tushare.rt_k",
+        "fetched_at": fetched_at.isoformat(timespec="seconds"),
+        "requested_count": len(requested),
+        "quote_count": len(quotes),
+        "quotes": quotes,
+        "rows": list(quotes.values()),
+        "missing_symbols": missing_symbols,
+        "ms": int((time.monotonic() - started) * 1000),
     }
 
 
@@ -1770,6 +1944,7 @@ def search_stock_news(query: str, symbol: str | None = None, max_results: int = 
         "source": f"{provider}.search",
         "results": results,
         "saved_rows": saved,
+        "fetched_at": _sh_now().isoformat(timespec="seconds"),
         "ms": int((time.monotonic() - started) * 1000),
     }
 
@@ -2260,10 +2435,17 @@ def get_top_inst(trade_date: str | None = None, ts_code: str | None = None) -> d
     return _semantic_tushare("top_inst", params, fields, name_cn="龙虎榜机构交易单", tool_name="get_top_inst")
 
 
-def get_limit_list(trade_date: str | None = None, start_date: str | None = None,
-                   end_date: str | None = None) -> dict:
+def get_limit_list(
+    trade_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    ts_code: str | None = None,
+) -> dict:
     """涨跌停和炸板数据。"""
     params: dict[str, Any] = {}
+    normalized_symbol = normalize_a_share_symbol(ts_code) if ts_code else None
+    if normalized_symbol:
+        params["ts_code"] = normalized_symbol
     td = _valid_yyyymmdd(trade_date)
     if td:
         params["trade_date"] = td
@@ -2274,7 +2456,41 @@ def get_limit_list(trade_date: str | None = None, start_date: str | None = None,
         params["start_date"] = start
         params["end_date"] = end
     fields = "trade_date,ts_code,name,close,pct_chg,up_limit,down_limit,limit_status,first_break_time,last_break_time,open_times"
-    return _semantic_tushare("limit_list_d", params, fields, name_cn="涨跌停和炸板数据", tool_name="get_limit_list")
+    result = _semantic_tushare(
+        "limit_list_d",
+        params,
+        fields,
+        name_cn="涨跌停和炸板数据",
+        tool_name="get_limit_list",
+    )
+    if "error" in result:
+        return result
+
+    rows = result.get("rows") or []
+    latest_trade_date = max(
+        (str(row.get("trade_date") or "") for row in rows),
+        default=None,
+    )
+    now = _sh_now()
+    market_open = _in_market_window(now)
+    requested_end = td or str(params.get("end_date") or "")
+    current_intraday = bool(
+        market_open and requested_end >= now.strftime("%Y%m%d")
+    )
+    return {
+        **result,
+        "symbol": normalized_symbol,
+        "latest_trade_date": latest_trade_date,
+        "market_open": market_open,
+        "is_final": not current_intraday,
+        "absence_is_conclusive": not current_intraday,
+        "freshness_note": (
+            "当前为交易时段，结果仅代表查询时点快照；空结果不能证明今日没有涨跌停，"
+            "已有涨停记录也可能随后炸板。"
+            if current_intraday
+            else "查询区间已经结束，结果可按历史收盘口径解释。"
+        ),
+    }
 
 
 def get_limit_step(trade_date: str | None = None) -> dict:
@@ -3191,10 +3407,18 @@ def stock_observation_preview(name: str, result: dict) -> str:
         return str(result["error"])
     if name == "get_latest_price":
         origin = "缓存" if result.get("from_cache") else "TuShare 实取"
-        return (
+        preview = (
             f"{result.get('name') or result.get('symbol')} 最新价 {result.get('price')}"
             f"（交易日 {result.get('trade_date')}，涨跌 {result.get('pct_chg')}%，{origin}）"
         )
+        if result.get("intraday_unavailable"):
+            preview += (
+                f"。⚠️ 当前开盘中，但行情仅到 {result.get('trade_date') or '未知日期'}；"
+                "不能据此否认今日盘中涨停、跌停或异动。"
+            )
+        elif result.get("stale"):
+            preview += f"。⚠️ 数据落后于应有交易日 {result.get('expected_trade_date')}。"
+        return preview
     if name == "resolve_stock":
         items = result.get("candidates") or []
         if not items:
@@ -3206,11 +3430,30 @@ def stock_observation_preview(name: str, result: dict) -> str:
         latest = rows[-1] if rows else {}
         return f"TuShare 返回 {len(rows)} 条日线，最新交易日 {latest.get('trade_date', '-')}, 收盘 {latest.get('close', '-')}"
     if name == "get_realtime_quote":
-        return (
+        preview = (
             f"完成行情快照：{result.get('symbol', '-')} {result.get('name', '')} "
             f"{result.get('trade_date', '-')} 价格 {result.get('price', '-')}, "
             f"涨跌幅 {result.get('pct_chg', '-')}%, 量比 {result.get('volume_ratio', '-')}"
         )
+        if result.get("intraday_unavailable"):
+            preview += "。⚠️ 这不是今日盘中实时行情，不能用于否定用户描述的当日异动。"
+        return preview
+    if name == "get_limit_list":
+        rows = result.get("rows") or []
+        symbol = result.get("symbol")
+        if rows:
+            labels = "、".join(
+                f"{row.get('trade_date', '-')} {row.get('ts_code', '-')} "
+                f"{row.get('name', '')} {row.get('pct_chg', '-')}%"
+                for row in rows[:6]
+            )
+            suffix = "（盘中快照，状态可能变化）" if not result.get("is_final", True) else ""
+            return f"涨跌停查询返回 {len(rows)} 条：{labels}{suffix}"
+        if symbol and not result.get("absence_is_conclusive", True):
+            return (
+                f"涨跌停盘中接口暂未返回 {symbol}；空结果不能证明该股今日没有涨停或炸板。"
+            )
+        return f"涨跌停查询返回 0 条{f'（{symbol}）' if symbol else ''}。"
     if name in {"analyze_daily_bars", "analyze_trend"}:
         latest = result.get("latest") or {}
         trend = result.get("trend") or {}

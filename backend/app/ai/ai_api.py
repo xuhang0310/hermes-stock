@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session, selectinload
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.duration import elapsed_wall_clock_ms
-from backend.app.agent_runtime.evidence_service import research_evidence_service
 from backend.app.agent_runtime.payloads import user_text_from_content
 from backend.app.agent_runtime.repository import agent_run_repository
 from backend.app.agent_runtime.service import agent_runtime_service
@@ -2741,27 +2740,6 @@ async def retry_agent_workflow_node(
     for child_run_id in workflow.pop("queued_run_ids", []):
         await redis_broker.enqueue(child_run_id)
     return workflow
-
-
-@router.get("/agent/runs/{run_id}/audit")
-def agent_run_research_audit(
-    run_id: str,
-    context: AuthContext = Depends(require_permission("agent:use")),
-) -> dict:
-    run = agent_run_repository.get_run(run_id, user_id=context.user.id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="Agent 任务不存在或无权访问")
-    bundle = research_evidence_service.audit_bundle(run_id)
-    if bundle is None:
-        return {
-            "goal": None,
-            "criteria": [],
-            "evidence": [],
-            "claims": [],
-            "latest_audit": None,
-            "completion_state": run.get("completion_state", "not_applicable"),
-        }
-    return {**bundle, "completion_state": run.get("completion_state", "not_applicable")}
 
 
 @router.get("/agent/skills/core")

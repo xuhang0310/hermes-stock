@@ -18,6 +18,7 @@ from backend.app.market.digital_human_tools import (
     get_intelligence_digest,
     get_macro_policy_digest,
     get_my_universe,
+    get_position_decision_context,
     get_portfolio_snapshot,
     get_priority_items,
     get_recent_alerts,
@@ -51,6 +52,7 @@ SKILL = {
     "tools": _pick(
         "get_my_universe",
         "get_portfolio_snapshot",
+        "get_position_decision_context",
         "get_watchlist_snapshot",
         "get_symbol_context",
         "get_recent_internal_evidence",
@@ -76,7 +78,17 @@ SKILL = {
     # 参数抽取与 execute_digital_human_tool 同名分支逐字一致
     "executors": {
         "get_my_universe": lambda a: get_my_universe(),
-        "get_portfolio_snapshot": lambda a: get_portfolio_snapshot(),
+        "get_portfolio_snapshot": lambda a: get_portfolio_snapshot(
+            account_id=int(a["account_id"]) if a.get("account_id") is not None else None,
+            symbol=_optional_str(a.get("symbol")),
+        ),
+        "get_position_decision_context": lambda a: get_position_decision_context(
+            str(a.get("symbol") or ""),
+            input_name=_optional_str(a.get("input_name")),
+            account_id=int(a["account_id"]) if a.get("account_id") is not None else None,
+            quantity=float(a["quantity"]) if a.get("quantity") is not None else None,
+            cost_price=float(a["cost_price"]) if a.get("cost_price") is not None else None,
+        ),
         "get_watchlist_snapshot": lambda a: get_watchlist_snapshot(),
         "get_symbol_context": lambda a: get_symbol_context(str(a.get("symbol") or "")),
         "get_recent_internal_evidence": lambda a: get_recent_internal_evidence(

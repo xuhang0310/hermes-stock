@@ -1,0 +1,78 @@
+{
+  "chat_modes": ["research"],
+  "roles": [],
+  "default_roles": ["stock-pm", "risk-officer", "research-analyst"],
+  "triggers": [
+    "持仓怎么办",
+    "周一怎么操作",
+    "操作方案",
+    "清仓",
+    "减仓",
+    "补仓",
+    "止损",
+    "换仓",
+    "持仓成本"
+  ],
+  "tool_names": [
+    "get_position_decision_context",
+    "get_anns",
+    "search_stock_news"
+  ],
+  "criteria": [
+    {
+      "code": "decision.position",
+      "description": "取得目标账户的真实持仓，或取得用户本轮明确给出的数量和成本。",
+      "tool_names": ["get_position_decision_context"],
+      "validation_profile": "decision_position",
+      "max_age_days": 7
+    },
+    {
+      "code": "decision.market",
+      "description": "取得目标证券带交易日期和新鲜度状态的最新行情。",
+      "tool_names": ["get_position_decision_context"],
+      "validation_profile": "decision_market",
+      "max_age_days": 3
+    },
+    {
+      "code": "decision.technical",
+      "description": "取得目标证券足够长度的带日期价格序列和确定性技术摘要。",
+      "tool_names": ["get_position_decision_context"],
+      "validation_profile": "decision_technical",
+      "max_age_days": 7
+    },
+    {
+      "code": "decision.fundamental",
+      "description": "取得目标公司的基础资料、估值和最近年度/最新报告期财务趋势。",
+      "tool_names": ["get_position_decision_context"],
+      "validation_profile": "decision_fundamental",
+      "max_age_days": 550
+    },
+    {
+      "code": "decision.capital",
+      "description": "取得带日期和口径的资金流、两融或筹码数据；若数据源不可用则必须明确缺口。",
+      "tool_names": ["get_position_decision_context"],
+      "validation_profile": "decision_capital",
+      "max_age_days": 30
+    },
+    {
+      "code": "decision.events",
+      "description": "取得目标证券近期公告或带来源和发布日期的新闻材料。",
+      "tool_names": ["get_anns", "search_stock_news"],
+      "validation_profile": "event_material",
+      "max_age_days": 30
+    }
+  ],
+  "output_contract": [
+    "执行摘要",
+    "数据与持仓快照",
+    "公司财务与估值",
+    "事件时间线",
+    "技术量价与资金",
+    "多维决策矩阵",
+    "风险与最强反方",
+    "至少两种条件化方案",
+    "下一个交易日前检查项",
+    "数据来源",
+    "数据缺口与失效条件"
+  ]
+}

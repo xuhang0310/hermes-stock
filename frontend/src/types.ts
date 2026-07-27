@@ -195,6 +195,48 @@ export type PositionSymbolValidation = {
   suggested_name?: string | null
 }
 
+export type PositionOcrRow = {
+  symbol: string
+  name: string
+  position_quantity: number
+  available_quantity?: number | null
+  frozen_quantity?: number | null
+  today_buy_quantity?: number | null
+  today_sell_quantity?: number | null
+  cost_price?: number | null
+  cost_amount?: number | null
+  latest_price?: number | null
+  market_value?: number | null
+  floating_pnl?: number | null
+  floating_pnl_pct?: number | null
+  day_pnl?: number | null
+  position_pct?: number | null
+  confidence?: number | null
+  action: 'replace'
+}
+
+export type PositionOcrRecognizeResult = {
+  schema_version: 'position_ocr.v1'
+  image_sha256: string
+  model: Partial<ModelConfig>
+  account: Record<string, unknown>
+  as_of_date: string | null
+  rows: PositionOcrRow[]
+  validations: PositionSymbolValidation[]
+  valid_count: number
+  invalid_count: number
+}
+
+export type PositionOcrConfirmResult = {
+  schema_version: 'position_ocr.v1'
+  batch_id: number | null
+  status: string | null
+  saved_count: number
+  error_count: number
+  rows: Array<PositionItem | { error: string; raw?: Record<string, unknown> }>
+  summary: string
+}
+
 export type PositionAgentStreamEvent = {
   type: string
   model?: Partial<ModelConfig> | null
@@ -939,6 +981,7 @@ export type AgentStreamEvent = {
   step?: number
   stage?: string
   status?: string
+  state?: 'complete' | 'incomplete' | 'not_applicable'
   success?: boolean
   duration?: number
   duration_ms?: number
@@ -982,6 +1025,15 @@ export type AgentStreamEvent = {
   deadline_at?: string
   report_run_id?: string
   report_url?: string
+  task?: string
+  symbols?: string[]
+  selected_skills?: string[]
+  required?: string[]
+  report_sections?: string[]
+  execution?: Record<string, unknown>
+  retry_round?: number
+  max_retries?: number
+  reason?: string
 }
 
 export type BacktestMetrics = {

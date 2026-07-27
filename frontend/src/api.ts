@@ -7,6 +7,9 @@ import type {
   PositionAgentAddResult,
   PositionAgentPendingAction,
   PositionAgentStreamEvent,
+  PositionOcrConfirmResult,
+  PositionOcrRecognizeResult,
+  PositionOcrRow,
   PositionSymbolValidation,
   PositionChartPayload,
   PositionItem,
@@ -302,7 +305,13 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   health: () => request<HealthPayload>('/api/health'),
-  dashboard: () => request<DashboardPayload>('/api/dashboard'),
+  dashboard: () =>
+    request<DashboardPayload>('/api/dashboard', {
+      cache: 'no-store',
+      headers: {
+        'Cache-Control': 'no-cache'
+      }
+    }),
   events: () => request<EventItem[]>('/api/events'),
   positions: (accountId?: number | null) =>
     request<PositionItem[]>(`/api/positions${accountId ? `?account_id=${accountId}` : ''}`),
@@ -361,6 +370,26 @@ export const api = {
     if (options?.resolution) params.set('resolution', options.resolution)
     return request<PositionChartPayload>(`/api/chart/positions/${encodeURIComponent(symbol)}?${params.toString()}`)
   },
+  recognizePositionOcr: (payload: {
+    image_base64: string
+    mime_type: string
+    model_config_id?: number | null
+  }) =>
+    request<PositionOcrRecognizeResult>('/api/positions/ocr/recognize', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  confirmPositionOcr: (payload: {
+    rows: PositionOcrRow[]
+    account_id: number
+    as_of_date?: string | null
+    image_sha256: string
+    mime_type: string
+  }) =>
+    request<PositionOcrConfirmResult>('/api/positions/ocr/confirm', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
   agentAddPositions: (payload: {
     instruction: string
     image_base64?: string

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+import re
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -8,12 +10,21 @@ from sqlalchemy import text
 
 from backend.app.core.database import engine
 from backend.app.data.user_scope import current_data_owner_user_id
+from backend.app.market.position_decision import (
+    build_snapshot_id,
+    calculate_position_metrics,
+    calculate_technical_summary,
+    compact_capital_snapshot,
+    compact_fundamental_snapshot,
+    compact_rows,
+)
 from backend.app.market.stock_tools import STOCK_TOOL_SCHEMAS, execute_stock_tool, normalize_a_share_symbol, stock_observation_preview, stock_tool_display_name
 
 
 COMMON_TOOL_NAMES = [
     "get_my_universe",
     "get_portfolio_snapshot",
+    "get_position_decision_context",
     "get_watchlist_snapshot",
     "get_symbol_context",
     "get_recent_internal_evidence",
@@ -156,8 +167,10 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
 }
 
 TOOL_DISPLAY_NAMES = {
+    "get_company_research_bundle": "生成公司研究底稿",
     "get_my_universe": "获取持仓与自选范围",
     "get_portfolio_snapshot": "获取持仓快照",
+    "get_position_decision_context": "获取持仓决策上下文",
     "get_watchlist_snapshot": "获取自选池快照",
     "get_symbol_context": "获取标的综合上下文",
     "get_recent_internal_evidence": "获取内部证据",
@@ -255,6 +268,27 @@ def digital_human_observation_preview(name: str, result: dict) -> str:
         return f"持仓 {len(result.get('positions', []))} 个，自选 {len(result.get('watchlist', []))} 个，重点标的 {len(result.get('symbols', []))} 个。"
     if name == "get_portfolio_snapshot":
         return f"返回 {len(result.get('positions', []))} 个持仓，风险提示 {len(result.get('risk_flags', []))} 条。"
+    if name == "get_position_decision_context":
+        identity = result.get("identity") if isinstance(result.get("identity"), dict) else {}
+        market = result.get("market") if isinstance(result.get("market"), dict) else {}
+        return (
+            f"已生成 {identity.get('symbol') or '-'} 持仓决策快照，"
+            f"行情截至 {market.get('trade_date') or '未知日期'}，"
+            f"陈旧={bool(market.get('stale'))}。"
+        )
+    if name == "get_company_research_bundle":
+        identity = result.get("identity") if isinstance(result.get("identity"), dict) else {}
+        coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
+        satisfied = sum(
+            1
+            for item in coverage.values()
+            if isinstance(item, dict) and item.get("satisfied")
+        )
+        return (
+            f"已生成 {identity.get('symbol') or result.get('symbol') or '-'} 公司研究底稿，"
+            f"七维覆盖 {satisfied}/{len(coverage) or 7}，"
+            f"数据截至 {result.get('data_as_of') or '未知日期'}。"
+        )
     if name == "get_watchlist_snapshot":
         return f"返回 {len(result.get('watchlist', []))} 个自选标的。"
     if name == "get_symbol_context":
@@ -320,7 +354,26 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 
 DIGITAL_HUMAN_TOOL_SCHEMAS: list[dict[str, Any]] = [
     _tool("get_my_universe", "获取当前系统自己的持仓和自选池范围，作为数字人默认分析边界。", {}),
-    _tool("get_portfolio_snapshot", "获取 open positions 持仓快照，包含仓位、成本、止损和风险提示。", {}),
+    _tool(
+        "get_portfolio_snapshot",
+        "按当前用户读取 open positions 持仓快照；可按证券账户和股票过滤，避免多账户持仓串数据。",
+        {
+            "account_id": {"type": "integer", "description": "可选证券账户 ID。"},
+            "symbol": {"type": "string", "description": "可选 A 股代码或 ts_code。"},
+        },
+    ),
+    _tool(
+        "get_position_decision_context",
+        "生成单一标的的专业持仓决策包：校验证券身份，读取账户持仓、最新行情、三表趋势、估值、资金、两融和筹码，并由程序计算盈亏、均线、回撤与20日支撑阻力。用户本轮明确给出的数量和成本优先。",
+        {
+            "symbol": {"type": "string", "description": "A股代码或 ts_code，例如 605286.SH。"},
+            "input_name": {"type": "string", "description": "用户输入的证券名称，用于代码名称一致性校验。"},
+            "account_id": {"type": "integer", "description": "可选证券账户 ID。"},
+            "quantity": {"type": "number", "description": "用户本轮明确给出的持仓数量。"},
+            "cost_price": {"type": "number", "description": "用户本轮明确给出的成本价。"},
+        },
+        ["symbol"],
+    ),
     _tool("get_watchlist_snapshot", "获取 active watchlist_items 自选池快照，包含入池理由和基础信息。", {}),
     _tool(
         "get_symbol_context",
@@ -523,15 +576,37 @@ def get_my_universe() -> dict:
     return {"source": "positions+watchlist_items", "positions": positions, "watchlist": watchlist, "symbols": symbols}
 
 
-def get_portfolio_snapshot() -> dict:
+def get_portfolio_snapshot(
+    account_id: int | None = None,
+    symbol: str | None = None,
+) -> dict:
     owner_user_id = current_data_owner_user_id()
-    owner_filter = "" if owner_user_id is None else "AND p.owner_user_id = :owner_user_id"
-    snapshot_owner_filter = (
-        "" if owner_user_id is None else "WHERE owner_user_id = :owner_user_id"
-    )
+    ts_code = _normalize_symbol(symbol) if symbol else None
+    if symbol and (
+        not ts_code or not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", ts_code)
+    ):
+        return {"error": f"无法识别标的: {symbol}"}
+    params: dict[str, Any] = {}
+    position_filters = ["p.status = 'open'"]
+    snapshot_filters = ["status = 'open'"]
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
+        position_filters.append("p.owner_user_id = :owner_user_id")
+        snapshot_filters.append("owner_user_id = :owner_user_id")
+    if account_id is not None:
+        params["account_id"] = int(account_id)
+        position_filters.append("p.account_id = :account_id")
+        snapshot_filters.append("account_id = :account_id")
+    if ts_code:
+        params["symbol"] = ts_code
+        position_filters.append("p.symbol = :symbol")
+        snapshot_filters.append("symbol = :symbol")
+    position_where = " AND ".join(position_filters)
+    snapshot_where = " AND ".join(snapshot_filters)
     rows = _query(
         f"""
         SELECT p.id,
+               COALESCE(s.account_id, p.account_id) AS account_id,
                p.symbol,
                COALESCE(s.symbol_name, i.name) AS name,
                COALESCE(s.position_pct, p.position_pct) AS position_pct,
@@ -551,25 +626,34 @@ def get_portfolio_snapshot() -> dict:
                p.status,
                p.opened_at,
                COALESCE(s.captured_at, p.updated_at) AS updated_at,
+               s.id AS snapshot_id,
+               s.captured_at,
                s.as_of_date,
                s.source_type,
                a.broker_name,
-               a.account_name
+               a.account_name,
+               a.total_asset AS account_total_asset,
+               a.available_cash AS account_available_cash,
+               a.holding_market_value AS account_holding_market_value
         FROM positions p
         JOIN instruments i ON i.symbol = p.symbol
         LEFT JOIN (
-          SELECT symbol, MAX(id) AS snapshot_id
+          SELECT account_id, symbol, MAX(id) AS snapshot_id
           FROM position_holding_snapshots
-          {snapshot_owner_filter}
-          GROUP BY symbol
+          WHERE {snapshot_where}
+          GROUP BY account_id, symbol
         ) latest ON latest.symbol = p.symbol
+          AND (
+            latest.account_id = p.account_id
+            OR (latest.account_id IS NULL AND p.account_id IS NULL)
+          )
         LEFT JOIN position_holding_snapshots s ON s.id = latest.snapshot_id
-        LEFT JOIN position_accounts a ON a.id = s.account_id
-        WHERE p.status = 'open' {owner_filter}
+        LEFT JOIN position_accounts a ON a.id = COALESCE(s.account_id, p.account_id)
+        WHERE {position_where}
         ORDER BY COALESCE(s.position_pct, p.position_pct) DESC, COALESCE(s.captured_at, p.updated_at) DESC
         LIMIT 100
         """,
-        {"owner_user_id": owner_user_id} if owner_user_id is not None else None,
+        params or None,
     )
     risk_flags = []
     for row in rows:
@@ -577,7 +661,233 @@ def get_portfolio_snapshot() -> dict:
             risk_flags.append({"symbol": row["symbol"], "level": "medium", "reason": "持仓缺少止损价"})
         if not row.get("thesis"):
             risk_flags.append({"symbol": row["symbol"], "level": "low", "reason": "持仓缺少投资逻辑记录"})
-    return {"source": "positions", "positions": rows, "risk_flags": risk_flags}
+    data_as_of = max(
+        (
+            str(row.get("as_of_date") or row.get("captured_at") or row.get("updated_at") or "")
+            for row in rows
+        ),
+        default="",
+    )
+    return {
+        "source": "positions+position_holding_snapshots",
+        "requested_account_id": account_id,
+        "requested_symbol": ts_code,
+        "data_as_of": data_as_of or None,
+        "positions": rows,
+        "risk_flags": risk_flags,
+    }
+
+
+def get_position_decision_context(
+    symbol: str,
+    *,
+    input_name: str | None = None,
+    account_id: int | None = None,
+    quantity: float | None = None,
+    cost_price: float | None = None,
+) -> dict:
+    ts_code = _normalize_symbol(symbol)
+    if not ts_code or not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", ts_code):
+        return {"error": f"无法识别标的: {symbol}"}
+
+    portfolio = get_portfolio_snapshot(account_id=account_id, symbol=ts_code)
+    if portfolio.get("error"):
+        return portfolio
+    candidates = [
+        row
+        for row in portfolio.get("positions", [])
+        if isinstance(row, dict) and row.get("symbol") == ts_code
+    ]
+    account_ambiguous = account_id is None and len(candidates) > 1
+    stored_position = candidates[0] if len(candidates) == 1 or account_id is not None else None
+    effective_quantity = quantity if quantity is not None else (
+        stored_position.get("quantity") if stored_position else None
+    )
+    effective_cost = cost_price if cost_price is not None else (
+        stored_position.get("cost_price") if stored_position else None
+    )
+
+    research_start = (date.today() - timedelta(days=365 * 4 + 2)).strftime("%Y%m%d")
+    capital_start = (date.today() - timedelta(days=90)).strftime("%Y%m%d")
+    calls = {
+        "latest": ("get_latest_price", {"symbol": ts_code}),
+        "history": ("get_analysis_context", {"symbol": ts_code, "limit": 60}),
+        "fundamental": ("get_stock_info", {"symbol": ts_code}),
+        "income": ("get_income", {"symbol": ts_code, "start_date": research_start}),
+        "balance": ("get_balancesheet", {"symbol": ts_code, "start_date": research_start}),
+        "cashflow": ("get_cashflow", {"symbol": ts_code, "start_date": research_start}),
+        "capital_flow": ("get_capital_flow", {"symbol": ts_code, "days": 20}),
+        "margin": (
+            "get_margin_detail",
+            {"symbol": ts_code, "start_date": capital_start},
+        ),
+        "chip": ("get_chip_distribution", {"symbol": ts_code}),
+    }
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="position-context") as pool:
+        futures = {
+            key: pool.submit(_safe_stock_tool, tool_name, args)
+            for key, (tool_name, args) in calls.items()
+        }
+        datasets = {key: future.result() for key, future in futures.items()}
+
+    latest = datasets["latest"]
+    history = datasets["history"]
+    if latest.get("error") and history.get("error"):
+        return {
+            "error": f"无法取得 {ts_code} 行情：{latest.get('error')}; {history.get('error')}",
+            "position_candidates": candidates,
+        }
+    latest_bar = history.get("latest") if isinstance(history.get("latest"), dict) else {}
+    latest_price = latest.get("price")
+    if latest_price is None:
+        latest_price = latest_bar.get("close")
+    canonical_name = (
+        latest.get("name")
+        or history.get("name")
+        or (stored_position or {}).get("name")
+    )
+    normalized_input_name = str(input_name or "").strip()
+    normalized_canonical_name = str(canonical_name or "").strip()
+    name_mismatch = bool(
+        normalized_input_name
+        and normalized_canonical_name
+        and normalized_input_name != normalized_canonical_name
+    )
+
+    position_metrics = calculate_position_metrics(
+        quantity=effective_quantity,
+        cost_price=effective_cost,
+        latest_price=latest_price,
+    )
+    position = None
+    if effective_quantity is not None or effective_cost is not None:
+        position = {
+            **position_metrics,
+            "source": (
+                "user_input"
+                if quantity is not None or cost_price is not None
+                else "position_snapshot"
+            ),
+            "account_id": account_id or (stored_position or {}).get("account_id"),
+            "broker_name": (stored_position or {}).get("broker_name"),
+            "account_name": (stored_position or {}).get("account_name"),
+            "snapshot_id": (stored_position or {}).get("snapshot_id"),
+            "as_of_date": (stored_position or {}).get("as_of_date"),
+        }
+
+    technical = calculate_technical_summary(
+        history.get("bars") if isinstance(history.get("bars"), list) else []
+    )
+    fundamental = compact_fundamental_snapshot(datasets["fundamental"])
+    income_trend = compact_rows(
+        datasets["income"].get("rows"),
+        fields=(
+            "ann_date",
+            "end_date",
+            "revenue",
+            "n_income_parent",
+            "net_profit_excl_min_int_inc",
+            "ebit",
+            "ebitda",
+        ),
+        limit=6,
+    )
+    balance_trend = compact_rows(
+        datasets["balance"].get("rows"),
+        fields=(
+            "ann_date",
+            "end_date",
+            "total_assets",
+            "total_liab",
+            "money_cap",
+            "accounts_rece",
+            "inventories",
+        ),
+        limit=6,
+    )
+    cashflow_trend = compact_rows(
+        datasets["cashflow"].get("rows"),
+        fields=(
+            "ann_date",
+            "end_date",
+            "n_cashflow_act",
+            "n_cashflow_inv",
+            "n_cash_flows_finance",
+            "free_cashflow",
+        ),
+        limit=6,
+    )
+    capital = compact_capital_snapshot(
+        flow=datasets["capital_flow"],
+        margin=datasets["margin"],
+        chip=datasets["chip"],
+    )
+    research_errors = [
+        {"dataset": key, "error": str(result.get("error"))}
+        for key, result in datasets.items()
+        if key not in {"latest", "history"} and result.get("error")
+    ]
+    research = {
+        "fundamental": fundamental,
+        "income_trend": income_trend,
+        "balance_trend": balance_trend,
+        "cashflow_trend": cashflow_trend,
+        "capital": capital,
+        "errors": research_errors,
+        "scope": "最近约4年财务 + 最近20个交易日资金/近90日两融 + 最新筹码",
+    }
+    market = {
+        "price": latest_price,
+        "pre_close": latest.get("pre_close"),
+        "pct_chg": latest.get("pct_chg"),
+        "trade_date": latest.get("trade_date") or latest_bar.get("trade_date"),
+        "expected_trade_date": latest.get("expected_trade_date"),
+        "market_open": latest.get("market_open"),
+        "stale": bool(latest.get("stale")),
+        "intraday_unavailable": bool(latest.get("intraday_unavailable")),
+        "freshness_note": latest.get("freshness_note"),
+        "source": latest.get("source") or history.get("source"),
+    }
+    snapshot_payload = {
+        "identity": {"symbol": ts_code, "canonical_name": canonical_name},
+        "position": position,
+        "market": market,
+        "technical": {key: value for key, value in technical.items() if key != "recent_bars"},
+        "research": research,
+    }
+    return {
+        "source": "hermes.position_decision_context",
+        "data_as_of": market.get("trade_date") or technical.get("end_trade_date"),
+        "identity": {
+            "symbol": ts_code,
+            "input_name": normalized_input_name or None,
+            "canonical_name": canonical_name,
+            "name_mismatch": name_mismatch,
+            "resolution_note": (
+                f"输入名称“{normalized_input_name}”与证券主数据“{canonical_name}”不一致，"
+                "后续分析以证券代码及主数据名称为准。"
+                if name_mismatch
+                else "证券代码与名称已校验。"
+            ),
+        },
+        "position": position,
+        "position_candidates": candidates if account_ambiguous else [],
+        "account_ambiguous": account_ambiguous,
+        "market": market,
+        "technical": technical,
+        "research": research,
+        "snapshot_id": build_snapshot_id(snapshot_payload),
+        "context_budget": {
+            "returned_recent_bars": len(technical.get("recent_bars") or []),
+            "raw_history_bars": int(history.get("bar_count") or 0),
+            "raw_history_omitted": True,
+            "income_periods": len(income_trend),
+            "balance_periods": len(balance_trend),
+            "cashflow_periods": len(cashflow_trend),
+            "capital_flow_days": len(capital.get("flow_recent") or []),
+            "margin_days": len(capital.get("margin_recent") or []),
+        },
+    }
 
 
 def get_watchlist_snapshot() -> dict:

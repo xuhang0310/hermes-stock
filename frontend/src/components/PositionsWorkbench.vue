@@ -1,8 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import DataTable from './DataTable.vue'
-import type { BrokerPreset, PositionAccount, PositionItem, PositionSummary, PositionSymbolValidation, PositionTrade } from '../types'
+import type {
+  BrokerPreset,
+  PositionAccount,
+  PositionItem,
+  PositionOcrRecognizeResult,
+  PositionOcrRow,
+  PositionSummary,
+  PositionSymbolValidation,
+  PositionTrade
+} from '../types'
 import { beijingFromDb } from '../utils/datetime'
 
 const props = defineProps<{ positions: PositionItem[] }>()
@@ -31,6 +40,38 @@ const correctionModalOpen = ref(false)
 const correctionSaving = ref(false)
 const correctionPositionId = ref<number | null>(null)
 const correctionValidation = ref<PositionSymbolValidation | null>(null)
+const ocrModalOpen = ref(false)
+const ocrRecognizing = ref(false)
+const ocrSaving = ref(false)
+const ocrDragging = ref(false)
+const ocrFileName = ref('')
+const ocrImageBase64 = ref('')
+const ocrMimeType = ref('image/png')
+const ocrAccountId = ref<number | null>(null)
+const ocrAsOfDate = ref('')
+const ocrMessage = ref('')
+const ocrResult = ref<PositionOcrRecognizeResult | null>(null)
+const ocrElapsedSeconds = ref(0)
+const ocrProgress = ref(0)
+const ocrStageIndex = ref(0)
+let ocrProgressTimer: ReturnType<typeof setInterval> | null = null
+const ocrStages = [
+  { title: '正在预处理图片', detail: '检查清晰度、方向和可识别区域' },
+  { title: '视觉模型正在读取', detail: '识别账户信息与持仓明细' },
+  { title: '正在整理结构化数据', detail: '转换为统一的持仓 JSON 格式' },
+  { title: '正在校验股票代码', detail: '核对市场后缀、名称和数值字段' }
+]
+const ocrWaitingTips = [
+  '复杂截图需要逐行核对，稍等片刻会更准确。',
+  '正在区分持仓数量、成本价和最新价。',
+  '识别结果返回后可以直接修改，不会自动写入数据库。',
+  '股票代码会经过系统数据源再次校验。'
+]
+type PositionOcrReviewRow = PositionOcrRow & {
+  validation: PositionSymbolValidation
+  validating: boolean
+}
+const ocrRows = ref<PositionOcrReviewRow[]>([])
 const correctionOriginal = ref<{
   symbol: string
   name: string
@@ -117,6 +158,29 @@ const displayedPositions = computed(() => {
       return result || left.originalIndex - right.originalIndex
     })
     .map((item) => item.position)
+})
+
+const ocrJsonPreview = computed(() => {
+  if (!ocrResult.value) return ''
+  return JSON.stringify(
+    {
+      schema_version: ocrResult.value.schema_version,
+      image_sha256: ocrResult.value.image_sha256,
+      model: ocrResult.value.model,
+      account: ocrResult.value.account,
+      as_of_date: ocrAsOfDate.value || null,
+      rows: ocrRows.value.map(({ validation: _validation, validating: _validating, ...row }) => row)
+    },
+    null,
+    2
+  )
+})
+const ocrCurrentStage = computed(() => ocrStages[ocrStageIndex.value])
+const ocrWaitingTip = computed(() => ocrWaitingTips[Math.floor(ocrElapsedSeconds.value / 4) % ocrWaitingTips.length])
+const ocrElapsedLabel = computed(() => {
+  const minutes = Math.floor(ocrElapsedSeconds.value / 60)
+  const seconds = ocrElapsedSeconds.value % 60
+  return minutes ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`
 })
 
 type PositionColumnKey =
@@ -350,6 +414,260 @@ function selectAccount(id: number | null) {
   selectedAccountId.value = id
   void api.positionsSummary(id).then((s) => (summary.value = s))
   if (activeTab.value === 'trades') void loadTrades()
+}
+
+function resetPositionOcr() {
+  stopPositionOcrProgress()
+  ocrFileName.value = ''
+  ocrImageBase64.value = ''
+  ocrMimeType.value = 'image/png'
+  ocrAsOfDate.value = ''
+  ocrMessage.value = ''
+  ocrResult.value = null
+  ocrRows.value = []
+  ocrDragging.value = false
+}
+
+function updatePositionOcrProgress() {
+  const seconds = ocrElapsedSeconds.value
+  if (seconds < 3) {
+    ocrStageIndex.value = 0
+    ocrProgress.value = Math.min(28, 10 + seconds * 6)
+  } else if (seconds < 9) {
+    ocrStageIndex.value = 1
+    ocrProgress.value = Math.min(54, 28 + (seconds - 2) * 4)
+  } else if (seconds < 16) {
+    ocrStageIndex.value = 2
+    ocrProgress.value = Math.min(74, 54 + (seconds - 8) * 3)
+  } else {
+    ocrStageIndex.value = 3
+    ocrProgress.value = Math.min(92, 74 + Math.floor((seconds - 15) * 1.2))
+  }
+}
+
+function startPositionOcrProgress() {
+  stopPositionOcrProgress()
+  ocrElapsedSeconds.value = 0
+  ocrProgress.value = 10
+  ocrStageIndex.value = 0
+  ocrProgressTimer = setInterval(() => {
+    ocrElapsedSeconds.value += 1
+    updatePositionOcrProgress()
+  }, 1000)
+}
+
+function stopPositionOcrProgress(completed = false) {
+  if (ocrProgressTimer) {
+    clearInterval(ocrProgressTimer)
+    ocrProgressTimer = null
+  }
+  if (completed) ocrProgress.value = 100
+}
+
+function openPositionOcr() {
+  resetPositionOcr()
+  ocrAccountId.value =
+    selectedAccountId.value
+    ?? accounts.value.find((item) => item.is_default)?.id
+    ?? accounts.value[0]?.id
+    ?? null
+  ocrModalOpen.value = true
+}
+
+function closePositionOcr() {
+  if (ocrRecognizing.value || ocrSaving.value) return
+  ocrModalOpen.value = false
+}
+
+function readPositionOcrFile(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('图片读取失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function setPositionOcrFile(file: File) {
+  ocrMessage.value = ''
+  if (!file.type.startsWith('image/')) {
+    ocrMessage.value = '请选择 PNG、JPG 或其他图片文件'
+    return
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    ocrMessage.value = '图片不能超过 8MB'
+    return
+  }
+  try {
+    ocrFileName.value = file.name
+    ocrMimeType.value = file.type || 'image/png'
+    ocrImageBase64.value = await readPositionOcrFile(file)
+    ocrResult.value = null
+    ocrRows.value = []
+  } catch (error) {
+    ocrMessage.value = error instanceof Error ? error.message : '图片读取失败'
+  }
+}
+
+async function onPositionOcrFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) await setPositionOcrFile(file)
+  input.value = ''
+}
+
+async function onPositionOcrDrop(event: DragEvent) {
+  ocrDragging.value = false
+  const file = Array.from(event.dataTransfer?.files || []).find((item) => item.type.startsWith('image/'))
+  if (!file) {
+    ocrMessage.value = '没有检测到图片文件'
+    return
+  }
+  await setPositionOcrFile(file)
+}
+
+function positionOcrValidationAt(result: PositionOcrRecognizeResult, index: number, row: PositionOcrRow) {
+  return result.validations.find((item) => Number(item.index) === index) || {
+    index,
+    valid: false,
+    status: 'unchecked',
+    input_symbol: row.symbol,
+    normalized_symbol: row.symbol,
+    message: '等待校验'
+  }
+}
+
+async function recognizePositionOcr() {
+  if (!ocrImageBase64.value || ocrRecognizing.value) {
+    if (!ocrImageBase64.value) ocrMessage.value = '请先选择一张券商持仓截图'
+    return
+  }
+  ocrRecognizing.value = true
+  startPositionOcrProgress()
+  ocrMessage.value = ''
+  ocrResult.value = null
+  ocrRows.value = []
+  try {
+    const result = await api.recognizePositionOcr({
+      image_base64: ocrImageBase64.value,
+      mime_type: ocrMimeType.value
+    })
+    ocrResult.value = result
+    ocrAsOfDate.value = result.as_of_date || ''
+    ocrRows.value = result.rows.map((row, index) => ({
+      ...row,
+      action: 'replace',
+      validation: positionOcrValidationAt(result, index, row),
+      validating: false
+    }))
+    stopPositionOcrProgress(true)
+    ocrMessage.value = result.invalid_count
+      ? `识别到 ${result.rows.length} 条持仓，其中 ${result.invalid_count} 条代码需要修正。`
+      : `识别到 ${result.rows.length} 条持仓，股票代码已全部通过校验。`
+  } catch (error) {
+    stopPositionOcrProgress()
+    ocrMessage.value = `识别失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    stopPositionOcrProgress(Boolean(ocrResult.value))
+    ocrRecognizing.value = false
+  }
+}
+
+function markPositionOcrSymbolEdited(row: PositionOcrReviewRow) {
+  row.validation = {
+    valid: false,
+    status: 'unchecked',
+    input_symbol: row.symbol,
+    normalized_symbol: row.symbol,
+    message: '代码已修改，请重新校验'
+  }
+}
+
+async function validatePositionOcrRow(index: number) {
+  const row = ocrRows.value[index]
+  if (!row || row.validating) return false
+  row.validating = true
+  try {
+    const validation = await api.validatePositionAgentSymbol({
+      symbol: row.symbol.trim(),
+      name: row.name.trim() || null
+    })
+    row.validation = validation
+    if (validation.valid) {
+      row.symbol = validation.normalized_symbol
+      row.name = validation.canonical_name || row.name
+    }
+    return validation.valid
+  } catch (error) {
+    row.validation = {
+      valid: false,
+      status: 'validation_error',
+      input_symbol: row.symbol,
+      normalized_symbol: row.symbol,
+      message: error instanceof Error ? error.message : '股票代码校验失败'
+    }
+    return false
+  } finally {
+    row.validating = false
+  }
+}
+
+function removePositionOcrRow(index: number) {
+  ocrRows.value.splice(index, 1)
+}
+
+async function confirmPositionOcr() {
+  if (!ocrResult.value || ocrSaving.value) return
+  if (!ocrAccountId.value) {
+    ocrMessage.value = '请选择要写入的证券账户'
+    return
+  }
+  if (!ocrRows.value.length) {
+    ocrMessage.value = '没有可写入的持仓明细'
+    return
+  }
+  ocrSaving.value = true
+  ocrMessage.value = ''
+  try {
+    const checks = await Promise.all(ocrRows.value.map((_, index) => validatePositionOcrRow(index)))
+    if (checks.some((valid) => !valid)) {
+      ocrMessage.value = '仍有股票代码未通过校验，请修正后再确认入库'
+      return
+    }
+    const invalidNumber = ocrRows.value.find(
+      (row) =>
+        !Number.isFinite(Number(row.position_quantity))
+        || Number(row.position_quantity) < 0
+        || (row.cost_price !== null && row.cost_price !== undefined && Number(row.cost_price) < 0)
+    )
+    if (invalidNumber) {
+      ocrMessage.value = '持仓数量和成本价不能为负数'
+      return
+    }
+    const rows = ocrRows.value.map(({ validation: _validation, validating: _validating, ...row }) => ({
+      ...row,
+      position_quantity: Number(row.position_quantity),
+      action: 'replace' as const
+    }))
+    const result = await api.confirmPositionOcr({
+      rows,
+      account_id: ocrAccountId.value,
+      as_of_date: ocrAsOfDate.value || null,
+      image_sha256: ocrResult.value.image_sha256,
+      mime_type: ocrMimeType.value
+    })
+    const failed = result.rows.filter((row) => 'error' in row).length
+    message.value = failed
+      ? `${result.summary} 另有 ${failed} 条保存失败。`
+      : result.summary
+    ocrModalOpen.value = false
+    await loadAccounts()
+    emit('refreshPositions')
+  } catch (error) {
+    ocrMessage.value = `入库失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    ocrSaving.value = false
+  }
 }
 
 function openNewAccount() {
@@ -675,6 +993,10 @@ onMounted(async () => {
   await loadAccounts()
   await loadTrades()
 })
+
+onBeforeUnmount(() => {
+  stopPositionOcrProgress()
+})
 </script>
 
 <template>
@@ -714,9 +1036,13 @@ onMounted(async () => {
           <button v-if="selectedAccount" type="button" @click="openFund(selectedAccount)">维护资金</button>
           <button v-if="selectedAccount" type="button" @click="editAccount(selectedAccount)">账户设置</button>
           <button type="button" class="primary" @click="openTradeModal(null, 'buy', 'add')">买入</button>
-          <button type="button" @click="emit('openAgent', selectedAccountId)">添加持仓</button>
+          <button type="button" class="ocr-action" @click="openPositionOcr">OCR 识别</button>
+          <button type="button" @click="emit('openAgent', selectedAccountId)">Agent 录入</button>
         </div>
       </header>
+      <p v-if="message && !accountModalOpen && !fundModalOpen && !tradeModalOpen && !correctionModalOpen" class="form-message positions-message">
+        {{ message }}
+      </p>
       <div class="wb-tabs">
         <button type="button" :class="{ active: activeTab === 'positions' }" @click="switchTab('positions')">持仓</button>
         <button type="button" :class="{ active: activeTab === 'trades' }" @click="switchTab('trades')">交易记录</button>
@@ -752,6 +1078,160 @@ onMounted(async () => {
       <div v-else-if="tradesLoading" class="trade-empty">加载中…</div>
       <DataTable v-else :columns="tradeColumns" :rows="tradeRows" @cell-click="onTradeCellClick" />
     </section>
+
+    <div v-if="ocrModalOpen" class="wb-modal-backdrop" @click.self="closePositionOcr">
+      <div class="wb-modal position-ocr-modal">
+        <header class="position-ocr-modal-header">
+          <div>
+            <span>POSITION OCR</span>
+            <h3>券商持仓截图识别</h3>
+            <p>图片只用于本次识别。确认前不会写入任何持仓数据。</p>
+          </div>
+          <button type="button" :disabled="ocrRecognizing || ocrSaving" aria-label="关闭" @click="closePositionOcr">×</button>
+        </header>
+
+        <div class="position-ocr-controls">
+          <label>
+            <span>写入账户</span>
+            <select v-model.number="ocrAccountId" :disabled="ocrSaving">
+              <option :value="null" disabled>请选择证券账户</option>
+              <option v-for="account in accounts" :key="account.id" :value="account.id">
+                {{ account.broker_name }}{{ account.account_name ? ' · ' + account.account_name : '' }}{{ account.account_no_masked ? ' · ' + account.account_no_masked : '' }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>持仓日期</span>
+            <input v-model="ocrAsOfDate" type="date" :disabled="ocrSaving" />
+          </label>
+          <div v-if="ocrResult" class="position-ocr-model">
+            <span>识别模型</span>
+            <strong>{{ ocrResult.model.display_name || ocrResult.model.model_name || '视觉模型' }}</strong>
+          </div>
+        </div>
+
+        <div
+          class="position-ocr-dropzone"
+          :class="{ dragging: ocrDragging, ready: Boolean(ocrImageBase64) }"
+          @dragenter.prevent="ocrDragging = true"
+          @dragover.prevent="ocrDragging = true"
+          @dragleave.prevent="ocrDragging = false"
+          @drop.prevent="onPositionOcrDrop"
+        >
+          <img v-if="ocrImageBase64" :src="ocrImageBase64" alt="待识别持仓截图" />
+          <div>
+            <strong>{{ ocrFileName || '拖入券商持仓截图' }}</strong>
+            <span>{{ ocrImageBase64 ? '可重新选择图片，或直接开始识别' : '支持 PNG、JPG，单张不超过 8MB' }}</span>
+            <label class="position-ocr-file-button">
+              <input type="file" accept="image/*" :disabled="ocrRecognizing || ocrSaving" @change="onPositionOcrFileSelected" />
+              <span>{{ ocrImageBase64 ? '重新选择' : '选择图片' }}</span>
+            </label>
+          </div>
+          <button type="button" class="primary" :disabled="!ocrImageBase64 || ocrRecognizing || ocrSaving" @click="recognizePositionOcr">
+            {{ ocrRecognizing ? 'AI 识别中' : '开始识别' }}
+          </button>
+        </div>
+
+        <section v-if="ocrRecognizing" class="position-ocr-progress" aria-live="polite" aria-busy="true">
+          <header>
+            <span class="position-ocr-spinner" aria-hidden="true"></span>
+            <div>
+              <strong>{{ ocrCurrentStage.title }}</strong>
+              <p>{{ ocrCurrentStage.detail }}</p>
+            </div>
+            <time>已等待 {{ ocrElapsedLabel }}</time>
+          </header>
+          <div class="position-ocr-progress-track" role="progressbar" :aria-valuenow="ocrProgress" aria-valuemin="0" aria-valuemax="100">
+            <span :style="{ width: `${ocrProgress}%` }"></span>
+          </div>
+          <ol>
+            <li
+              v-for="(stage, index) in ocrStages"
+              :key="stage.title"
+              :class="{ active: index === ocrStageIndex, complete: index < ocrStageIndex }"
+            >
+              <span>{{ index < ocrStageIndex ? '✓' : index + 1 }}</span>
+              {{ stage.title.replace('正在', '') }}
+            </li>
+          </ol>
+          <p class="position-ocr-waiting-tip">{{ ocrWaitingTip }}</p>
+        </section>
+
+        <p v-if="ocrMessage" class="form-message position-ocr-message">{{ ocrMessage }}</p>
+
+        <section v-if="ocrRows.length" class="position-ocr-result">
+          <header>
+            <div>
+              <h4>识别结果</h4>
+              <p>核对后可直接修改；确认入库时后端会再次校验股票代码。</p>
+            </div>
+            <strong>
+              {{ ocrRows.filter((row) => row.validation.valid).length }}/{{ ocrRows.length }} 已校验
+            </strong>
+          </header>
+          <div class="position-ocr-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>股票代码</th>
+                  <th>名称</th>
+                  <th>持仓数量</th>
+                  <th>成本价</th>
+                  <th>现价</th>
+                  <th>校验状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, index) in ocrRows" :key="`${row.symbol}-${index}`">
+                  <td>{{ index + 1 }}</td>
+                  <td>
+                    <input
+                      v-model.trim="row.symbol"
+                      maxlength="16"
+                      :disabled="ocrSaving"
+                      @input="markPositionOcrSymbolEdited(row)"
+                      @blur="validatePositionOcrRow(index)"
+                    />
+                  </td>
+                  <td><input v-model.trim="row.name" maxlength="120" :disabled="ocrSaving" /></td>
+                  <td><input v-model.number="row.position_quantity" type="number" min="0" step="1" :disabled="ocrSaving" /></td>
+                  <td><input v-model.number="row.cost_price" type="number" min="0" step="0.0001" :disabled="ocrSaving" /></td>
+                  <td><input v-model.number="row.latest_price" type="number" min="0" step="0.0001" :disabled="ocrSaving" /></td>
+                  <td>
+                    <span class="position-ocr-validation-badge" :class="{ valid: row.validation.valid }">
+                      {{ row.validating ? '校验中' : row.validation.valid ? '已通过' : '需核对' }}
+                    </span>
+                    <small>{{ row.validation.message }}</small>
+                  </td>
+                  <td>
+                    <button type="button" class="danger-text" :disabled="ocrSaving" @click="removePositionOcrRow(index)">移除</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <details class="position-ocr-json">
+            <summary>查看接口 JSON</summary>
+            <pre>{{ ocrJsonPreview }}</pre>
+          </details>
+        </section>
+
+        <footer class="wb-modal-actions position-ocr-footer">
+          <span class="wb-spacer"></span>
+          <button type="button" :disabled="ocrRecognizing || ocrSaving" @click="closePositionOcr">取消</button>
+          <button
+            type="button"
+            class="primary"
+            :disabled="!ocrRows.length || ocrRecognizing || ocrSaving"
+            @click="confirmPositionOcr"
+          >
+            {{ ocrSaving ? '正在入库' : `确认并录入 ${ocrRows.length || ''} 条` }}
+          </button>
+        </footer>
+      </div>
+    </div>
 
     <div v-if="accountModalOpen" class="wb-modal-backdrop" @click.self="accountModalOpen = false">
       <div class="wb-modal">
@@ -908,6 +1388,393 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.positions-message {
+  margin: 0 0 10px;
+}
+.wb-actions .ocr-action {
+  border-color: rgba(37, 211, 180, 0.42);
+  color: #7fe3cf;
+}
+.position-ocr-modal {
+  width: min(1120px, calc(100vw - 32px));
+  max-width: 1120px;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 0;
+  gap: 0;
+}
+.position-ocr-modal-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.position-ocr-modal-header > div {
+  display: grid;
+  gap: 4px;
+}
+.position-ocr-modal-header span {
+  color: #61d8c0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.position-ocr-modal-header h3 {
+  font-size: 20px;
+}
+.position-ocr-modal-header p,
+.position-ocr-result header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.position-ocr-modal-header > button {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #111;
+  color: var(--muted-2);
+  font-size: 22px;
+  line-height: 1;
+}
+.position-ocr-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 180px minmax(180px, auto);
+  gap: 12px;
+  padding: 16px 20px 0;
+}
+.position-ocr-model {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 0 12px;
+  border-left: 1px solid var(--line);
+}
+.position-ocr-model span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.position-ocr-model strong {
+  color: var(--gold-2);
+  font-size: 12px;
+}
+.position-ocr-dropzone {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 112px;
+  margin: 16px 20px 0;
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 6px;
+  background: #0d0d0e;
+}
+.position-ocr-dropzone.dragging {
+  border-color: #43cbb0;
+  background: rgba(37, 211, 180, 0.06);
+}
+.position-ocr-dropzone img {
+  width: 90px;
+  height: 80px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.position-ocr-dropzone > div {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  min-width: 0;
+}
+.position-ocr-dropzone > div > strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.position-ocr-dropzone > div > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.position-ocr-file-button {
+  display: inline-flex !important;
+  color: var(--gold-2) !important;
+  cursor: pointer;
+}
+.position-ocr-file-button input {
+  display: none;
+}
+.position-ocr-file-button span {
+  padding: 5px 10px;
+  border: 1px solid var(--gold-dim);
+  border-radius: 5px;
+  background: #111;
+}
+.position-ocr-dropzone > button {
+  min-width: 100px;
+  height: 36px;
+  border: 1px solid #2dbda0;
+  border-radius: 6px;
+  background: rgba(37, 211, 180, 0.1);
+  color: #7fe3cf;
+}
+.position-ocr-dropzone button:disabled,
+.position-ocr-footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.position-ocr-message {
+  margin: 12px 20px 0;
+}
+.position-ocr-progress {
+  display: grid;
+  gap: 12px;
+  margin: 14px 20px 0;
+  padding: 16px;
+  border: 1px solid rgba(37, 211, 180, 0.3);
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgba(37, 211, 180, 0.07), rgba(211, 170, 84, 0.04));
+}
+.position-ocr-progress header {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.position-ocr-progress header > div {
+  display: grid;
+  gap: 3px;
+}
+.position-ocr-progress header strong {
+  color: #8ce9d6;
+  font-size: 14px;
+}
+.position-ocr-progress header p,
+.position-ocr-waiting-tip {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.position-ocr-progress time {
+  color: var(--gold-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.position-ocr-spinner {
+  width: 30px;
+  height: 30px;
+  border: 2px solid rgba(37, 211, 180, 0.18);
+  border-top-color: #61d8c0;
+  border-radius: 50%;
+  animation: position-ocr-spin 0.8s linear infinite;
+}
+.position-ocr-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.position-ocr-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2dbda0, #d3aa54);
+  transition: width 0.65s ease;
+}
+.position-ocr-progress ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.position-ocr-progress li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.position-ocr-progress li > span {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 10px;
+}
+.position-ocr-progress li.active {
+  color: #8ce9d6;
+}
+.position-ocr-progress li.active > span {
+  border-color: #2dbda0;
+  background: rgba(37, 211, 180, 0.12);
+  color: #8ce9d6;
+  box-shadow: 0 0 0 4px rgba(37, 211, 180, 0.06);
+}
+.position-ocr-progress li.complete {
+  color: var(--text);
+}
+.position-ocr-progress li.complete > span {
+  border-color: rgba(37, 211, 180, 0.5);
+  background: #2dbda0;
+  color: #07110f;
+}
+.position-ocr-waiting-tip {
+  min-height: 16px;
+  padding-top: 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+@keyframes position-ocr-spin {
+  to { transform: rotate(360deg); }
+}
+.position-ocr-result {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.position-ocr-result > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 20px 0;
+}
+.position-ocr-result h4 {
+  margin: 0 0 4px;
+  color: var(--gold-2);
+  font-size: 14px;
+}
+.position-ocr-result > header > strong {
+  color: #61d8c0;
+  font-size: 12px;
+}
+.position-ocr-table-wrap {
+  overflow-x: auto;
+  padding: 0 20px;
+}
+.position-ocr-table-wrap table {
+  width: 100%;
+  min-width: 930px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.position-ocr-table-wrap th,
+.position-ocr-table-wrap td {
+  padding: 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.position-ocr-table-wrap th {
+  background: #171713;
+  color: var(--gold-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+.position-ocr-table-wrap th:first-child {
+  width: 42px;
+}
+.position-ocr-table-wrap th:nth-child(2) {
+  width: 126px;
+}
+.position-ocr-table-wrap th:nth-child(3) {
+  width: 118px;
+}
+.position-ocr-table-wrap th:nth-child(4),
+.position-ocr-table-wrap th:nth-child(5),
+.position-ocr-table-wrap th:nth-child(6) {
+  width: 112px;
+}
+.position-ocr-table-wrap th:nth-child(7) {
+  width: 190px;
+}
+.position-ocr-table-wrap th:last-child {
+  width: 58px;
+}
+.position-ocr-table-wrap td {
+  color: var(--muted-2);
+  font-size: 11px;
+}
+.position-ocr-table-wrap input {
+  width: 100%;
+  height: 32px;
+  padding: 0 7px;
+}
+.position-ocr-table-wrap td:nth-child(7) {
+  display: grid;
+  gap: 4px;
+}
+.position-ocr-table-wrap td small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+.position-ocr-validation-badge {
+  width: max-content;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 93, 93, 0.35);
+  border-radius: 4px;
+  color: var(--danger);
+}
+.position-ocr-validation-badge.valid {
+  border-color: rgba(39, 197, 138, 0.35);
+  color: var(--ok);
+}
+.danger-text {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--danger);
+}
+.position-ocr-json {
+  margin: 0 20px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0c0c0d;
+}
+.position-ocr-json summary {
+  padding: 9px 11px;
+  color: var(--muted-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+.position-ocr-json pre {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  color: #9bdacb;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.position-ocr-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
 .wb-tabs {
   display: flex;
   gap: 4px;
@@ -932,4 +1799,38 @@ onMounted(async () => {
 .trade-dir.sell { color: #16a34a; font-weight: 600; }
 .trade-dir.close { color: #6b7280; font-weight: 600; }
 .trade-empty { padding: 16px; color: #9ca3af; text-align: center; }
+@media (max-width: 760px) {
+  .position-ocr-modal {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+  }
+  .position-ocr-controls {
+    grid-template-columns: 1fr;
+  }
+  .position-ocr-model {
+    padding: 8px 0 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+  .position-ocr-dropzone {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+  .position-ocr-dropzone img {
+    width: 72px;
+    height: 64px;
+  }
+  .position-ocr-dropzone > button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .position-ocr-progress header {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+  .position-ocr-progress time {
+    grid-column: 2;
+  }
+  .position-ocr-progress ol {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 </style>

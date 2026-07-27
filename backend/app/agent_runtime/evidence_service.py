@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import date, datetime
 from typing import Any, Callable
@@ -11,7 +12,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import (
-    AgentRun,
     ResearchClaim,
     ResearchCompletionAudit,
     ResearchEvidence,
@@ -20,6 +20,63 @@ from backend.app.core.models import (
 )
 from backend.app.skills.manifests import SkillManifest
 from backend.app.skills.manifests import CORE_SKILL_MANIFESTS, SkillCriterion
+
+
+_A_SHARE_SYMBOL_PATTERN = re.compile(r"(?<!\d)(\d{6})(?:\.(?:SH|SZ|BJ))?(?!\d)", re.I)
+
+
+def _build_research_plan(
+    objective: str,
+    selected: list[SkillManifest],
+) -> dict[str, Any]:
+    selected_names = [item.name for item in selected]
+    symbols = list(
+        dict.fromkeys(match.group(0).upper() for match in _A_SHARE_SYMBOL_PATTERN.finditer(objective))
+    )
+    if "position-decision-support" in selected_names:
+        task = "position_decision"
+    elif "company-deep-research" in selected_names:
+        task = "company_deep_research"
+    else:
+        task = "evidence_driven_research"
+
+    criteria: list[dict[str, Any]] = []
+    sections: list[str] = []
+    seen_criteria: set[str] = set()
+    for manifest in selected:
+        for criterion in manifest.criteria:
+            if criterion.code in seen_criteria:
+                continue
+            seen_criteria.add(criterion.code)
+            criteria.append(
+                {
+                    "code": criterion.code,
+                    "description": criterion.description,
+                    "required": criterion.required,
+                    "min_evidence": criterion.min_evidence,
+                    "allowed_tools": list(criterion.tool_names),
+                    "max_age_days": criterion.max_age_days,
+                }
+            )
+        for section in manifest.output_contract:
+            if section not in sections:
+                sections.append(section)
+
+    return {
+        "task": task,
+        "symbols": symbols,
+        "selected_skills": selected_names,
+        "required": [item["code"] for item in criteria if item["required"]],
+        "criteria": criteria,
+        "report_sections": sections,
+        "execution": {
+            "standard_bundle_first": task in {"company_deep_research", "position_decision"},
+            "react_gap_fill": True,
+            "completion_audit": True,
+            "max_audit_retries": 2,
+            "stop_when_no_new_evidence": True,
+        },
+    }
 
 
 def _canonical_json(value: Any) -> str:
@@ -96,6 +153,7 @@ def _data_as_of(result: dict[str, Any]) -> str | None:
                     "report_date",
                     "period",
                     "published_at",
+                    "ann_date",
                     "date",
                     "updated_at",
                 )
@@ -165,6 +223,7 @@ def _assess_result(
         reasons.append(f"tool returned error: {str(result['error'])[:200]}")
 
     valid_content = False
+    profile_as_of: str | None = None
     if profile == "market_data":
         valid_content = result.get("price") is not None or bool(result.get("bars"))
         if result.get("stale"):
@@ -219,6 +278,168 @@ def _assess_result(
         valid_content = isinstance(result.get("positions"), list) or bool(
             result.get("stop_status") or result.get("items")
         )
+    elif profile == "decision_position":
+        position = result.get("position")
+        valid_content = bool(
+            isinstance(position, dict)
+            and position.get("quantity") is not None
+            and position.get("cost_price") is not None
+            and not result.get("account_ambiguous")
+        )
+        if result.get("account_ambiguous"):
+            reasons.append("same symbol exists in multiple accounts; account selection is required")
+    elif profile == "decision_market":
+        market = result.get("market")
+        valid_content = bool(
+            isinstance(market, dict)
+            and market.get("price") is not None
+            and market.get("trade_date")
+        )
+        if isinstance(market, dict) and market.get("stale"):
+            reasons.append("decision market result is marked stale")
+    elif profile == "decision_technical":
+        technical = result.get("technical")
+        valid_content = bool(
+            isinstance(technical, dict)
+            and int(technical.get("bar_count") or 0) >= 20
+            and technical.get("end_trade_date")
+            and isinstance(technical.get("recent_bars"), list)
+        )
+        if isinstance(technical, dict):
+            profile_as_of = technical.get("end_trade_date")
+    elif profile == "decision_fundamental":
+        research = result.get("research")
+        fundamental = (
+            research.get("fundamental")
+            if isinstance(research, dict) and isinstance(research.get("fundamental"), dict)
+            else {}
+        )
+        income_trend = (
+            research.get("income_trend")
+            if isinstance(research, dict) and isinstance(research.get("income_trend"), list)
+            else []
+        )
+        valid_content = bool(
+            fundamental.get("industry")
+            and (
+                fundamental.get("latest_financial")
+                or income_trend
+            )
+        )
+        profile_as_of = fundamental.get("data_as_of") or (
+            income_trend[0].get("end_date")
+            if income_trend and isinstance(income_trend[0], dict)
+            else None
+        )
+    elif profile == "decision_capital":
+        research = result.get("research")
+        capital = (
+            research.get("capital")
+            if isinstance(research, dict) and isinstance(research.get("capital"), dict)
+            else {}
+        )
+        valid_content = bool(
+            capital.get("flow_recent")
+            or capital.get("margin_recent")
+            or capital.get("chip")
+        )
+        profile_as_of = capital.get("data_as_of")
+    elif profile == "company_market":
+        market = result.get("market") if isinstance(result.get("market"), dict) else result
+        timeline = market.get("timeline") if isinstance(market, dict) else None
+        valid_content = bool(
+            isinstance(market, dict)
+            and market.get("price") is not None
+            and market.get("trade_date")
+            and isinstance(timeline, list)
+        )
+        profile_as_of = market.get("trade_date") if isinstance(market, dict) else None
+        if isinstance(market, dict) and market.get("stale"):
+            reasons.append("company market result is marked stale")
+    elif profile == "company_financial":
+        financial = result.get("financial") if isinstance(result.get("financial"), dict) else {}
+        valid_content = bool(
+            financial.get("income_trend")
+            and (financial.get("balance_trend") or financial.get("cashflow_trend"))
+        )
+        profile_as_of = financial.get("data_as_of")
+    elif profile == "company_valuation":
+        valuation = result.get("valuation") if isinstance(result.get("valuation"), dict) else result
+        valid_content = bool(
+            isinstance(valuation, dict)
+            and any(
+                valuation.get(key) is not None
+                for key in ("pe", "pe_ttm", "pb", "ps", "ps_ttm", "total_mv", "circ_mv")
+            )
+        )
+        profile_as_of = valuation.get("data_as_of") if isinstance(valuation, dict) else None
+    elif profile == "company_events":
+        events = result.get("events") if isinstance(result.get("events"), dict) else {}
+        checked = events.get("checked_sources") if isinstance(events, dict) else None
+        direct_rows = result.get("rows") or result.get("results")
+        valid_content = bool(
+            (isinstance(checked, list) and any(item.get("ok") for item in checked if isinstance(item, dict)))
+            or (isinstance(direct_rows, list) and direct_rows)
+        )
+        profile_as_of = events.get("data_as_of") if isinstance(events, dict) else None
+    elif profile == "company_technical":
+        technical = result.get("technical") if isinstance(result.get("technical"), dict) else {}
+        bars = result.get("bars")
+        valid_content = bool(
+            (
+                isinstance(technical, dict)
+                and int(technical.get("bar_count") or 0) >= 60
+                and technical.get("end_trade_date")
+            )
+            or (isinstance(bars, list) and len(bars) >= 60)
+        )
+        profile_as_of = (
+            technical.get("end_trade_date")
+            if isinstance(technical, dict)
+            else None
+        )
+    elif profile == "company_capital":
+        capital = result.get("capital") if isinstance(result.get("capital"), dict) else result
+        valid_content = bool(
+            isinstance(capital, dict)
+            and (
+                capital.get("flow_recent")
+                or capital.get("margin_recent")
+                or capital.get("chip")
+                or capital.get("rows")
+                or capital.get("main_net_amount") is not None
+            )
+        )
+        profile_as_of = capital.get("data_as_of") if isinstance(capital, dict) else None
+    elif profile == "company_counter_evidence":
+        counter = (
+            result.get("counter_evidence")
+            if isinstance(result.get("counter_evidence"), dict)
+            else {}
+        )
+        valid_content = bool(counter.get("facts"))
+        profile_as_of = counter.get("data_as_of")
+    elif profile == "event_material":
+        rows = result.get("rows") or result.get("results")
+        valid_content = bool(
+            isinstance(rows, list)
+            and any(
+                isinstance(row, dict)
+                and (
+                    row.get("ann_title")
+                    or row.get("title")
+                    or row.get("content")
+                )
+                and (
+                    row.get("ann_date")
+                    or row.get("published_at")
+                    or row.get("date")
+                    or row.get("url")
+                    or row.get("source")
+                )
+                for row in rows
+            )
+        )
     elif profile == "watchlist":
         valid_content = isinstance(result.get("watchlist"), list) or isinstance(
             result.get("in_user_universe"), bool
@@ -254,7 +475,7 @@ def _assess_result(
     if not valid_content:
         reasons.append(f"result does not satisfy validation profile {profile}")
 
-    as_of = _data_as_of(result)
+    as_of = profile_as_of or _data_as_of(result)
     freshness_status = "not_required"
     if criterion and criterion.max_age_days is not None:
         parsed = _parse_date(as_of)
@@ -286,6 +507,183 @@ def _assess_result(
         "reasons": reasons,
         "tool_name": tool_name,
     }
+
+
+def _decision_answer_issues(
+    answer: str,
+    *,
+    selected_skills: set[str],
+    verified_tools: set[str],
+) -> list[dict[str, Any]]:
+    if "position-decision-support" not in selected_skills:
+        return []
+    text = answer.strip()
+    requirements = (
+        (
+            "decision.answer_summary",
+            "回答必须先给出执行摘要或核心结论。",
+            ("执行摘要", "核心结论"),
+        ),
+        (
+            "decision.answer_as_of",
+            "回答必须明确行情或证据的数据截止日期。",
+            ("数据截止", "截至", "交易日", "数据日期"),
+        ),
+        (
+            "decision.answer_scenarios",
+            "回答必须给出至少两种条件化情景或方案。",
+            ("方案", "情景"),
+        ),
+        (
+            "decision.answer_triggers",
+            "回答必须写明方案触发条件。",
+            ("触发", "如果", "若", "条件"),
+        ),
+        (
+            "decision.answer_limits",
+            "回答必须写明风险、数据缺口或失效条件。",
+            ("风险", "数据缺口", "失效条件", "未核验"),
+        ),
+        (
+            "decision.answer_fundamental",
+            "回答必须覆盖公司基本面、财务或估值。",
+            ("基本面", "财务", "估值"),
+        ),
+        (
+            "decision.answer_technical",
+            "回答必须覆盖技术面或量价结构。",
+            ("技术", "量价", "均线", "支撑", "阻力"),
+        ),
+        (
+            "decision.answer_capital",
+            "回答必须覆盖资金、两融或筹码；无数据时明确未核验。",
+            ("资金", "两融", "融资", "筹码", "未核验"),
+        ),
+        (
+            "decision.answer_matrix",
+            "回答必须给出多维决策矩阵或评分表。",
+            ("决策矩阵", "多维", "评分"),
+        ),
+    )
+    issues = [
+        {
+            "code": code,
+            "description": description,
+            "evidence_count": 0,
+            "min_evidence": 1,
+        }
+        for code, description, terms in requirements
+        if not any(term in text for term in terms)
+    ]
+
+    capital_terms = ("主力", "机构接盘", "资金持续流入", "资金持续流出", "散户接盘")
+    capital_tools = {
+        "get_capital_flow",
+        "get_top_list",
+        "get_margin_detail",
+        "get_chip_distribution",
+        "tushare_query",
+    }
+    capital_caveats = ("未取得资金", "资金数据缺失", "无法判断主力", "尚未核验资金")
+    if (
+        any(term in text for term in capital_terms)
+        and not verified_tools.intersection(capital_tools)
+        and not any(term in text for term in capital_caveats)
+    ):
+        issues.append(
+            {
+                "code": "decision.unsupported_capital_claim",
+                "description": "回答包含资金或机构结论，但没有经过验证的资金类工具证据。",
+                "evidence_count": 0,
+                "min_evidence": 1,
+            }
+        )
+    return issues
+
+
+def _company_answer_issues(
+    answer: str,
+    *,
+    selected_skills: set[str],
+) -> list[dict[str, Any]]:
+    if "company-deep-research" not in selected_skills:
+        return []
+    text = answer.strip()
+    requirements = (
+        ("company.answer_summary", "报告必须包含执行摘要或核心结论。", ("执行摘要", "核心结论")),
+        (
+            "company.answer_as_of",
+            "报告必须明确数据截止日期和行情交易日。",
+            ("数据截止", "数据日期", "交易日", "截至"),
+        ),
+        ("company.answer_profile", "报告必须覆盖公司画像和主营业务。", ("公司画像", "主营业务")),
+        (
+            "company.answer_timeline",
+            "报告必须提供行情与事件时间线。",
+            ("事件时间线", "行情与事件", "时间线"),
+        ),
+        (
+            "company.answer_financial_valuation",
+            "报告必须同时覆盖财务质量和估值。",
+            ("财务质量", "财务与估值", "估值"),
+        ),
+        (
+            "company.answer_technical_capital",
+            "报告必须覆盖技术量价和资金证据。",
+            ("技术量价", "量价", "资金", "两融", "筹码"),
+        ),
+        (
+            "company.answer_matrix",
+            "报告必须给出多维决策矩阵或评分表。",
+            ("多维决策矩阵", "决策矩阵", "评分表"),
+        ),
+        (
+            "company.answer_counter",
+            "报告必须给出最强反方论证。",
+            ("最强反方", "反方论证", "反证"),
+        ),
+        (
+            "company.answer_scenarios",
+            "报告必须给出至少两种条件化方案。",
+            ("方案A", "方案 A", "情景A", "情景 A"),
+        ),
+        (
+            "company.answer_limits",
+            "报告必须写明风险、失效条件和数据缺口。",
+            ("失效条件", "数据缺口", "风险与局限"),
+        ),
+        (
+            "company.answer_sources",
+            "报告必须列出来源清单。",
+            ("来源清单", "证据来源", "数据来源"),
+        ),
+    )
+    issues = [
+        {
+            "code": code,
+            "description": description,
+            "evidence_count": 0,
+            "min_evidence": 1,
+        }
+        for code, description, terms in requirements
+        if not any(term in text for term in terms)
+    ]
+    scenario_markers = sum(
+        marker in text
+        for marker in ("方案A", "方案 A", "情景A", "情景 A", "方案B", "方案 B", "情景B", "情景 B")
+    )
+    if scenario_markers < 2 and not any(
+        item["code"] == "company.answer_scenarios" for item in issues
+    ):
+        issues.append(
+            {
+                "code": "company.answer_scenarios",
+                "description": "报告必须给出至少两种条件化方案。",
+                "evidence_count": 0,
+                "min_evidence": 1,
+            }
+        )
+    return issues
 
 
 class ResearchEvidenceService:
@@ -336,6 +734,7 @@ class ResearchEvidenceService:
                 "goal_id": goal.goal_id,
                 "objective": goal.objective,
                 "selected_skills": json.loads(goal.selected_skills_json or "[]"),
+                "plan": _build_research_plan(goal.objective, selected),
             }
 
     def record_tool_result(
@@ -455,7 +854,7 @@ class ResearchEvidenceService:
                 ).all()
             )
             required = [item for item in criteria if item.required]
-            missing = [
+            evidence_missing = [
                 {
                     "code": item.criterion_code,
                     "description": item.description,
@@ -465,6 +864,27 @@ class ResearchEvidenceService:
                 for item in required
                 if item.evidence_count < item.min_evidence
             ]
+            selected_skills = set(json.loads(goal.selected_skills_json or "[]"))
+            verified_tools = set(
+                db.scalars(
+                    select(ResearchEvidence.tool_name).where(
+                        ResearchEvidence.goal_id == goal.goal_id,
+                        ResearchEvidence.verification_status == "verified",
+                    )
+                ).all()
+            )
+            quality_issues = _decision_answer_issues(
+                final_answer,
+                selected_skills=selected_skills,
+                verified_tools=verified_tools,
+            )
+            quality_issues.extend(
+                _company_answer_issues(
+                    final_answer,
+                    selected_skills=selected_skills,
+                )
+            )
+            missing = [*evidence_missing, *quality_issues]
             state = "complete" if not missing else "incomplete"
             if final_answer.strip():
                 db.add(
@@ -480,9 +900,10 @@ class ResearchEvidenceService:
             summary = {
                 "state": state,
                 "goal_id": goal.goal_id,
-                "required_count": len(required),
-                "satisfied_count": len(required) - len(missing),
+                "required_count": len(required) + len(quality_issues),
+                "satisfied_count": len(required) - len(evidence_missing),
                 "missing": missing,
+                "quality_issues": quality_issues,
                 "criteria": [
                     {
                         "code": item.criterion_code,
@@ -510,8 +931,8 @@ class ResearchEvidenceService:
                     run_id=run_id,
                     sequence=next_sequence,
                     completion_state=state,
-                    required_count=len(required),
-                    satisfied_count=len(required) - len(missing),
+                    required_count=summary["required_count"],
+                    satisfied_count=summary["satisfied_count"],
                     missing_json=json.dumps(missing, ensure_ascii=False),
                     summary_json=json.dumps(summary, ensure_ascii=False),
                 )

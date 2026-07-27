@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -22,10 +22,12 @@ from backend.app.auth.auth_api import router as auth_router
 from backend.app.core.database import get_db, initialize_default_database, session_scope
 from backend.app.agents.position_agent import (
     _execute_position_tool,
+    extract_position_ocr_arguments,
     run_position_agent,
+    validate_position_rows,
     validate_position_symbol,
 )
-from backend.app.agents.position_import import parse_position_screenshot
+from backend.app.agents.position_import import decode_image_payload, parse_position_screenshot
 from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, start_prompt_recommendation_scheduler, stop_prompt_recommendation_scheduler
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
 from backend.app.feishu.feishu_bot_api import router as feishu_bot_router
@@ -135,6 +137,20 @@ class PositionAiImportIn(BaseModel):
     mime_type: str = Field(default="image/png", max_length=80)
     model_config_id: int | None = None
     account_id: int | None = None
+
+
+class PositionOcrRecognizeIn(BaseModel):
+    image_base64: str = Field(min_length=100)
+    mime_type: str = Field(default="image/png", max_length=80)
+    model_config_id: int | None = None
+
+
+class PositionOcrConfirmIn(BaseModel):
+    rows: list[dict] = Field(min_length=1, max_length=100)
+    account_id: int = Field(ge=1)
+    as_of_date: str | None = Field(default=None, max_length=32)
+    image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mime_type: str = Field(default="image/png", max_length=80)
 
 
 class PositionAgentAddIn(BaseModel):
@@ -303,9 +319,13 @@ def create_app(init_db: bool = True) -> FastAPI:
 
     @app.get("/api/dashboard")
     def dashboard(
+        response: Response,
         repository: StockRepository = Depends(repo),
         context: AuthContext = Depends(require_permission("dashboard:view")),
     ) -> dict:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
         return repository.for_user(context.user.id).dashboard(user_id=context.user.id)
 
     @app.get("/api/events")
@@ -548,6 +568,119 @@ def create_app(init_db: bool = True) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/positions/ocr/recognize")
+    def recognize_position_ocr(
+        payload: PositionOcrRecognizeIn,
+        _context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        """Recognize one current screenshot and return a fixed JSON draft without writing data."""
+
+        if not payload.mime_type.lower().startswith("image/"):
+            raise HTTPException(status_code=400, detail="仅支持图片文件")
+        try:
+            _, clean_base64, image_sha256 = decode_image_payload(payload.image_base64)
+            extracted = extract_position_ocr_arguments(
+                user_content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            "识别这张 A 股券商持仓截图。只提取持仓明细行，不要提取资产汇总、"
+                            "按钮或广告；返回完整持仓快照，每个标的只出现一次。"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{payload.mime_type};base64,{clean_base64}",
+                        },
+                    },
+                ],
+                model_config_id=payload.model_config_id,
+            )
+            arguments = extracted.get("arguments") or {}
+            source_rows = arguments.get("rows")
+            if not isinstance(source_rows, list) or not source_rows:
+                raise ValueError("图片中没有识别到持仓明细")
+            rows, validations = validate_position_rows(
+                [dict(row) for row in source_rows if isinstance(row, dict)]
+            )
+            for row in rows:
+                row["action"] = "replace"
+            invalid_count = sum(1 for item in validations if not item.get("valid"))
+            return {
+                "schema_version": "position_ocr.v1",
+                "image_sha256": image_sha256,
+                "model": extracted.get("model") or {},
+                "account": (
+                    arguments.get("account")
+                    if isinstance(arguments.get("account"), dict)
+                    else {}
+                ),
+                "as_of_date": arguments.get("as_of_date"),
+                "rows": rows,
+                "validations": validations,
+                "valid_count": len(rows) - invalid_count,
+                "invalid_count": invalid_count,
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/positions/ocr/confirm")
+    def confirm_position_ocr(
+        payload: PositionOcrConfirmIn,
+        repository: StockRepository = Depends(repo),
+        context: AuthContext = Depends(require_permission("data:write")),
+    ) -> dict:
+        """Persist a user-reviewed OCR draft; all symbols are validated again server-side."""
+
+        user_repository = repository.for_user(context.user.id)
+        account_ids = {
+            int(account["id"])
+            for account in user_repository.list_position_accounts()
+            if account.get("id") is not None
+        }
+        if payload.account_id not in account_ids:
+            raise HTTPException(status_code=404, detail="持仓账户不存在或无权访问")
+        arguments: dict = {
+            "rows": [
+                {**row, "action": "replace"}
+                for row in payload.rows
+                if isinstance(row, dict)
+            ]
+        }
+        if payload.as_of_date:
+            arguments["as_of_date"] = payload.as_of_date
+        result = _execute_position_tool(
+            repository=user_repository,
+            name="save_position_holdings",
+            args=arguments,
+            created_by=context.user.username,
+            source_name="持仓 OCR 人工确认",
+            image_mime_type=payload.mime_type,
+            image_sha256=payload.image_sha256,
+            account_id=payload.account_id,
+            instruction=None,
+            trusted_pending_action=True,
+        )
+        if result.get("need_account"):
+            raise HTTPException(status_code=400, detail=result.get("message"))
+        if result.get("need_review"):
+            raise HTTPException(status_code=400, detail="OCR 结果尚未完成人工确认")
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+        saved_count = int(result.get("saved_count") or 0)
+        return {
+            "schema_version": "position_ocr.v1",
+            "batch_id": result.get("batch_id"),
+            "status": result.get("status"),
+            "saved_count": saved_count,
+            "error_count": int(result.get("error_count") or 0),
+            "rows": result.get("rows") or [],
+            "summary": f"OCR 复核完成，已保存 {saved_count} 条持仓。",
+        }
 
     @app.post("/api/positions/agent-add")
     def agent_add_positions(

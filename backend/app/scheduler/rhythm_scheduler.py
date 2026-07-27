@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import threading
 import time
 from datetime import date, datetime, timedelta
 from uuid import uuid4
@@ -64,6 +65,7 @@ _background_tasks: set[asyncio.Task] = set()
 _inflight_runs: set[str] = set()
 _semaphore: asyncio.Semaphore | None = None
 _trade_day_cache: dict[str, bool] = {}
+_position_price_sync_lock = threading.Lock()
 
 _CARD_TEMPLATE_BY_JOB = {
     "premarket-brief-0830": "wathet",
@@ -145,6 +147,11 @@ def _interval_due(job: ScheduledJob, now: datetime) -> bool:
     return (now_minutes - anchor_minutes) % job.interval_minutes == 0
 
 
+def _position_price_sync_session_open(now: datetime) -> bool:
+    current = (now.hour, now.minute)
+    return (9, 30) <= current <= (11, 30) or (13, 0) <= current <= (15, 0)
+
+
 def _is_due(job: ScheduledJob, now: datetime) -> bool:
     schedule_type = job.schedule_type
     if schedule_type == "once":
@@ -159,6 +166,8 @@ def _is_due(job: ScheduledJob, now: datetime) -> bool:
             return False
     elif schedule_type == "interval":
         if not _interval_due(job, now):
+            return False
+        if job.job_kind == "position_price_sync" and not _position_price_sync_session_open(now):
             return False
     else:
         return False
@@ -436,15 +445,23 @@ def _run_health_check(now: datetime, push_channel_key: str | None) -> tuple[str,
 
 
 def _run_position_price_sync(now: datetime) -> str:
-    """规则任务（不经 LLM）：为全部 open 持仓快照同步行情价，重算市值/浮盈与账户资金。
+    if not _position_price_sync_lock.acquire(blocking=False):
+        return "上一轮持仓价格同步仍在执行，本轮已跳过"
+    try:
+        return _run_position_price_sync_locked(now)
+    finally:
+        _position_price_sync_lock.release()
 
-    录入持仓时不再要求用户提供最新价——行情由本任务每个交易日收盘后自动同步。
-    价格来源复用 stock_tools.get_realtime_quote（TuShare 日线收盘）。失败标的记录到
-    输出预览，不主动推送（由次日健康检查汇总失败任务）。
+
+def _run_position_price_sync_locked(now: datetime) -> str:
+    """规则任务（不经 LLM）：批量同步全部 open 持仓价格，重算市值/浮盈与账户资金。
+
+    交易时段每分钟调用一次 TuShare rt_k 批量接口；外部请求期间不持有数据库连接。
+    整批请求失败时保留上一轮价格并令任务失败，避免用空值覆盖有效行情。
     """
     from backend.app.core.models import Instrument, Position, PositionAccount, PositionHoldingSnapshot
     from backend.app.data.repository import StockRepository
-    from backend.app.market.stock_tools import get_realtime_quote
+    from backend.app.market.stock_tools import get_realtime_quotes
 
     # 会话一（短）：确定同步对象并提交。绝不带着未提交事务去做外部 HTTP——
     # 补建快照的 FK 会给 instruments 父行持共享锁，而行情工具的缓存写入要更新同一行，
@@ -495,15 +512,15 @@ def _run_position_price_sync(now: datetime) -> str:
     if not snap_ids:
         return "无 open 持仓，跳过价格同步"
 
-    # 无会话阶段：逐标的拉行情（TuShare 慢/限流都不影响数据库锁）
-    quotes: dict[str, dict] = {}
-    failures: list[str] = []
-    for symbol in symbols:
-        quote = get_realtime_quote(symbol)
-        if not isinstance(quote, dict) or "error" in quote or quote.get("price") is None:
-            failures.append(symbol)
-            continue
-        quotes[symbol] = quote
+    # 无会话阶段：一次批量拉取全部持仓行情，不占用数据库连接。
+    batch = get_realtime_quotes(symbols)
+    if not isinstance(batch, dict) or batch.get("error"):
+        reason = batch.get("error") if isinstance(batch, dict) else "返回格式错误"
+        raise RuntimeError(f"实时行情同步失败: {reason}")
+    quotes = batch.get("quotes") or {}
+    failures = batch.get("missing_symbols") or []
+    if not quotes:
+        raise RuntimeError("实时行情同步失败: TuShare rt_k 未返回任何有效持仓行情")
 
     # 会话二（短）：按 id 重载快照写价，并重算账户资金
     updated = 0
@@ -539,9 +556,14 @@ def _run_position_price_sync(now: datetime) -> str:
             account = session.get(PositionAccount, acc_id)
             if account is not None:
                 repo._recompute_account_funds(account)
+                account.fund_updated_at = now
         session.commit()
 
-    preview = f"同步 {len(quotes)} 个标的行情，更新 {updated} 条持仓快照，重算 {len(touched_accounts)} 个账户资金"
+    preview = (
+        f"实时同步 {len(quotes)} 个标的行情，更新 {updated} 条持仓快照，"
+        f"重算 {len(touched_accounts)} 个账户资金；来源 {batch.get('source')}，"
+        f"耗时 {batch.get('ms', 0)}ms"
+    )
     if failures:
         preview += f"；{len(failures)} 个标的取价失败: {', '.join(failures[:8])}"
     return preview
@@ -682,6 +704,16 @@ def _claim_due_jobs(now: datetime) -> list[tuple[str, str]]:
         for job in jobs:
             if not _is_due(job, now):
                 continue
+            if job.job_kind == "position_price_sync":
+                running = session.scalar(
+                    select(JobRun).where(
+                        JobRun.job_key == job.job_key,
+                        JobRun.status == "running",
+                        JobRun.started_at >= now - timedelta(minutes=2),
+                    ).limit(1)
+                )
+                if running is not None:
+                    continue
             run_id = uuid4().hex
             session.add(
                 JobRun(
@@ -837,11 +869,14 @@ DEFAULT_JOBS = [
     },
     {
         "job_key": "position-price-sync-1505",
-        "name": "持仓价格同步",
-        "description": "收盘后自动拉取行情，刷新全部持仓的最新价/市值/浮盈并重算账户资金（不经 LLM、不推送）。",
+        "name": "持仓价格分钟同步",
+        "description": "交易时段每分钟批量拉取实时行情，刷新全部持仓的最新价/市值/浮盈并重算账户资金（不经 LLM、不推送）。",
         "job_kind": "position_price_sync",
-        "schedule_type": "daily",
-        "run_time": "15:05",
+        "schedule_type": "interval",
+        "run_time": None,
+        "interval_minutes": 1,
+        "window_start": "09:30",
+        "window_end": "15:00",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
         "enabled": True,
@@ -954,11 +989,23 @@ _JOB_SORT = {item["job_key"]: index * 10 for index, item in enumerate(DEFAULT_JO
 
 
 def ensure_default_jobs(session) -> int:
-    """预置内置节律任务；已存在的行不动（保留用户改过的时间/提示词/启停）。"""
+    """补齐内置任务；仅基础设施型价格同步任务会随版本迁移调度配置。"""
     created = 0
     for item in DEFAULT_JOBS:
         existing = session.scalar(select(ScheduledJob).where(ScheduledJob.job_key == item["job_key"]).limit(1))
         if existing is not None:
+            if existing.job_kind == "position_price_sync":
+                # 系统内置行情任务属于基础设施配置；版本升级时迁移为分钟同步。
+                existing.name = item["name"]
+                existing.description = item.get("description")
+                existing.schedule_type = item["schedule_type"]
+                existing.run_time = item.get("run_time")
+                existing.interval_minutes = item.get("interval_minutes")
+                existing.window_start = item.get("window_start")
+                existing.window_end = item.get("window_end")
+                existing.weekday_mask = item.get("weekday_mask")
+                existing.trading_day_only = item.get("trading_day_only", True)
+                existing.enabled = item.get("enabled", True)
             continue
         session.add(
             ScheduledJob(

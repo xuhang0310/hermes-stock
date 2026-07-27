@@ -1,9 +1,0 @@
-{
-  "chat_modes": ["research", "stock", "knowledge"],
-  "roles": [],
-  "default_roles": ["stock-pm"],
-  "triggers": ["深度研究", "完整研究", "持续研究", "研究目标", "完成审计", "证据", "对比研究", "复杂任务", "全面分析"],
-  "tool_names": [],
-  "criteria": [],
-  "output_contract": ["研究目标", "必选标准", "证据状态", "完成状态", "未解决问题"]
-}

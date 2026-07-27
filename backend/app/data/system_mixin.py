@@ -298,6 +298,17 @@ class SystemMixin:
             present = [float(value) for value in values if value is not None]
             return round(sum(present), 2) if present else None
 
+        def total_asset_sum() -> float:
+            return round(
+                sum(
+                    float(account.total_asset)
+                    if account.total_asset is not None
+                    else float(account.holding_market_value or 0)
+                    for account in accounts
+                ),
+                2,
+            )
+
         def position_sum(field: str) -> float | None:
             present = [float(row[field]) for row in positions if row.get(field) is not None]
             return round(sum(present), 2) if present else None
@@ -319,7 +330,7 @@ class SystemMixin:
         }
         return {
             "account_count": len(accounts),
-            "total_asset": account_sum("total_asset"),
+            "total_asset": total_asset_sum(),
             "available_cash": account_sum("available_cash"),
             "holding_market_value": holding_market_value,
             "total_pnl": total_pnl,

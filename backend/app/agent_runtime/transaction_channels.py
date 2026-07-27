@@ -19,7 +19,10 @@ from backend.app.agent_runtime.channel_runs import build_channel_request, create
 from backend.app.agent_runtime.repository import agent_run_repository
 from backend.app.agent_runtime.transaction_state import transaction_state_service
 from backend.app.core.database import SessionLocal
-from backend.app.core.llm_config import resolve_vision_model_config_id
+from backend.app.core.llm_config import (
+    resolve_position_agent_model_config_id,
+    resolve_vision_model_config_id,
+)
 from backend.app.core.models import (
     AiChatMessage,
     AiChatSession,
@@ -150,6 +153,11 @@ def create_transaction_run(
     existing = agent_run_repository.get_by_idempotency_key(user_id, idempotency_key)
     if existing is not None:
         return {**existing, "created": False}
+    if code == "position-entry-agent":
+        try:
+            model_config_id = resolve_position_agent_model_config_id(model_config_id)
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
     requested_model_config_id = model_config_id
     if image_base64:
         try:
@@ -162,6 +170,9 @@ def create_transaction_run(
         question=question,
         model_config_id=model_config_id,
     )
+    active_run = agent_run_repository.active_run_for_session(user_id, session_id)
+    if active_run is not None:
+        return {**active_run, "created": False, "duplicate_active": True}
     attachments: list[dict[str, Any]] = []
     image_sha256 = None
     if image_base64:
@@ -253,15 +264,27 @@ def _transaction_result(run_id: str, code: str) -> dict[str, Any]:
         if code == "position-entry-agent":
             rows = tool_result.get("rows") or []
             changed = int(tool_result.get("saved_count") or 0)
+            if changed:
+                failed = int(tool_result.get("error_count") or 0)
+                batch_id = tool_result.get("batch_id")
+                tool_summary = (
+                    f"持仓入库完成：成功 {changed} 条，失败 {failed} 条"
+                    + (f"（批次 {batch_id}）" if batch_id else "")
+                    + "。"
+                )
+            else:
+                tool_summary = str(tool_result.get("message") or tool_result.get("error") or "")
         else:
             rows = tool_result.get("watchlist") or (
                 StockRepository(db, owner_user_id=user_id).watchlist() if user_id else []
             )
             changed = int(tool_result.get("changed_count") or 0)
+            tool_summary = str(tool_result.get("message") or tool_result.get("error") or "")
+    authoritative_answer = tool_summary or answer
     state = transaction_state_service.load(session_id, code) if session_id else None
     return {
-        "reply": answer,
-        "summary": answer,
+        "reply": authoritative_answer,
+        "summary": authoritative_answer,
         "rows": rows,
         "should_save": changed > 0,
         "pending_action": (state or {}).get("pending_action"),

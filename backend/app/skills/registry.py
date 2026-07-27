@@ -27,6 +27,81 @@ from backend.app.skills.manifests import (
 logger = get_logger("skills")
 
 _BUILTIN_SUBPKG = "_builtin"  # 内置安全关键技能子包（run_sql 等），Phase 2/3 引入
+_PROGRESSIVE_INSTRUCTION_BUDGET = 24_000
+
+
+def classify_research_intent(question: str) -> str:
+    """Classify high-value research intents without spending another model call."""
+
+    normalized = (question or "").strip().lower()
+    switch_terms = ("换仓", "调仓", "卖掉", "清仓后买", "卖出后买", "换成")
+    position_terms = ("持仓", "成本", "浮亏", "浮盈", "仓位", "套牢")
+    action_terms = (
+        "怎么办",
+        "怎么操作",
+        "操作方案",
+        "周一",
+        "明天",
+        "下个交易日",
+        "清仓",
+        "减仓",
+        "补仓",
+        "止损",
+        "止盈",
+    )
+    full_terms = ("全面分析", "完整分析", "深度分析", "全维", "基本面", "估值", "资金面")
+    if any(term in normalized for term in switch_terms):
+        return "switch_decision"
+    if any(term in normalized for term in position_terms) and any(
+        term in normalized for term in action_terms
+    ):
+        return "position_action_full" if any(term in normalized for term in full_terms) else "position_action"
+    if any(term in normalized for term in full_terms):
+        return "full_research"
+    return "generic"
+
+
+def _intent_skill_pack(intent: str) -> tuple[str, ...]:
+    base = (
+        "position-decision-support",
+        "position-risk-review",
+        "market-snapshot",
+        "event-intelligence",
+        "technical-analysis",
+        "research-discipline",
+        "financial-statement-analysis",
+        "capital-flow-analysis",
+        "company-deep-research",
+        "data-routing",
+    )
+    if intent in {"switch_decision", "position_action_full"}:
+        return (
+            *base,
+            "portfolio-risk-analysis",
+            "knowledge-citation",
+        )
+    if intent == "full_research":
+        return (
+            "company-deep-research",
+            "data-routing",
+            "market-snapshot",
+            "event-intelligence",
+            "financial-statement-analysis",
+            "technical-analysis",
+            "capital-flow-analysis",
+            "research-discipline",
+            "knowledge-citation",
+            "report-generation",
+        )
+    return base if intent == "position_action" else ()
+
+
+def _intent_skill_limit(intent: str) -> int:
+    if intent in {"switch_decision", "position_action_full", "full_research"}:
+        return 12
+    if intent == "position_action":
+        return 10
+    return 8
 
 
 class SkillRegistry:
@@ -187,17 +262,27 @@ class SkillRegistry:
         chat_mode: str,
         role_code: str | None = None,
         *,
-        limit: int = 4,
+        limit: int | None = None,
     ) -> list[SkillManifest]:
-        """Select a small, deterministic capability set for the current task."""
+        """Select a deterministic capability set sized to the task."""
 
         normalized = (question or "").lower()
+        intent = classify_research_intent(question)
+        effective_limit = max(1, min(limit or _intent_skill_limit(intent), 12))
+        eligible: dict[str, SkillManifest] = {
+            manifest.name: manifest
+            for manifest in self._manifests.values()
+            if chat_mode in manifest.chat_modes
+            and (not manifest.roles or role_code in manifest.roles)
+        }
+        selected: list[SkillManifest] = []
+        for name in _intent_skill_pack(intent):
+            manifest = eligible.get(name)
+            if manifest is not None and manifest not in selected:
+                selected.append(manifest)
+
         ranked: list[tuple[int, int, SkillManifest]] = []
-        for index, manifest in enumerate(self._manifests.values()):
-            if chat_mode not in manifest.chat_modes:
-                continue
-            if manifest.roles and role_code not in manifest.roles:
-                continue
+        for index, manifest in enumerate(eligible.values()):
             keyword_score = sum(3 for keyword in manifest.keywords if keyword.lower() in normalized)
             if manifest.name in normalized:
                 keyword_score += 5
@@ -206,7 +291,12 @@ class SkillRegistry:
             if score:
                 ranked.append((score, -index, manifest))
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [item[2] for item in ranked[: max(1, min(limit, 4))]]
+        for _, _, manifest in ranked:
+            if manifest not in selected:
+                selected.append(manifest)
+            if len(selected) >= effective_limit:
+                break
+        return selected[:effective_limit]
 
     def build_progressive_context(
         self,
@@ -229,12 +319,28 @@ class SkillRegistry:
             "需要引用资料时再传 resource_path。",
             "### 已激活",
         ]
+        instruction_chars = 0
+        deferred_selected: list[SkillManifest] = []
         for item in selected:
+            if (
+                instruction_chars
+                and instruction_chars + len(item.instructions)
+                > _PROGRESSIVE_INSTRUCTION_BUDGET
+            ):
+                deferred_selected.append(item)
+                continue
             lines.append(
                 f'\n<skill name="{item.name}" version="{item.version}">\n'
                 f"{item.instructions}\n"
                 "</skill>"
             )
+            instruction_chars += len(item.instructions)
+        if deferred_selected:
+            lines.append("### 已选择但按需加载")
+            for item in deferred_selected:
+                lines.append(
+                    f"- {item.name}：{item.summary}。需要完整规则时调用 load_skill。"
+                )
         lines.append("### 可按需加载")
         for item in available:
             if item.name not in selected_names:
@@ -354,6 +460,8 @@ class SkillRegistry:
     def criterion_codes_for_tool(
         self, tool_name: str, selected_skill_names: list[str] | tuple[str, ...]
     ) -> list[str]:
+        """Keep contract metadata queryable without enabling runtime evidence audits."""
+
         codes: list[str] = []
         for skill_name in selected_skill_names:
             manifest = self._manifests.get(self._canonical_manifest_name(skill_name))

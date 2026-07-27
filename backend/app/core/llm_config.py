@@ -25,7 +25,10 @@ _VISION_MODEL_PREFIXES = (
     "qwen-omni",
     "qvq",
     "kimi-k2.5",
+    "k3",
 )
+
+_POSITION_AGENT_MODEL_PRIORITY = ("qwen3.7-plus", "k3")
 
 
 def model_supports_vision(model_name: str | None) -> bool:
@@ -35,6 +38,51 @@ def model_supports_vision(model_name: str | None) -> bool:
         normalized == prefix or normalized.startswith(f"{prefix}-")
         for prefix in _VISION_MODEL_PREFIXES
     )
+
+
+def resolve_position_agent_model_config_id(model_config_id: int | None = None) -> int | None:
+    """Choose the position-entry model, preferring Qwen3.7 Plus then k3."""
+    with SessionLocal() as session:
+        query = select(LlmModelConfig).options(selectinload(LlmModelConfig.platform))
+        if model_config_id:
+            selected = session.scalar(
+                query.where(
+                    LlmModelConfig.id == model_config_id,
+                    LlmModelConfig.status != "disabled",
+                ).limit(1)
+            )
+            if selected is None or (
+                selected.platform is not None and selected.platform.status == "disabled"
+            ):
+                raise RuntimeError("所选模型配置不存在或已停用。")
+            return selected.id
+
+        candidates = session.scalars(
+            query.where(LlmModelConfig.status != "disabled").order_by(
+                LlmModelConfig.is_active.desc(),
+                LlmModelConfig.updated_at.desc(),
+                LlmModelConfig.id.desc(),
+            )
+        ).all()
+        candidates = [
+            row
+            for row in candidates
+            if row.platform is None or row.platform.status != "disabled"
+        ]
+        for preferred_name in _POSITION_AGENT_MODEL_PRIORITY:
+            preferred = next(
+                (
+                    row
+                    for row in candidates
+                    if (row.model_name or "").strip().lower() == preferred_name
+                ),
+                None,
+            )
+            if preferred is not None:
+                return preferred.id
+        if candidates:
+            return candidates[0].id
+        return None
 
 
 def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | None:

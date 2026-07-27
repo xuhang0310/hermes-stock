@@ -10,8 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, text
-from sqlalchemy.orm import selectinload
+from sqlalchemy import text
 
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal, engine
@@ -22,9 +21,7 @@ from backend.app.market.digital_human_tools import (
     digital_human_tool_display_name,
     write_tool_schemas,
 )
-from backend.app.core.models import LlmModelConfig
 from backend.app.core.llm_config import active_llm_config
-from backend.app.core.settings import settings
 from backend.app.data.repository import StockRepository
 from backend.app.skills.registry import skill_registry
 from backend.app.agents.position_intent import (
@@ -42,6 +39,8 @@ from backend.app.agents.tool_approval import (
 )
 from backend.app.ai.retrieval import retrieve_chunks
 from backend.app.market.stock_tools import (
+    _in_market_window,
+    _sh_now,
     stock_observation_preview,
     stock_system_prompt_with_skills,
     stock_tool_display_name,
@@ -249,8 +248,10 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
     # 技能其 prompt_instructions 留空，不会重复注入。
     extra_rules = skill_registry.get_prompt_instructions(chat_mode="research", role_code=digital_human_code)
     skill_rules_block = ("\n\n技能补充规则:\n" + "\n".join(f"- {r}" for r in extra_rules)) if extra_rules else ""
+    shanghai_now = _sh_now()
+    market_state = "开盘中" if _in_market_window(shanghai_now) else "非交易时段"
     return f"""你是 SixRabbits Stock A股多智能体研究台的数字人——既是有温度、会聊天的人，也是严谨的A股数据研究专家，采用 ReAct 方式工作。
-今天日期: {date.today().isoformat()}
+当前上海时间: {shanghai_now.isoformat(timespec="minutes")}（{market_state}）
 
 可查询的数据表:
 {chr(10).join(schema_lines)}
@@ -271,8 +272,10 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 6. SQL 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询或多语句。
 7. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
 8. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
-9. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
-10. 最终回答使用中文 Markdown，尽量短、清楚、可执行。{skill_rules_block}{context}"""
+9. 用户询问“今日/当前涨停、跌停、炸板、连板或异动”时，必须调用 get_limit_list，并同时传 symbol 与目标 trade_date。不能用上一交易日收盘价否定用户描述的当日盘中事件。
+10. 若行情结果 stale=true、intraday_unavailable=true，或 trade_date 早于开盘中的当前交易日，只能说“当前数据源尚未覆盖今日盘中，无法核实”，严禁断言“今天没有涨停/没有异动”。
+11. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
+12. 最终回答使用中文 Markdown，长度与任务匹配：简单事实问题保持简短；持仓、换仓、完整研究必须严格执行已激活技能的专业报告结构，不得为了缩短而省略财务、估值、事件、技术、资金、风险、方案触发条件或证据缺口。禁止用 ASCII 字符画模拟结论卡片。{skill_rules_block}{context}"""
 
 
 def validate_sql(sql: str) -> str | None:
@@ -641,7 +644,6 @@ def run_agent_events(
 ) -> Generator[dict, None, None]:
     stock_mode = chat_mode == "stock"
     knowledge_mode = chat_mode == "knowledge"
-    digital_tool_names: set[str] = set()
     write_tool_names: set[str] = set()
     if stock_mode:
         tools = skill_registry.get_tools_for("stock")

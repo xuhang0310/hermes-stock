@@ -193,7 +193,6 @@ onBeforeUnmount(() => {
           <span>v{{ skill.version }}</span>
           <span :class="`risk-${skill.risk_level}`">{{ riskText(skill) }}</span>
           <span>{{ skill.tool_names.length }} 个工具</span>
-          <span>{{ skill.criteria.length }} 项验收</span>
         </div>
 
         <footer>
@@ -248,18 +247,6 @@ onBeforeUnmount(() => {
                 <span v-for="item in selected.output_contract" :key="item">{{ item }}</span>
               </div>
             </div>
-          </section>
-
-          <section>
-            <h3>验收标准</h3>
-            <div v-if="selected.criteria.length" class="skill-criteria-list">
-              <div v-for="criterion in selected.criteria" :key="criterion.code">
-                <code>{{ criterion.code }}</code>
-                <strong>{{ criterion.description }}</strong>
-                <span>{{ criterion.required ? '必选' : '可选' }} · 至少 {{ criterion.min_evidence }} 条已验证证据</span>
-              </div>
-            </div>
-            <p v-else class="skill-detail-muted">流程型技能不单独增加证据门槛。</p>
           </section>
 
           <section>

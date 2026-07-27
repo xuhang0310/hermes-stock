@@ -393,11 +393,15 @@ def _restrict_rows_to_explicit_targets(
     unchanged rows into a one-symbol write. Screenshot/full-portfolio imports
     remain multi-row operations.
     """
-    if len(rows) <= 1:
+    if instruction is None:
         return rows, []
-    text = str(instruction or "").strip()
-    if not text or any(hint in text for hint in _COLLECTIVE_POSITION_WRITE_HINTS):
-        return rows, []
+    text = str(instruction).strip()
+    if not text:
+        return [], [
+            str(row.get("name") or row.get("symbol") or "未命名标的")
+            for row in rows
+            if isinstance(row, dict)
+        ]
 
     upper_text = text.upper()
     matched: list[dict[str, Any]] = []
@@ -418,9 +422,7 @@ def _restrict_rows_to_explicit_targets(
         else:
             omitted.append(name or symbol or "未命名标的")
 
-    if matched and len(matched) < len(rows):
-        return matched, omitted
-    return rows, []
+    return matched, omitted
 
 
 def _merge_pending_tool_args(
@@ -768,6 +770,8 @@ def _position_agent_prompt() -> str:
 7. 保存后基于工具 observation 回复用户，明确保存了哪些标的、哪些字段缺失（行情类字段缺失不必提醒，说明系统会自动同步即可）。
 8. save_position_holdings 是增量工具。rows 只允许包含用户本轮明确要求变更的标的；
    get_current_positions 返回的其他已有持仓只能用于核对，严禁原样塞回 rows 重复写入。
+9. 当前轮没有新截图、没有系统提供的待确认草稿、也没有明确持仓明细时，禁止根据历史对话
+   重建或保存旧持仓；只说明当前没有可确认草稿，并请用户重新上传截图或提供明细。
 
 【交易动作识别规则 — 必须严格遵守】
 当用户表达以下意图时，按对应规则处理，不要混淆动作：
@@ -813,11 +817,63 @@ A 股代码规范:
 
 
 def _chat_completion(messages: list[dict[str, Any]], llm_config: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
-    body = chat_completion(messages, llm_config, tools=tools, temperature=0.1)
+    body = chat_completion(messages, llm_config, tools=tools)
     choices = body.get("choices") or []
     if not choices:
         raise RuntimeError("持仓 Agent 模型没有返回 choices")
     return choices[0].get("message") or {}
+
+
+def extract_position_ocr_arguments(
+    *,
+    user_content: str | list[dict[str, Any]],
+    model_config_id: int | None,
+) -> dict[str, Any]:
+    """Extract a new screenshot into one bounded, structured import draft."""
+
+    resolved_model_id = resolve_vision_model_config_id(model_config_id)
+    llm_config = active_llm_config(resolved_model_id)
+    if not llm_config["api_key"] or not llm_config["base_url"]:
+        raise RuntimeError("当前视觉模型未配置 API Key 或 Base URL。")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是 A 股券商持仓截图结构化提取器。只处理本轮用户消息中的新截图，"
+                "不得引用历史对话中的持仓。必须调用 save_position_holdings，不能直接回答文本。"
+                "完整持仓截图中的每个可见标的只输出一次，action 使用 replace；"
+                "提取代码、名称、数量、成本价以及截图中明确可见的现价、市值和盈亏。"
+                "截图可见券商、账户名称或脱敏账号时写入 account。看不清的字段不要猜。"
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    body = chat_completion(
+        messages,
+        llm_config,
+        tools=[POSITION_AGENT_TOOLS[2]],
+        tool_choice="required",
+    )
+    choices = body.get("choices") or []
+    message = (choices[0].get("message") or {}) if choices else {}
+    tool_calls = message.get("tool_calls") or []
+    for call in tool_calls:
+        function = call.get("function") or {}
+        if function.get("name") != "save_position_holdings":
+            continue
+        arguments = _json_args(function.get("arguments"))
+        rows = arguments.get("rows")
+        if isinstance(rows, list) and rows:
+            return {
+                "arguments": arguments,
+                "model": {
+                    "id": llm_config.get("id"),
+                    "display_name": llm_config.get("display_name"),
+                    "model_name": llm_config.get("model"),
+                    "provider_name": llm_config.get("provider_name"),
+                },
+            }
+    raise RuntimeError("视觉模型未返回可用的持仓明细，请重新上传更清晰的截图。")
 
 
 def _execute_position_tool(
@@ -831,6 +887,7 @@ def _execute_position_tool(
     image_sha256: str | None,
     account_id: int | None = None,
     instruction: str | None = None,
+    trusted_pending_action: bool = False,
 ) -> dict[str, Any]:
     if name == "get_position_schema":
         return {
@@ -851,17 +908,30 @@ def _execute_position_tool(
         if not rows:
             return {"error": "没有可保存的持仓明细 rows"}
         ignored_rows: list[str] = []
-        if not image_sha256:
+        if not image_sha256 and not trusted_pending_action:
             rows, ignored_rows = _restrict_rows_to_explicit_targets(
                 [row for row in rows if isinstance(row, dict)],
                 instruction,
             )
+        if not rows:
+            return {
+                "error": (
+                    "本轮没有明确指定可写入的持仓，系统已阻止复用历史聊天中的旧持仓。"
+                    "请重新上传截图，或明确输入股票代码、数量和成本价。"
+                ),
+                "history_reuse_blocked": True,
+                "saved_count": 0,
+                "error_count": 0,
+                "rows": [],
+                "ignored_unchanged_count": len(ignored_rows),
+                "ignored_unchanged_rows": ignored_rows,
+            }
         rows, validations = validate_position_rows(
             [row for row in rows if isinstance(row, dict)]
         )
         args["rows"] = rows
         invalid = [item for item in validations if not item.get("valid")]
-        if image_sha256:
+        if image_sha256 and not trusted_pending_action:
             return {
                 "need_review": True,
                 "message": (

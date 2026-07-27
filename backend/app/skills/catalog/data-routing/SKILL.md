@@ -7,7 +7,7 @@ metadata:
   hermes-category: data
   hermes-version: "3.0.0"
   hermes-risk-level: low
-allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_daily get_stock_info search_stock_news search_market_intel search_comprehensive_intel search_knowledge
+allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_daily get_limit_list get_stock_info search_stock_news search_market_intel search_comprehensive_intel search_knowledge
 ---
 
 # 数据路由与来源治理
@@ -53,6 +53,8 @@ allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_dai
 
 - Token 缺失、超时或限流时明确记录失败原因。
 - 实时源失败后使用最近收盘价，必须改称“最近可用收盘价”。
+- 开盘期间返回上一交易日数据时，必须视为盘中不可用；不能据此否定用户描述的当日涨停、跌停、炸板或异动。
+- 查询具体股票的涨跌停记录必须携带股票代码，避免全市场结果被截断后漏掉目标标的。
 - 不同来源数值偏差显著时同时保留，并解释可能的复权、币种、报告期或合并口径差异。
 - 不把空数组解释为“没有事件”；它也可能意味着检索失败。
 

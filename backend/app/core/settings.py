@@ -90,6 +90,12 @@ class Settings:
     ).lower() == "true"
     agent_redis_url: str = os.getenv("STOCK_AGENT_REDIS_URL", "").strip()
     agent_run_timeout_seconds: int = int(os.getenv("STOCK_AGENT_RUN_TIMEOUT_SECONDS", "900"))
+    # AgentScope ReAct loop budget. This is intentionally independent from
+    # model-level max_steps, which remains available to the legacy runtime.
+    agent_loop_max_iterations: int = int(os.getenv("STOCK_AGENT_LOOP_MAX_ITERATIONS", "50"))
+    agent_loop_duplicate_tool_limit: int = int(
+        os.getenv("STOCK_AGENT_LOOP_DUPLICATE_TOOL_LIMIT", "3")
+    )
     agent_shutdown_grace_seconds: int = int(os.getenv("STOCK_AGENT_SHUTDOWN_GRACE_SECONDS", "90"))
     agent_run_max_attempts: int = int(os.getenv("STOCK_AGENT_RUN_MAX_ATTEMPTS", "3"))
     agent_worker_concurrency: int = int(os.getenv("STOCK_AGENT_WORKER_CONCURRENCY", "4"))

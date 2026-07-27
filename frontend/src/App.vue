@@ -78,6 +78,7 @@ const dashboard = ref<DashboardPayload | null>(null)
 const positions = ref<PositionItem[]>([])
 const watchlist = ref<WatchlistItem[]>([])
 const agents = ref<AgentItem[]>([])
+let dashboardRefreshRequest = 0
 
 const positionAgentInstruction = ref('')
 const positionAgentImageBase64 = ref('')
@@ -102,6 +103,8 @@ const positionAgentAccounts = ref<PositionAccount[]>([])
 const positionAgentPendingAction = ref<PositionAgentPendingAction | null>(null)
 const positionAgentReviewRows = ref<PositionAgentReviewRow[]>([])
 const positionAgentConfirming = ref(false)
+const positionAgentDragging = ref(false)
+let positionAgentDragDepth = 0
 let restoredPositionAgentUserId: number | null = null
 
 function positionAgentStorageKey(userId: number) {
@@ -280,6 +283,7 @@ const positionModelGroups = computed(() => {
 
 async function refreshAll() {
   if (!currentUser.value) return
+  const dashboardRequestId = ++dashboardRefreshRequest
   loading.value = true
   error.value = ''
   try {
@@ -298,7 +302,9 @@ async function refreshAll() {
     ])
 
     health.value = healthPayload
-    dashboard.value = dashboardPayload
+    if (dashboardRequestId === dashboardRefreshRequest) {
+      dashboard.value = dashboardPayload
+    }
     positions.value = positionPayload
     watchlist.value = watchlistPayload
     agents.value = agentPayload
@@ -306,6 +312,21 @@ async function refreshAll() {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function refreshDashboard() {
+  if (!currentUser.value) return
+  const requestId = ++dashboardRefreshRequest
+  try {
+    const payload = await api.dashboard()
+    if (requestId === dashboardRefreshRequest) {
+      dashboard.value = payload
+    }
+  } catch (err) {
+    if (requestId === dashboardRefreshRequest) {
+      error.value = err instanceof Error ? err.message : '工作台刷新失败'
+    }
   }
 }
 
@@ -387,9 +408,13 @@ function modelOptionLabel(model: ModelConfig | null | undefined) {
 async function loadPositionModels() {
   const payload = await api.modelConfigs()
   positionModels.value = payload.filter((item) => item.status !== 'disabled')
-  if (!selectedPositionModelId.value || !positionModels.value.some((item) => item.id === selectedPositionModelId.value)) {
-    selectedPositionModelId.value = positionModels.value.find((item) => item.is_active)?.id || positionModels.value[0]?.id || null
-  }
+  const preferred = positionModels.value.find(
+    (item) => item.model_name.trim().toLowerCase() === 'qwen3.7-plus'
+  )
+    || positionModels.value.find((item) => item.model_name.trim().toLowerCase() === 'k3')
+    || positionModels.value.find((item) => item.is_active)
+    || positionModels.value[0]
+  selectedPositionModelId.value = preferred?.id || null
 }
 
 async function openPositionAgent(accountId: number | null = null) {
@@ -438,10 +463,11 @@ function readFileAsDataUrl(file: File) {
   })
 }
 
-async function onPositionImageSelected(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
+async function setPositionAgentImage(file: File) {
+  if (!file.type.startsWith('image/')) {
+    positionAgentMessage.value = '只能拖入图片文件'
+    return
+  }
   positionAgentMimeType.value = file.type || 'image/png'
   positionAgentFileName.value = file.name
   positionAgentImageBase64.value = await readFileAsDataUrl(file)
@@ -455,6 +481,43 @@ async function onPositionImageSelected(event: Event) {
   if (!positionAgentInstruction.value.trim()) {
     positionAgentInstruction.value = '请识别这张 A 股券商持仓截图，按持仓明细保存。'
   }
+}
+
+async function onPositionImageSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  await setPositionAgentImage(file)
+  input.value = ''
+}
+
+function onPositionImageDragEnter(event: DragEvent) {
+  if (positionAgentBusy.value || !Array.from(event.dataTransfer?.types || []).includes('Files')) return
+  positionAgentDragDepth += 1
+  positionAgentDragging.value = true
+}
+
+function onPositionImageDragOver(event: DragEvent) {
+  if (positionAgentBusy.value || !event.dataTransfer) return
+  event.dataTransfer.dropEffect = 'copy'
+}
+
+function onPositionImageDragLeave() {
+  positionAgentDragDepth = Math.max(0, positionAgentDragDepth - 1)
+  if (positionAgentDragDepth === 0) positionAgentDragging.value = false
+}
+
+async function onPositionImageDrop(event: DragEvent) {
+  positionAgentDragDepth = 0
+  positionAgentDragging.value = false
+  if (positionAgentBusy.value) return
+  const files = Array.from(event.dataTransfer?.files || [])
+  const file = files.find((item) => item.type.startsWith('image/'))
+  if (!file) {
+    positionAgentMessage.value = '没有检测到可用的图片文件'
+    return
+  }
+  await setPositionAgentImage(file)
 }
 
 function clearPositionAgentImage() {
@@ -717,10 +780,10 @@ function handlePositionAgentEvent(event: PositionAgentStreamEvent, messageId: nu
     positionAgentMessage.value = event.summary || event.reply || `已保存 ${positionAgentRows.value.length} 条持仓`
     positionAgentPendingAction.value = event.pending_action || null
     setPositionAgentReviewDraft(positionAgentPendingAction.value)
-    const finalContent = latest.content.trim()
-      ? latest.content
-      : event.should_save
-        ? positionAgentResultMarkdown(positionAgentRows.value, failedRows, positionAgentMessage.value)
+    const finalContent = event.should_save
+      ? positionAgentResultMarkdown(positionAgentRows.value, failedRows, positionAgentMessage.value)
+      : latest.content.trim()
+        ? latest.content
         : (event.reply || positionAgentMessage.value || '我可以帮你录入 A 股持仓。你可以输入持仓描述，或上传券商持仓截图。')
     updatePositionAgentMessage(messageId, (current) => ({
       ...current,
@@ -805,6 +868,7 @@ function backFromChart() {
 function navigate(page: PageKey) {
   if (page === 'digitalHumans') digitalHumanInitialTab.value = 'chat'
   if (page === 'askStock') askStockInitialQuestion.value = ''
+  if (page === 'workbench') void refreshDashboard()
   if (page !== 'backtestReport' && window.location.pathname.startsWith('/backtests/')) {
     window.history.pushState({}, '', '/')
   }
@@ -1040,7 +1104,18 @@ onBeforeUnmount(() => window.removeEventListener('popstate', syncPageFromLocatio
           </section>
         </section>
 
-        <form class="position-agent-composer" @submit.prevent="agentAddPositions">
+        <form
+          class="position-agent-composer"
+          :class="{ 'is-dragging-image': positionAgentDragging }"
+          @submit.prevent="agentAddPositions"
+          @dragenter.prevent="onPositionImageDragEnter"
+          @dragover.prevent="onPositionImageDragOver"
+          @dragleave.prevent="onPositionImageDragLeave"
+          @drop.prevent="onPositionImageDrop"
+        >
+          <div v-if="positionAgentDragging" class="position-agent-drop-hint">
+            <strong>松开即可添加图片</strong>
+          </div>
           <div v-if="positionAgentFileName" class="position-selected-file">
             <span>{{ positionAgentFileName }}</span>
             <button type="button" :disabled="positionAgentBusy" @click="clearPositionAgentImage">移除</button>

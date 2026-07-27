@@ -2,8 +2,8 @@
   "chat_modes": ["stock", "research"],
   "roles": [],
   "default_roles": ["research-analyst", "quant-analyst", "short-term-hunter"],
-  "triggers": ["股价", "行情", "走势", "k线", "K线", "涨跌", "最新价", "复盘", "成交量", "收盘价"],
-  "tool_names": ["resolve_stock", "get_latest_price", "get_realtime_quote", "get_tushare_daily"],
+  "triggers": ["股价", "行情", "走势", "k线", "K线", "涨跌", "涨停", "跌停", "炸板", "连板", "最新价", "复盘", "成交量", "收盘价"],
+  "tool_names": ["resolve_stock", "get_latest_price", "get_realtime_quote", "get_tushare_daily", "get_limit_list"],
   "criteria": [
     {
       "code": "market.current_price",

@@ -12,7 +12,6 @@ from sqlalchemy import select
 from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.contracts import EngineOutcome
 from backend.app.agent_runtime.external_tools import external_tool_executor
-from backend.app.agent_runtime.evidence_service import research_evidence_service
 from backend.app.agent_runtime.orchestration_tools import (
     ORCHESTRATION_PROMPT,
     ORCHESTRATION_TOOL_NAMES,
@@ -20,7 +19,10 @@ from backend.app.agent_runtime.orchestration_tools import (
     TEAM_AND_SCHEDULE_TOOL_SCHEMAS,
     TOOL_DISPLAY_NAMES as ORCHESTRATION_DISPLAY_NAMES,
 )
-from backend.app.agent_runtime.payloads import materialize_agentscope_content
+from backend.app.agent_runtime.payloads import (
+    materialize_agentscope_content,
+    materialize_openai_content,
+)
 from backend.app.agent_runtime.tool_specs import should_externalize, tool_spec
 from backend.app.agent_runtime.transaction_state import transaction_state_service
 from backend.app.agents.tool_approval import (
@@ -45,6 +47,119 @@ from backend.app.skills.manifests import LOAD_SKILL_TOOL_SCHEMA
 Emit = Callable[[dict[str, Any]], Awaitable[None]]
 Checkpoint = Callable[[str, list[dict[str, Any]] | None], Awaitable[None]]
 Cancelled = Callable[[], Awaitable[bool]]
+
+AGENT_LOOP_HARD_MAX_ITERATIONS = 50
+
+
+def _agent_loop_max_iterations() -> int:
+    """Return the bounded AgentScope loop budget."""
+
+    configured = int(getattr(settings, "agent_loop_max_iterations", 50) or 50)
+    return max(1, min(configured, AGENT_LOOP_HARD_MAX_ITERATIONS))
+
+
+def _agent_loop_duplicate_tool_limit() -> int:
+    """Return how many identical read calls may run before the loop is stopped."""
+
+    configured = int(getattr(settings, "agent_loop_duplicate_tool_limit", 3) or 3)
+    return max(1, min(configured, 10))
+
+
+class ReasoningLoopGuard:
+    """Detect repeated long sentences in streamed model reasoning."""
+
+    def __init__(self, *, repeat_limit: int = 3, max_chars: int = 20_000) -> None:
+        self.repeat_limit = max(2, repeat_limit)
+        self.max_chars = max(1_000, max_chars)
+        self.total_chars = 0
+        self._tail = ""
+        self._sentence_counts: dict[str, int] = {}
+
+    def observe(self, delta: str) -> str | None:
+        content = str(delta or "")
+        if not content:
+            return None
+        self.total_chars += len(content)
+        if self.total_chars > self.max_chars:
+            return "reasoning_too_long"
+
+        combined = self._tail + content
+        sentences = re.split(r"[。！？!?；;\n]+", combined)
+        self._tail = sentences.pop()[-500:]
+        for sentence in sentences:
+            normalized = re.sub(r"[\W_]+", "", sentence, flags=re.UNICODE).lower()
+            if len(normalized) < 16:
+                continue
+            digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+            count = self._sentence_counts.get(digest, 0) + 1
+            self._sentence_counts[digest] = count
+            if count >= self.repeat_limit:
+                return "repeated_reasoning"
+        return None
+
+
+def _position_confirmation_requested(request_payload: dict[str, Any]) -> bool:
+    if str(request_payload.get("digital_human_code") or "") != "position-entry-agent":
+        return False
+    question = str(request_payload.get("user_text") or request_payload.get("question") or "").strip()
+    normalized = re.sub(r"[\s，。！？!?、；;：:]+", "", question)
+    return normalized in {
+        "确认",
+        "确定",
+        "好的",
+        "可以",
+        "保存",
+        "入库",
+        "确认保存",
+        "确认入库",
+        "保存进去",
+        "直接保存",
+        "保存就行",
+        "保存一下",
+        "入库就行",
+    }
+
+
+def _transaction_preflight_reply(request_payload: dict[str, Any]) -> str | None:
+    """Reject history-only save confirmations before invoking the model."""
+
+    if not _position_confirmation_requested(request_payload):
+        return None
+
+    question = str(request_payload.get("user_text") or request_payload.get("question") or "").strip()
+    attachments = request_payload.get("attachments")
+    has_current_image = bool(
+        request_payload.get("image_sha256")
+        or (
+            isinstance(attachments, list)
+            and any(
+                isinstance(item, dict)
+                and (
+                    item.get("kind") == "image"
+                    or str(item.get("mime_type") or "").startswith("image/")
+                )
+                for item in attachments
+            )
+        )
+    )
+    pending = request_payload.get("pending_action")
+    if not pending and request_payload.get("session_id"):
+        state = transaction_state_service.load(
+            int(request_payload["session_id"]),
+            "position-entry-agent",
+        )
+        pending = (state or {}).get("pending_action")
+    has_current_facts = bool(
+        re.search(r"(?<!\d)\d{6}(?:\.(?:SH|SZ|BJ))?(?!\d)", question.upper())
+        or re.search(r"\d[\d,]*(?:\.\d+)?\s*(?:股|手)", question)
+    )
+    if has_current_image or pending or has_current_facts:
+        return None
+    return (
+        "当前会话没有可确认的 OCR 持仓草稿，本轮也没有收到新的截图或持仓明细。"
+        "为避免把历史聊天中的旧持仓重复写入，我已停止本次保存；请重新上传截图，"
+        "或直接输入“股票代码、数量、成本价”，系统会重新识别并让你核对后入库。"
+    )
 
 
 def agentscope_available() -> tuple[bool, str | None]:
@@ -260,6 +375,25 @@ def _execute_tool(
     )
 
     args, transaction_state = transaction_state_service.before_tool(request_payload, name, args)
+    write_signature: str | None = None
+    completed_write_signatures = request_payload.setdefault("_completed_write_signatures", set())
+    if name in write_names:
+        canonical_args = json.dumps(
+            args,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        write_signature = f"{name}:{hashlib.sha256(canonical_args.encode('utf-8')).hexdigest()}"
+        if write_signature in completed_write_signatures:
+            return {
+                "error": "检测到同一写入请求被重复调用，系统已自动拦截，未再次写入。",
+                "duplicate_write_blocked": True,
+                "saved_count": 0,
+                "changed_count": 0,
+                "rows": [],
+            }
     role_code = str(request_payload.get("digital_human_code") or "")
     if name == "load_skill":
         return skill_registry.load_manifest(
@@ -283,8 +417,15 @@ def _execute_tool(
                 image_sha256=request_payload.get("image_sha256"),
                 account_id=int(account_id) if account_id else None,
                 instruction=str(request_payload.get("user_text") or request_payload.get("question") or ""),
+                trusted_pending_action=bool((transaction_state or {}).get("pending_action")),
             )
         transaction_state_service.after_tool(request_payload, name, args, result)
+        if (
+            write_signature
+            and "error" not in result
+            and int(result.get("saved_count") or result.get("changed_count") or 0) > 0
+        ):
+            completed_write_signatures.add(write_signature)
         return result
     if role_code == "watchlist-entry-agent":
         from backend.app.agents.watchlist_agent import _execute_watchlist_tool
@@ -298,6 +439,12 @@ def _execute_tool(
                 created_by=str(request_payload.get("user_label") or "agent"),
             )
         transaction_state_service.after_tool(request_payload, name, args, result)
+        if (
+            write_signature
+            and "error" not in result
+            and int(result.get("saved_count") or result.get("changed_count") or 0) > 0
+        ):
+            completed_write_signatures.add(write_signature)
         return result
 
     if name == "run_sql":
@@ -376,6 +523,8 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
     from agentscope.tool import ToolBase, ToolChunk
 
     approval_policy = str(request_payload.get("approval_policy") or "ask")
+    duplicate_tool_limit = _agent_loop_duplicate_tool_limit()
+    read_call_counts: dict[str, int] = {}
 
     class HermesTool(ToolBase):
         def __init__(self, schema: dict[str, Any]) -> None:
@@ -404,6 +553,43 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
         async def call(self, **kwargs):
             try:
                 execution_id = None
+                if self.is_read_only:
+                    canonical_input = json.dumps(
+                        kwargs,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    signature = hashlib.sha256(
+                        f"{self.name}:{canonical_input}".encode("utf-8")
+                    ).hexdigest()
+                    call_count = read_call_counts.get(signature, 0) + 1
+                    read_call_counts[signature] = call_count
+                    if call_count > duplicate_tool_limit:
+                        result = {
+                            "error": (
+                                f"相同参数的只读工具 {self.name} 在本轮已执行 "
+                                f"{duplicate_tool_limit} 次，AgentLoop 已停止重复调用。"
+                            ),
+                            "duplicate_tool_call_blocked": True,
+                            "tool": self.name,
+                            "duplicate_count": call_count,
+                            "allowed_count": duplicate_tool_limit,
+                        }
+                        return ToolChunk(
+                            content=[
+                                TextBlock(
+                                    text=json.dumps(result, ensure_ascii=False, default=str)
+                                )
+                            ],
+                            state=ToolResultState.ERROR,
+                            metadata={
+                                "result": result,
+                                "display_name": _tool_display_name(self.name),
+                                "execution_id": None,
+                            },
+                        )
                 externalized = should_externalize(
                     self.spec,
                     enabled=bool(settings.tool_external_execution_enabled and request_payload.get("run_id")),
@@ -449,6 +635,217 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
             )
 
     return [HermesTool(schema) for schema in schemas]
+
+
+def _position_value(value: Any, *, digits: int = 4) -> str:
+    if value is None or value == "":
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return f"{int(number):,}"
+    return f"{number:,.{digits}f}".rstrip("0").rstrip(".")
+
+
+def _position_account_label(arguments: dict[str, Any]) -> str:
+    account = arguments.get("account") if isinstance(arguments.get("account"), dict) else {}
+    parts = [
+        str(account.get("broker_name") or "").strip(),
+        str(account.get("account_name") or "").strip(),
+        str(account.get("account_no_masked") or "").strip(),
+    ]
+    return " / ".join(item for item in parts if item) or "当前选择的证券账户"
+
+
+def _position_draft_reply(arguments: dict[str, Any], result: dict[str, Any]) -> str:
+    rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+    validations = result.get("validations") if isinstance(result.get("validations"), list) else []
+    validation_by_index = {
+        int(item.get("index") or 0): item for item in validations if isinstance(item, dict)
+    }
+    lines = [
+        f"已识别 **{len(rows)} 条**持仓，待保存到 **{_position_account_label(arguments)}**。",
+        "",
+        "| # | 名称 | 代码 | 数量 | 成本价 | 现价 | 校验 |",
+        "|---:|---|---|---:|---:|---:|---|",
+    ]
+    invalid_count = 0
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        validation = validation_by_index.get(index, {})
+        valid = bool(validation.get("valid"))
+        invalid_count += 0 if valid else 1
+        lines.append(
+            "| {index} | {name} | {symbol} | {quantity} | {cost} | {latest} | {status} |".format(
+                index=index + 1,
+                name=str(row.get("name") or "-"),
+                symbol=str(row.get("symbol") or "-"),
+                quantity=_position_value(row.get("position_quantity"), digits=0),
+                cost=_position_value(row.get("cost_price")),
+                latest=_position_value(row.get("latest_price")),
+                status="通过" if valid else str(validation.get("message") or "需纠正"),
+            )
+        )
+    lines.extend(["", f"持仓日期：{arguments.get('as_of_date') or '以截图日期为准'}。"])
+    if invalid_count:
+        lines.append(f"其中 **{invalid_count} 条代码需要纠正**，修正后再回复“确认”。")
+    else:
+        lines.append("股票代码已完成校验。请核对明细，回复 **“确认”** 后一次性入库。")
+    return "\n".join(lines)
+
+
+def _position_save_reply(result: dict[str, Any]) -> str:
+    if result.get("need_account"):
+        return str(result.get("message") or "请确认这批持仓要保存到哪个证券账户。")
+    if result.get("need_review"):
+        return _position_draft_reply({}, result)
+    if result.get("error"):
+        return f"持仓未保存：{result['error']}"
+    saved = int(result.get("saved_count") or 0)
+    rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+    names = [
+        str(item.get("name") or item.get("symbol") or "")
+        for item in rows
+        if isinstance(item, dict) and not item.get("error")
+    ]
+    detail = "、".join(item for item in names if item)
+    return (
+        f"已确认入库，成功保存 **{saved} 条**持仓。"
+        + (f"\n\n本次保存：{detail}。" if detail else "")
+    )
+
+
+async def _emit_position_tool_result(
+    *,
+    emit: Emit,
+    tool_call_id: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    await emit(
+        {
+            "type": "action",
+            "tool_call_id": tool_call_id,
+            "tool": "save_position_holdings",
+            "display_name": _tool_display_name("save_position_holdings"),
+            "content": json.dumps(arguments, ensure_ascii=False, default=str),
+            "risk_level": "medium",
+            "has_side_effects": True,
+        }
+    )
+    await emit({"type": "observation", "content": _tool_preview("save_position_holdings", result)})
+    await emit(
+        {
+            "type": "tool_done",
+            "tool_call_id": tool_call_id,
+            "tool": "save_position_holdings",
+            "display_name": _tool_display_name("save_position_holdings"),
+            "success": "error" not in result,
+        }
+    )
+
+
+async def _confirm_pending_position_draft(
+    request_payload: dict[str, Any],
+    emit: Emit,
+) -> EngineOutcome | None:
+    if not _position_confirmation_requested(request_payload) or not request_payload.get("session_id"):
+        return None
+    state = await asyncio.to_thread(
+        transaction_state_service.load,
+        int(request_payload["session_id"]),
+        "position-entry-agent",
+    )
+    pending = (state or {}).get("pending_action")
+    if not pending:
+        return None
+    arguments = pending.get("arguments") if isinstance(pending, dict) else {}
+    if not isinstance(arguments, dict):
+        return None
+    result = await asyncio.to_thread(
+        _execute_tool,
+        "save_position_holdings",
+        {},
+        request_payload,
+        {"save_position_holdings"},
+    )
+    await _emit_position_tool_result(
+        emit=emit,
+        tool_call_id="position_confirmation",
+        arguments=arguments,
+        result=result,
+    )
+    reply = _position_save_reply(result)
+    await emit({"type": "content_delta", "content": reply})
+    await emit({"type": "content_end", "role": "answer"})
+    await emit(
+        {
+            "type": "stage_done",
+            "stage": "position_confirmation",
+            "status": "completed",
+            "iterations": 0,
+        }
+    )
+    return EngineOutcome(final_answer=reply)
+
+
+async def _stage_position_ocr_draft(
+    request_payload: dict[str, Any],
+    emit: Emit,
+) -> EngineOutcome | None:
+    if (
+        str(request_payload.get("digital_human_code") or "") != "position-entry-agent"
+        or not request_payload.get("image_sha256")
+    ):
+        return None
+    from backend.app.agents.position_agent import extract_position_ocr_arguments
+
+    await emit(
+        {
+            "type": "stage_start",
+            "stage": "position_ocr",
+            "message": "正在识别截图并校验股票代码...",
+        }
+    )
+    extracted = await asyncio.to_thread(
+        extract_position_ocr_arguments,
+        user_content=materialize_openai_content(request_payload),
+        model_config_id=request_payload.get("model_config_id"),
+    )
+    await emit({"type": "model_selected", "model": extracted["model"]})
+    arguments = extracted["arguments"]
+    result = await asyncio.to_thread(
+        _execute_tool,
+        "save_position_holdings",
+        arguments,
+        request_payload,
+        {"save_position_holdings"},
+    )
+    await _emit_position_tool_result(
+        emit=emit,
+        tool_call_id="position_ocr_draft",
+        arguments=arguments,
+        result=result,
+    )
+    reply = (
+        _position_draft_reply(arguments, result)
+        if result.get("need_review")
+        else _position_save_reply(result)
+    )
+    await emit({"type": "content_delta", "content": reply})
+    await emit({"type": "content_end", "role": "answer"})
+    await emit(
+        {
+            "type": "stage_done",
+            "stage": "position_ocr",
+            "status": "completed",
+            "iterations": 1,
+        }
+    )
+    return EngineOutcome(final_answer=reply)
 
 
 def _history_state(request_payload: dict[str, Any]):
@@ -586,17 +983,30 @@ async def run_agentscope(
     from agentscope.tool import Toolkit
 
     request_payload = {**request_payload, "run_id": run_id}
+    max_iterations = _agent_loop_max_iterations()
+    if checkpoint_json is None:
+        confirmed = await _confirm_pending_position_draft(request_payload, emit)
+        if confirmed is not None:
+            return confirmed
+    preflight_reply = _transaction_preflight_reply(request_payload)
+    if preflight_reply:
+        await emit({"type": "content_delta", "content": preflight_reply})
+        await emit({"type": "content_end", "role": "answer"})
+        return EngineOutcome(final_answer=preflight_reply)
+    if checkpoint_json is None:
+        staged_draft = await _stage_position_ocr_draft(request_payload, emit)
+        if staged_draft is not None:
+            return staged_draft
     system_prompt, schemas, write_names = _build_definition(request_payload)
-    request_payload["write_tool_names"] = sorted(write_names)
-    selected_skill_names = list(request_payload.get("resolved_skills") or [])
-    selected_manifests = skill_registry.manifests_by_names(selected_skill_names)
-    goal = await asyncio.to_thread(
-        research_evidence_service.ensure_goal,
-        run_id=run_id,
-        user_id=int(request_payload["user_id"]),
-        objective=str(request_payload.get("question") or request_payload.get("user_text") or ""),
-        selected=selected_manifests,
+    system_prompt = (
+        f"{system_prompt.rstrip()}\n\n"
+        "## AgentLoop 执行约束\n"
+        f"- 本轮最多允许 {max_iterations} 次推理迭代；这是复杂任务预算，不是必须消耗的轮数。\n"
+        "- 能直接回答时立即收敛，不得为消耗轮数继续调用工具。\n"
+        "- 已获得的工具结果必须复用；不要使用完全相同的参数重复调用同一只读工具。\n"
+        "- 工具返回的信息足以支持结论后，立即输出最终答案；证据不足则明确数据缺口。"
     )
+    request_payload["write_tool_names"] = sorted(write_names)
     llm = active_llm_config(request_payload.get("model_config_id"))
     if not llm.get("base_url") or not llm.get("api_key"):
         raise RuntimeError("当前模型未配置 API Key 或 Base URL。")
@@ -618,7 +1028,7 @@ async def run_agentscope(
         toolkit=Toolkit(tools=_build_tools(request_payload, schemas, write_names)),
         state=state,
         model_config=ModelConfig(max_retries=1),
-        react_config=ReActConfig(max_iters=max(1, int(llm.get("max_steps") or 6))),
+        react_config=ReActConfig(max_iters=max_iterations),
     )
 
     if checkpoint_json:
@@ -639,17 +1049,14 @@ async def run_agentscope(
             },
         }
     )
-    await emit({"type": "stage_start", "stage": "agent_loop", "message": "AgentScope 正在分析..."})
-    if goal:
-        await emit(
-            {
-                "type": "research_goal",
-                "goal_id": goal["goal_id"],
-                "objective": goal["objective"],
-                "selected_skills": goal["selected_skills"],
-            }
-        )
-
+    await emit(
+        {
+            "type": "stage_start",
+            "stage": "agent_loop",
+            "message": f"AgentScope 正在分析，最多 {max_iterations} 轮...",
+            "max_iterations": max_iterations,
+        }
+    )
     outcome = EngineOutcome()
     text_buffer: list[str] = []
     text_block_open = False
@@ -657,6 +1064,16 @@ async def run_agentscope(
     tool_args: dict[str, list[str]] = {}
     tool_results: dict[str, list[str]] = {}
     waiting: list[dict[str, Any]] = []
+    transaction_agent = str(request_payload.get("digital_human_code") or "") in {
+        "position-entry-agent",
+        "watchlist-entry-agent",
+    }
+    reasoning_guard = ReasoningLoopGuard(
+        repeat_limit=3 if transaction_agent else 5,
+        max_chars=20_000 if transaction_agent else 120_000,
+    )
+    completed_business_write = False
+    iteration_count = 0
 
     if state.context:
         for pending_call in state.context[-1].get_content_blocks("tool_call"):
@@ -688,6 +1105,18 @@ async def run_agentscope(
             # (thought) or terminates the reply (answer).
             pass
         elif isinstance(event, ThinkingBlockDeltaEvent):
+            loop_reason = reasoning_guard.observe(event.delta)
+            if loop_reason:
+                outcome.status = "failed"
+                outcome.error = (
+                    "检测到模型推理内容持续重复，系统已自动停止本轮任务，避免继续占用会话或重复写入。"
+                    + (
+                        "本轮已有写入工具执行完成，请以工具返回结果为准。"
+                        if completed_business_write
+                        else "本轮没有执行新的业务写入，请重新上传截图或发送更明确的单条指令。"
+                    )
+                )
+                break
             await emit({"type": "reasoning_delta", "content": event.delta})
         elif isinstance(event, ToolCallStartEvent):
             await close_text("thought")
@@ -744,20 +1173,12 @@ async def run_agentscope(
                     raw_result = json.loads(text_result)
                 except (TypeError, json.JSONDecodeError):
                     raw_result = {"result": text_result}
-            evidence_ids = []
-            if goal:
-                evidence_ids = await asyncio.to_thread(
-                    research_evidence_service.record_tool_result,
-                    run_id=run_id,
-                    tool_call_id=event.tool_call_id,
-                    tool_name=name,
-                    result=raw_result,
-                    execution_id=execution_id,
-                    criterion_codes=skill_registry.criterion_codes_for_tool(
-                        name, selected_skill_names
-                    ),
-                    success=str(event.state) == "success",
-                )
+            if (
+                name in write_names
+                and str(event.state) == "success"
+                and int(raw_result.get("saved_count") or raw_result.get("changed_count") or 0) > 0
+            ):
+                completed_business_write = True
             await emit({"type": "observation", "content": _tool_preview(name, raw_result)})
             for artifact in raw_result.get("artifacts") or []:
                 if isinstance(artifact, dict) and artifact.get("path"):
@@ -769,7 +1190,6 @@ async def run_agentscope(
                 "display_name": _tool_display_name(name),
                 "success": str(event.state) == "success",
                 "execution_id": execution_id,
-                "evidence_ids": evidence_ids,
             }
             if name in {"run_macd_backtest", "run_portfolio_backtest"} and raw_result.get("run_id"):
                 tool_done_event["report_run_id"] = str(raw_result["run_id"])
@@ -778,6 +1198,22 @@ async def run_agentscope(
                 )
             await emit(tool_done_event)
             await save_checkpoint(agent.state.model_dump_json(), None)
+            if raw_result.get("duplicate_tool_call_blocked"):
+                outcome.status = "failed"
+                outcome.error = (
+                    "检测到相同工具和参数在本轮被重复调用，系统已自动停止本轮任务。"
+                    "请复用已有结果，或调整查询条件后重试。"
+                )
+                await emit(
+                    {
+                        "type": "agent_loop_guard_triggered",
+                        "reason": "duplicate_tool_call",
+                        "tool": name,
+                        "iteration": iteration_count,
+                        "max_iterations": max_iterations,
+                    }
+                )
+                break
         elif isinstance(event, RequireUserConfirmEvent):
             await close_text("thought")
             for tool_call in event.tool_calls:
@@ -904,10 +1340,29 @@ async def run_agentscope(
             outcome.status = "waiting_children"
             outcome.waiting = waiting
         elif isinstance(event, ModelCallEndEvent):
+            iteration_count += 1
+            await emit(
+                {
+                    "type": "agent_loop_progress",
+                    "iteration": iteration_count,
+                    "max_iterations": max_iterations,
+                }
+            )
             await save_checkpoint(agent.state.model_dump_json(), waiting or None)
         elif isinstance(event, ExceedMaxItersEvent):
             outcome.status = "failed"
-            outcome.error = "Agent 达到最大推理轮数，请缩小任务范围后重试。"
+            outcome.error = (
+                f"Agent 已达到 {max_iterations} 次最大推理迭代上限，"
+                "系统已停止本轮任务。请拆分任务或补充更明确的目标后重试。"
+            )
+            await emit(
+                {
+                    "type": "agent_loop_guard_triggered",
+                    "reason": "max_iterations",
+                    "iteration": max(iteration_count, max_iterations),
+                    "max_iterations": max_iterations,
+                }
+            )
         elif isinstance(event, ReplyEndEvent):
             await close_text("answer")
             reason = str(event.finished_reason)
@@ -921,18 +1376,13 @@ async def run_agentscope(
     outcome.checkpoint_json = agent.state.model_dump_json()
     await save_checkpoint(outcome.checkpoint_json, waiting or None)
     if outcome.status == "completed":
-        if goal:
-            completion = await asyncio.to_thread(
-                research_evidence_service.audit, run_id, outcome.final_answer
-            )
-            outcome.completion_state = completion["state"]
-            outcome.completion = completion
-            if completion["state"] == "incomplete":
-                missing_text = "；".join(item["description"] for item in completion["missing"])
-                outcome.final_answer = (
-                    f"{outcome.final_answer.rstrip()}\n\n"
-                    f"> 研究完成度：incomplete。缺少必选证据：{missing_text}"
-                ).strip()
-            await emit({"type": "completion_audit", **completion})
-        await emit({"type": "stage_done", "stage": "agent_loop", "status": "completed"})
+        await emit(
+            {
+                "type": "stage_done",
+                "stage": "agent_loop",
+                "status": "completed",
+                "iterations": iteration_count,
+                "max_iterations": max_iterations,
+            }
+        )
     return outcome

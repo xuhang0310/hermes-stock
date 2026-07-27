@@ -1,17 +1,86 @@
 {
   "chat_modes": ["research", "stock"],
-  "roles": ["research-analyst", "stock-pm"],
+  "roles": [],
   "default_roles": ["research-analyst", "stock-pm"],
   "triggers": ["深度研究", "深研", "公司研究", "完整复盘", "投资逻辑", "研究备忘录", "全面分析", "首次覆盖"],
-  "tool_names": ["get_analysis_context", "get_stock_info", "search_knowledge", "search_stock_news"],
+  "tool_names": [
+    "get_company_research_bundle",
+    "get_latest_price",
+    "get_daily_history",
+    "get_limit_list",
+    "get_stock_info",
+    "get_income",
+    "get_balancesheet",
+    "get_cashflow",
+    "get_anns",
+    "search_stock_news",
+    "get_capital_flow",
+    "get_margin_detail",
+    "get_chip_distribution",
+    "search_knowledge"
+  ],
   "criteria": [
     {
-      "code": "research.context",
-      "description": "取得可支撑公司研究的市场、财务、知识库或事件上下文。",
-      "tool_names": ["get_analysis_context", "get_stock_info", "search_knowledge", "search_stock_news"],
-      "validation_profile": "research_context",
+      "code": "company.market",
+      "description": "取得目标证券带交易日期和时效状态的最新行情及异常涨跌时间线。",
+      "tool_names": ["get_company_research_bundle", "get_latest_price", "get_daily_history", "get_limit_list"],
+      "validation_profile": "company_market",
+      "max_age_days": 3
+    },
+    {
+      "code": "company.financial",
+      "description": "取得明确报告期的利润表、资产负债表、现金流量表和财务质量趋势。",
+      "tool_names": ["get_company_research_bundle", "get_stock_info", "get_income", "get_balancesheet", "get_cashflow"],
+      "validation_profile": "company_financial",
+      "max_age_days": 550
+    },
+    {
+      "code": "company.valuation",
+      "description": "取得带交易日期的PE、PB、PS或市值等估值证据。",
+      "tool_names": ["get_company_research_bundle", "get_stock_info"],
+      "validation_profile": "company_valuation",
+      "max_age_days": 7
+    },
+    {
+      "code": "company.events",
+      "description": "核验近期公告和新闻，并建立带发布日期、来源的事件时间线。",
+      "tool_names": ["get_company_research_bundle", "get_anns", "search_stock_news"],
+      "validation_profile": "company_events",
+      "max_age_days": 30
+    },
+    {
+      "code": "company.technical",
+      "description": "取得足够长度的价格序列、量价结构、关键位和异常波动记录。",
+      "tool_names": ["get_company_research_bundle", "get_daily_history", "get_limit_list"],
+      "validation_profile": "company_technical",
+      "max_age_days": 7
+    },
+    {
+      "code": "company.capital",
+      "description": "取得带日期和口径的资金流、两融、筹码或龙虎榜证据。",
+      "tool_names": ["get_company_research_bundle", "get_capital_flow", "get_margin_detail", "get_chip_distribution"],
+      "validation_profile": "company_capital",
+      "max_age_days": 30
+    },
+    {
+      "code": "company.counter_evidence",
+      "description": "取得至少一项可验证的反方证据、风险事实或明确的数据缺口。",
+      "tool_names": ["get_company_research_bundle", "get_anns", "search_stock_news", "search_knowledge"],
+      "validation_profile": "company_counter_evidence",
       "max_age_days": 550
     }
   ],
-  "output_contract": ["研究问题", "事实与观点", "财务和估值", "事件与市场预期", "反方论证", "催化与风险", "失效条件"]
+  "output_contract": [
+    "执行摘要",
+    "数据截止日期",
+    "公司画像",
+    "行情与事件时间线",
+    "财务质量与估值",
+    "技术量价与资金",
+    "多维决策矩阵",
+    "最强反方论证",
+    "至少两种条件化方案",
+    "风险、失效条件和数据缺口",
+    "来源清单"
+  ]
 }
