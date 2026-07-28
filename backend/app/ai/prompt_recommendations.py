@@ -5,11 +5,10 @@ import contextlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -102,18 +101,34 @@ def recommendation_out(row: AiPromptRecommendation) -> dict[str, Any]:
         "source_type": row.source_type,
         "score": row.score,
         "status": row.status,
-        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "expires_at": _utc_iso(row.expires_at),
+        "updated_at": _utc_iso(row.updated_at),
     }
 
 
-def active_recommendations(db: Session, user_id: int, digital_human_id: int, limit: int = 6) -> list[AiPromptRecommendation]:
-    now = datetime.now()
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    return value.replace(tzinfo=timezone.utc).isoformat() if value else None
+
+
+def active_recommendations(
+    db: Session,
+    user_id: int,
+    digital_human_id: int,
+    limit: int = 6,
+    *,
+    chat_mode: str = "research",
+) -> list[AiPromptRecommendation]:
+    now = _utcnow()
     return db.scalars(
         select(AiPromptRecommendation)
         .where(
             AiPromptRecommendation.user_id == user_id,
             AiPromptRecommendation.digital_human_id == digital_human_id,
+            AiPromptRecommendation.chat_mode == chat_mode,
             AiPromptRecommendation.status == "active",
             (AiPromptRecommendation.expires_at.is_(None) | (AiPromptRecommendation.expires_at > now)),
         )
@@ -130,20 +145,48 @@ def refresh_recommendations_for_user_profile(
     chat_mode: str = "research",
 ) -> list[AiPromptRecommendation]:
     """为一个用户+数字人组合刷新推荐（LLM 驱动，失败时走 fallback）。"""
-    context = _collect_context(db, user_id=user_id, digital_human_id=profile.id, chat_mode=chat_mode)
-    candidates = _build_candidates(profile, context)
-    if not candidates:
-        candidates = _fallback_candidates(profile)
+    return _refresh_recommendations(
+        db,
+        user_id=user_id,
+        profile=profile,
+        chat_mode=chat_mode,
+        context_digital_human_id=profile.id,
+    )
 
-    now = datetime.now()
-    expires_at = now + timedelta(hours=RECOMMENDATION_TTL_HOURS)
+
+def _refresh_recommendations(
+    db: Session,
+    *,
+    user_id: int,
+    profile: DigitalHumanProfile,
+    chat_mode: str,
+    context_digital_human_id: int | None,
+) -> list[AiPromptRecommendation]:
+    now = _utcnow()
     existing = db.scalars(
         select(AiPromptRecommendation).where(
             AiPromptRecommendation.user_id == user_id,
             AiPromptRecommendation.digital_human_id == profile.id,
+            AiPromptRecommendation.chat_mode == chat_mode,
             AiPromptRecommendation.status == "active",
         )
     ).all()
+    context = _collect_context(
+        db,
+        user_id=user_id,
+        digital_human_id=context_digital_human_id,
+        chat_mode=chat_mode,
+    )
+    candidates = _build_candidates(
+        profile,
+        context,
+        avoid_prompts=[row.prompt_text for row in existing],
+        refresh_token=now.isoformat(timespec="seconds"),
+    )
+    if not candidates:
+        candidates = _fallback_candidates(profile)
+
+    expires_at = now + timedelta(hours=RECOMMENDATION_TTL_HOURS)
     for row in existing:
         row.status = "expired"
 
@@ -167,8 +210,18 @@ def refresh_recommendations_for_user_profile(
         db.commit()
     except IntegrityError:
         db.rollback()
-        return active_recommendations(db, user_id, profile.id)
-    return active_recommendations(db, user_id, profile.id)
+        return active_recommendations(
+            db,
+            user_id,
+            profile.id,
+            chat_mode=chat_mode,
+        )
+    return active_recommendations(
+        db,
+        user_id,
+        profile.id,
+        chat_mode=chat_mode,
+    )
 
 
 def schedule_recommendation_refresh(
@@ -182,8 +235,22 @@ def schedule_recommendation_refresh(
         asyncio.to_thread(_refresh_one_in_new_session, user_id, profile_id, chat_mode)
     )
     _refresh_tasks.add(task)
-    task.add_done_callback(_refresh_tasks.discard)
+    task.add_done_callback(_recommendation_refresh_done)
     return task
+
+
+def _recommendation_refresh_done(task: asyncio.Task[None]) -> None:
+    _refresh_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log_event(
+            "agent",
+            "ERROR",
+            f"推荐问题后台任务异常退出: {str(exc)[:300]}",
+            to_db=False,
+        )
 
 
 def _refresh_one_in_new_session(user_id: int, profile_id: int, chat_mode: str) -> None:
@@ -215,63 +282,80 @@ def refresh_recommendations_for_stock(db: Session, *, user_id: int) -> list[AiPr
     逐字对齐。
     """
     profile = ensure_ask_stock_profile(db)
-    context = _collect_context(db, user_id=user_id, digital_human_id=None, chat_mode="stock")
-    candidates = _build_candidates(profile, context)
-    if not candidates:
-        candidates = _fallback_candidates(profile)
-
-    now = datetime.now()
-    expires_at = now + timedelta(hours=RECOMMENDATION_TTL_HOURS)
-    existing = db.scalars(
-        select(AiPromptRecommendation).where(
-            AiPromptRecommendation.user_id == user_id,
-            AiPromptRecommendation.digital_human_id == profile.id,
-            AiPromptRecommendation.chat_mode == "stock",
-            AiPromptRecommendation.status == "active",
-        )
-    ).all()
-    for row in existing:
-        row.status = "expired"
-
-    rows: list[AiPromptRecommendation] = []
-    for candidate in _dedupe_candidates(candidates)[:MAX_RECOMMENDATIONS]:
-        row = AiPromptRecommendation(
-            user_id=user_id,
-            digital_human_id=profile.id,
-            digital_human_code=profile.code,
-            chat_mode="stock",
-            prompt_text=candidate.text[:500],
-            reason=candidate.reason,
-            source_type=candidate.source_type,
-            score=candidate.score,
-            status="active",
-            expires_at=expires_at,
-        )
-        db.add(row)
-        rows.append(row)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        return active_recommendations(db, user_id, profile.id)
-    return active_recommendations(db, user_id, profile.id)
+    return _refresh_recommendations(
+        db,
+        user_id=user_id,
+        profile=profile,
+        chat_mode="stock",
+        context_digital_human_id=None,
+    )
 
 
 def refresh_all_recommendations(db: Session) -> int:
-    users = db.scalars(select(User).where(User.is_enabled.is_(True))).all()
-    profiles = db.scalars(
-        select(DigitalHumanProfile)
-        .where(DigitalHumanProfile.status == "enabled")
-        .order_by(DigitalHumanProfile.sort_order, DigitalHumanProfile.id)
+    """补偿刷新有新对话但推荐尚未更新的会话，避免全用户、全角色轮询 LLM。"""
+    since = _utcnow() - timedelta(days=7)
+    conversations = db.execute(
+        select(
+            AiChatSession.user_id,
+            AiChatSession.digital_human_id,
+            AiChatSession.chat_mode,
+            func.max(AiChatMessage.created_at).label("last_message_at"),
+        )
+        .join(AiChatMessage, AiChatMessage.session_id == AiChatSession.id)
+        .where(
+            AiChatSession.status == "active",
+            AiChatSession.chat_mode.in_(("research", "stock")),
+            AiChatMessage.created_at >= since,
+        )
+        .group_by(
+            AiChatSession.user_id,
+            AiChatSession.digital_human_id,
+            AiChatSession.chat_mode,
+        )
     ).all()
+    enabled_users = set(
+        db.scalars(select(User.id).where(User.is_enabled.is_(True))).all()
+    )
+    ask_stock_profile = ensure_ask_stock_profile(db)
     count = 0
-    for user in users:
-        for profile in profiles:
-            if profile.code == ASK_STOCK_PROFILE_CODE:
-                refresh_recommendations_for_stock(db, user_id=user.id)
-            else:
-                refresh_recommendations_for_user_profile(db, user_id=user.id, profile=profile)
-            count += 1
+    for user_id, digital_human_id, chat_mode, last_message_at in conversations:
+        if user_id not in enabled_users or last_message_at is None:
+            continue
+        if chat_mode == "stock":
+            profile = ask_stock_profile
+        elif digital_human_id:
+            profile = db.get(DigitalHumanProfile, digital_human_id)
+            if profile is None or profile.status != "enabled":
+                continue
+        else:
+            continue
+
+        latest_recommendation = db.scalar(
+            select(AiPromptRecommendation).where(
+                AiPromptRecommendation.user_id == user_id,
+                AiPromptRecommendation.digital_human_id == profile.id,
+                AiPromptRecommendation.chat_mode == chat_mode,
+                AiPromptRecommendation.status == "active",
+            )
+            .order_by(desc(AiPromptRecommendation.updated_at), desc(AiPromptRecommendation.id))
+            .limit(1)
+        )
+        if (
+            latest_recommendation
+            and latest_recommendation.source_type != "fallback"
+            and latest_recommendation.updated_at >= last_message_at
+        ):
+            continue
+        if chat_mode == "stock":
+            refresh_recommendations_for_stock(db, user_id=user_id)
+        else:
+            refresh_recommendations_for_user_profile(
+                db,
+                user_id=user_id,
+                profile=profile,
+                chat_mode=chat_mode,
+            )
+        count += 1
     return count
 
 
@@ -311,8 +395,13 @@ async def _scheduler_loop() -> None:
     while True:
         try:
             await asyncio.to_thread(_refresh_all_in_new_session)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                "agent",
+                "ERROR",
+                f"推荐问题定时补偿刷新失败: {str(exc)[:300]}",
+                to_db=False,
+            )
         await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 
@@ -331,7 +420,7 @@ def _collect_context(db: Session, *, user_id: int, digital_human_id: int | None,
 
     digital_human_id 为 None 时按 chat_mode 过滤会话（问股 stock 会话不绑 profile）。
     """
-    since = datetime.now() - timedelta(days=30)
+    since = _utcnow() - timedelta(days=30)
     session_filters = [
         AiChatSession.user_id == user_id,
         AiChatSession.chat_mode == chat_mode,
@@ -361,7 +450,10 @@ def _collect_context(db: Session, *, user_id: int, digital_human_id: int | None,
     positions = db.execute(
         select(Position, Instrument.name)
         .outerjoin(Instrument, Instrument.symbol == Position.symbol)
-        .where(Position.status == "open")
+        .where(
+            Position.owner_user_id == user_id,
+            Position.status == "open",
+        )
         .order_by(desc(Position.position_pct), desc(Position.updated_at))
         .limit(20)
     ).all()
@@ -369,7 +461,10 @@ def _collect_context(db: Session, *, user_id: int, digital_human_id: int | None,
         select(WatchlistItem, Instrument.name, WatchlistGroup.name)
         .outerjoin(Instrument, Instrument.symbol == WatchlistItem.symbol)
         .outerjoin(WatchlistGroup, WatchlistGroup.id == WatchlistItem.group_id)
-        .where(WatchlistItem.status == "active")
+        .where(
+            WatchlistItem.owner_user_id == user_id,
+            WatchlistItem.status == "active",
+        )
         .order_by(desc(WatchlistItem.updated_at))
         .limit(20)
     ).all()
@@ -408,8 +503,14 @@ def _collect_context(db: Session, *, user_id: int, digital_human_id: int | None,
         "symbols": symbols[:8],
         "positions": position_rows,
         "watchlist": watch_rows,
-        "risks": [{"symbol": s, "level": l, "type": t, "finding": f} for s, l, t, f in risks],
-        "events": [{"symbol": s, "level": l, "title": t} for s, l, t in events],
+        "risks": [
+            {"symbol": symbol, "level": level, "type": risk_type, "finding": finding}
+            for symbol, level, risk_type, finding in risks
+        ],
+        "events": [
+            {"symbol": symbol, "level": level, "title": title}
+            for symbol, level, title in events
+        ],
     }
 
 
@@ -418,11 +519,22 @@ def _collect_context(db: Session, *, user_id: int, digital_human_id: int | None,
 # ---------------------------------------------------------------------------
 
 
-def _build_candidates(profile: DigitalHumanProfile, context: dict[str, Any]) -> list[CandidatePrompt]:
+def _build_candidates(
+    profile: DigitalHumanProfile,
+    context: dict[str, Any],
+    *,
+    avoid_prompts: list[str] | None = None,
+    refresh_token: str | None = None,
+) -> list[CandidatePrompt]:
     """使用 LLM 分析对话历史并生成推荐。无对话或 LLM 失败时返回空列表。"""
     if not context["messages"]:
         return []
-    return _call_llm_for_recommendations(profile, context)
+    return _call_llm_for_recommendations(
+        profile,
+        context,
+        avoid_prompts=avoid_prompts,
+        refresh_token=refresh_token,
+    )
 
 
 def _fallback_candidates(profile: DigitalHumanProfile) -> list[CandidatePrompt]:
@@ -450,6 +562,9 @@ def _fallback_candidates(profile: DigitalHumanProfile) -> list[CandidatePrompt]:
 def _call_llm_for_recommendations(
     profile: DigitalHumanProfile,
     context: dict[str, Any],
+    *,
+    avoid_prompts: list[str] | None = None,
+    refresh_token: str | None = None,
 ) -> list[CandidatePrompt]:
     """调用 LLM 分析对话并生成推荐。失败返回空列表。"""
     try:
@@ -458,17 +573,39 @@ def _call_llm_for_recommendations(
             log_event("agent", "WARNING", "LLM 推荐跳过：未配置 API Key/Base URL", to_db=False)
             return []
 
-        messages = _build_llm_messages(profile, context)
-        data = chat_completion(messages, llm_config, temperature=0)
+        messages = _build_llm_messages(
+            profile,
+            context,
+            avoid_prompts=avoid_prompts,
+            refresh_token=refresh_token,
+        )
+        # 不覆盖模型自身温度。部分模型（如 k3）只允许 temperature=1。
+        data = chat_completion(
+            messages,
+            llm_config,
+            temperature=None,
+            log_module="prompt_recommendations",
+        )
         content = data["choices"][0]["message"]["content"]
         parsed = _extract_json(content)
         return _parse_llm_response(parsed)
-    except Exception:
-        log_event("agent", "WARNING", "LLM 推荐生成失败，将使用 fallback", to_db=False)
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            "agent",
+            "WARNING",
+            f"LLM 推荐生成失败，将使用 fallback: {str(exc)[:300]}",
+            to_db=False,
+        )
         return []
 
 
-def _build_llm_messages(profile: DigitalHumanProfile, context: dict[str, Any]) -> list[dict[str, str]]:
+def _build_llm_messages(
+    profile: DigitalHumanProfile,
+    context: dict[str, Any],
+    *,
+    avoid_prompts: list[str] | None = None,
+    refresh_token: str | None = None,
+) -> list[dict[str, str]]:
     """构建发送给 LLM 的消息（system + user）。"""
     system_prompt = (
         "你是一个用户意图分析专家，为股票研究平台的用户生成个性化后续提问推荐。\n"
@@ -512,6 +649,11 @@ def _build_llm_messages(profile: DigitalHumanProfile, context: dict[str, Any]) -
     for e in context["events"][:10]:
         ev_lines.append(f"  [{e['level']}] {e['symbol']} {e['title']}")
 
+    previous_lines = [
+        f"  - {text[:150]}"
+        for text in (avoid_prompts or [])
+        if text and text.strip()
+    ]
     user_message = (
         f"【当前角色】\n"
         f"名称：{profile.name}\n"
@@ -529,6 +671,12 @@ def _build_llm_messages(profile: DigitalHumanProfile, context: dict[str, Any]) -
         f"\n"
         f"【最近系统事件】\n"
         f"{chr(10).join(ev_lines) if ev_lines else '（暂无事件）'}\n"
+        f"\n"
+        f"【上一批推荐，本次禁止原样重复】\n"
+        f"{chr(10).join(previous_lines) if previous_lines else '（首次生成）'}\n"
+        f"刷新批次：{refresh_token or 'initial'}\n"
+        f"\n"
+        f"本次必须结合最新对话重新选择角度，推荐文本不得与上一批原样相同。\n"
         f"\n"
         f"请分析并生成推荐。只输出如下 JSON：\n"
         f'{{"analysis":{{"focus_symbols":["代码"],"topics":["主题"],"unresolved":["未解决问题"],"gaps":["研究缺口"]}},'
@@ -557,13 +705,17 @@ def _extract_json(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # 从最外层 { } 中提取
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
+    # 从第一个可独立解码的 JSON 对象开始解析，避免贪婪正则吞掉多个对象。
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
         try:
-            return json.loads(m.group(0))  # type: ignore[no-any-return]
+            value, _ = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
-            pass
+            continue
+        if isinstance(value, dict):
+            return value
 
     raise ValueError(f"无法从 LLM 响应中提取 JSON，原始文本前 200 字符：{text[:200]}")
 

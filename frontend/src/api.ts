@@ -261,6 +261,13 @@ async function durableAgentStreamRequest(
     }
     if (!createdRun) throw createError instanceof Error ? createError : new Error('Agent task could not be created.')
 
+    // Bind the UI to the canonical session immediately. The persisted stream
+    // also contains this event, so consumers remain compatible when resuming.
+    onEvent({
+      type: 'session',
+      run_id: createdRun.run_id,
+      session_id: createdRun.session_id
+    })
     await consumeAgentRunEvents(createdRun.run_id, onEvent, signal)
   } catch (error) {
     if (signal?.aborted && createdRun) await cancelAgentRunQuietly(createdRun.run_id)

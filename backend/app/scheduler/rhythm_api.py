@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -29,8 +29,17 @@ from backend.app.core.settings import settings
 
 
 router = APIRouter(prefix="/api", tags=["rhythm"])
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 VALID_DIGITAL_HUMAN_CODES = set(DH_TO_AGENT)
+
+
+def _shanghai_iso(value: datetime | None) -> str | None:
+    return value.replace(tzinfo=SHANGHAI_TZ).isoformat() if value else None
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    return value.replace(tzinfo=timezone.utc).isoformat() if value else None
 
 
 class NotifyChannelIn(BaseModel):
@@ -237,7 +246,7 @@ def _job_out(job: ScheduledJob) -> dict:
         "job_kind": job.job_kind,
         "schedule_type": job.schedule_type,
         "run_time": job.run_time,
-        "run_once_at": job.run_once_at.isoformat() if job.run_once_at else None,
+        "run_once_at": _shanghai_iso(job.run_once_at),
         "timezone": job.timezone,
         "weekday_mask": job.weekday_mask,
         "interval_minutes": job.interval_minutes,
@@ -254,10 +263,10 @@ def _job_out(job: ScheduledJob) -> dict:
         "allow_code_execution": bool(job.allow_code_execution),
         "enabled": job.enabled,
         "sort_order": job.sort_order,
-        "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
+        "last_run_at": _shanghai_iso(job.last_run_at),
         "last_status": job.last_status,
         "last_error": job.last_error,
-        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "updated_at": _utc_iso(job.updated_at),
     }
 
 
@@ -273,14 +282,14 @@ def _run_out(
         "job_name": job_name,
         "trigger_type": run.trigger_type,
         "status": run.status,
-        "started_at": run.started_at.isoformat() if run.started_at else None,
-        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "started_at": _shanghai_iso(run.started_at),
+        "finished_at": _shanghai_iso(run.finished_at),
         "duration_ms": run.duration_ms,
         "report_id": run.report_id,
         "notification_id": run.notification_id,
         "output_preview": run.output_preview,
         "error": run.error,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "created_at": _utc_iso(run.created_at),
     }
     if output_content is not None:
         payload["output_content"] = output_content
@@ -620,7 +629,7 @@ def schedule_status(
     counts = {"success": 0, "failed": 0, "running": 0}
     for status_value, total in db.execute(
         select(JobRun.status, func.count())
-        .where(JobRun.created_at >= today_start)
+        .where(JobRun.started_at >= today_start)
         .group_by(JobRun.status)
     ).all():
         counts[status_value] = total
@@ -629,9 +638,9 @@ def schedule_status(
     return {
         "scheduler_enabled": settings.scheduler_enabled,
         "scheduler_alive": alive,
-        "heartbeat_at": heartbeat_at.isoformat() if heartbeat_at else None,
+        "heartbeat_at": _shanghai_iso(heartbeat_at),
         "is_trading_day": is_trading_day(now.date()),
-        "server_time": now.isoformat(),
+        "server_time": _shanghai_iso(now),
         "today": counts,
         "notify_channel": {
             "name": channel.name if channel else "飞书任务群",

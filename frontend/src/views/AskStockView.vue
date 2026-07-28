@@ -60,6 +60,8 @@ type ChatMessage = {
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
   startedAt?: number
   durationMs?: number
+  terminalDurationMs?: number
+  streamFinalized?: boolean
   processExpanded?: boolean
   processAutoCollapsed?: boolean
 }
@@ -85,6 +87,7 @@ const quickQuestions = [
 const promptRecommendations = ref<PromptRecommendation[]>([])
 const fallbackPrompts = ref<string[]>([])
 const loadingPrompts = ref(false)
+const promptRefreshFeedback = ref('')
 
 const displayedPrompts = computed(() => {
   const rows: Array<{ id?: number; text: string; reason?: string | null; source: 'dynamic' | 'fallback' }> = []
@@ -253,10 +256,17 @@ async function loadStockRecommendations() {
 async function refreshStockRecommendations() {
   if (sending.value) return
   loadingPrompts.value = true
+  promptRefreshFeedback.value = ''
   try {
+    const previous = new Set(promptRecommendations.value.map((item) => item.prompt_text.trim()))
     const payload = await api.refreshStockPromptRecommendations()
     promptRecommendations.value = payload.items
     fallbackPrompts.value = payload.fallback_prompts
+    const changed = payload.items.some((item) => !previous.has(item.prompt_text.trim()))
+    promptRefreshFeedback.value = changed ? '推荐已更新' : '内容暂无变化'
+    window.setTimeout(() => {
+      promptRefreshFeedback.value = ''
+    }, 1800)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '刷新推荐失败'
   } finally {
@@ -443,9 +453,12 @@ function finishStreamDuration(message: ChatMessage, durationMs?: number) {
   message.durationMs = elapsedStreamMilliseconds(message.startedAt)
 }
 
-function completeStream(message: ChatMessage, durationMs?: number) {
-  finishStreamDuration(message, durationMs)
-  message.streamStatus = 'done'
+function finalizeStream(message: ChatMessage, outcome: 'done' | 'aborted' | 'error') {
+  finishStreamDuration(message, message.terminalDurationMs)
+  if (message.streamFinalized) return
+  message.streamFinalized = true
+  message.streamStatus = outcome === 'error' ? 'error' : 'done'
+  if (outcome === 'error') return
   if (!message.processAutoCollapsed) {
     message.processExpanded = false
     message.processAutoCollapsed = true
@@ -458,7 +471,7 @@ function releaseComposer(controller: AbortController) {
   sending.value = false
 }
 
-function handleRunEvent(reply: ChatMessage, controller: AbortController, event: AgentStreamEvent) {
+function handleRunEvent(reply: ChatMessage, event: AgentStreamEvent) {
   if (event.type === 'session') {
     selectedSessionId.value = event.session_id || selectedSessionId.value
     return
@@ -494,7 +507,6 @@ function handleRunEvent(reply: ChatMessage, controller: AbortController, event: 
     if (event.role === 'answer') {
       reply.content = reply.liveContent.trim()
       reply.liveContent = ''
-      completeStream(reply)
     } else {
       flushThought(reply)
       reply.streamStatus = 'tooling'
@@ -543,18 +555,12 @@ function handleRunEvent(reply: ChatMessage, controller: AbortController, event: 
     reply.liveTool = null
     reply.error = event.content || '问股响应失败'
     reply.streamStatus = 'error'
-    finishStreamDuration(reply)
     pushStep(reply, { type: 'error', content: reply.error })
     error.value = reply.error
   } else if (event.type === 'done') {
     reply.liveTool = null
-    if (reply.error) {
-      reply.streamStatus = 'error'
-      finishStreamDuration(reply, event.duration_ms)
-    } else {
-      completeStream(reply, event.duration_ms)
-    }
-    releaseComposer(controller)
+    reply.terminalDurationMs = event.duration_ms
+    reply.streamStatus = reply.error ? 'error' : 'done'
   }
   scrollChat()
 }
@@ -663,7 +669,7 @@ async function send() {
         attachments: sentAttachments.map((item) => ({ path: item.path })),
         approval_policy: approvalPolicy.value
       },
-      (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
+      (event: AgentStreamEvent) => handleRunEvent(reply, event),
       controller.signal
     )
     // 收尾：优先保住已产出内容（有半截答案就转正）；只有从头到尾什么都没收到才提示重试，
@@ -676,9 +682,6 @@ async function send() {
       const gotNothing = !reply.content && !reply.liveContent.trim() && !hasVisibleAssistantWork(reply)
       if (gotNothing) {
         reply.error = '回复未完成，请重试。'
-        reply.streamStatus = 'error'
-      } else {
-        completeStream(reply)
       }
     }
     nextTick(() => { refreshSessions().catch(() => {}) })
@@ -686,23 +689,21 @@ async function send() {
     if (controller.signal.aborted) {
       // 用户主动点了“停止”：保留已经收到的内容，不当作错误
       flushReasoning(reply)
-      flushThought(reply)
       reply.liveTool = null
       if (reply.liveContent) {
         reply.content = reply.liveContent.trim()
         reply.liveContent = ''
       }
-      completeStream(reply)
     } else {
       reply.error = err instanceof Error ? err.message : '发送失败'
-      reply.streamStatus = 'error'
-      finishStreamDuration(reply)
       error.value = reply.error
     }
   } finally {
+    finalizeStream(
+      reply,
+      reply.error ? 'error' : controller.signal.aborted ? 'aborted' : 'done'
+    )
     releaseComposer(controller)
-    if (!reply.error) completeStream(reply)
-    else finishStreamDuration(reply)
     scrollChat()
   }
 }
@@ -741,30 +742,32 @@ async function recoverActiveRun() {
     try {
       await api.resumeAgentRun(
         run.run_id,
-        (event: AgentStreamEvent) => handleRunEvent(reply, controller, event),
+        (event: AgentStreamEvent) => handleRunEvent(reply, event),
         controller.signal
       )
       if (!reply.content && reply.liveContent.trim()) {
         reply.content = reply.liveContent.trim()
         reply.liveContent = ''
       }
-      if (!reply.error) completeStream(reply)
       nextTick(() => { refreshSessions().catch(() => {}) })
     } catch (err) {
       if (controller.signal.aborted) {
         flushReasoning(reply)
-        flushThought(reply)
         reply.liveTool = null
-        completeStream(reply)
+        if (reply.liveContent) {
+          reply.content = reply.liveContent.trim()
+          reply.liveContent = ''
+        }
       } else {
         reply.error = err instanceof Error ? err.message : '恢复问股任务失败'
-        reply.streamStatus = 'error'
-        finishStreamDuration(reply)
         error.value = reply.error
       }
     } finally {
+      finalizeStream(
+        reply,
+        reply.error ? 'error' : controller.signal.aborted ? 'aborted' : 'done'
+      )
       releaseComposer(controller)
-      if (!reply.error) completeStream(reply)
       scrollChat()
     }
   } catch {
@@ -901,7 +904,7 @@ onMounted(async () => {
             {{ prompt.text }}
           </button>
           <button type="button" :disabled="sending || loadingPrompts" @click="refreshStockRecommendations">
-            {{ loadingPrompts ? '推荐生成中' : '刷新推荐' }}
+            {{ loadingPrompts ? '推荐生成中' : (promptRefreshFeedback || '刷新推荐') }}
           </button>
         </div>
       </section>

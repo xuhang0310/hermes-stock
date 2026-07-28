@@ -1919,7 +1919,7 @@ def prompt_recommendations(
         raise HTTPException(status_code=404, detail="数字人不存在或已停用")
     if not _profile_allowed(profile, context):
         raise HTTPException(status_code=403, detail="当前账号不能使用该数字人")
-    rows = active_recommendations(db, context.user.id, profile.id, limit=6)
+    rows = active_recommendations(db, context.user.id, profile.id, limit=6, chat_mode="research")
     if not rows:
         rows = refresh_recommendations_for_user_profile(db, user_id=context.user.id, profile=profile)
     return {
@@ -1961,7 +1961,7 @@ def stock_prompt_recommendations(
 ) -> dict:
     """问股（stock 模式）推荐 prompt：复用问股虚拟 profile，会话历史按 chat_mode=stock 过滤。"""
     profile = ensure_ask_stock_profile(db)
-    rows = active_recommendations(db, context.user.id, profile.id, limit=6)
+    rows = active_recommendations(db, context.user.id, profile.id, limit=6, chat_mode="stock")
     if not rows:
         rows = refresh_recommendations_for_stock(db, user_id=context.user.id)
     return {
