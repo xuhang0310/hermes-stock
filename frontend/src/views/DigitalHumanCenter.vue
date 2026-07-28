@@ -114,6 +114,8 @@ const loadingSession = ref(false)
 const loadingPrompts = ref(false)
 const error = ref('')
 const chatScroll = ref<HTMLElement | null>(null)
+const mobileRailOpen = ref(false)
+function closeMobileRail() { mobileRailOpen.value = false }
 
 function pasteIntoComposer(event: ClipboardEvent) {
   if (selectedSessionReadOnly.value) return
@@ -250,6 +252,7 @@ function selectSessionDetail(detail: AgentSessionDetail, sessionMessages: ChatMe
 }
 
 async function openSession(id: number) {
+  closeMobileRail()
   error.value = ''
   const activeRequest = activeRequests.get(sessionKey(id))
   if (activeRequest) {
@@ -646,6 +649,7 @@ function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: A
 }
 
 async function send() {
+  closeMobileRail()
   if (selectedSessionReadOnly.value) {
     error.value = `${selectedSessionSourceLabel.value}会话为只读。`
     return
@@ -912,7 +916,7 @@ function requestIsVisible(request: ActiveChatRequest) {
   <FeishuBotPanel v-if="activeCenterTab === 'feishuBots'" />
 
   <section v-else class="digital-center">
-    <aside class="session-rail page-section">
+    <aside class="session-rail page-section" :class="{ 'rail-mobile-visible': mobileRailOpen }">
       <header class="section-header">
         <div>
           <h2>历史会话</h2>
@@ -965,6 +969,7 @@ function requestIsVisible(request: ActiveChatRequest) {
     </aside>
 
     <main class="chat-workspace page-section">
+      <button type="button" class="chat-rail-toggle" :aria-expanded="mobileRailOpen" aria-label="切换会话列表" @click="mobileRailOpen = !mobileRailOpen">≡</button>
       <section v-if="selectedProfile" class="persona-strip">
         <div>
           <strong>{{ selectedProfile.name }}</strong>
@@ -1133,6 +1138,8 @@ function requestIsVisible(request: ActiveChatRequest) {
       </form>
       <p v-if="error" class="chat-page-error">{{ error }}</p>
     </main>
+
+    <div v-if="mobileRailOpen" class="rail-mobile-overlay" @click="closeMobileRail"></div>
   </section>
   </div>
 </template>

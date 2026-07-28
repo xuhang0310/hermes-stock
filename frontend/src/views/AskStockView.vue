@@ -126,6 +126,8 @@ const abortController = ref<AbortController | null>(null)
 const loadingSession = ref(false)
 const error = ref('')
 const chatScroll = ref<HTMLElement | null>(null)
+const mobileRailOpen = ref(false)
+function closeMobileRail() { mobileRailOpen.value = false }
 const maxSelectedStrategies = 3
 
 function pasteIntoComposer(event: ClipboardEvent) {
@@ -193,6 +195,7 @@ async function refreshSessions() {
 }
 
 async function openSession(id: number) {
+  closeMobileRail()
   if (sending.value) return
   error.value = ''
   loadingSession.value = true
@@ -615,6 +618,7 @@ function flushThought(reply: ChatMessage) {
 }
 
 async function send() {
+  closeMobileRail()
   const enteredText = question.value.trim()
   const sentAttachments = pendingAttachments.value.map(({ preview_url: _preview, ...item }) => item)
   if ((!enteredText && !sentAttachments.length) || sending.value) return
@@ -815,7 +819,7 @@ onMounted(async () => {
 
 <template>
   <section class="stock-chat-page">
-    <aside class="session-rail page-section stock-session-rail">
+    <aside class="session-rail page-section stock-session-rail" :class="{ 'rail-mobile-visible': mobileRailOpen }">
       <header class="section-header">
         <div>
           <h2>历史问股</h2>
@@ -881,6 +885,7 @@ onMounted(async () => {
     </aside>
 
     <main class="chat-workspace page-section">
+      <button type="button" class="chat-rail-toggle" :aria-expanded="mobileRailOpen" aria-label="切换会话列表" @click="mobileRailOpen = !mobileRailOpen">≡</button>
       <section class="persona-strip">
         <div>
           <strong>问股助手</strong>
@@ -1048,5 +1053,7 @@ onMounted(async () => {
       </form>
       <p v-if="error" class="chat-page-error">{{ error }}</p>
     </main>
+
+    <div v-if="mobileRailOpen" class="rail-mobile-overlay" @click="closeMobileRail"></div>
   </section>
 </template>

@@ -3236,6 +3236,8 @@ button.btn-stop:hover {
   font-size: 12px;
 }
 
+.chat-rail-toggle { display: none; }
+
 .chat-composer-command:hover,
 .chat-attachment-add:hover,
 .approval-policy-trigger:hover {
@@ -4262,12 +4264,17 @@ button.btn-stop:hover {
     height: auto;
   }
 
+  .stock-chat-page {
+    grid-template-columns: 1fr;
+  }
+
   .message-list {
     overflow: visible;
   }
 
   .chat-workspace {
     overflow: clip;
+    position: relative;
   }
 
   .pending-approval-dock {
@@ -4302,6 +4309,54 @@ button.btn-stop:hover {
 
   .position-agent-drawer {
     width: 100vw;
+  }
+}
+
+/* 移动端侧栏折叠：默认隐藏，切换按钮呼出为覆盖层 */
+@media (max-width: 820px) {
+  .chat-rail-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    left: auto;
+    z-index: 10;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface-2, #141317);
+    color: var(--text);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+  }
+  .chat-rail-toggle:hover { background: var(--surface-3, #1c1a22); }
+
+  .session-rail {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: min(85vw, 320px);
+    height: 100vh;
+    z-index: 100;
+    overflow-y: auto;
+    display: none;
+    background: var(--bg-1, #0a0a0b);
+    border-right: 1px solid var(--line);
+    box-shadow: 4px 0 20px rgba(0, 0, 0, 0.4);
+    padding: 54px 0 0 0;
+  }
+  .session-rail.rail-mobile-visible { display: grid; }
+
+  .rail-mobile-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
   }
 }
 
@@ -4409,6 +4464,59 @@ button.btn-stop:hover {
 
   .session-rail {
     max-height: 340px;
+  }
+}
+
+/* 手机端极致简化 */
+@media (max-width: 560px) {
+  .nav-list button span {
+    display: none;
+  }
+
+  .nav-list button {
+    padding: 8px;
+    min-width: 44px;
+    justify-content: center;
+  }
+
+  .chat-composer-toolbar {
+    gap: 4px;
+  }
+
+  .chat-composer-toolbar select {
+    min-width: 120px;
+    font-size: 12px;
+  }
+
+  .chat-composer-command,
+  .chat-composer-send,
+  .chat-attachment-add,
+  .approval-policy-trigger {
+    height: 32px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+
+  .quick-prompts {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+
+  .quick-prompts button {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 4px 8px;
+  }
+
+  .message {
+    font-size: 13px;
+  }
+
+  .message-list {
+    padding: 8px;
+    gap: 8px;
   }
 }
 
