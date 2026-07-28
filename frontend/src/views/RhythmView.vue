@@ -139,7 +139,7 @@ function weekdayText(mask: string | null | undefined) {
 }
 
 function scheduleText(job: ScheduleJob) {
-  if (job.schedule_type === 'once') return `一次 · ${beijingFromDb(job.run_once_at) || '-'}`
+  if (job.schedule_type === 'once') return `一次 · ${beijingFromDb(job.run_once_at)}`
   if (job.schedule_type === 'interval') {
     return `每 ${job.interval_minutes ?? '-'} 分钟 · ${job.window_start || '--:--'} 至 ${job.window_end || '--:--'}`
   }
