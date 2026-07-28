@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { ArtifactVersion, WorkspaceDoc } from '../types'
 import { beijingFromEpoch } from '../utils/datetime'
 
 const docs = ref<WorkspaceDoc[]>([])
+const page = ref(1)
+const pageSize = ref(20)
 const loading = ref(false)
+const listRef = ref<HTMLElement | null>(null)
 const error = ref('')
 const busyPath = ref<string | null>(null)
 const notice = ref('')
@@ -58,11 +61,25 @@ const stats = computed(() => {
   return { total: list.length, ingested, convo, size: fmtBytes(bytes) }
 })
 
+const totalPages = computed(() => Math.ceil(docs.value.length / pageSize.value) || 1)
+const paginatedDocs = computed(() =>
+  docs.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
+)
+
+function goPage(n: number) {
+  const target = Math.max(1, Math.min(n, totalPages.value))
+  if (target === page.value) return
+  page.value = target
+  nextTick(() => listRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+
 async function load() {
   loading.value = true
   error.value = ''
   try {
     docs.value = await api.workspaceDocuments()
+    const pages = Math.ceil(docs.value.length / pageSize.value) || 1
+    if (page.value > pages) page.value = pages
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -154,8 +171,8 @@ onMounted(load)
       还没有生成的文档。在数字人对话里让它生成研究/报告并写入文件，就会出现在这里。
     </div>
 
-    <div v-else class="wsd-list">
-      <article v-for="doc in docs" :key="doc.path" class="wsd-card">
+    <div v-else class="wsd-list" ref="listRef">
+      <article v-for="doc in paginatedDocs" :key="doc.path" class="wsd-card">
         <img class="wsd-ficon" :src="fileIcon(doc.path)" :alt="doc.name" />
 
 
@@ -220,6 +237,12 @@ onMounted(load)
           </div>
         </div>
       </article>
+    </div>
+
+    <div v-if="totalPages > 1" class="wsd-pager">
+      <button type="button" :disabled="page <= 1" @click="goPage(page - 1)">上一页</button>
+      <span>第 {{ page }} 页 / 共 {{ totalPages }} 页（{{ docs.length }} 篇）</span>
+      <button type="button" :disabled="page >= totalPages" @click="goPage(page + 1)">下一页</button>
     </div>
 
     <p class="wsd-foot"><i class="live"></i>文件系统实时同步 · 工作区共享目录</p>
@@ -342,6 +365,10 @@ onMounted(load)
 .wsd-version-row .invalid { color: var(--danger); }
 
 .wsd-foot { margin-top: 18px; color: var(--ink-mute); font-size: 11.5px; display: flex; align-items: center; gap: 8px; }
+.wsd-pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 18px; font-size: 13px; color: var(--ink-soft); }
+.wsd-pager button { border: 1px solid var(--line); background: rgba(213, 180, 106, 0.06); color: var(--gold-2); border-radius: 8px; padding: 7px 16px; font-size: 12.5px; cursor: pointer; }
+.wsd-pager button:hover:not(:disabled) { background: rgba(213, 180, 106, 0.12); border-color: var(--gold); }
+.wsd-pager button:disabled { opacity: 0.5; cursor: default; }
 .wsd-foot .live { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 
 @media (max-width: 820px) {
