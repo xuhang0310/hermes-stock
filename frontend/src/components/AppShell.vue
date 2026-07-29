@@ -32,6 +32,7 @@ const emit = defineEmits<{
 }>()
 
 const expandedMenu = ref<PageKey | null>(null)
+const mobileNavOpen = ref(false)
 
 const canViewRhythm = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
@@ -84,14 +85,17 @@ function isParentActive(item: NavItem): boolean {
 function handleParentClick(item: NavItem) {
   if (item.children) {
     expandedMenu.value = expandedMenu.value === item.key ? null : item.key
+    mobileNavOpen.value = false
     emit('navigate', item.children[0].key)
   } else {
     expandedMenu.value = null
+    mobileNavOpen.value = false
     emit('navigate', item.key)
   }
 }
 
 function handleChildClick(key: PageKey) {
+  mobileNavOpen.value = false
   emit('navigate', key)
 }
 </script>
@@ -109,7 +113,18 @@ function handleChildClick(key: PageKey) {
         </div>
       </div>
 
-      <nav class="nav-list">
+      <button
+        class="mobile-nav-toggle"
+        type="button"
+        :aria-label="mobileNavOpen ? '收起主导航' : '打开主导航'"
+        aria-controls="primary-navigation"
+        :aria-expanded="mobileNavOpen"
+        @click="mobileNavOpen = !mobileNavOpen"
+      >
+        <span aria-hidden="true">{{ mobileNavOpen ? '×' : '☰' }}</span>
+      </button>
+
+      <nav id="primary-navigation" class="nav-list" :class="{ 'mobile-open': mobileNavOpen }">
         <template v-for="item in navItems" :key="item.key">
           <!-- parent item -->
           <button
@@ -144,6 +159,13 @@ function handleChildClick(key: PageKey) {
         <span>{{ health?.ok ? 'MySQL 已连接' : '数据库待检查' }}</span>
       </div>
     </aside>
+    <button
+      v-if="mobileNavOpen"
+      class="mobile-nav-backdrop"
+      type="button"
+      aria-label="关闭主导航"
+      @click="mobileNavOpen = false"
+    ></button>
 
     <div class="main-frame">
       <header class="topbar">
@@ -152,9 +174,9 @@ function handleChildClick(key: PageKey) {
           <p>{{ pageSubtitle || '问股、数字人、持仓、自选池和模型配置统一入口' }}</p>
         </div>
         <div class="topbar-status">
-          <span>{{ user.display_name }}</span>
-          <span>{{ user.role }}</span>
-          <span>{{ health?.journal_mode ?? 'mysql' }}</span>
+          <span class="topbar-user">{{ user.display_name }}</span>
+          <span class="topbar-role">{{ user.role }}</span>
+          <span class="topbar-database">{{ health?.journal_mode ?? 'mysql' }}</span>
           <button type="button" @click="$emit('refresh')">刷新</button>
           <button type="button" @click="$emit('logout')">退出</button>
         </div>

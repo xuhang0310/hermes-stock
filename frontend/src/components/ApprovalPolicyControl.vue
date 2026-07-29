@@ -57,6 +57,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeFromOutsi
       type="button"
       :disabled="disabled"
       :aria-expanded="open"
+      :aria-label="`工具权限：${current.short}`"
       title="设置 Agent 工具权限策略"
       @click="open = !open"
     >

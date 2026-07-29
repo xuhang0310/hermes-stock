@@ -149,6 +149,35 @@ class PositionCorrectionTests(unittest.TestCase):
         self.assertEqual(refreshed["position_quantity"], 125)
         self.assertEqual(refreshed["cost_price"], 34.5)
 
+    def test_correct_quantity_scales_day_pnl(self) -> None:
+        saved = self.repo.save_position_holding(
+            {
+                "symbol": "600036.SH",
+                "name": "招商银行",
+                "account_id": self.account["id"],
+                "position_quantity": 100,
+                "available_quantity": 100,
+                "cost_price": 35,
+                "latest_price": 36,
+                "day_pnl": 200,
+            }
+        )
+
+        result = self.repo.correct_position_holding(
+            saved["id"],
+            {
+                "symbol": "600036.SH",
+                "name": "招商银行",
+                "position_quantity": 150,
+                "cost_price": 35,
+            },
+        )
+
+        self.assertEqual(result["position_quantity"], 150)
+        self.assertEqual(result["day_pnl"], 300.0)
+        account = next(a for a in self.repo.list_position_accounts() if a["id"] == self.account["id"])
+        self.assertEqual(account["day_pnl"], 300.0)
+
     def test_other_user_cannot_correct_position(self) -> None:
         saved = self.repo.save_position_holding(
             {

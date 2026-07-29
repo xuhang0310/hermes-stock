@@ -133,6 +133,12 @@ class PositionWriteMixin:
             )
             latest.latest_price = float(latest_price) if latest_price is not None else None
             latest.day_pnl = None
+        elif quantity != old_quantity:
+            # day_pnl = (最新价 - 昨收) × 数量；数量纠正后按比例缩放，避免账户汇总沿用旧股数。
+            if latest.day_pnl is not None and old_quantity > 0:
+                latest.day_pnl = round(float(latest.day_pnl) * (quantity / old_quantity), 4)
+            else:
+                latest.day_pnl = None
         latest.market_value = (
             round(float(latest.latest_price) * quantity, 4)
             if latest.latest_price is not None

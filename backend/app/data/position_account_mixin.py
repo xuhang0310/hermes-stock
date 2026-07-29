@@ -136,9 +136,13 @@ class PositionAccountMixin:
         hmv = round(sum(s.market_value or 0 for s in open_snaps), 4)
         account.holding_market_value = hmv
         account.total_pnl = round(sum(s.floating_pnl or 0 for s in open_snaps), 4)
-        # 当日盈亏：每个 open 持仓取 daily_bars 最新一条的 (close - pre_close) × 持仓量
+        # 实时同步已把 (最新价 - 昨收) × 持仓量写入快照；只对缺失值回退到日线。
+        # 否则每分钟行情同步后，账户汇总会被旧的日线收盘价重新覆盖。
         day_pnl = 0.0
         for s in open_snaps:
+            if s.day_pnl is not None:
+                day_pnl += float(s.day_pnl)
+                continue
             bar = self.db.scalar(
                 select(DailyBar)
                 .where(DailyBar.symbol == s.symbol)

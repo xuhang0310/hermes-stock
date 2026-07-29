@@ -79,6 +79,9 @@ const positions = ref<PositionItem[]>([])
 const watchlist = ref<WatchlistItem[]>([])
 const agents = ref<AgentItem[]>([])
 let dashboardRefreshRequest = 0
+let dashboardRefreshTimer: number | null = null
+let dashboardRefreshInFlightCount = 0
+const DASHBOARD_REFRESH_INTERVAL_MS = 30_000
 
 const positionAgentInstruction = ref('')
 const positionAgentImageBase64 = ref('')
@@ -284,6 +287,7 @@ const positionModelGroups = computed(() => {
 async function refreshAll() {
   if (!currentUser.value) return
   const dashboardRequestId = ++dashboardRefreshRequest
+  dashboardRefreshInFlightCount += 1
   loading.value = true
   error.value = ''
   try {
@@ -312,22 +316,53 @@ async function refreshAll() {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
     loading.value = false
+    dashboardRefreshInFlightCount = Math.max(0, dashboardRefreshInFlightCount - 1)
   }
 }
 
-async function refreshDashboard() {
+async function refreshDashboard(silent = false) {
   if (!currentUser.value) return
+  // 静默自动刷新可合并；用户切到工作台等显式刷新不能被丢弃。
+  // 用计数而不是“仅最新请求清 flag”，避免 refreshAll 抬高 requestId 后把 inFlight 永久卡住。
+  if (silent && dashboardRefreshInFlightCount > 0) return
   const requestId = ++dashboardRefreshRequest
+  dashboardRefreshInFlightCount += 1
   try {
     const payload = await api.dashboard()
     if (requestId === dashboardRefreshRequest) {
       dashboard.value = payload
     }
   } catch (err) {
-    if (requestId === dashboardRefreshRequest) {
+    if (!silent && requestId === dashboardRefreshRequest) {
       error.value = err instanceof Error ? err.message : '工作台刷新失败'
     }
+  } finally {
+    dashboardRefreshInFlightCount = Math.max(0, dashboardRefreshInFlightCount - 1)
   }
+}
+
+function refreshVisibleDashboard() {
+  if (
+    currentUser.value
+    && activePage.value === 'workbench'
+    && document.visibilityState === 'visible'
+  ) {
+    void refreshDashboard(true)
+  }
+}
+
+function startDashboardAutoRefresh() {
+  if (dashboardRefreshTimer !== null) return
+  dashboardRefreshTimer = window.setInterval(
+    refreshVisibleDashboard,
+    DASHBOARD_REFRESH_INTERVAL_MS
+  )
+}
+
+function stopDashboardAutoRefresh() {
+  if (dashboardRefreshTimer === null) return
+  window.clearInterval(dashboardRefreshTimer)
+  dashboardRefreshTimer = null
 }
 
 // 静默刷新持仓+自选：买入/卖出/删除后调用，不显示 loading 遮罩，避免页面闪烁
@@ -909,9 +944,17 @@ function openAskStock(symbol: string) {
 onMounted(() => {
   syncPageFromLocation()
   window.addEventListener('popstate', syncPageFromLocation)
+  window.addEventListener('focus', refreshVisibleDashboard)
+  document.addEventListener('visibilitychange', refreshVisibleDashboard)
+  startDashboardAutoRefresh()
   void initialize()
 })
-onBeforeUnmount(() => window.removeEventListener('popstate', syncPageFromLocation))
+onBeforeUnmount(() => {
+  stopDashboardAutoRefresh()
+  window.removeEventListener('popstate', syncPageFromLocation)
+  window.removeEventListener('focus', refreshVisibleDashboard)
+  document.removeEventListener('visibilitychange', refreshVisibleDashboard)
+})
 </script>
 
 <template>
