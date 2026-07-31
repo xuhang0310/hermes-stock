@@ -26,7 +26,6 @@ const loading = ref(false)
 const loadError = ref('')
 const open = ref(false)
 const swarmMode = ref(false)
-const swarmExpanded = ref(false)
 const query = ref('')
 const activeIndex = ref(0)
 const triggerStart = ref(0)
@@ -103,7 +102,6 @@ function sync(text: string, caret: number) {
     triggerEnd.value = caret
     activeIndex.value = 0
     swarmMode.value = true
-    swarmExpanded.value = false
     open.value = true
     return
   }
@@ -149,7 +147,7 @@ function handleKeydown(event: KeyboardEvent) {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault()
     const maxItems = swarmMode.value
-      ? (swarmExpanded.value ? filteredSwarmTeams.value.length : 0) + filteredSkills.value.length
+      ? filteredSwarmTeams.value.length
       : filteredSkills.value.length
     if (!maxItems) return true
     const direction = event.key === 'ArrowDown' ? 1 : -1
@@ -158,12 +156,7 @@ function handleKeydown(event: KeyboardEvent) {
   }
   if (event.key === 'Enter' && !event.isComposing) {
     event.preventDefault()
-    if (swarmMode.value && !swarmExpanded.value) {
-      // 在 swarm 模式但未展开，回车展开
-      swarmExpanded.value = true
-      return true
-    }
-    if (swarmMode.value && swarmExpanded.value) {
+    if (swarmMode.value) {
       const team = filteredSwarmTeams.value[activeIndex.value]
       if (team) chooseSwarm(team)
       return true
@@ -178,7 +171,6 @@ function handleKeydown(event: KeyboardEvent) {
 function close() {
   open.value = false
   swarmMode.value = false
-  swarmExpanded.value = false
   query.value = ''
   activeIndex.value = 0
 }
@@ -219,39 +211,32 @@ onMounted(loadData)
       <div v-else-if="loadError" class="skill-menu-state error">{{ loadError }}</div>
       <template v-else-if="swarmMode">
         <!-- Swarm 团队模式 -->
-        <div v-if="!swarmExpanded" class="skill-menu-state swarm-collapsed" @click="swarmExpanded = true">
-          <span class="swarm-icon">&#x1F916;</span>
-          <span>{{ filteredSwarmTeams.length }} 个协作团队可用</span>
-          <span class="swarm-expand-hint">点击展开 &darr;</span>
+        <div v-if="!filteredSwarmTeams.length" class="skill-menu-state">没有匹配的团队</div>
+        <div v-else class="skill-menu-list" role="listbox">
+          <button
+            v-for="(team, index) in filteredSwarmTeams"
+            :key="team.id"
+            type="button"
+            class="skill-menu-item swarm-item"
+            :class="{ active: index === activeIndex }"
+            role="option"
+            @mouseenter="activeIndex = index"
+            @mousedown.prevent
+            @click="chooseSwarm(team)"
+          >
+            <span class="skill-menu-icon swarm-icon">{{ team.icon }}</span>
+            <span class="skill-menu-copy">
+              <strong>{{ team.name }}</strong>
+              <small>{{ team.description }}</small>
+              <span class="swarm-members">
+                <span v-for="m in team.members" :key="m.role" class="swarm-member-tag">{{ m.label }}</span>
+              </span>
+            </span>
+            <span class="skill-menu-meta">
+              <em>{{ team.member_count }}人</em>
+            </span>
+          </button>
         </div>
-        <template v-else>
-          <div v-if="!filteredSwarmTeams.length" class="skill-menu-state">没有匹配的团队</div>
-          <div v-else class="skill-menu-list" role="listbox">
-            <button
-              v-for="(team, index) in filteredSwarmTeams"
-              :key="team.id"
-              type="button"
-              class="skill-menu-item swarm-item"
-              :class="{ active: index === activeIndex }"
-              role="option"
-              @mouseenter="activeIndex = index"
-              @mousedown.prevent
-              @click="chooseSwarm(team)"
-            >
-              <span class="skill-menu-icon swarm-icon">{{ team.icon }}</span>
-              <span class="skill-menu-copy">
-                <strong>{{ team.name }}</strong>
-                <small>{{ team.description }}</small>
-                <span class="swarm-members">
-                  <span v-for="m in team.members" :key="m.role" class="swarm-member-tag">{{ m.label }}</span>
-                </span>
-              </span>
-              <span class="skill-menu-meta">
-                <em>{{ team.member_count }}人</em>
-              </span>
-            </button>
-          </div>
-        </template>
         <!-- 切换回技能模式提示 -->
         <div class="swarm-switch-hint">
           输入 <code>/</code> 切换回技能选择
@@ -488,30 +473,6 @@ onMounted(loadData)
 
 .skill-menu-state.error {
   color: #ff8585;
-}
-
-/* Swarm 折叠状态 */
-.swarm-collapsed {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 16px 12px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.swarm-collapsed:hover {
-  background: rgba(138, 106, 213, 0.06);
-}
-
-.swarm-collapsed .swarm-icon {
-  font-size: 20px;
-}
-
-.swarm-expand-hint {
-  color: #8a6ad5;
-  font-size: 11px;
 }
 
 /* Swarm 成员标签 */
