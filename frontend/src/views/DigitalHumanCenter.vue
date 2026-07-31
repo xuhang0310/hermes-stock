@@ -252,10 +252,16 @@ async function load() {
     api.workspaceStatus().catch(() => null)
   ])
   workspaceExecAvailable.value = Boolean(workspaceStatus?.exec_enabled && workspaceStatus.exec_available)
-  profiles.value = profilePayload
+  // 总调度（stock-pm）固定置顶，其余按 sort_order/id 升序
+  profiles.value = [...profilePayload].sort((a, b) => {
+    if (a.code === 'stock-pm') return -1
+    if (b.code === 'stock-pm') return 1
+    return (a.sort_order - b.sort_order) || (a.id - b.id)
+  })
   models.value = modelPayload.filter((item) => item.status !== 'disabled')
-  if (!selectedProfileId.value && profiles.value[0]) {
-    selectedProfileId.value = profiles.value[0].id
+  if (!selectedProfileId.value) {
+    const pm = profiles.value.find((item) => item.code === 'stock-pm')
+    selectedProfileId.value = (pm || profiles.value[0])?.id ?? null
   }
   if (!selectedModelId.value || !models.value.some((item) => item.id === selectedModelId.value)) {
     selectedModelId.value = models.value.find((item) => item.is_active)?.id || models.value[0]?.id || null
