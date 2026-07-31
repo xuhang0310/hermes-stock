@@ -165,6 +165,18 @@ function selectCoreSkill(payload: { skill: AgentSkill; start: number; end: numbe
   })
 }
 
+function selectSwarmTeam(payload: { team: import('../types').SwarmTeam; start: number; end: number }) {
+  const team = payload.team
+  const membersLabel = team.members.map(m => m.label).join(' + ')
+  const objective = team.objective_template
+  question.value = `${question.value.slice(0, payload.start)}${team.icon} [${team.name}: ${membersLabel}] ${objective}${question.value.slice(payload.end)}`
+  nextTick(() => {
+    composerTextarea.value?.focus()
+    const pos = payload.start + team.icon.length + 2
+    composerTextarea.value?.setSelectionRange(pos, pos)
+  })
+}
+
 function removeCoreSkill(name: string) {
   selectedCoreSkills.value = selectedCoreSkills.value.filter((item) => item.name !== name)
 }
@@ -1110,6 +1122,7 @@ onMounted(async () => {
           :selected-skills="selectedCoreSkills"
           :disabled="sending"
           @select="selectCoreSkill"
+          @select-swarm="selectSwarmTeam"
           @remove="removeCoreSkill"
         />
         <footer class="chat-composer-toolbar">

@@ -744,6 +744,7 @@ export const api = {
   agentSkills: () => request<AgentSkill[]>('/api/agent/skills/core'),
   agentSkill: (name: string) =>
     request<AgentSkill>(`/api/agent/skills/core/${encodeURIComponent(name)}`),
+  swarmTeams: () => request<import('./types').SwarmTeam[]>('/api/agent/swarm-teams'),
   agentWorkflowTemplates: () =>
     request<AgentWorkflowTemplate[]>('/api/agent/workflows/templates'),
   agentWorkflow: (runId: string) =>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
-import type { AgentSkill } from '../types'
+import type { AgentSkill, SwarmTeam } from '../types'
 
 const props = withDefaults(defineProps<{
   chatMode: 'research' | 'stock' | 'knowledge'
@@ -17,12 +17,16 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   select: [payload: { skill: AgentSkill; start: number; end: number }]
   remove: [name: string]
+  selectSwarm: [payload: { team: SwarmTeam; start: number; end: number }]
 }>()
 
 const skills = ref<AgentSkill[]>([])
+const swarmTeams = ref<SwarmTeam[]>([])
 const loading = ref(false)
 const loadError = ref('')
 const open = ref(false)
+const swarmMode = ref(false)
+const swarmExpanded = ref(false)
 const query = ref('')
 const activeIndex = ref(0)
 const triggerStart = ref(0)
@@ -51,6 +55,15 @@ const filteredSkills = computed(() => {
   })
 })
 
+const filteredSwarmTeams = computed(() => {
+  const keyword = query.value.trim().toLowerCase()
+  if (!keyword) return swarmTeams.value
+  return swarmTeams.value.filter((team) => {
+    return [team.name, team.description, ...team.tags]
+      .some((value) => String(value || '').toLowerCase().includes(keyword))
+  })
+})
+
 watch(filteredSkills, (rows) => {
   activeIndex.value = Math.min(activeIndex.value, Math.max(0, rows.length - 1))
 })
@@ -59,11 +72,16 @@ watch(() => [props.chatMode, props.roleCode], () => {
   activeIndex.value = 0
 })
 
-async function loadSkills() {
+async function loadData() {
   loading.value = true
   loadError.value = ''
   try {
-    skills.value = await api.agentSkills()
+    const [skillData, teamData] = await Promise.all([
+      api.agentSkills(),
+      api.swarmTeams().catch(() => [] as SwarmTeam[])
+    ])
+    skills.value = skillData
+    swarmTeams.value = teamData
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : '技能加载失败'
   } finally {
@@ -77,21 +95,44 @@ function sync(text: string, caret: number) {
     return
   }
   const prefix = text.slice(0, Math.max(0, caret))
-  const match = prefix.match(/(^|\s)\/([^\s/]*)$/)
-  if (!match) {
+  // 检测 // 触发 swarm 模式
+  const swarmMatch = prefix.match(/(^|\s)\/\/([^\s/]*)$/)
+  if (swarmMatch) {
+    query.value = swarmMatch[2] || ''
+    triggerStart.value = caret - query.value.length - 2
+    triggerEnd.value = caret
+    activeIndex.value = 0
+    swarmMode.value = true
+    swarmExpanded.value = false
+    open.value = true
+    return
+  }
+  // 检测 / 触发技能模式
+  const skillMatch = prefix.match(/(^|\s)\/([^\s/]*)$/)
+  if (!skillMatch) {
     close()
     return
   }
-  query.value = match[2] || ''
+  query.value = skillMatch[2] || ''
   triggerStart.value = caret - query.value.length - 1
   triggerEnd.value = caret
   activeIndex.value = 0
+  swarmMode.value = false
   open.value = true
 }
 
 function choose(skill: AgentSkill) {
   emit('select', {
     skill,
+    start: triggerStart.value,
+    end: triggerEnd.value
+  })
+  close()
+}
+
+function chooseSwarm(team: SwarmTeam) {
+  emit('selectSwarm', {
+    team,
     start: triggerStart.value,
     end: triggerEnd.value
   })
@@ -107,15 +148,26 @@ function handleKeydown(event: KeyboardEvent) {
   }
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault()
-    if (!filteredSkills.value.length) return true
+    const maxItems = swarmMode.value
+      ? (swarmExpanded.value ? filteredSwarmTeams.value.length : 0) + filteredSkills.value.length
+      : filteredSkills.value.length
+    if (!maxItems) return true
     const direction = event.key === 'ArrowDown' ? 1 : -1
-    activeIndex.value = (
-      activeIndex.value + direction + filteredSkills.value.length
-    ) % filteredSkills.value.length
+    activeIndex.value = (activeIndex.value + direction + maxItems) % maxItems
     return true
   }
   if (event.key === 'Enter' && !event.isComposing) {
     event.preventDefault()
+    if (swarmMode.value && !swarmExpanded.value) {
+      // 在 swarm 模式但未展开，回车展开
+      swarmExpanded.value = true
+      return true
+    }
+    if (swarmMode.value && swarmExpanded.value) {
+      const team = filteredSwarmTeams.value[activeIndex.value]
+      if (team) chooseSwarm(team)
+      return true
+    }
     const skill = filteredSkills.value[activeIndex.value]
     if (skill) choose(skill)
     return true
@@ -125,13 +177,15 @@ function handleKeydown(event: KeyboardEvent) {
 
 function close() {
   open.value = false
+  swarmMode.value = false
+  swarmExpanded.value = false
   query.value = ''
   activeIndex.value = 0
 }
 
 defineExpose({ sync, handleKeydown, close })
 
-onMounted(loadSkills)
+onMounted(loadData)
 </script>
 
 <template>
@@ -146,47 +200,95 @@ onMounted(loadSkills)
           :title="`移除${skill.display_name}`"
           :disabled="disabled"
           @click="emit('remove', skill.name)"
-        >×</button>
+        >&times;</button>
       </span>
     </div>
 
     <section v-if="open" class="skill-slash-menu" aria-label="技能菜单">
       <header>
         <div>
-          <strong>技能</strong>
-          <span v-if="query">匹配“{{ query }}”</span>
+          <strong>{{ swarmMode ? 'Swarm 团队' : '技能' }}</strong>
+          <span v-if="query">匹配&ldquo;{{ query }}&rdquo;</span>
+          <span v-else-if="swarmMode">选择多智能体协作团队</span>
           <span v-else>选择本轮能力</span>
         </div>
         <small>{{ selectedSkills.length }}/8</small>
       </header>
 
-      <div v-if="loading" class="skill-menu-state">正在加载技能...</div>
+      <div v-if="loading" class="skill-menu-state">正在加载...</div>
       <div v-else-if="loadError" class="skill-menu-state error">{{ loadError }}</div>
-      <div v-else-if="!filteredSkills.length" class="skill-menu-state">没有匹配的技能</div>
-      <div v-else class="skill-menu-list" role="listbox">
-        <button
-          v-for="(skill, index) in filteredSkills"
-          :key="skill.name"
-          type="button"
-          class="skill-menu-item"
-          :class="{ active: index === activeIndex, selected: selectedNames.has(skill.name) }"
-          role="option"
-          :aria-selected="selectedNames.has(skill.name)"
-          @mouseenter="activeIndex = index"
-          @mousedown.prevent
-          @click="choose(skill)"
-        >
-          <span class="skill-menu-icon">/</span>
-          <span class="skill-menu-copy">
-            <strong>{{ skill.display_name }}</strong>
-            <small>{{ skill.summary }}</small>
-          </span>
-          <span class="skill-menu-meta">
-            <em>{{ skill.availability === 'ready' ? '可用' : `${skill.readiness_percent}%` }}</em>
-            <i v-if="selectedNames.has(skill.name)">已选</i>
-          </span>
-        </button>
-      </div>
+      <template v-else-if="swarmMode">
+        <!-- Swarm 团队模式 -->
+        <div v-if="!swarmExpanded" class="skill-menu-state swarm-collapsed" @click="swarmExpanded = true">
+          <span class="swarm-icon">&#x1F916;</span>
+          <span>{{ filteredSwarmTeams.length }} 个协作团队可用</span>
+          <span class="swarm-expand-hint">点击展开 &darr;</span>
+        </div>
+        <template v-else>
+          <div v-if="!filteredSwarmTeams.length" class="skill-menu-state">没有匹配的团队</div>
+          <div v-else class="skill-menu-list" role="listbox">
+            <button
+              v-for="(team, index) in filteredSwarmTeams"
+              :key="team.id"
+              type="button"
+              class="skill-menu-item swarm-item"
+              :class="{ active: index === activeIndex }"
+              role="option"
+              @mouseenter="activeIndex = index"
+              @mousedown.prevent
+              @click="chooseSwarm(team)"
+            >
+              <span class="skill-menu-icon swarm-icon">{{ team.icon }}</span>
+              <span class="skill-menu-copy">
+                <strong>{{ team.name }}</strong>
+                <small>{{ team.description }}</small>
+                <span class="swarm-members">
+                  <span v-for="m in team.members" :key="m.role" class="swarm-member-tag">{{ m.label }}</span>
+                </span>
+              </span>
+              <span class="skill-menu-meta">
+                <em>{{ team.member_count }}人</em>
+              </span>
+            </button>
+          </div>
+        </template>
+        <!-- 切换回技能模式提示 -->
+        <div class="swarm-switch-hint">
+          输入 <code>/</code> 切换回技能选择
+        </div>
+      </template>
+      <template v-else>
+        <!-- 普通技能模式 -->
+        <div v-if="!filteredSkills.length" class="skill-menu-state">没有匹配的技能</div>
+        <div v-else class="skill-menu-list" role="listbox">
+          <button
+            v-for="(skill, index) in filteredSkills"
+            :key="skill.name"
+            type="button"
+            class="skill-menu-item"
+            :class="{ active: index === activeIndex, selected: selectedNames.has(skill.name) }"
+            role="option"
+            :aria-selected="selectedNames.has(skill.name)"
+            @mouseenter="activeIndex = index"
+            @mousedown.prevent
+            @click="choose(skill)"
+          >
+            <span class="skill-menu-icon">/</span>
+            <span class="skill-menu-copy">
+              <strong>{{ skill.display_name }}</strong>
+              <small>{{ skill.summary }}</small>
+            </span>
+            <span class="skill-menu-meta">
+              <em>{{ skill.availability === 'ready' ? '可用' : `${skill.readiness_percent}%` }}</em>
+              <i v-if="selectedNames.has(skill.name)">已选</i>
+            </span>
+          </button>
+        </div>
+        <!-- Swarm 入口提示 -->
+        <div v-if="swarmTeams.length" class="swarm-entry-hint">
+          输入 <code>//</code> 选择 Swarm 多智能体团队
+        </div>
+      </template>
     </section>
   </div>
 </template>
@@ -326,6 +428,11 @@ onMounted(loadSkills)
   font-weight: 800;
 }
 
+.swarm-item .skill-menu-icon {
+  border-color: rgba(138, 106, 213, 0.4);
+  background: rgba(138, 106, 213, 0.08);
+}
+
 .skill-menu-copy {
   display: grid;
   min-width: 0;
@@ -381,6 +488,66 @@ onMounted(loadSkills)
 
 .skill-menu-state.error {
   color: #ff8585;
+}
+
+/* Swarm 折叠状态 */
+.swarm-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.swarm-collapsed:hover {
+  background: rgba(138, 106, 213, 0.06);
+}
+
+.swarm-collapsed .swarm-icon {
+  font-size: 20px;
+}
+
+.swarm-expand-hint {
+  color: #8a6ad5;
+  font-size: 11px;
+}
+
+/* Swarm 成员标签 */
+.swarm-members {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+
+.swarm-member-tag {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(138, 106, 213, 0.1);
+  color: #b8a3e8;
+  font-size: 10px;
+}
+
+/* 底部提示 */
+.swarm-entry-hint,
+.swarm-switch-hint {
+  padding: 8px 12px;
+  border-top: 1px solid rgba(213, 180, 106, 0.1);
+  color: #6d6a62;
+  font-size: 11px;
+  text-align: center;
+}
+
+.swarm-entry-hint code,
+.swarm-switch-hint code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(213, 180, 106, 0.12);
+  color: #e0c16c;
+  font-family: inherit;
 }
 
 @media (max-width: 680px) {

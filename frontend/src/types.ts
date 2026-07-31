@@ -922,6 +922,24 @@ export type AgentSkill = {
   metadata?: Record<string, string>
 }
 
+export type SwarmTeamMember = {
+  role: string
+  label: string
+  task: string
+}
+
+export type SwarmTeam = {
+  id: string
+  name: string
+  description: string
+  icon: string
+  members: SwarmTeamMember[]
+  objective_template: string
+  tags: string[]
+  member_count: number
+  member_roles: string[]
+}
+
 export type AgentWorkflowTemplate = {
   code: string
   name: string

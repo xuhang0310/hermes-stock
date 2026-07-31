@@ -2817,6 +2817,15 @@ def core_agent_skill_detail(
     return item
 
 
+@router.get("/agent/swarm-teams")
+def list_swarm_teams_api(
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> list[dict]:
+    """返回可用的 Swarm 多智能体团队模板。"""
+    from backend.app.agent_runtime.swarm_teams import list_swarm_teams
+    return list_swarm_teams()
+
+
 @router.get("/agent/runs/{run_id}/events")
 async def agent_run_events(
     run_id: str,
