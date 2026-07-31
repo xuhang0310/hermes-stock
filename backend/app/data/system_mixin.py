@@ -421,10 +421,31 @@ class SystemMixin:
         for row in rows:
             by_symbol[str(row["symbol"])].append(row)
 
+        # 缓存为空时主动从 TuShare 拉取并缓存（指数数据量小，可接受首次加载开销）
+        if all(not by_symbol[s] for s in symbols):
+            from backend.app.market.stock_tools import get_index_daily
+
+            for symbol, _name in INDEX_SPECS:
+                try:
+                    result = get_index_daily(symbol, limit=90)
+                    if "error" not in result:
+                        # 重新读取刚写入的数据
+                        sub_rows = self.db.execute(
+                            select(ranked)
+                            .where(ranked.c.symbol == symbol, ranked.c.rank <= 14)
+                            .order_by(ranked.c.trade_date)
+                        ).mappings().all()
+                        by_symbol[symbol] = list(sub_rows)
+                except Exception:
+                    pass
+
         items: list[dict[str, Any]] = []
+        source_label = "TuShare 本地缓存"
         for symbol, name in INDEX_SPECS:
             bars = by_symbol[symbol]
             latest = bars[-1] if bars else None
+            if latest and latest["source"] != "tushare-cache":
+                source_label = "TuShare 实时"
             items.append(
                 {
                     "symbol": symbol,
@@ -439,7 +460,7 @@ class SystemMixin:
                     "sparkline": [float(bar["close"]) for bar in bars if bar["close"] is not None],
                 }
             )
-        return {"source": "TuShare 本地缓存", "items": items}
+        return {"source": source_label, "items": items}
 
     def _dashboard_runtime(self) -> dict[str, list[dict[str, Any]]]:
         base = select(JobRun, ScheduledJob.name, ScheduledJob.digital_human_code).outerjoin(

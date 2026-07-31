@@ -350,7 +350,7 @@ function closeRunDetail() {
               </article>
             </div>
             <div v-if="dashboard.market.items.every((item) => item.price === null)" class="wb-inline-empty">
-              暂无指数日线缓存，工作台不会在页面请求中外调 TuShare。
+              指数数据暂不可用，请检查 TuShare Token 配置。
             </div>
           </section>
 

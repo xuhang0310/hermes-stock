@@ -2378,8 +2378,9 @@ def get_income(ts_code: str, period: str | None = None, start_date: str | None =
 
 
 def get_index_daily(ts_code: str, trade_date: str | None = None,
-                    start_date: str | None = None, end_date: str | None = None) -> dict:
-    """指数日线行情（ts_code 为指数代码，如 000001.SH 上证综指）。"""
+                    start_date: str | None = None, end_date: str | None = None,
+                    limit: int = 90) -> dict:
+    """指数日线行情（ts_code 为指数代码，如 000001.SH 上证综指）。结果自动缓存到 daily_bars。"""
     params: dict[str, Any] = {"ts_code": str(ts_code).strip().upper()}
     today = date.today()
     end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
@@ -2390,7 +2391,23 @@ def get_index_daily(ts_code: str, trade_date: str | None = None,
     if td:
         params["trade_date"] = td
     fields = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
-    return _semantic_tushare("index_daily", params, fields, name_cn="指数日线行情", tool_name="get_index_daily")
+    response = _semantic_tushare("index_daily", params, fields, limit=limit * 2, name_cn="指数日线行情", tool_name="get_index_daily")
+    if "error" in response:
+        return response
+    rows = response.get("rows", [])
+    bars = [_normalize_daily_row(row) for row in rows]
+    bars = sorted((row for row in bars if row), key=lambda row: row["trade_date"])
+    bars = bars[-limit:]
+    saved = _cache_daily_bars(params["ts_code"], bars)
+    return {
+        "symbol": params["ts_code"],
+        "source": "tushare.index_daily",
+        "start_date": start,
+        "end_date": end,
+        "bars": bars,
+        "rows": bars,  # 向后兼容：portfolio_backtest/backtest_engine 用 rows 读取
+        "saved_rows": saved,
+    }
 
 
 def get_sw_daily(ts_code: str, trade_date: str | None = None,

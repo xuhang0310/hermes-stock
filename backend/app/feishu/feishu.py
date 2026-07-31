@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import threading
 import time
@@ -24,8 +25,6 @@ ALERT_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
 DAILY_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
 LEGACY_CHANNEL_KEYS = ("feishu-alert",)
 BUILTIN_CHANNEL_KEYS = (SCHEDULE_CHANNEL_KEY,)
-
-import re
 
 FEISHU_CONTENT_LIMIT = 3800  # 飞书单 markdown 元素上限约 4000，留 200 余量
 FEISHU_MAX_CARD_ELEMENTS = 80  # 飞书卡片元素上限保护，避免超长内容被拒
