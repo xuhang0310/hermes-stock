@@ -36,14 +36,13 @@ from backend.app.agent_runtime.channel_runs import (
     create_channel_run,
     wait_for_channel_run,
 )
-from backend.app.feishu.feishu import decrypt_value
+from backend.app.feishu.feishu import decrypt_value, markdown_elements
 from backend.app.core.models import AiChatMessage, AiChatSession, DigitalHumanProfile, User
 from backend.app.scheduler.rhythm_scheduler import _build_digital_human_context
 from backend.app.core.settings import settings
 
 
 FEISHU_BASE = "https://open.feishu.cn"
-CARD_CONTENT_LIMIT = 4000
 _HISTORY_TURNS = 8
 _DEDUP_MAX = 2000
 _OPEN_ID_RETRY_SECONDS = 60
@@ -202,10 +201,9 @@ def _complete_feishu_session(
 
 
 def _card(title: str, body: str, template: str, note: str | None = None) -> str:
-    text = body.strip()
-    if len(text) > CARD_CONTENT_LIMIT:
-        text = text[:CARD_CONTENT_LIMIT] + "\n……内容过长已截断"
-    elements: list[dict] = [{"tag": "markdown", "content": text}]
+    text = body.strip() or "本次回复未生成正文。"
+    # 长内容自动分片为多个 markdown 元素，避免截断
+    elements: list[dict] = markdown_elements(text)
     if note:
         elements.append({"tag": "hr"})
         elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})

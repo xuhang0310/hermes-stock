@@ -25,7 +25,10 @@ DAILY_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
 LEGACY_CHANNEL_KEYS = ("feishu-alert",)
 BUILTIN_CHANNEL_KEYS = (SCHEDULE_CHANNEL_KEY,)
 
-FEISHU_CONTENT_LIMIT = 4000
+import re
+
+FEISHU_CONTENT_LIMIT = 3800  # 飞书单 markdown 元素上限约 4000，留 200 余量
+FEISHU_MAX_CARD_ELEMENTS = 80  # 飞书卡片元素上限保护，避免超长内容被拒
 RATE_LIMIT_PER_MINUTE = 20
 _RETRYABLE_STATUS = {500, 502, 503, 504}
 _CARD_TEMPLATES = {
@@ -116,6 +119,135 @@ def _compact_text(value: object, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+# ── 飞书 markdown 清洗 ──────────────────────────────────────────────
+# 飞书卡片的 markdown 渲染与标准 CommonMark 有差异：不支持 HTML 块级标签、
+# 部分特殊字符需要转义。此处在保留语义的前提下做轻量清洗，避免原始 markdown
+# 在飞书中渲染为一堆裸标记。
+_FEISHU_STRIP_TAGS = re.compile(
+    r"</?(?:details|summary|div|span|center|table|thead|tbody|tr|th|td)"
+    r"(?:\s[^>]*)?>",
+    re.IGNORECASE,
+)
+_FEISHU_IMG_TAG = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _sanitize_markdown_for_feishu(text: str) -> str:
+    """清洗 markdown 使之在飞书卡片中尽量正确渲染。
+
+    处理：
+    1. CRLF → LF（避免段落分割失效）
+    2. 去除飞书不支持的 HTML 块级标签（保留行内 <font>/<a>/<at> 等）
+    3. 图片语法 ![alt](url) 转为飞书可识别的链接（飞书不支持标准图片语法）
+    4. 连续空行压缩为两段（飞书渲染多段间距无差异，减少无效字符）
+    """
+    # 1. 统一换行
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # 2. 去除不支持的 HTML 块级标签
+    text = _FEISHU_STRIP_TAGS.sub("", text)
+    # 3. 图片 → 链接（飞书 markdown 组件不渲染标准图片语法）
+    text = _FEISHU_IMG_TAG.sub(r"[📷 \1](\2)", text)
+    # 4. 连续 3+ 空行 → 2 空行
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+# ── markdown 分片 ────────────────────────────────────────────────────
+_MIN_CHUNK_FRACTION = 3  # 分片最小长度 = limit // 此值，避免碎片
+
+
+def split_markdown_content(
+    text: str,
+    limit: int = FEISHU_CONTENT_LIMIT,
+    max_chunks: int = FEISHU_MAX_CARD_ELEMENTS,
+) -> list[str]:
+    """将长 markdown 拆分为多个分片，每片不超过 limit 字符。
+
+    拆分策略按优先级：
+    1. 段落边界（\\n\\n）
+    2. 代码块闭合边界（配对 ``` 之后）
+    3. 单行换行
+    4. 硬截断（兜底）
+
+    返回最多 max_chunks 片；超出时最后一片追加截断提示。
+    """
+    if limit <= 0:
+        return [text] if text else [""]
+    text = _sanitize_markdown_for_feishu(text)
+    if len(text) <= limit:
+        return [text] if text else [""]
+
+    chunks: list[str] = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        # 达到最大分片数：最后一片截断并提示
+        if len(chunks) >= max_chunks - 1:
+            tail = remaining[:limit]
+            chunks.append(tail.rstrip() + "\n\n……内容过长，已截断。全文见系统内记录。")
+            break
+
+        min_chunk = limit // _MIN_CHUNK_FRACTION
+
+        # 1. 段落边界（\n\n）
+        split_at = remaining.rfind("\n\n", 0, limit)
+
+        # 2. 代码块闭合边界 —— 必须找到配对的 ``` 才在之后切
+        if split_at < min_chunk:
+            split_at = _find_code_block_boundary(remaining, limit, min_chunk)
+
+        # 3. 单行换行
+        if split_at < min_chunk:
+            split_at = remaining.rfind("\n", 0, limit)
+
+        # 4. 兜底：硬截断
+        if split_at < min_chunk:
+            split_at = limit
+
+        chunk = remaining[:split_at].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip()
+
+    return [c for c in chunks if c]  # 过滤空片
+
+
+def _find_code_block_boundary(text: str, limit: int, min_chunk: int) -> int:
+    """在 [0, limit) 内找到最后一个 *闭合* 的 ``` 后的换行位置。
+
+    通过统计 ``` 出现次数的奇偶性判断开/闭：奇数个 = 当前找到的最后一个是闭合。
+    找不到配对闭合则返回 -1。
+    """
+    # 找到 limit 内所有 ``` 的位置
+    fences: list[int] = []
+    start = 0
+    while True:
+        pos = text.find("```", start, limit)
+        if pos == -1:
+            break
+        fences.append(pos)
+        start = pos + 3
+    if len(fences) < 2:
+        return -1  # 没有配对的闭合
+    # 最后一个 ``` 是闭合（假设文本从代码块外部开始，奇偶性成立）
+    last_fence = fences[-1]
+    # 确认是闭合：前面有偶数个 fence（0-indexed 即 len-1 为奇数索引）
+    if len(fences) % 2 == 0:
+        # 偶数个 fence：最后一个是闭合
+        after = text.find("\n", last_fence)
+        if after != -1 and after <= limit:
+            return after if after >= min_chunk else -1
+    return -1
+
+
+def markdown_elements(text: str) -> list[dict]:
+    """将 markdown 文本转为飞书卡片 markdown 元素列表（自动分片）。"""
+    return [{"tag": "markdown", "content": chunk} for chunk in split_markdown_content(text)]
+
+
 def _build_payload(
     title: str,
     content: str,
@@ -127,8 +259,6 @@ def _build_payload(
     template: str | None = None,
 ) -> dict:
     text = content.strip() or "本次任务未返回正文。"
-    if len(text) > FEISHU_CONTENT_LIMIT:
-        text = text[:FEISHU_CONTENT_LIMIT] + "\n……内容过长已截断，全文见系统内记录"
     card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
     elements: list[dict] = []
     fields = []
@@ -143,7 +273,8 @@ def _build_payload(
         )
     if fields:
         elements.extend([{"tag": "div", "fields": fields}, {"tag": "hr"}])
-    elements.append({"tag": "markdown", "content": text})
+    # 长内容自动分片为多个 markdown 元素，避免截断
+    elements.extend(markdown_elements(text))
     footer_text = footer or (
         "SixRabbits Stock | 系统告警，请及时核查"
         if purpose == "alert"
