@@ -30,13 +30,21 @@ class MacroNewsCollector(BaseCollector):
             except Exception as e:
                 logger.error("宏观新闻 Tavily 搜索失败 [%s]: %s", query, e)
 
-        # 去重（按标题前 30 字符）
+        # 去重 + 过滤无效条目（太短、纯分类标签）
         seen_titles: set[str] = set()
         unique_items: list[dict] = []
+        skip_keywords = {"百科", "术语", "频道", "行情中心", "价格走势", "百度百科"}
         for item in items:
-            key = item.get("title", "")[:30]
+            title = item.get("title", "")
+            content = item.get("content", "")
+            # 跳过太短的、纯标签的
+            if len(title) < 8 and len(content) < 20:
+                continue
+            if any(kw in title for kw in skip_keywords):
+                continue
+            key = title[:30]
             if key and key not in seen_titles:
                 seen_titles.add(key)
                 unique_items.append(item)
 
-        return MarketData(category=self.category, items=unique_items[:20])
+        return MarketData(category=self.category, items=unique_items[:15])

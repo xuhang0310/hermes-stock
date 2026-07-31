@@ -33,11 +33,17 @@ def _fetch_tavily_news(query: str, max_results: int = 15) -> list[dict]:
 def _parse_tavily_to_news(items: list[dict], category_label: str) -> list[dict]:
     """将 Tavily 搜索结果转为新闻条目格式。"""
     news_items: list[dict] = []
+    skip_keywords = {"百科", "术语", "频道", "行情中心", "价格走势", "百度百科"}
     for item in items:
         title = (item.get("title") or "").strip()
         content = (item.get("content") or "").strip()
         url = item.get("url", "")
         if not title and not content:
+            continue
+        # 过滤太短或纯标签
+        if len(title) < 8 and len(content) < 20:
+            continue
+        if any(kw in title for kw in skip_keywords):
             continue
         text = title + " " + content
         sentiment_result = _sentiment_analyzer.analyze(text)
