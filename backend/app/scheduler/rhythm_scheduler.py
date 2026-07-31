@@ -68,6 +68,7 @@ _trade_day_cache: dict[str, bool] = {}
 _position_price_sync_lock = threading.Lock()
 
 _CARD_TEMPLATE_BY_JOB = {
+    "topnews-morning-0630": "wathet",
     "premarket-brief-0830": "wathet",
     "open-report-0935": "turquoise",
     "close-review-1530": "blue",
@@ -384,6 +385,32 @@ def _run_agent_report(
     return report_id, notification_id, answer, notification_error
 
 
+def _run_topnews_brief(snapshot: dict, ran_at: datetime) -> str:
+    """采集全球市场数据→分析→生成早盘舆情简报→推送飞书。"""
+    period = "pre_market"
+    if snapshot.get("job_key", "").startswith("topnews-morning"):
+        period = "pre_market"
+    from backend.app.topnews.handler import run_topnews_brief
+
+    report = run_topnews_brief(period=period)
+    title = f"早盘舆情简报 | {ran_at.strftime('%Y-%m-%d')}"
+    with SessionLocal() as session:
+        send_feishu(
+            session,
+            snapshot.get("push_channel_key") or "feishu-daily",
+            title,
+            report,
+            card_template=_CARD_TEMPLATE_BY_JOB.get(snapshot["job_key"], "wathet"),
+            card_metadata=[
+                ("任务", snapshot.get("name", "早盘舆情简报")),
+                ("触发方式", "手动执行" if snapshot.get("trigger_type") == "manual" else "自动调度"),
+                ("生成时间", ran_at.strftime("%Y-%m-%d %H:%M:%S")),
+            ],
+            card_footer="SixRabbits Stock | 数据采集自动生成，仅供参考",
+        )
+    return report
+
+
 def _run_health_check(
     now: datetime,
     push_channel_key: str | None,
@@ -680,6 +707,8 @@ def _execute_job(job_key: str, run_id: str) -> None:
             if push_error:
                 status = "failed"
                 error = f"报告已生成，但飞书任务群推送失败: {push_error}"
+        elif snapshot["job_kind"] == "topnews_brief":
+            output_content = _run_topnews_brief(snapshot, ran_at)
         else:
             status = "skipped"
             output_content = f"暂不支持的任务类型: {snapshot['job_kind']}"
@@ -878,6 +907,18 @@ async def _scheduler_loop() -> None:
 # 内置节律任务（幂等预置，只补缺行，绝不覆盖用户在前端的修改）
 # --------------------------------------------------------------------------- #
 DEFAULT_JOBS = [
+    {
+        "job_key": "topnews-morning-0630",
+        "name": "早盘舆情简报",
+        "description": "采集美股、期货、财联社、宏观与资金面数据，生成结构化早盘简报。",
+        "job_kind": "topnews_brief",
+        "schedule_type": "daily",
+        "run_time": "06:30",
+        "weekday_mask": "1,2,3,4,5",
+        "trading_day_only": True,
+        "push_channel_key": "feishu-daily",
+        "enabled": True,
+    },
     {
         "job_key": "health-check-0815",
         "name": "系统健康检查",
