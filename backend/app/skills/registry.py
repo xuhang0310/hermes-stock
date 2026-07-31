@@ -50,6 +50,15 @@ def classify_research_intent(question: str) -> str:
         "止盈",
     )
     full_terms = ("全面分析", "完整分析", "深度分析", "全维", "基本面", "估值", "资金面")
+    backtest_terms = (
+        "回测", "回溯", "测一下", "历史表现", "过去表现", "历史收益",
+        "能赚多少", "亏了多少", "模拟", "复盘", "如果当时", "要是当初",
+        "策略效果", "策略收益", "策略验证", "历史验证", "数据验证",
+        "净值", "回撤", "年化", "胜率", "盈亏比", "资金曲线",
+        "绩效", "风险收益",
+    )
+    if any(term in normalized for term in backtest_terms):
+        return "backtest"
     if any(term in normalized for term in switch_terms):
         return "switch_decision"
     if any(term in normalized for term in position_terms) and any(
@@ -74,11 +83,19 @@ def _intent_skill_pack(intent: str) -> tuple[str, ...]:
         "company-deep-research",
         "data-routing",
     )
+    if intent == "backtest":
+        return (
+            "strategy-backtest",
+            "technical-analysis",
+            "market-data",
+            "data-routing",
+        )
     if intent in {"switch_decision", "position_action_full"}:
         return (
             *base,
             "portfolio-risk-analysis",
             "knowledge-citation",
+            "strategy-backtest",
         )
     if intent == "full_research":
         return (
@@ -92,6 +109,7 @@ def _intent_skill_pack(intent: str) -> tuple[str, ...]:
             "research-discipline",
             "knowledge-citation",
             "report-generation",
+            "strategy-backtest",
         )
     return base if intent == "position_action" else ()
 
@@ -99,6 +117,8 @@ def _intent_skill_pack(intent: str) -> tuple[str, ...]:
 def _intent_skill_limit(intent: str) -> int:
     if intent in {"switch_decision", "position_action_full", "full_research"}:
         return 12
+    if intent == "backtest":
+        return 6
     if intent == "position_action":
         return 10
     return 8
