@@ -20,7 +20,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from backend.app.ai import memory as _memory
 from backend.app.core.applog import log_event

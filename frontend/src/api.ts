@@ -62,19 +62,49 @@ import type {
 import { readSseStream } from './utils/sse'
 
 const TOKEN_KEY = 'hermes_stock_token'
-let authToken = localStorage.getItem(TOKEN_KEY) || ''
+const persistentAuthStorage = typeof localStorage === 'undefined' ? null : localStorage
+const sessionAuthStorage = typeof sessionStorage === 'undefined' ? null : sessionStorage
+let authToken =
+  persistentAuthStorage?.getItem(TOKEN_KEY) || sessionAuthStorage?.getItem(TOKEN_KEY) || ''
+let authExpiryNotified = false
 
-export function setAuthToken(token: string) {
+export function setAuthToken(token: string, persistent = true) {
   authToken = token
+  if (token) authExpiryNotified = false
+  persistentAuthStorage?.removeItem(TOKEN_KEY)
+  sessionAuthStorage?.removeItem(TOKEN_KEY)
   if (token) {
-    localStorage.setItem(TOKEN_KEY, token)
-  } else {
-    localStorage.removeItem(TOKEN_KEY)
+    const storage = persistent ? persistentAuthStorage : sessionAuthStorage
+    storage?.setItem(TOKEN_KEY, token)
   }
 }
 
 export function getAuthToken() {
   return authToken
+}
+
+async function authorizedFetch(input: RequestInfo | URL, init?: RequestInit) {
+  const response = await fetch(input, init)
+  if (response.status === 401 && authToken) {
+    setAuthToken('')
+    if (!authExpiryNotified) {
+      authExpiryNotified = true
+      window.dispatchEvent(new CustomEvent('hermes-auth-expired'))
+    }
+  }
+  return response
+}
+
+async function responseErrorMessage(response: Response) {
+  const text = await response.text()
+  if (!text) return `Request failed: ${response.status}`
+  try {
+    const payload = JSON.parse(text) as { detail?: unknown }
+    if (typeof payload.detail === 'string') return payload.detail
+  } catch {
+    // Non-JSON errors are returned as plain text by some upstream services.
+  }
+  return text
 }
 
 export class ApiError extends Error {
@@ -87,6 +117,12 @@ export class ApiError extends Error {
   }
 }
 
+type PromptRecommendationResponse = {
+  items: PromptRecommendation[]
+  fallback_prompts: string[]
+  refreshing?: boolean
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const isFormData = options?.body instanceof FormData
   const headers: Record<string, string> = isFormData ? {} : { 'Content-Type': 'application/json' }
@@ -95,14 +131,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     headers.Authorization = `Bearer ${authToken}`
   }
 
-  const response = await fetch(url, {
+  const response = await authorizedFetch(url, {
     ...options,
     headers
   })
 
   if (!response.ok) {
-    const detail = await response.text()
-    throw new ApiError(detail || `Request failed: ${response.status}`, response.status)
+    throw new ApiError(await responseErrorMessage(response), response.status)
   }
 
   return response.json() as Promise<T>
@@ -151,7 +186,7 @@ async function cancelAgentRunQuietly(runId: string) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authToken) headers.Authorization = `Bearer ${authToken}`
   try {
-    await fetch(`/api/agent/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', headers })
+    await authorizedFetch(`/api/agent/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', headers })
   } catch {
     // Cancellation is durable when the API is reachable; a transient network
     // failure is handled by the server-side run timeout and stale-run recovery.
@@ -174,7 +209,7 @@ async function consumeAgentRunEvents(
     if (afterSeq > 0) headers['Last-Event-ID'] = String(afterSeq)
 
     try {
-      const response = await fetch(
+      const response = await authorizedFetch(
         `/api/agent/runs/${encodeURIComponent(runId)}/events?after_seq=${afterSeq}`,
         { headers, signal }
       )
@@ -261,13 +296,6 @@ async function durableAgentStreamRequest(
     }
     if (!createdRun) throw createError instanceof Error ? createError : new Error('Agent task could not be created.')
 
-    // Bind the UI to the canonical session immediately. The persisted stream
-    // also contains this event, so consumers remain compatible when resuming.
-    onEvent({
-      type: 'session',
-      run_id: createdRun.run_id,
-      session_id: createdRun.session_id
-    })
     await consumeAgentRunEvents(createdRun.run_id, onEvent, signal)
   } catch (error) {
     if (signal?.aborted && createdRun) await cancelAgentRunQuietly(createdRun.run_id)
@@ -286,7 +314,7 @@ async function streamJsonRequest<T extends { type?: string }>(
   if (authToken) {
     headers.Authorization = `Bearer ${authToken}`
   }
-  const response = await fetch(url, {
+  const response = await authorizedFetch(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload)
@@ -300,7 +328,7 @@ async function streamJsonRequest<T extends { type?: string }>(
 }
 
 export const api = {
-  login: (payload: { username: string; password: string }) =>
+  login: (payload: { username: string; password: string; remember_me: boolean }) =>
     request<LoginPayload>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify(payload)
@@ -598,7 +626,7 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   downloadBacktestFile: async (runId: string, kind: 'trades.csv' | 'metrics.json') => {
-    const response = await fetch(`/api/backtests/${encodeURIComponent(runId)}/${kind}`, {
+    const response = await authorizedFetch(`/api/backtests/${encodeURIComponent(runId)}/${kind}`, {
       headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
     })
     if (!response.ok) throw new Error((await response.text()) || `下载失败: ${response.status}`)
@@ -626,7 +654,7 @@ export const api = {
     }),
   // 下载端点需鉴权（Bearer），故走带 token 的 fetch → blob → 触发浏览器下载
   downloadWorkspaceDoc: async (path: string, filename: string) => {
-    const res = await fetch(`/api/workspace/documents/download?path=${encodeURIComponent(path)}`, {
+    const res = await authorizedFetch(`/api/workspace/documents/download?path=${encodeURIComponent(path)}`, {
       headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
     })
     if (!res.ok) throw new Error((await res.text()) || `下载失败: ${res.status}`)
@@ -696,20 +724,20 @@ export const api = {
   agentDeleteSession: (id: number) =>
     request<{ ok: boolean }>(`/api/agent/sessions/${id}`, { method: 'DELETE' }),
   promptRecommendations: (digitalHumanId: number) =>
-    request<{ items: PromptRecommendation[]; fallback_prompts: string[] }>(
+    request<PromptRecommendationResponse>(
       `/api/agent/prompt-recommendations?digital_human_id=${digitalHumanId}`
     ),
   refreshPromptRecommendations: (digitalHumanId: number) =>
-    request<{ items: PromptRecommendation[]; fallback_prompts: string[] }>('/api/agent/prompt-recommendations/refresh', {
+    request<PromptRecommendationResponse>('/api/agent/prompt-recommendations/refresh', {
       method: 'POST',
       body: JSON.stringify({ digital_human_id: digitalHumanId })
     }),
   dismissPromptRecommendation: (id: number) =>
     request<{ ok: boolean }>(`/api/agent/prompt-recommendations/${id}/dismiss`, { method: 'POST' }),
   stockPromptRecommendations: () =>
-    request<{ items: PromptRecommendation[]; fallback_prompts: string[] }>('/api/agent/stock/prompt-recommendations'),
+    request<PromptRecommendationResponse>('/api/agent/stock/prompt-recommendations'),
   refreshStockPromptRecommendations: () =>
-    request<{ items: PromptRecommendation[]; fallback_prompts: string[] }>('/api/agent/stock/prompt-recommendations/refresh', {
+    request<PromptRecommendationResponse>('/api/agent/stock/prompt-recommendations/refresh', {
       method: 'POST'
     }),
   stockStrategies: () => request<{ skills: StockStrategy[]; default_skill_id: string }>('/api/agent/stock/strategies'),

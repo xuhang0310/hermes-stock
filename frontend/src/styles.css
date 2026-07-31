@@ -1763,6 +1763,28 @@ tbody tr.clickable-row:focus-visible td {
   padding: 8px 10px;
 }
 
+.login-form .remember-login {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.login-form .remember-login input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--gold);
+}
+
+.login-hint {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .login-form button {
   min-height: 38px;
   border: 1px solid var(--gold-dim);

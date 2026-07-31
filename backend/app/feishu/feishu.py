@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.core.models import Notification, NotifyChannel, SystemLog
+from backend.app.core.models import Notification, NotifyChannel
 from backend.app.core.settings import settings
 
 
@@ -238,6 +238,25 @@ def send_feishu(
     card_kind: str | None = None,
 ) -> Notification:
     """向指定通道推送消息。先落 pending 审计记录再发送，任何失败都不抛异常、只写 failed。"""
+    if report_id or event_id:
+        identity_filter = (
+            Notification.report_id == report_id
+            if report_id
+            else Notification.event_id == event_id
+        )
+        existing = db.scalar(
+            select(Notification)
+            .where(
+                Notification.channel == f"feishu:{channel_key}",
+                identity_filter,
+                Notification.status.in_(("pending", "sent")),
+            )
+            .order_by(Notification.id.desc())
+            .limit(1)
+        )
+        if existing is not None:
+            return existing
+
     notification = Notification(
         channel=f"feishu:{channel_key}",
         title=title[:300],

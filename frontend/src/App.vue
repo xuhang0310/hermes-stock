@@ -380,12 +380,12 @@ async function refreshPositions() {
   }
 }
 
-async function login(payload: { username: string; password: string }) {
+async function login(payload: { username: string; password: string; remember_me: boolean }) {
   loginLoading.value = true
   loginError.value = ''
   try {
     const result = await api.login(payload)
-    setAuthToken(result.access_token)
+    setAuthToken(result.access_token, result.remember_me)
     currentUser.value = result.user
     restorePositionAgentSession()
     await refreshAll()
@@ -403,6 +403,12 @@ function logout() {
   resetPositionAgentSessionMemory()
   dashboard.value = null
   activePage.value = 'workbench'
+}
+
+function handleAuthExpired() {
+  logout()
+  bootstrapping.value = false
+  loginError.value = '登录已过期或已在其他位置失效，请重新登录。'
 }
 
 async function initialize() {
@@ -945,6 +951,7 @@ onMounted(() => {
   syncPageFromLocation()
   window.addEventListener('popstate', syncPageFromLocation)
   window.addEventListener('focus', refreshVisibleDashboard)
+  window.addEventListener('hermes-auth-expired', handleAuthExpired)
   document.addEventListener('visibilitychange', refreshVisibleDashboard)
   startDashboardAutoRefresh()
   void initialize()
@@ -953,6 +960,7 @@ onBeforeUnmount(() => {
   stopDashboardAutoRefresh()
   window.removeEventListener('popstate', syncPageFromLocation)
   window.removeEventListener('focus', refreshVisibleDashboard)
+  window.removeEventListener('hermes-auth-expired', handleAuthExpired)
   document.removeEventListener('visibilitychange', refreshVisibleDashboard)
 })
 </script>

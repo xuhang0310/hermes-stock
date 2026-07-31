@@ -16,8 +16,6 @@ clawd 的"多次压缩增量合并不丢历史"（Previously/Newly 合并）需�
 from __future__ import annotations
 
 import re
-from typing import Any
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 

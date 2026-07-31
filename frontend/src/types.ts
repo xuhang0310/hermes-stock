@@ -475,6 +475,8 @@ export type UserPayload = {
 export type LoginPayload = {
   access_token: string
   token_type: 'bearer'
+  expires_in: number
+  remember_me: boolean
   user: UserPayload
 }
 

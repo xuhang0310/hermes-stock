@@ -248,6 +248,9 @@ async function loadStockRecommendations() {
     const payload = await api.stockPromptRecommendations()
     promptRecommendations.value = payload.items
     fallbackPrompts.value = payload.fallback_prompts
+    if (payload.refreshing) {
+      void pollStockRecommendations(recommendationSignature(payload.items)).catch(() => {})
+    }
   } catch {
     promptRecommendations.value = []
     fallbackPrompts.value = []
@@ -256,16 +259,35 @@ async function loadStockRecommendations() {
   }
 }
 
+function recommendationSignature(items: PromptRecommendation[]) {
+  return items.map((item) => `${item.id}:${item.updated_at || ''}`).join('|')
+}
+
+async function pollStockRecommendations(previousSignature: string) {
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1500))
+    const payload = await api.stockPromptRecommendations()
+    fallbackPrompts.value = payload.fallback_prompts
+    const signature = recommendationSignature(payload.items)
+    if (payload.items.length && signature !== previousSignature) {
+      promptRecommendations.value = payload.items
+      return true
+    }
+  }
+  return false
+}
+
 async function refreshStockRecommendations() {
   if (sending.value) return
   loadingPrompts.value = true
   promptRefreshFeedback.value = ''
   try {
-    const previous = new Set(promptRecommendations.value.map((item) => item.prompt_text.trim()))
+    const previousSignature = recommendationSignature(promptRecommendations.value)
     const payload = await api.refreshStockPromptRecommendations()
     promptRecommendations.value = payload.items
     fallbackPrompts.value = payload.fallback_prompts
-    const changed = payload.items.some((item) => !previous.has(item.prompt_text.trim()))
+    promptRefreshFeedback.value = '正在后台生成推荐...'
+    const changed = await pollStockRecommendations(previousSignature)
     promptRefreshFeedback.value = changed ? '推荐已更新' : '内容暂无变化'
     window.setTimeout(() => {
       promptRefreshFeedback.value = ''

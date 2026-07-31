@@ -26,10 +26,16 @@ from backend.app.core.models import (
     DigitalHumanProfile,
     JobRun,
     ScheduledJob,
+    SystemLog,
     User,
 )
 from backend.app.scheduler.rhythm_api import _run_output_content
-from backend.app.scheduler.rhythm_scheduler import _finalize_run, _is_due, _recover_stale_runs
+from backend.app.scheduler.rhythm_scheduler import (
+    _finalize_run,
+    _is_due,
+    _recover_stale_runs,
+    _run_health_check,
+)
 from backend.app.scheduler.schedule_service import AgentScheduleService
 
 
@@ -662,6 +668,76 @@ class AgentScheduleServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.engine.dispose()
 
+    def test_schedule_tools_query_real_table_and_enforce_edit_scope(self) -> None:
+        with self.SessionFactory() as db:
+            viewer = User(
+                username="schedule-viewer",
+                display_name="Schedule Viewer",
+                role="viewer",
+                permission_scope="agent:use",
+                password_hash="test",
+            )
+            db.add(viewer)
+            db.flush()
+            db.add_all(
+                [
+                    ScheduledJob(
+                        job_key="system-health",
+                        name="系统健康检查",
+                        job_kind="health_check",
+                        schedule_type="daily",
+                        run_time="08:15",
+                        owner_user_id=None,
+                        created_via="admin",
+                        enabled=True,
+                    ),
+                    ScheduledJob(
+                        job_key="viewer-agent-job",
+                        name="用户日报",
+                        job_kind="agent_task",
+                        schedule_type="daily",
+                        run_time="09:00",
+                        owner_user_id=viewer.id,
+                        created_via="agent",
+                        enabled=True,
+                    ),
+                ]
+            )
+            db.commit()
+            viewer_id = viewer.id
+
+        admin_result = self.service.execute(
+            "list_agent_schedules",
+            {"include_disabled": True},
+            {"user_id": self.user_id},
+        )
+        self.assertEqual(admin_result["total"], 2)
+        self.assertEqual(admin_result["enabled_total"], 2)
+        self.assertTrue(all(job["editable"] for job in admin_result["jobs"]))
+
+        updated = self.service.update_job(
+            user_id=self.user_id,
+            run_id=None,
+            args={"job_key": "system-health", "schedule": {"type": "daily", "run_time": "08:30"}},
+        )
+        self.assertEqual(updated["job"]["run_time"], "08:30")
+
+        viewer_result = self.service.execute(
+            "list_agent_schedules",
+            {"include_disabled": True},
+            {"user_id": viewer_id},
+        )
+        self.assertEqual(viewer_result["total"], 2)
+        jobs = {job["job_key"]: job for job in viewer_result["jobs"]}
+        self.assertFalse(jobs["system-health"]["editable"])
+        self.assertTrue(jobs["viewer-agent-job"]["editable"])
+        with self.assertRaises(PermissionError):
+            self.service.update_job(
+                user_id=viewer_id,
+                run_id=None,
+                args={"job_key": "system-health", "enabled": False},
+            )
+
     def test_create_pause_update_and_delete_sandbox_schedule(self) -> None:
         run_at = (datetime.now() + timedelta(minutes=10)).replace(microsecond=0)
         created = self.service.create_job(
@@ -750,14 +826,46 @@ class AgentScheduleServiceTests(unittest.TestCase):
             db.commit()
 
         with patch("backend.app.scheduler.rhythm_scheduler.SessionLocal", self.SessionFactory):
-            self.assertEqual(_recover_stale_runs(), 1)
+            self.assertEqual(
+                _recover_stale_runs(),
+                [("once-crash-window", "stale-once-run")],
+            )
 
         with self.SessionFactory() as db:
             job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == "once-crash-window"))
             run = db.scalar(select(JobRun).where(JobRun.run_id == "stale-once-run"))
-            self.assertTrue(job.enabled)
-            self.assertEqual(run.status, "failed")
-            self.assertTrue(_is_due(job, datetime.now()))
+            self.assertFalse(job.enabled)
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(run.finished_at)
+
+    def test_health_check_notification_is_idempotent_per_job_run(self) -> None:
+        with self.SessionFactory() as db:
+            db.add(
+                SystemLog(
+                    level="ERROR",
+                    module="test",
+                    message="force a health-check alert",
+                    created_at=datetime.now(),
+                )
+            )
+            db.commit()
+
+        notification = SimpleNamespace(id=42, status="sent", error=None)
+        with (
+            patch("backend.app.scheduler.rhythm_scheduler.SessionLocal", self.SessionFactory),
+            patch("backend.app.scheduler.rhythm_scheduler.send_feishu", return_value=notification) as send_mock,
+            patch("backend.app.core.applog.prune_system_logs"),
+        ):
+            message, notification_id, error = _run_health_check(
+                datetime.now(),
+                "feishu-channel",
+                "health-run-1",
+            )
+
+        self.assertIn("发现 1 项异常", message)
+        self.assertEqual(notification_id, 42)
+        self.assertIsNone(error)
+        self.assertEqual(send_mock.call_args.kwargs["event_id"], "rhythm-health-health-run-1")
 
     def test_job_run_preserves_full_output_and_derives_preview(self) -> None:
         full_output = "完整结果" * 1200

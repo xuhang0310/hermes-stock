@@ -248,7 +248,13 @@ def _tool_preview(name: str, result: dict[str, Any]) -> str:
     if name == "dispatch_agent_tasks":
         return str(result.get("summary") or f"Agent Team {result.get('status', '已完成')}。")
     if name == "list_agent_schedules":
-        return f"定时 Agent 任务 {len(result.get('jobs', []))} 个。"
+        return (
+            f"定时任务共 {int(result.get('total', len(result.get('jobs', []))))} 个，"
+            f"其中启用 {int(result.get('enabled_total', 0))} 个。"
+        )
+    if name == "get_agent_schedule":
+        job = result.get("job") if isinstance(result.get("job"), dict) else {}
+        return f"已读取定时任务：{job.get('name') or job.get('job_key') or '-'}。"
     if name in SCHEDULE_MUTATION_TOOL_NAMES:
         job = result.get("job") if isinstance(result.get("job"), dict) else {}
         return f"定时任务操作完成：{job.get('name') or result.get('job_key') or '-'}。"
@@ -471,7 +477,10 @@ def _execute_tool(
         from backend.app.agent_runtime.workflow_service import agent_workflow_service
 
         return {"templates": agent_workflow_service.list_templates()}
-    if name in SCHEDULE_MUTATION_TOOL_NAMES or name == "list_agent_schedules":
+    if name in SCHEDULE_MUTATION_TOOL_NAMES or name in {
+        "list_agent_schedules",
+        "get_agent_schedule",
+    }:
         from backend.app.scheduler.schedule_service import agent_schedule_service
 
         return agent_schedule_service.execute(name, args, request_payload)

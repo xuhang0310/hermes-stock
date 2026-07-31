@@ -338,6 +338,74 @@ class AgentRuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(repeated["cancelled_now"])
         self.assertEqual(self.repository.active_runs(self.user_id), [])
 
+    def test_cancelled_run_closes_steps_tools_and_pending_approvals(self) -> None:
+        run, _ = self.create_run()
+        run_id = run["run_id"]
+        with self.SessionFactory() as db:
+            step = AgentRunStep(
+                run_id=run_id,
+                seq=1,
+                step_key="pending-work",
+                status="running",
+            )
+            db.add(step)
+            db.flush()
+            db.add_all(
+                [
+                    AgentToolExecution(
+                        execution_id="queued-tool",
+                        run_id=run_id,
+                        step_id=step.id,
+                        tool_call_id="queued-call",
+                        tool_name="read_data",
+                        execution_mode="external",
+                        status="queued",
+                    ),
+                    AgentToolExecution(
+                        execution_id="side-effect-tool",
+                        run_id=run_id,
+                        step_id=step.id,
+                        tool_call_id="side-effect-call",
+                        tool_name="write_data",
+                        execution_mode="external",
+                        status="running",
+                        has_side_effects=True,
+                        lease_owner="worker-1",
+                    ),
+                    AgentToolApproval(
+                        approval_id="pending-approval",
+                        run_id=run_id,
+                        tool_call_id="queued-call",
+                        session_id=self.session_id,
+                        user_id=self.user_id,
+                        tool_name="read_data",
+                        display_name="读取数据",
+                        risk_level="medium",
+                        status="pending",
+                        expires_at=datetime.utcnow() + timedelta(minutes=5),
+                    ),
+                ]
+            )
+            db.commit()
+
+        cancelled = self.repository.request_cancel(run_id, user_id=self.user_id)
+        self.assertTrue(cancelled["cancelled_now"])
+        with self.SessionFactory() as db:
+            step = db.scalar(select(AgentRunStep).where(AgentRunStep.run_id == run_id))
+            tools = {
+                row.execution_id: row
+                for row in db.scalars(
+                    select(AgentToolExecution).where(AgentToolExecution.run_id == run_id)
+                ).all()
+            }
+            approval = db.get(AgentToolApproval, "pending-approval")
+            self.assertEqual(step.status, "cancelled")
+            self.assertEqual(tools["queued-tool"].status, "cancelled")
+            self.assertEqual(tools["side-effect-tool"].status, "unknown")
+            self.assertIsNone(tools["side-effect-tool"].lease_owner)
+            self.assertEqual(approval.status, "cancelled")
+            self.assertIsNotNone(approval.resolved_at)
+
     async def test_event_sink_coalesces_deltas_before_persisting(self) -> None:
         run, _ = self.create_run()
         broker = RecordingBroker()

@@ -224,6 +224,7 @@ class Deployer:
         log(f"上传 {len(files)} 个文件 -> releases/{release} ...")
         self.upload(files, new)
 
+        auth_secret = secrets.token_urlsafe(48)
         enc_key = secrets.token_urlsafe(36)
         server = f"""
 set -u
@@ -233,6 +234,9 @@ if [ -n "$OLD" ] && [ -f "$OLD/backend/.env" ]; then
 else
   [ -f "$NEW/backend/.env.example" ] && cp "$NEW/backend/.env.example" "$NEW/backend/.env" || touch "$NEW/backend/.env"
 fi
+grep -q '^STOCK_AUTH_SECRET=.' "$NEW/backend/.env" || echo 'STOCK_AUTH_SECRET={auth_secret}' >> "$NEW/backend/.env"
+grep -q '^STOCK_AUTH_TOKEN_TTL_HOURS=' "$NEW/backend/.env" || echo 'STOCK_AUTH_TOKEN_TTL_HOURS=24' >> "$NEW/backend/.env"
+grep -q '^STOCK_AUTH_REMEMBER_TOKEN_TTL_DAYS=' "$NEW/backend/.env" || echo 'STOCK_AUTH_REMEMBER_TOKEN_TTL_DAYS=30' >> "$NEW/backend/.env"
 grep -q '^STOCK_WEBHOOK_ENC_KEY=' "$NEW/backend/.env" || echo 'STOCK_WEBHOOK_ENC_KEY={enc_key}' >> "$NEW/backend/.env"
 grep -q '^STOCK_SCHEDULER_ENABLED=' "$NEW/backend/.env" || echo 'STOCK_SCHEDULER_ENABLED=true' >> "$NEW/backend/.env"
 grep -q '^STOCK_WORKSPACE_EXEC_BACKEND=' "$NEW/backend/.env" || echo 'STOCK_WORKSPACE_EXEC_BACKEND=docker' >> "$NEW/backend/.env"

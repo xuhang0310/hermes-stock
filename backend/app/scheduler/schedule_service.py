@@ -6,9 +6,10 @@ from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from backend.app.auth.auth import permissions_for
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import DigitalHumanProfile, ScheduledJob, User
 from backend.app.agent_runtime.profile_access import target_roles_allow
@@ -40,7 +41,14 @@ class AgentScheduleService:
         ):
             raise PermissionError("请先为本次总调度会话显式开启 Python 执行权限。")
         if name == "list_agent_schedules":
-            return {"jobs": self.list_jobs(user_id, bool(args.get("include_disabled", True)))}
+            jobs = self.list_jobs(user_id, bool(args.get("include_disabled", True)))
+            return {
+                "jobs": jobs,
+                "total": len(jobs),
+                "enabled_total": sum(1 for job in jobs if job["enabled"]),
+            }
+        if name == "get_agent_schedule":
+            return {"job": self.get_job(user_id, str(args.get("job_key") or ""))}
         if name == "create_agent_schedule":
             return self.create_job(user_id=user_id, run_id=run_id, args=args)
         if name == "update_agent_schedule":
@@ -57,14 +65,25 @@ class AgentScheduleService:
 
     def list_jobs(self, user_id: int, include_disabled: bool = True) -> list[dict[str, Any]]:
         with self.session_factory() as db:
-            query = select(ScheduledJob).where(
-                ScheduledJob.owner_user_id == user_id,
-                ScheduledJob.created_via == "agent",
-            )
+            actor = self._actor(db, user_id)
+            query = select(ScheduledJob)
+            if not self._can_manage_all(actor):
+                query = query.where(
+                    or_(
+                        ScheduledJob.owner_user_id == user_id,
+                        ScheduledJob.owner_user_id.is_(None),
+                    )
+                )
             if not include_disabled:
                 query = query.where(ScheduledJob.enabled.is_(True))
-            rows = db.scalars(query.order_by(ScheduledJob.created_at.desc())).all()
-            return [self._out(row) for row in rows]
+            rows = db.scalars(query.order_by(ScheduledJob.sort_order, ScheduledJob.id)).all()
+            return [self._out(row, actor=actor) for row in rows]
+
+    def get_job(self, user_id: int, job_key: str) -> dict[str, Any]:
+        with self.session_factory() as db:
+            actor = self._actor(db, user_id)
+            job = self._visible_job(db, actor, job_key)
+            return self._out(job, actor=actor)
 
     def create_job(self, *, user_id: int, run_id: str | None, args: dict[str, Any]) -> dict[str, Any]:
         name = str(args.get("name") or "").strip()
@@ -76,6 +95,7 @@ class AgentScheduleService:
             raise ValueError("任务名称或指令过长。")
         schedule = self._normalize_schedule(args.get("schedule"))
         with self.session_factory() as db:
+            actor = self._actor(db, user_id)
             profile = self._target_profile(db, target_code, user_id)
             job = ScheduledJob(
                 job_key=f"agent-{user_id}-{uuid.uuid4().hex[:12]}",
@@ -99,12 +119,13 @@ class AgentScheduleService:
             db.add(job)
             db.commit()
             db.refresh(job)
-            return {"created": True, "job": self._out(job)}
+            return {"created": True, "job": self._out(job, actor=actor)}
 
     def update_job(self, *, user_id: int, run_id: str | None, args: dict[str, Any]) -> dict[str, Any]:
         job_key = str(args.get("job_key") or "").strip()
         with self.session_factory() as db:
-            job = self._owned_job(db, user_id, job_key)
+            actor = self._actor(db, user_id)
+            job = self._editable_job(db, actor, job_key)
             if "name" in args:
                 value = str(args.get("name") or "").strip()
                 if not value:
@@ -138,33 +159,57 @@ class AgentScheduleService:
             job.created_by_run_id = run_id or job.created_by_run_id
             db.commit()
             db.refresh(job)
-            return {"updated": True, "job": self._out(job)}
+            return {"updated": True, "job": self._out(job, actor=actor)}
 
     def set_enabled(self, *, user_id: int, job_key: str, enabled: bool) -> dict[str, Any]:
         with self.session_factory() as db:
-            job = self._owned_job(db, user_id, job_key)
+            actor = self._actor(db, user_id)
+            job = self._editable_job(db, actor, job_key)
             job.enabled = enabled
             db.commit()
             db.refresh(job)
-            return {"updated": True, "job": self._out(job)}
+            return {"updated": True, "job": self._out(job, actor=actor)}
 
     def delete_job(self, *, user_id: int, job_key: str) -> dict[str, Any]:
         with self.session_factory() as db:
-            job = self._owned_job(db, user_id, job_key)
+            actor = self._actor(db, user_id)
+            job = self._editable_job(db, actor, job_key)
             db.delete(job)
             db.commit()
             return {"deleted": True, "job_key": job_key}
 
-    def _owned_job(self, db: Session, user_id: int, job_key: str) -> ScheduledJob:
-        job = db.scalar(
-            select(ScheduledJob).where(
-                ScheduledJob.job_key == job_key,
-                ScheduledJob.owner_user_id == user_id,
-                ScheduledJob.created_via == "agent",
-            ).limit(1)
+    @staticmethod
+    def _actor(db: Session, user_id: int) -> User:
+        actor = db.get(User, user_id)
+        if actor is None or not actor.is_enabled:
+            raise PermissionError("当前用户不存在或已停用。")
+        return actor
+
+    @staticmethod
+    def _can_manage_all(actor: User) -> bool:
+        permissions = permissions_for(actor)
+        return "all" in permissions or "model:manage" in permissions
+
+    @classmethod
+    def _can_edit(cls, actor: User, job: ScheduledJob) -> bool:
+        return cls._can_manage_all(actor) or (
+            job.owner_user_id == actor.id and job.created_via == "agent"
         )
+
+    @classmethod
+    def _visible_job(cls, db: Session, actor: User, job_key: str) -> ScheduledJob:
+        job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
         if job is None:
-            raise ValueError("定时任务不存在，或不属于当前用户。")
+            raise ValueError("定时任务不存在。")
+        if not cls._can_manage_all(actor) and job.owner_user_id not in {None, actor.id}:
+            raise PermissionError("当前用户无权查看该定时任务。")
+        return job
+
+    @classmethod
+    def _editable_job(cls, db: Session, actor: User, job_key: str) -> ScheduledJob:
+        job = cls._visible_job(db, actor, job_key)
+        if not cls._can_edit(actor, job):
+            raise PermissionError("当前用户无权修改该定时任务。")
         return job
 
     @staticmethod
@@ -244,8 +289,14 @@ class AgentScheduleService:
         if not _TIME_PATTERN.fullmatch(value):
             raise ValueError(f"{field} 必须是 HH:MM。")
 
-    @staticmethod
-    def _out(job: ScheduledJob) -> dict[str, Any]:
+    @classmethod
+    def _out(cls, job: ScheduledJob, *, actor: User) -> dict[str, Any]:
+        if job.owner_user_id == actor.id:
+            scope = "own"
+        elif job.owner_user_id is None:
+            scope = "system"
+        else:
+            scope = "managed"
         return {
             "job_key": job.job_key,
             "name": job.name,
@@ -267,6 +318,10 @@ class AgentScheduleService:
             "last_status": job.last_status,
             "last_error": job.last_error,
             "created_at": job.created_at.isoformat() if job.created_at else None,
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "created_via": job.created_via,
+            "scope": scope,
+            "editable": cls._can_edit(actor, job),
         }
 
 

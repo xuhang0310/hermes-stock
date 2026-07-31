@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -10,7 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 import time
@@ -217,10 +218,10 @@ def create_app(init_db: bool = True) -> FastAPI:
         finally:
             if init_db and settings.background_services_enabled:
                 log_event("system", "INFO", "应用关闭：停止后台组件", to_db=False)
-                stop_feishu_bots()
-                await agent_runtime_worker.stop()
                 await stop_rhythm_scheduler()
                 await stop_prompt_recommendation_scheduler()
+                await agent_runtime_worker.stop()
+                stop_feishu_bots()
             await redis_broker.close()
 
     app = FastAPI(
@@ -277,12 +278,34 @@ def create_app(init_db: bool = True) -> FastAPI:
     def repo(db: Session = Depends(get_db)) -> StockRepository:
         return StockRepository(db)
 
+    @app.exception_handler(IntegrityError)
+    async def db_integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+        error_id = uuid.uuid4().hex[:12]
+        get_logger("db").error(
+            "数据库约束冲突 [%s] %s %s",
+            error_id,
+            request.method,
+            request.url.path,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "数据冲突或关联记录不存在，请刷新后重试", "error_id": error_id},
+        )
+
     @app.exception_handler(SQLAlchemyError)
     async def db_error_handler(request: Request, exc: SQLAlchemyError) -> JSONResponse:
-        origin = getattr(exc, "orig", None)
+        error_id = uuid.uuid4().hex[:12]
+        get_logger("db").error(
+            "数据库操作失败 [%s] %s %s",
+            error_id,
+            request.method,
+            request.url.path,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
         return JSONResponse(
             status_code=500,
-            content={"detail": f"database error: {str(origin or exc)[:300]}"},
+            content={"detail": "数据库操作失败，请稍后重试", "error_id": error_id},
         )
 
     @app.get("/api/health")

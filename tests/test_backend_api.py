@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import select
+import select as socket_select
 import socketserver
 import threading
 import unittest
@@ -37,7 +37,7 @@ class _TunnelHandler(socketserver.BaseRequestHandler):
             return
         try:
             while True:
-                readers, _, _ = select.select([self.request, channel], [], [], 1)
+                readers, _, _ = socket_select.select([self.request, channel], [], [], 1)
                 if self.request in readers:
                     data = self.request.recv(65535)
                     if not data:

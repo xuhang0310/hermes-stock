@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,7 +22,6 @@ from backend.app.core.models import User
 from backend.app.core.settings import settings
 
 
-TOKEN_TTL_SECONDS = 60 * 60 * 12
 PASSWORD_ITERATIONS = 260_000
 security = HTTPBearer(auto_error=False)
 
@@ -48,6 +48,9 @@ class AuthContext:
 
 
 _AUTH_SECRET_CACHE: bytes | None = None
+_LOGIN_LIMIT_LOCK = threading.Lock()
+_LOGIN_LIMIT_LOCAL: dict[str, tuple[int, float]] = {}
+_LOGIN_LIMIT_REDIS_UNAVAILABLE_UNTIL = 0.0
 
 
 def _secret_key() -> bytes:
@@ -117,15 +120,23 @@ def user_payload(context: AuthContext) -> dict:
     }
 
 
-def create_access_token(user: User) -> str:
+def access_token_ttl_seconds(*, remember_me: bool = False) -> int:
+    if remember_me:
+        return max(1, settings.auth_remember_token_ttl_days) * 24 * 60 * 60
+    return max(1, settings.auth_token_ttl_hours) * 60 * 60
+
+
+def create_access_token(user: User, *, remember_me: bool = False) -> str:
     now = int(time.time())
+    ttl_seconds = access_token_ttl_seconds(remember_me=remember_me)
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "sub": str(user.id),
         "username": user.username,
         "role": user.role,
+        "ver": int(user.token_version or 1),
         "iat": now,
-        "exp": now + TOKEN_TTL_SECONDS,
+        "exp": now + ttl_seconds,
     }
     signing_input = (
         f"{_b64(json.dumps(header, separators=(',', ':')).encode())}."
@@ -177,6 +188,8 @@ def get_current_user(
     user = db.get(User, int(payload.get("sub") or 0))
     if user is None or not user.is_enabled:
         raise HTTPException(status_code=401, detail="账号不存在或已停用")
+    if int(payload.get("ver", 1)) != int(user.token_version or 1):
+        raise HTTPException(status_code=401, detail="登录凭证已失效，请重新登录")
     return AuthContext(user=user, permissions=permissions_for(user))
 
 
@@ -190,3 +203,112 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
     db.commit()
     db.refresh(user)
     return user
+
+
+def _login_limit_key(kind: str, value: str) -> str:
+    digest = hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
+    return f"hermes:auth:login:{kind}:{digest}"
+
+
+def _login_limit_redis():
+    global _LOGIN_LIMIT_REDIS_UNAVAILABLE_UNTIL
+    if not settings.agent_redis_url or time.monotonic() < _LOGIN_LIMIT_REDIS_UNAVAILABLE_UNTIL:
+        return None
+    try:
+        from redis import Redis
+
+        client = Redis.from_url(
+            settings.agent_redis_url,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            decode_responses=True,
+        )
+        client.ping()
+        return client
+    except Exception:  # noqa: BLE001
+        _LOGIN_LIMIT_REDIS_UNAVAILABLE_UNTIL = time.monotonic() + 30
+        return None
+
+
+def login_retry_after(*, username: str, client_ip: str) -> int:
+    keys = (
+        _login_limit_key("account", username),
+        _login_limit_key("ip", client_ip),
+    )
+    limit = max(1, settings.auth_login_max_attempts)
+    client = _login_limit_redis()
+    if client is not None:
+        try:
+            values = client.mget(keys)
+            retry_after = 0
+            for key, value in zip(keys, values, strict=True):
+                if int(value or 0) >= limit:
+                    retry_after = max(retry_after, max(1, int(client.ttl(key))))
+            return retry_after
+        except Exception:  # noqa: BLE001
+            pass
+
+    now = time.monotonic()
+    retry_after = 0
+    with _LOGIN_LIMIT_LOCK:
+        for key in keys:
+            count, expires_at = _LOGIN_LIMIT_LOCAL.get(key, (0, 0.0))
+            if expires_at <= now:
+                _LOGIN_LIMIT_LOCAL.pop(key, None)
+            elif count >= limit:
+                retry_after = max(retry_after, max(1, int(expires_at - now)))
+    return retry_after
+
+
+def record_login_failure(*, username: str, client_ip: str) -> None:
+    keys = (
+        _login_limit_key("account", username),
+        _login_limit_key("ip", client_ip),
+    )
+    window = max(30, settings.auth_login_window_seconds)
+    client = _login_limit_redis()
+    if client is not None:
+        try:
+            pipeline = client.pipeline(transaction=True)
+            for key in keys:
+                pipeline.incr(key)
+                pipeline.expire(key, window, nx=True)
+            pipeline.execute()
+            return
+        except Exception:  # noqa: BLE001
+            pass
+
+    now = time.monotonic()
+    with _LOGIN_LIMIT_LOCK:
+        if len(_LOGIN_LIMIT_LOCAL) > 10_000:
+            expired = [
+                key
+                for key, (_, expires_at) in _LOGIN_LIMIT_LOCAL.items()
+                if expires_at <= now
+            ]
+            for key in expired:
+                _LOGIN_LIMIT_LOCAL.pop(key, None)
+            if len(_LOGIN_LIMIT_LOCAL) > 10_000:
+                oldest = sorted(
+                    _LOGIN_LIMIT_LOCAL,
+                    key=lambda item: _LOGIN_LIMIT_LOCAL[item][1],
+                )[:1_000]
+                for key in oldest:
+                    _LOGIN_LIMIT_LOCAL.pop(key, None)
+        for key in keys:
+            count, expires_at = _LOGIN_LIMIT_LOCAL.get(key, (0, 0.0))
+            if expires_at <= now:
+                count, expires_at = 0, now + window
+            _LOGIN_LIMIT_LOCAL[key] = (count + 1, expires_at)
+
+
+def clear_login_failures(*, username: str) -> None:
+    key = _login_limit_key("account", username)
+    client = _login_limit_redis()
+    if client is not None:
+        try:
+            client.delete(key)
+        except Exception:  # noqa: BLE001
+            pass
+    with _LOGIN_LIMIT_LOCK:
+        _LOGIN_LIMIT_LOCAL.pop(key, None)

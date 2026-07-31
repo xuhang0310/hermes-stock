@@ -102,12 +102,26 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
     ),
     _tool(
         "list_agent_schedules",
-        "查看当前用户通过总调度创建的定时任务。",
+        "查询 scheduled_jobs 中当前账号有权查看的真实定时任务，并返回总数、启用数、状态、"
+        "执行数字人和调度配置。超级管理员/管理员可查看全部任务；普通用户可查看自己的任务和"
+        "系统公共任务。凡是用户询问当前任务数量、任务状态或已有配置，必须先调用本工具，"
+        "禁止根据会话内容猜测。",
         {
             "properties": {
                 "include_disabled": {"type": "boolean", "default": True},
             },
             "required": [],
+        },
+    ),
+    _tool(
+        "get_agent_schedule",
+        "按 job_key 查询一条真实定时任务的完整配置。修改任务前应先调用 list_agent_schedules "
+        "定位 job_key，再调用本工具核对当前值，避免覆盖未要求变更的字段。",
+        {
+            "properties": {
+                "job_key": {"type": "string", "description": "定时任务唯一标识。"},
+            },
+            "required": ["job_key"],
         },
     ),
     _tool(
@@ -152,7 +166,8 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
     ),
     _tool(
         "update_agent_schedule",
-        "修改当前用户通过总调度创建的定时任务。只传需要变更的字段。",
+        "修改当前账号有权管理的真实定时任务。管理员可修改全部任务，普通用户只能修改自己"
+        "通过 Agent 创建的任务。只传用户明确要求变更的字段，其他字段保持不变。",
         {
             "properties": {
                 "job_key": {"type": "string"},
@@ -218,7 +233,8 @@ Swarm 工作流规则：
 4. dispatch_agent_tasks 返回后，根据每个成员的状态、证据和缺口统一复核并统稿；部分失败时明确标注，不得把失败结果当成事实。
 5. 用户明确要求“定时、每天、每周、稍后、每隔多久”执行时，可以创建定时任务。创建前复述执行者、时间、指令、是否推送飞书、是否允许代码执行。
 6. 定时代码只在用户隔离工作区的 Docker 沙箱执行；不要把密钥、数据库密码或宿主机路径写进任务指令。
-7. 修改、暂停、恢复和删除任务时，先用 list_agent_schedules 找到准确 job_key。
+7. 用户询问“有多少定时任务、有哪些任务、是否启用、最近是否成功”时，必须调用 list_agent_schedules 查询真实数据，禁止用会话记忆推断，更不能把未查询解释成 0。
+8. 修改、暂停、恢复和删除任务时，先用 list_agent_schedules 找到准确 job_key，再用 get_agent_schedule 核对当前配置；update_agent_schedule 只提交需要变化的字段。
 """
 
 
@@ -228,6 +244,7 @@ TOOL_DISPLAY_NAMES = {
     "list_delegatable_agents": "查看可委派数字人",
     "dispatch_agent_tasks": "派发 Agent Team",
     "list_agent_schedules": "查看定时 Agent 任务",
+    "get_agent_schedule": "查看定时任务详情",
     "create_agent_schedule": "创建定时 Agent 任务",
     "update_agent_schedule": "修改定时 Agent 任务",
     "pause_agent_schedule": "暂停或恢复定时 Agent 任务",

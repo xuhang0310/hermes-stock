@@ -296,6 +296,21 @@ class SkillRegistry:
                 selected.append(manifest)
             if len(selected) >= effective_limit:
                 break
+        # Generic questions can have fewer keyword hits than the configured
+        # baseline. Fill deterministically with role-default skills first so
+        # every Agent receives the promised minimum capability pack.
+        for manifest in eligible.values():
+            if role_code not in manifest.default_roles or manifest in selected:
+                continue
+            selected.append(manifest)
+            if len(selected) >= effective_limit:
+                break
+        for manifest in eligible.values():
+            if manifest in selected:
+                continue
+            selected.append(manifest)
+            if len(selected) >= effective_limit:
+                break
         return selected[:effective_limit]
 
     def build_progressive_context(

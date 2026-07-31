@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
+import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -29,6 +32,7 @@ from backend.app.core.models import (
     WatchlistGroup,
     WatchlistItem,
 )
+from backend.app.core.settings import settings
 
 
 SCHEDULER_INTERVAL_SECONDS = 30 * 60
@@ -36,6 +40,8 @@ RECOMMENDATION_TTL_HOURS = 10
 MAX_RECOMMENDATIONS = 8
 _scheduler_task: asyncio.Task | None = None
 _refresh_tasks: set[asyncio.Task[None]] = set()
+_refresh_claims: set[str] = set()
+_refresh_claim_lock = threading.Lock()
 
 # 问股（stock 模式）虚拟 profile：问股会话不绑数字人（agent_chat stock 置 digital_human_id=None），
 # 但 AiPromptRecommendation.digital_human_id NOT NULL，故用此虚拟 profile 作 persona / fallback /
@@ -253,18 +259,76 @@ def _recommendation_refresh_done(task: asyncio.Task[None]) -> None:
         )
 
 
-def _refresh_one_in_new_session(user_id: int, profile_id: int, chat_mode: str) -> None:
-    try:
-        with SessionLocal() as db:
-            profile = db.get(DigitalHumanProfile, profile_id)
-            if profile is None or profile.status != "enabled":
-                return
-            refresh_recommendations_for_user_profile(
-                db,
-                user_id=user_id,
-                profile=profile,
-                chat_mode=chat_mode,
+@contextlib.contextmanager
+def _recommendation_refresh_lease(user_id: int, profile_id: int, chat_mode: str):
+    identity = f"{user_id}:{profile_id}:{chat_mode}"
+    lock_key = f"hermes:prompt-refresh:{hashlib.sha256(identity.encode()).hexdigest()}"
+    token = uuid.uuid4().hex
+    redis_client = None
+
+    if settings.agent_redis_url:
+        try:
+            from redis import Redis
+
+            redis_client = Redis.from_url(
+                settings.agent_redis_url,
+                socket_connect_timeout=0.5,
+                socket_timeout=0.5,
+                decode_responses=True,
             )
+            if not redis_client.set(lock_key, token, nx=True, ex=90):
+                yield False
+                return
+        except Exception:  # noqa: BLE001
+            redis_client = None
+
+    local_claimed = False
+    if redis_client is None:
+        with _refresh_claim_lock:
+            if lock_key in _refresh_claims:
+                yield False
+                return
+            _refresh_claims.add(lock_key)
+            local_claimed = True
+
+    try:
+        yield True
+    finally:
+        if redis_client is not None:
+            with contextlib.suppress(Exception):
+                redis_client.eval(
+                    "if redis.call('get', KEYS[1]) == ARGV[1] "
+                    "then return redis.call('del', KEYS[1]) else return 0 end",
+                    1,
+                    lock_key,
+                    token,
+                )
+        elif local_claimed:
+            with _refresh_claim_lock:
+                _refresh_claims.discard(lock_key)
+
+
+def refresh_recommendations_in_new_session(
+    user_id: int,
+    profile_id: int,
+    chat_mode: str = "research",
+) -> None:
+    """Generate one recommendation batch outside the HTTP response path."""
+
+    try:
+        with _recommendation_refresh_lease(user_id, profile_id, chat_mode) as acquired:
+            if not acquired:
+                return
+            with SessionLocal() as db:
+                profile = db.get(DigitalHumanProfile, profile_id)
+                if profile is None or profile.status != "enabled":
+                    return
+                refresh_recommendations_for_user_profile(
+                    db,
+                    user_id=user_id,
+                    profile=profile,
+                    chat_mode=chat_mode,
+                )
     except Exception as exc:  # noqa: BLE001
         log_event(
             "agent",
@@ -272,6 +336,12 @@ def _refresh_one_in_new_session(user_id: int, profile_id: int, chat_mode: str) -
             f"推荐问题后台刷新失败: {str(exc)[:200]}",
             to_db=False,
         )
+
+
+def _refresh_one_in_new_session(user_id: int, profile_id: int, chat_mode: str) -> None:
+    """Compatibility seam retained for scheduling tests and runtime patching."""
+
+    refresh_recommendations_in_new_session(user_id, profile_id, chat_mode)
 
 
 def refresh_recommendations_for_stock(db: Session, *, user_id: int) -> list[AiPromptRecommendation]:
@@ -382,12 +452,20 @@ def start_prompt_recommendation_scheduler() -> None:
 
 async def stop_prompt_recommendation_scheduler() -> None:
     global _scheduler_task
-    if not _scheduler_task:
+    if _scheduler_task:
+        _scheduler_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _scheduler_task
+        _scheduler_task = None
+    pending = [task for task in _refresh_tasks if not task.done()]
+    if not pending:
         return
-    _scheduler_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await _scheduler_task
-    _scheduler_task = None
+    done, still_pending = await asyncio.wait(pending, timeout=30)
+    for task in done:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+    for task in still_pending:
+        task.cancel()
 
 
 async def _scheduler_loop() -> None:
@@ -584,6 +662,7 @@ def _call_llm_for_recommendations(
             messages,
             llm_config,
             temperature=None,
+            timeout=30.0,
             log_module="prompt_recommendations",
         )
         content = data["choices"][0]["message"]["content"]

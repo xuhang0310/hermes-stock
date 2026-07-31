@@ -60,6 +60,8 @@ type ChatMessage = {
   streamStatus?: 'connecting' | 'streaming' | 'tooling' | 'done' | 'error'
   startedAt?: number
   durationMs?: number
+  terminalDurationMs?: number
+  streamFinalized?: boolean
   backtestRunId?: string
   processExpanded?: boolean
   processAutoCollapsed?: boolean
@@ -322,6 +324,24 @@ function applyQuickPrompt(prompt: string) {
   question.value = prompt
 }
 
+function recommendationSignature(items: PromptRecommendation[]) {
+  return items.map((item) => `${item.id}:${item.updated_at || ''}`).join('|')
+}
+
+async function pollPromptRecommendations(profileId: number, previousSignature: string) {
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1500))
+    if (selectedProfileId.value !== profileId) return
+    const payload = await api.promptRecommendations(profileId)
+    fallbackPrompts.value = payload.fallback_prompts
+    const signature = recommendationSignature(payload.items)
+    if (payload.items.length && signature !== previousSignature) {
+      promptRecommendations.value = payload.items
+      return
+    }
+  }
+}
+
 async function loadPromptRecommendations(profileId: number) {
   loadingPrompts.value = true
   try {
@@ -329,6 +349,9 @@ async function loadPromptRecommendations(profileId: number) {
     if (selectedProfileId.value !== profileId) return
     promptRecommendations.value = payload.items
     fallbackPrompts.value = payload.fallback_prompts
+    if (payload.refreshing) {
+      void pollPromptRecommendations(profileId, recommendationSignature(payload.items)).catch(() => {})
+    }
   } catch {
     if (selectedProfileId.value === profileId) {
       promptRecommendations.value = []
@@ -345,9 +368,11 @@ async function refreshPromptRecommendations() {
   if (!selectedProfileId.value || selectedSessionRunning.value) return
   loadingPrompts.value = true
   try {
+    const previousSignature = recommendationSignature(promptRecommendations.value)
     const payload = await api.refreshPromptRecommendations(selectedProfileId.value)
     promptRecommendations.value = payload.items
     fallbackPrompts.value = payload.fallback_prompts
+    await pollPromptRecommendations(selectedProfileId.value, previousSignature)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '刷新推荐失败'
   } finally {
@@ -436,9 +461,11 @@ function finishStreamDuration(message: ChatMessage, durationMs?: number) {
   message.durationMs = elapsedStreamMilliseconds(message.startedAt)
 }
 
-function completeStream(message: ChatMessage, durationMs?: number) {
-  finishStreamDuration(message, durationMs)
-  message.streamStatus = 'done'
+function finalizeStream(message: ChatMessage, outcome: 'done' | 'aborted' | 'error') {
+  finishStreamDuration(message, message.terminalDurationMs)
+  if (message.streamFinalized) return
+  message.streamFinalized = true
+  message.streamStatus = outcome === 'error' ? 'error' : 'done'
   if (!message.processAutoCollapsed) {
     message.processExpanded = false
     message.processAutoCollapsed = true
@@ -571,7 +598,6 @@ function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: A
     if (event.role === 'answer') {
       reply.content = reply.liveContent.trim()
       reply.liveContent = ''
-      completeStream(reply)
     } else {
       flushThought(reply)
       reply.streamStatus = 'tooling'
@@ -632,18 +658,11 @@ function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: A
     reply.liveTool = null
     reply.error = event.content || 'ReAct 响应失败'
     reply.streamStatus = 'error'
-    finishStreamDuration(reply)
     pushStep(reply, { type: 'error', content: reply.error })
     if (requestIsVisible(request)) error.value = reply.error
   } else if (event.type === 'done') {
     reply.liveTool = null
-    if (reply.error) {
-      reply.streamStatus = 'error'
-      finishStreamDuration(reply, event.duration_ms)
-    } else {
-      completeStream(reply, event.duration_ms)
-    }
-    releaseRequest(request)
+    reply.terminalDurationMs = event.duration_ms
   }
   if (requestIsVisible(request)) scrollChat()
 }
@@ -711,6 +730,7 @@ async function send() {
     messages: requestMessages
   }
   activeRequests.set(request.key, request)
+  let outcome: 'done' | 'aborted' | 'error' = 'done'
   try {
     await api.streamAgentChat(
       {
@@ -735,9 +755,7 @@ async function send() {
       const gotNothing = !reply.content && !reply.liveContent.trim() && !reply.steps.length && !reply.liveReasoning
       if (gotNothing) {
         reply.error = '回复未完成，请重试。'
-        reply.streamStatus = 'error'
-      } else {
-        completeStream(reply)
+        outcome = 'error'
       }
     }
     nextTick(() => {
@@ -756,23 +774,22 @@ async function send() {
         reply.content = reply.liveContent.trim()
         reply.liveContent = ''
       }
-      completeStream(reply)
+      outcome = 'aborted'
     } else {
       reply.error = err instanceof Error ? err.message : '发送失败'
-      reply.streamStatus = 'error'
-      finishStreamDuration(reply)
+      outcome = 'error'
       if (requestIsVisible(request)) error.value = reply.error
     }
   } finally {
     releaseRequest(request)
-    if (!reply.error) completeStream(reply)
-    else finishStreamDuration(reply)
+    finalizeStream(reply, reply.error ? 'error' : outcome)
     if (requestIsVisible(request)) scrollChat()
   }
 }
 
 async function resumeRecoveredRun(runId: string, request: ActiveChatRequest, reply: ChatMessage) {
   const controller = request.controller
+  let outcome: 'done' | 'aborted' | 'error' = 'done'
   try {
     await api.resumeAgentRun(
       runId,
@@ -783,22 +800,20 @@ async function resumeRecoveredRun(runId: string, request: ActiveChatRequest, rep
       reply.content = reply.liveContent.trim()
       reply.liveContent = ''
     }
-    if (!reply.error) completeStream(reply)
   } catch (err) {
     if (controller.signal.aborted) {
       flushReasoning(reply)
       flushThought(reply)
       reply.liveTool = null
-      completeStream(reply)
+      outcome = 'aborted'
     } else {
       reply.error = err instanceof Error ? err.message : '恢复数字人任务失败'
-      reply.streamStatus = 'error'
-      finishStreamDuration(reply)
+      outcome = 'error'
       if (requestIsVisible(request)) error.value = reply.error
     }
   } finally {
     releaseRequest(request)
-    if (!reply.error) completeStream(reply)
+    finalizeStream(reply, reply.error ? 'error' : outcome)
     if (requestIsVisible(request)) scrollChat()
     nextTick(() => {
       refreshSessions(request.profileId).catch(() => {})

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from sqlalchemy import delete, exists, func, select
+from sqlalchemy import and_, case, delete, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
@@ -61,6 +61,79 @@ def _run_dict(row: AgentRun) -> dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+
+
+def _finalize_run_children(
+    db: Session,
+    *,
+    run_id: str,
+    status: str,
+    error: str | None,
+    terminal_at: datetime,
+) -> None:
+    """Close every non-terminal child row when its owning run terminates."""
+
+    child_error = (
+        error or f"Agent run ended with status {status} before the operation completed."
+    )[:16000]
+    step_status = "failed" if status == "failed" else ("cancelled" if status == "cancelled" else status)
+    tool_status = "failed" if status == "failed" else "cancelled"
+
+    db.query(AgentRunStep).filter(
+        AgentRunStep.run_id == run_id,
+        AgentRunStep.status == "running",
+    ).update(
+        {
+            AgentRunStep.status: step_status,
+            AgentRunStep.error: child_error if step_status in {"failed", "cancelled"} else None,
+            AgentRunStep.finished_at: terminal_at,
+        },
+        synchronize_session=False,
+    )
+    db.query(AgentToolExecution).filter(
+        AgentToolExecution.run_id == run_id,
+        AgentToolExecution.status.in_(["queued", "retry", "waiting_approval", "running"]),
+    ).update(
+        {
+            AgentToolExecution.status: case(
+                (
+                    and_(
+                        AgentToolExecution.status == "running",
+                        AgentToolExecution.execution_mode != "inline",
+                        AgentToolExecution.has_side_effects.is_(True),
+                    ),
+                    "unknown",
+                ),
+                else_=tool_status,
+            ),
+            AgentToolExecution.error: child_error,
+            AgentToolExecution.error_code: case(
+                (
+                    and_(
+                        AgentToolExecution.status == "running",
+                        AgentToolExecution.execution_mode != "inline",
+                        AgentToolExecution.has_side_effects.is_(True),
+                    ),
+                    "cancelled_during_side_effect",
+                ),
+                else_="run_terminal",
+            ),
+            AgentToolExecution.lease_owner: None,
+            AgentToolExecution.lease_expires_at: None,
+            AgentToolExecution.finished_at: terminal_at,
+        },
+        synchronize_session=False,
+    )
+    db.query(AgentToolApproval).filter(
+        AgentToolApproval.run_id == run_id,
+        AgentToolApproval.status == "pending",
+    ).update(
+        {
+            AgentToolApproval.status: "cancelled",
+            AgentToolApproval.resolved_at: terminal_at,
+        },
+        synchronize_session=False,
+    )
 
 
 class AgentRunRepository:
@@ -470,6 +543,15 @@ class AgentRunRepository:
             if row.status in {"queued", "waiting_approval", "waiting_children"}:
                 row.status = "cancelled"
                 row.finished_at = now
+                row.worker_id = None
+                row.heartbeat_at = now
+                _finalize_run_children(
+                    db,
+                    run_id=run_id,
+                    status="cancelled",
+                    error="Agent run was cancelled before execution completed.",
+                    terminal_at=now,
+                )
                 cancelled_now = True
             db.commit()
             db.refresh(row)
@@ -569,30 +651,12 @@ class AgentRunRepository:
             row.worker_id = None
             row.finished_at = terminal_at
             row.heartbeat_at = terminal_at
-            db.query(AgentRunStep).filter(
-                AgentRunStep.run_id == run_id,
-                AgentRunStep.status == "running",
-            ).update(
-                {
-                    AgentRunStep.status: "failed" if status == "failed" else status,
-                    AgentRunStep.error: error[:16000] if error else None,
-                    AgentRunStep.finished_at: terminal_at,
-                },
-                synchronize_session=False,
-            )
-            tool_status = "failed" if status == "failed" else "cancelled"
-            tool_error = (error or f"Agent run ended with status {status} before the tool completed.")[:16000]
-            db.query(AgentToolExecution).filter(
-                AgentToolExecution.run_id == run_id,
-                AgentToolExecution.execution_mode == "inline",
-                AgentToolExecution.status.in_(["running", "waiting_approval"]),
-            ).update(
-                {
-                    AgentToolExecution.status: tool_status,
-                    AgentToolExecution.error: tool_error,
-                    AgentToolExecution.finished_at: terminal_at,
-                },
-                synchronize_session=False,
+            _finalize_run_children(
+                db,
+                run_id=run_id,
+                status=status,
+                error=error,
+                terminal_at=terminal_at,
             )
             db.commit()
 

@@ -202,7 +202,8 @@ class ProgressiveSkillTests(unittest.TestCase):
         )
         names = [item.name for item in selected]
         self.assertIn("technical-analysis", names)
-        self.assertLessEqual(len(names), 4)
+        self.assertGreaterEqual(len(names), 8)
+        self.assertLessEqual(len(names), 12)
 
         context = self.registry.build_progressive_context(
             selected, "research", "quant-analyst"

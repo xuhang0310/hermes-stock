@@ -278,6 +278,7 @@ class _WsLoop:
             def _run() -> None:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                loop.set_exception_handler(self._handle_loop_exception)
                 try:
                     import lark_oapi  # noqa: F401  首次导入必须在本线程：SDK 全局 loop 由此绑定
                 except Exception as exc:  # noqa: BLE001
@@ -292,6 +293,16 @@ class _WsLoop:
             self._thread.start()
             self._ready.wait(timeout)
             return self.loop is not None
+
+    @staticmethod
+    def _handle_loop_exception(
+        loop: asyncio.AbstractEventLoop,
+        context: dict,
+    ) -> None:
+        exception = context.get("exception")
+        if exception is not None and exception.__class__.__name__ == "ConnectionClosedOK":
+            return
+        loop.default_exception_handler(context)
 
     def submit(self, coro):
         if self.loop is None:
@@ -322,6 +333,7 @@ class BotWorker:
         self.app_id = app_id
         self._app_secret = app_secret
         self._client = None
+        self._connect_future = None
         self._token: str | None = None
         self._token_expire = 0.0
         self._token_lock = threading.Lock()
@@ -637,7 +649,7 @@ class BotWorker:
             self.app_id,
             self._app_secret,
             event_handler=handler,
-            log_level=lark.LogLevel.INFO,
+            log_level=lark.LogLevel.WARNING,
             auto_reconnect=True,
         )
         # 线上 SDK 暴露了重连生命周期钩子；兼容未带钩子的官方 1.7.1。
@@ -647,10 +659,13 @@ class BotWorker:
             self._client.on_reconnected = self._on_reconnected
         try:
             future = _ws_loop.submit(self._client._connect())  # noqa: SLF001 —— 见文件头运行时设计
+            self._connect_future = future
         except Exception as exc:  # noqa: BLE001
             return f"提交连接失败: {str(exc)[:200]}"
 
         def _done(f) -> None:
+            if f.cancelled():
+                return
             exc = f.exception()
             if exc is not None:
                 if not self.stopping:
@@ -683,7 +698,9 @@ class BotWorker:
         self.stopping = True
         self.connected = False
         client = self._client
+        connect_future = self._connect_future
         self._client = None
+        self._connect_future = None
         if client is None or _ws_loop.loop is None:
             return
         try:
@@ -694,6 +711,15 @@ class BotWorker:
             _ws_loop.submit(client._disconnect()).result(timeout=5)  # noqa: SLF001
         except Exception:  # noqa: BLE001
             pass
+        if connect_future is not None:
+            try:
+                connect_future.result(timeout=5)
+            except TimeoutError:
+                connect_future.cancel()
+            except Exception:  # noqa: BLE001
+                # Retrieve the terminal exception so concurrent.futures does not
+                # report it as an unobserved task during shutdown.
+                pass
 
     @property
     def running(self) -> bool:

@@ -28,6 +28,10 @@ class Settings:
     db_name: str = os.getenv("STOCK_DB_NAME", "hermes-stock")
     db_echo: bool = os.getenv("STOCK_DB_ECHO", "false").lower() == "true"
     auth_secret: str = os.getenv("STOCK_AUTH_SECRET", "")
+    auth_token_ttl_hours: int = int(os.getenv("STOCK_AUTH_TOKEN_TTL_HOURS", "24"))
+    auth_remember_token_ttl_days: int = int(os.getenv("STOCK_AUTH_REMEMBER_TOKEN_TTL_DAYS", "30"))
+    auth_login_max_attempts: int = int(os.getenv("STOCK_AUTH_LOGIN_MAX_ATTEMPTS", "8"))
+    auth_login_window_seconds: int = int(os.getenv("STOCK_AUTH_LOGIN_WINDOW_SECONDS", "900"))
     webhook_enc_key: str = os.getenv("STOCK_WEBHOOK_ENC_KEY", "")
     llm_base_url: str = os.getenv("STOCK_LLM_BASE_URL", os.getenv("RABBIT_LLM_BASE_URL", ""))
     llm_api_key: str = os.getenv("STOCK_LLM_API_KEY", os.getenv("RABBIT_LLM_API_KEY", ""))
@@ -131,6 +135,9 @@ class Settings:
     log_dir: str = os.getenv("STOCK_LOG_DIR", "logs")
     log_retention_days: int = int(os.getenv("STOCK_LOG_RETENTION_DAYS", "90"))
     scheduler_tick_seconds: int = int(os.getenv("STOCK_SCHEDULER_TICK_SECONDS", "30"))
+    scheduler_shutdown_grace_seconds: int = int(
+        os.getenv("STOCK_SCHEDULER_SHUTDOWN_GRACE_SECONDS", "60")
+    )
     stock_holidays: tuple[str, ...] = tuple(
         day.strip()
         for day in os.getenv("STOCK_HOLIDAYS", "").split(",")

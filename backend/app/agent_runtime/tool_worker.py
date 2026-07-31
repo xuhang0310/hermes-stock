@@ -7,6 +7,7 @@ import socket
 import uuid
 from contextlib import suppress
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.redis_broker import RedisBroker, redis_broker
@@ -22,6 +23,12 @@ from backend.app.skills.registry import skill_registry
 
 
 logger = get_logger("agent.runtime.tool_worker")
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _heartbeat_now() -> datetime:
+    """Return the repository-wide naive Asia/Shanghai timestamp."""
+    return datetime.now(_SHANGHAI).replace(tzinfo=None)
 
 
 def initialize_tool_worker_runtime() -> None:
@@ -44,7 +51,7 @@ class ToolWorker:
         self._inflight: set[str] = set()
 
     def _record_heartbeat(self, status: str) -> None:
-        now = datetime.utcnow()
+        now = _heartbeat_now()
         detail = json.dumps(
             {
                 "worker_id": self.worker_id,

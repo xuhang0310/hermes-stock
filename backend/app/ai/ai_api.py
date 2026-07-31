@@ -57,8 +57,6 @@ from backend.app.ai.prompt_recommendations import (
     dismiss_recommendation,
     ensure_ask_stock_profile,
     recommendation_out,
-    refresh_recommendations_for_stock,
-    refresh_recommendations_for_user_profile,
     schedule_recommendation_refresh,
 )
 from backend.app.core.applog import log_event
@@ -1909,7 +1907,7 @@ def agent_models(
 
 
 @router.get("/agent/prompt-recommendations")
-def prompt_recommendations(
+async def prompt_recommendations(
     digital_human_id: int = Query(..., ge=1),
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
@@ -1920,16 +1918,23 @@ def prompt_recommendations(
     if not _profile_allowed(profile, context):
         raise HTTPException(status_code=403, detail="当前账号不能使用该数字人")
     rows = active_recommendations(db, context.user.id, profile.id, limit=6, chat_mode="research")
+    refreshing = False
     if not rows:
-        rows = refresh_recommendations_for_user_profile(db, user_id=context.user.id, profile=profile)
+        schedule_recommendation_refresh(
+            user_id=context.user.id,
+            profile_id=profile.id,
+            chat_mode="research",
+        )
+        refreshing = True
     return {
         "items": [recommendation_out(row) for row in rows],
         "fallback_prompts": _quick_prompts(profile),
+        "refreshing": refreshing,
     }
 
 
 @router.post("/agent/prompt-recommendations/refresh")
-def refresh_prompt_recommendations(
+async def refresh_prompt_recommendations(
     payload: PromptRecommendationRefreshIn,
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
@@ -1939,8 +1944,17 @@ def refresh_prompt_recommendations(
         raise HTTPException(status_code=404, detail="数字人不存在或已停用")
     if not _profile_allowed(profile, context):
         raise HTTPException(status_code=403, detail="当前账号不能使用该数字人")
-    rows = refresh_recommendations_for_user_profile(db, user_id=context.user.id, profile=profile)
-    return {"items": [recommendation_out(row) for row in rows], "fallback_prompts": _quick_prompts(profile)}
+    rows = active_recommendations(db, context.user.id, profile.id, limit=6, chat_mode="research")
+    schedule_recommendation_refresh(
+        user_id=context.user.id,
+        profile_id=profile.id,
+        chat_mode="research",
+    )
+    return {
+        "items": [recommendation_out(row) for row in rows],
+        "fallback_prompts": _quick_prompts(profile),
+        "refreshing": True,
+    }
 
 
 @router.post("/agent/prompt-recommendations/{recommendation_id}/dismiss")
@@ -1955,29 +1969,45 @@ def dismiss_prompt_recommendation(
 
 
 @router.get("/agent/stock/prompt-recommendations")
-def stock_prompt_recommendations(
+async def stock_prompt_recommendations(
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
     """问股（stock 模式）推荐 prompt：复用问股虚拟 profile，会话历史按 chat_mode=stock 过滤。"""
     profile = ensure_ask_stock_profile(db)
     rows = active_recommendations(db, context.user.id, profile.id, limit=6, chat_mode="stock")
+    refreshing = False
     if not rows:
-        rows = refresh_recommendations_for_stock(db, user_id=context.user.id)
+        schedule_recommendation_refresh(
+            user_id=context.user.id,
+            profile_id=profile.id,
+            chat_mode="stock",
+        )
+        refreshing = True
     return {
         "items": [recommendation_out(row) for row in rows],
         "fallback_prompts": _quick_prompts(profile),
+        "refreshing": refreshing,
     }
 
 
 @router.post("/agent/stock/prompt-recommendations/refresh")
-def refresh_stock_prompt_recommendations(
+async def refresh_stock_prompt_recommendations(
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
     profile = ensure_ask_stock_profile(db)
-    rows = refresh_recommendations_for_stock(db, user_id=context.user.id)
-    return {"items": [recommendation_out(row) for row in rows], "fallback_prompts": _quick_prompts(profile)}
+    rows = active_recommendations(db, context.user.id, profile.id, limit=6, chat_mode="stock")
+    schedule_recommendation_refresh(
+        user_id=context.user.id,
+        profile_id=profile.id,
+        chat_mode="stock",
+    )
+    return {
+        "items": [recommendation_out(row) for row in rows],
+        "fallback_prompts": _quick_prompts(profile),
+        "refreshing": True,
+    }
 
 
 @router.get("/agent/stock/strategies")

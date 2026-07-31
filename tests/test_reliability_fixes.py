@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from backend.app.agents.watchlist_agent import _execute_watchlist_tool
+from backend.app.agent_runtime.tool_worker import _heartbeat_now
 from backend.app.core.models import (
     Base,
     Instrument,
@@ -98,6 +100,18 @@ class TradingDayTests(unittest.TestCase):
         with patch("backend.app.market.stock_tools.get_trade_cal") as trade_cal:
             self.assertFalse(rhythm_scheduler.is_trading_day(date(2026, 10, 3)))
         trade_cal.assert_not_called()
+
+
+class HeartbeatClockTests(unittest.TestCase):
+    def test_tool_worker_heartbeat_uses_naive_shanghai_time(self) -> None:
+        timezone = ZoneInfo("Asia/Shanghai")
+        before = datetime.now(timezone).replace(tzinfo=None)
+        heartbeat_at = _heartbeat_now()
+        after = datetime.now(timezone).replace(tzinfo=None)
+
+        self.assertIsNone(heartbeat_at.tzinfo)
+        self.assertLessEqual(before, heartbeat_at)
+        self.assertLessEqual(heartbeat_at, after)
 
 
 class PositionReliabilityTests(unittest.TestCase):

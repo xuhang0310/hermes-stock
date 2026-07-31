@@ -142,6 +142,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             if not exists:
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
 
+        _add_column("users", "token_version", "token_version INT NOT NULL DEFAULT 1")
+
         for column, ddl in (
             ("broker_code", "broker_code VARCHAR(40) NULL"),
             ("is_default", "is_default TINYINT(1) NOT NULL DEFAULT 0"),

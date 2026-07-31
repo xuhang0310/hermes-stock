@@ -391,12 +391,26 @@ class ToolExecutionRepository:
             rows = db.scalars(
                 select(AgentToolExecution).where(
                     AgentToolExecution.run_id == run_id,
-                    AgentToolExecution.status.in_(["queued", "retry"]),
+                    AgentToolExecution.status.in_(["queued", "retry", "waiting_approval", "running"]),
                 )
             ).all()
+            now = _utcnow()
             for row in rows:
-                row.status = "cancelled"
-                row.finished_at = _utcnow()
+                uncertain_side_effect = (
+                    row.status == "running"
+                    and row.execution_mode != "inline"
+                    and row.has_side_effects
+                )
+                row.status = "unknown" if uncertain_side_effect else "cancelled"
+                row.error = "Agent run was cancelled before the tool completed."
+                row.error_code = (
+                    "cancelled_during_side_effect"
+                    if uncertain_side_effect
+                    else "run_cancelled"
+                )
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.finished_at = now
             if rows:
                 db.commit()
             return len(rows)

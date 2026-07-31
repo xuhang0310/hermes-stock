@@ -9,7 +9,7 @@ from sqlalchemy import desc, select
 
 from backend.app.core.models import DailyBar, Instrument
 from backend.app.market.stock_tools import get_tushare_daily, get_tushare_minutes
-from backend.app.data._helpers import CHINA_TZ, MINUTE_RESOLUTIONS, dt, normalize_a_share_symbol, number_or_none
+from backend.app.data._helpers import CHINA_TZ, MINUTE_RESOLUTIONS, normalize_a_share_symbol, number_or_none
 
 
 class PositionChartMixin:

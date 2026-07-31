@@ -11,22 +11,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
-import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import desc, or_, select, text
+from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.llm_config import active_llm_config
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import AiChatMessage, AiChatSession, UserMemory
+from backend.app.core.models import AiChatMessage, UserMemory
 from backend.app.core.settings import settings
 
 # ---------------------------------------------------------------------------

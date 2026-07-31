@@ -329,7 +329,7 @@ def _run_agent_report(
     if not answer:
         raise RuntimeError("模型未返回有效内容")
 
-    report_id = f"rhythm-{snap['job_key']}-{now:%Y%m%d}-{uuid4().hex[:8]}"
+    report_id = f"rhythm-{job_run_id}"
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
     title = f"{snap['name']} | {now:%Y-%m-%d}"
     notification_id: int | None = None
@@ -338,8 +338,9 @@ def _run_agent_report(
         profile = session.scalar(
             select(DigitalHumanProfile).where(DigitalHumanProfile.code == snap["digital_human_code"]).limit(1)
         )
-        session.add(
-            AgentReport(
+        report = session.get(AgentReport, report_id)
+        if report is None:
+            report = AgentReport(
                 report_id=report_id,
                 task_id=snap["job_key"],
                 agent_name=agent_name,
@@ -350,7 +351,15 @@ def _run_agent_report(
                 content=answer,
                 model_name=model_name,
             )
-        )
+            session.add(report)
+        else:
+            report.task_id = snap["job_key"]
+            report.agent_name = agent_name
+            report.title = title[:300]
+            report.conclusion = answer[:2000]
+            report.action_suggestion = "observe"
+            report.content = answer
+            report.model_name = model_name
         session.commit()
         if snap["push_channel_key"]:
             trigger_label = "手动执行" if snap.get("trigger_type") == "manual" else "自动调度"
@@ -375,7 +384,11 @@ def _run_agent_report(
     return report_id, notification_id, answer, notification_error
 
 
-def _run_health_check(now: datetime, push_channel_key: str | None) -> tuple[str, int | None, str | None]:
+def _run_health_check(
+    now: datetime,
+    push_channel_key: str | None,
+    job_run_id: str,
+) -> tuple[str, int | None, str | None]:
     problems: list[str] = []
     with SessionLocal() as session:
         try:
@@ -429,6 +442,7 @@ def _run_health_check(now: datetime, push_channel_key: str | None) -> tuple[str,
                 push_channel_key,
                 "系统健康检查 | 发现异常",
                 body,
+                event_id=f"rhythm-health-{job_run_id}",
                 card_kind="alert",
                 card_template="red",
                 card_metadata=[
@@ -646,6 +660,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
             output_content, notification_id, push_error = _run_health_check(
                 ran_at,
                 snapshot["push_channel_key"],
+                run_id,
             )
             if push_error:
                 status = "failed"
@@ -797,24 +812,25 @@ async def dispatch_manual_run(job_key: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # 调度循环
 # --------------------------------------------------------------------------- #
-def _recover_stale_runs() -> int:
+def _recover_stale_runs() -> list[tuple[str, str]]:
+    recovered: list[tuple[str, str]] = []
     with SessionLocal() as session:
         stale = session.scalars(select(JobRun).where(JobRun.status == "running")).all()
         for run in stale:
-            run.status = "failed"
-            run.error = "进程重启，任务被中断"
-            run.finished_at = now_sh()
             job = session.scalar(
                 select(ScheduledJob).where(ScheduledJob.job_key == run.job_key).limit(1)
             )
-            if job is not None and job.schedule_type == "once" and not job.enabled:
-                # A crash can happen after a one-shot job is claimed and disabled,
-                # but before its Agent run is dispatched. Re-enable it so the next
-                # scheduler tick claims a fresh fire key and completes the delivery.
-                job.enabled = True
+            if job is None:
+                run.status = "failed"
+                run.error = "进程重启后未找到对应定时任务，无法恢复"
+                run.finished_at = now_sh()
+                continue
+            run.error = None
+            run.finished_at = None
+            recovered.append((run.job_key, run.run_id))
         if stale:
             session.commit()
-        return len(stale)
+    return recovered
 
 
 async def _tick() -> None:
@@ -836,7 +852,14 @@ async def _scheduler_loop() -> None:
     try:
         recovered = await asyncio.to_thread(_recover_stale_runs)
         if recovered:
-            await asyncio.to_thread(_log, "WARNING", f"启动恢复：{recovered} 个中断的任务已标记为失败")
+            for job_key, run_id in recovered:
+                if run_id not in _inflight_runs:
+                    _dispatch(job_key, run_id)
+            await asyncio.to_thread(
+                _log,
+                "WARNING",
+                f"启动恢复：{len(recovered)} 个中断任务已重新接管执行",
+            )
     except Exception as exc:  # noqa: BLE001
         await asyncio.to_thread(_log, "ERROR", "启动恢复失败", {"error": str(exc)[:500]})
 
@@ -1051,3 +1074,19 @@ async def stop_rhythm_scheduler() -> None:
     with contextlib.suppress(asyncio.CancelledError):
         await _scheduler_task
     _scheduler_task = None
+    pending = [task for task in _background_tasks if not task.done()]
+    if not pending:
+        return
+    grace = max(1, settings.scheduler_shutdown_grace_seconds)
+    done, still_pending = await asyncio.wait(pending, timeout=grace)
+    for task in done:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+    if still_pending:
+        await asyncio.to_thread(
+            _log,
+            "WARNING",
+            f"关闭等待超时：{len(still_pending)} 个调度任务将在下次启动时恢复",
+        )
+        for task in still_pending:
+            task.cancel()
