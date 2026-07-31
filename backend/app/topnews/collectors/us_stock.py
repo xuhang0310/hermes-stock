@@ -1,157 +1,79 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-import re
-
-import httpx
+from datetime import date, timedelta
 
 from backend.app.topnews.collectors.base import BaseCollector, MarketData
-from backend.app.topnews.config import SINA_HQ_HEADERS
 
 logger = logging.getLogger(__name__)
 
-US_INDICES = {
-    ".DJI": "道琼斯",
-    ".IXIC": "纳斯达克",
-    ".INX": "标普500",
-    "VIX": "VIX恐慌指数",
-}
 
-US_ETF_CN = {
-    "KWEB": "中概互联网ETF",
-    "FXI": "中国大盘ETF",
-}
+def _fetch_tushare_global_indices() -> list[dict]:
+    """通过 TuShare index_global 获取国际主要指数（同步，在 executor 中运行）。"""
+    try:
+        from backend.app.market.stock_tools import _tushare_request
+        end = date.today().strftime("%Y%m%d")
+        start = (date.today() - timedelta(days=7)).strftime("%Y%m%d")
+        fields = "ts_code,trade_date,open,close,high,low,change,pct_chg"
+        resp = _tushare_request(
+            "index_global",
+            {"start_date": start, "end_date": end},
+            fields,
+        )
+        rows = resp.get("rows") or []
+        if not rows:
+            return []
+
+        # 每个指数取最新一行
+        latest_by_code: dict[str, dict] = {}
+        for row in sorted(rows, key=lambda r: str(r.get("trade_date") or "")):
+            ts_code = str(row.get("ts_code") or "")
+            latest_by_code[ts_code] = row
+
+        name_map = {
+            "DJI": "道琼斯",
+            "IXIC": "纳斯达克",
+            "SPX": "标普500",
+            "VIX": "VIX恐慌指数",
+            "HSI": "恒生指数",
+            "HSTECH": "恒生科技",
+        }
+        items: list[dict] = []
+        for ts_code, row in latest_by_code.items():
+            short = ts_code.split(".")[0] if "." in ts_code else ts_code
+            name = name_map.get(short, ts_code)
+            close = float(row.get("close") or 0)
+            pct = float(row.get("pct_chg") or 0)
+            change = float(row.get("change") or 0)
+            if close <= 0:
+                continue
+            items.append({
+                "name": name,
+                "code": short,
+                "price": round(close, 2),
+                "change": round(change, 2),
+                "change_pct": round(pct, 2),
+                "direction": "up" if pct > 0 else "down" if pct < 0 else "flat",
+                "trade_date": row.get("trade_date"),
+                "source": "tushare.index_global",
+            })
+        return items
+    except Exception as e:
+        logger.error("TuShare 国际指数采集失败: %s", e)
+        return []
 
 
 class USStockCollector(BaseCollector):
+    """美股/国际指数行情采集：TuShare 优先，网页抓取降级。"""
     category = "美股行情"
 
-    def __init__(self):
-        super().__init__()
-        self.sina_client = httpx.AsyncClient(
-            headers=SINA_HQ_HEADERS,
-            timeout=15,
-            follow_redirects=True,
-        )
-
-    async def close(self):
-        await self.client.aclose()
-        await self.sina_client.aclose()
-
     async def collect(self) -> MarketData:
-        items = []
+        # TuShare 是同步 API，放到线程池执行避免阻塞 event loop
         try:
-            items.extend(await self._fetch_eastmoney_us())
+            items = await asyncio.to_thread(_fetch_tushare_global_indices)
+            if items:
+                return MarketData(category=self.category, items=items)
         except Exception as e:
-            logger.error("东方财富美股采集失败: %s", e)
-        if not items:
-            try:
-                items.extend(await self._fetch_sina_indices())
-            except Exception as e:
-                logger.error("新浪美股采集失败: %s", e)
-        try:
-            if not items:
-                items.extend(await self._fetch_akshare_us())
-        except Exception as e:
-            logger.error("akshare美股采集失败: %s", e)
-        return MarketData(category=self.category, items=items)
-
-    async def _fetch_eastmoney_us(self) -> list[dict]:
-        url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
-        params = {
-            "fltt": "2",
-            "fields": "f2,f3,f4,f12,f14",
-            "secids": "100.DJIA,100.NDX,100.SPX,100.VIX",
-        }
-        data = await self._get_json(url, params=params)
-        if not data:
-            return []
-        items = []
-        try:
-            diff = data.get("data", {}).get("diff", [])
-            for row in diff:
-                name = row.get("f14", "")
-                price = row.get("f2", 0)
-                change_pct = row.get("f3", 0)
-                change = row.get("f4", 0)
-                if not name or price == "-":
-                    continue
-                items.append({
-                    "name": name,
-                    "code": row.get("f12", ""),
-                    "price": round(float(price), 2),
-                    "change": round(float(change), 2),
-                    "change_pct": round(float(change_pct), 2),
-                    "direction": "up" if float(change_pct) > 0 else "down" if float(change_pct) < 0 else "flat",
-                })
-        except Exception as e:
-            logger.error("解析东方财富美股数据失败: %s", e)
-        return items
-
-    async def _fetch_sina_indices(self) -> list[dict]:
-        items = []
-        codes_param = ",".join(f"gb_{code.lstrip('.')}" for code in US_INDICES)
-        url = f"https://hq.sinajs.cn/list={codes_param}"
-        try:
-            resp = await self.sina_client.get(url)
-            resp.raise_for_status()
-            text = resp.text
-        except Exception as e:
-            logger.error("新浪行情请求失败: %s", e)
-            return items
-
-        lines = text.strip().split("\n")
-        for line in lines:
-            code_match = re.search(r'gb_([A-Za-z0-9.]+)=', line)
-            if not code_match:
-                continue
-            code_raw = code_match.group(1)
-            name = US_INDICES.get(f".{code_raw}", US_INDICES.get(code_raw, code_raw))
-            match = re.search(r'="([^"]*)"', line)
-            if not match or not match.group(1):
-                continue
-            parts = match.group(1).split(",")
-            if len(parts) < 3:
-                continue
-            try:
-                price = float(parts[1])
-                prev_close = float(parts[2])
-                change = price - prev_close
-                change_pct = (change / prev_close * 100) if prev_close else 0
-                items.append({
-                    "name": name,
-                    "code": code_raw,
-                    "price": round(price, 2),
-                    "change": round(change, 2),
-                    "change_pct": round(change_pct, 2),
-                    "direction": "up" if change > 0 else "down" if change < 0 else "flat",
-                })
-            except (ValueError, IndexError) as e:
-                logger.warning("解析美股指数 %s 失败: %s", code_raw, e)
-        return items
-
-    async def _fetch_akshare_us(self) -> list[dict]:
-        try:
-            import akshare as ak
-            df = ak.index_us_stock_sina()
-            if df is None or df.empty:
-                return []
-            items = []
-            target_names = {"道琼斯", "纳斯达克", "标普500"}
-            for _, row in df.iterrows():
-                name = str(row.get("名称", ""))
-                if name not in target_names:
-                    continue
-                items.append({
-                    "name": name,
-                    "code": "",
-                    "price": round(float(row.get("最新价", 0)), 2),
-                    "change": round(float(row.get("涨跌额", 0)), 2),
-                    "change_pct": round(float(row.get("涨跌幅", 0)), 2),
-                    "direction": "up" if float(row.get("涨跌幅", 0)) > 0 else "down" if float(row.get("涨跌幅", 0)) < 0 else "flat",
-                })
-            return items
-        except Exception as e:
-            logger.error("akshare美股采集失败: %s", e)
-            return []
+            logger.error("TuShare 美股采集失败: %s", e)
+        return MarketData(category=self.category, items=[])
