@@ -169,11 +169,22 @@ function selectSwarmTeam(payload: { team: import('../types').SwarmTeam; start: n
   const team = payload.team
   const membersLabel = team.members.map(m => m.label).join(' + ')
   const objective = team.objective_template
-  question.value = `${question.value.slice(0, payload.start)}${team.icon} [${team.name}: ${membersLabel}] ${objective}${question.value.slice(payload.end)}`
+  const insert = `${team.icon} [${team.name}: ${membersLabel}] ${objective}`
+  const before = question.value.slice(0, payload.start)
+  const after = question.value.slice(payload.end)
+  question.value = before + insert + after
   nextTick(() => {
     composerTextarea.value?.focus()
-    const pos = payload.start + team.icon.length + 2
-    composerTextarea.value?.setSelectionRange(pos, pos)
+    // 优先选中 objective 里的占位符（{symbol}/{sector}/{event}），方便直接键入；否则光标移到末尾
+    const placeholder = insert.search(/\{[^}]+\}/)
+    if (placeholder >= 0) {
+      const start = before.length + placeholder
+      const match = insert.slice(placeholder).match(/\{[^}]+\}/)!
+      composerTextarea.value?.setSelectionRange(start, start + match[0].length)
+    } else {
+      const pos = before.length + insert.length
+      composerTextarea.value?.setSelectionRange(pos, pos)
+    }
   })
 }
 

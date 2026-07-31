@@ -414,8 +414,9 @@ onMounted(loadData)
 }
 
 .swarm-item .skill-menu-icon {
-  border-color: rgba(138, 106, 213, 0.4);
-  background: rgba(138, 106, 213, 0.08);
+  border-color: rgba(43, 212, 212, 0.34);
+  background: rgba(7, 31, 32, 0.6);
+  color: #35d3cf;
 }
 
 .skill-menu-copy {
@@ -487,8 +488,8 @@ onMounted(loadData)
   display: inline-block;
   padding: 1px 5px;
   border-radius: 3px;
-  background: rgba(138, 106, 213, 0.1);
-  color: #b8a3e8;
+  background: rgba(43, 212, 212, 0.08);
+  color: #9fded9;
   font-size: 10px;
 }
 
