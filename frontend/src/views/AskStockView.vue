@@ -5,8 +5,10 @@ import AgentApprovalCard from '../components/AgentApprovalCard.vue'
 import AgentProcessDisclosure from '../components/AgentProcessDisclosure.vue'
 import ApprovalPolicyControl from '../components/ApprovalPolicyControl.vue'
 import ChatAttachmentPicker from '../components/ChatAttachmentPicker.vue'
+import SkillSlashMenu from '../components/SkillSlashMenu.vue'
 import type {
   AgentAttachment,
+  AgentSkill,
   AgentSession,
   AgentStreamEvent,
   AgentToolApproval,
@@ -70,6 +72,12 @@ type ChatAttachmentPickerHandle = {
   handlePaste: (event: ClipboardEvent) => Promise<boolean>
 }
 
+type SkillSlashMenuHandle = {
+  sync: (text: string, caret: number) => void
+  handleKeydown: (event: KeyboardEvent) => boolean
+  close: () => void
+}
+
 const props = withDefaults(defineProps<{
   initialQuestion?: string
 }>(), {
@@ -120,6 +128,9 @@ const question = ref('')
 const approvalPolicy = ref<ApprovalPolicy>('ask')
 const pendingAttachments = ref<AgentAttachment[]>([])
 const attachmentPicker = ref<ChatAttachmentPickerHandle | null>(null)
+const composerTextarea = ref<HTMLTextAreaElement | null>(null)
+const skillSlashMenu = ref<SkillSlashMenuHandle | null>(null)
+const selectedCoreSkills = ref<AgentSkill[]>([])
 const workspaceExecAvailable = ref(false)
 const sending = ref(false)
 const abortController = ref<AbortController | null>(null)
@@ -132,6 +143,30 @@ const maxSelectedStrategies = 3
 
 function pasteIntoComposer(event: ClipboardEvent) {
   void attachmentPicker.value?.handlePaste(event)
+}
+
+function syncSkillSlashMenu() {
+  const caret = composerTextarea.value?.selectionStart ?? question.value.length
+  skillSlashMenu.value?.sync(question.value, caret)
+}
+
+function selectCoreSkill(payload: { skill: AgentSkill; start: number; end: number }) {
+  const alreadySelected = selectedCoreSkills.value.some((item) => item.name === payload.skill.name)
+  if (!alreadySelected && selectedCoreSkills.value.length >= 8) {
+    error.value = '每轮最多选择 8 个技能'
+  } else if (!alreadySelected) {
+    selectedCoreSkills.value = [...selectedCoreSkills.value, payload.skill]
+    error.value = ''
+  }
+  question.value = `${question.value.slice(0, payload.start)}${question.value.slice(payload.end)}`
+  nextTick(() => {
+    composerTextarea.value?.focus()
+    composerTextarea.value?.setSelectionRange(payload.start, payload.start)
+  })
+}
+
+function removeCoreSkill(name: string) {
+  selectedCoreSkills.value = selectedCoreSkills.value.filter((item) => item.name !== name)
 }
 
 const activeModel = computed(
@@ -197,6 +232,8 @@ async function refreshSessions() {
 async function openSession(id: number) {
   closeMobileRail()
   if (sending.value) return
+  selectedCoreSkills.value = []
+  skillSlashMenu.value?.close()
   error.value = ''
   loadingSession.value = true
   try {
@@ -304,6 +341,8 @@ function newSession() {
   selectedSessionId.value = null
   messages.value = []
   question.value = ''
+  selectedCoreSkills.value = []
+  skillSlashMenu.value?.close()
   pendingAttachments.value = []
   approvalPolicy.value = 'ask'
   error.value = ''
@@ -645,6 +684,7 @@ async function send() {
   const sentAttachments = pendingAttachments.value.map(({ preview_url: _preview, ...item }) => item)
   if ((!enteredText && !sentAttachments.length) || sending.value) return
   const text = enteredText || '请分析我上传的附件。'
+  const selectedSkillNames = selectedCoreSkills.value.map((item) => item.name)
 
   const history = messages.value
     .filter((item) => item.content)
@@ -653,6 +693,8 @@ async function send() {
   sending.value = true
   error.value = ''
   question.value = ''
+  selectedCoreSkills.value = []
+  skillSlashMenu.value?.close()
   pendingAttachments.value = []
   messages.value.push({
     id: Date.now(),
@@ -692,6 +734,7 @@ async function send() {
         session_id: selectedSessionId.value,
         model_config_id: selectedModelId.value,
         skills: selectedStrategyIds.value,
+        selected_skill_names: selectedSkillNames,
         attachments: sentAttachments.map((item) => ({ path: item.path })),
         approval_policy: approvalPolicy.value
       },
@@ -830,6 +873,11 @@ function submitFromKeyboard(event: KeyboardEvent) {
   if (event.isComposing || event.shiftKey) return
   event.preventDefault()
   void send()
+}
+
+function composerKeydown(event: KeyboardEvent) {
+  if (skillSlashMenu.value?.handleKeydown(event)) return
+  if (event.key === 'Enter') submitFromKeyboard(event)
 }
 
 onMounted(async () => {
@@ -1047,12 +1095,23 @@ onMounted(async () => {
 
       <form class="chat-composer stock-chat-composer" @paste="pasteIntoComposer" @submit.prevent="send">
         <textarea
+          ref="composerTextarea"
           v-model="question"
           rows="2"
           placeholder="输入股票代码、问题，或上传研报、表格和图片"
           :disabled="sending"
-          @keydown.enter="submitFromKeyboard"
+          @input="syncSkillSlashMenu"
+          @click="syncSkillSlashMenu"
+          @keydown="composerKeydown"
         ></textarea>
+        <SkillSlashMenu
+          ref="skillSlashMenu"
+          chat-mode="stock"
+          :selected-skills="selectedCoreSkills"
+          :disabled="sending"
+          @select="selectCoreSkill"
+          @remove="removeCoreSkill"
+        />
         <footer class="chat-composer-toolbar">
           <ChatAttachmentPicker ref="attachmentPicker" v-model="pendingAttachments" :disabled="sending" />
           <ApprovalPolicyControl v-model="approvalPolicy" :disabled="sending" :exec-available="workspaceExecAvailable" />

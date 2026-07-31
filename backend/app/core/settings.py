@@ -135,6 +135,9 @@ class Settings:
     log_dir: str = os.getenv("STOCK_LOG_DIR", "logs")
     log_retention_days: int = int(os.getenv("STOCK_LOG_RETENTION_DAYS", "90"))
     scheduler_tick_seconds: int = int(os.getenv("STOCK_SCHEDULER_TICK_SECONDS", "30"))
+    scheduler_max_concurrent_jobs: int = int(
+        os.getenv("STOCK_SCHEDULER_MAX_CONCURRENT_JOBS", "2")
+    )
     scheduler_shutdown_grace_seconds: int = int(
         os.getenv("STOCK_SCHEDULER_SHUTDOWN_GRACE_SECONDS", "60")
     )

@@ -46,7 +46,6 @@ from backend.app.core.settings import settings
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 HEARTBEAT_COMPONENT = "rhythm_scheduler"
-_MAX_CONCURRENT_JOBS = 2
 
 # 数字人 code -> agent_profiles.agent_name（AgentReport.agent_name 外键指向后者）
 DH_TO_AGENT = {
@@ -740,12 +739,24 @@ def _write_scheduler_heartbeat(now: datetime, detail: dict) -> None:
         session.commit()
 
 
-def _claim_due_jobs(now: datetime) -> list[tuple[str, str]]:
+def _max_concurrent_jobs() -> int:
+    return max(1, settings.scheduler_max_concurrent_jobs)
+
+
+def _claim_due_jobs(now: datetime, limit: int | None = None) -> list[tuple[str, str]]:
+    if limit is not None and limit <= 0:
+        return []
     claimed: list[tuple[str, str]] = []
     minute_key = now.strftime("%Y-%m-%dT%H:%M")
     with SessionLocal() as session:
-        jobs = session.scalars(select(ScheduledJob).where(ScheduledJob.enabled.is_(True))).all()
+        jobs = session.scalars(
+            select(ScheduledJob)
+            .where(ScheduledJob.enabled.is_(True))
+            .order_by(ScheduledJob.sort_order, ScheduledJob.id)
+        ).all()
         for job in jobs:
+            if limit is not None and len(claimed) >= limit:
+                break
             if not _is_due(job, now):
                 continue
             if job.job_kind == "position_price_sync":
@@ -808,7 +819,7 @@ def _claim_manual_run(job_key: str) -> str | None:
 def _get_semaphore() -> asyncio.Semaphore:
     global _semaphore
     if _semaphore is None:
-        _semaphore = asyncio.Semaphore(_MAX_CONCURRENT_JOBS)
+        _semaphore = asyncio.Semaphore(_max_concurrent_jobs())
     return _semaphore
 
 
@@ -864,12 +875,20 @@ def _recover_stale_runs() -> list[tuple[str, str]]:
 
 async def _tick() -> None:
     now = now_sh()
+    available_slots = max(0, _max_concurrent_jobs() - len(_inflight_runs))
     await asyncio.to_thread(
         _write_scheduler_heartbeat,
         now,
-        {"tick_at": now.isoformat(), "inflight": len(_inflight_runs)},
+        {
+            "tick_at": now.isoformat(),
+            "inflight": len(_inflight_runs),
+            "available_slots": available_slots,
+            "max_concurrency": _max_concurrent_jobs(),
+        },
     )
-    claimed = await asyncio.to_thread(_claim_due_jobs, now)
+    if available_slots <= 0:
+        return
+    claimed = await asyncio.to_thread(_claim_due_jobs, now, available_slots)
     for job_key, run_id in claimed:
         if run_id in _inflight_runs:
             continue

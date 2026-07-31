@@ -160,6 +160,13 @@ class Deployer:
             return False
         return True
 
+    def _restart_agent_worker(self) -> bool:
+        rc, out, err = self.run("systemctl restart hermes-stock-agent-worker")
+        if rc != 0 or not self._wait_health(18086):
+            log(f"Agent Worker 重启或健康检查失败: {out} {err}")
+            return False
+        return True
+
     def _restart_tool_worker(self) -> bool:
         rc, out, err = self.run("systemctl restart hermes-stock-tool-worker")
         if rc != 0:
@@ -252,10 +259,11 @@ install -m 0644 "$NEW/deploy/systemd/hermes-stock-sandboxd.service" /etc/systemd
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-api-a.service" /etc/systemd/system/hermes-stock-api-a.service
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-api-b.service" /etc/systemd/system/hermes-stock-api-b.service
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-background.service" /etc/systemd/system/hermes-stock-background.service
+install -m 0644 "$NEW/deploy/systemd/hermes-stock-agent-worker.service" /etc/systemd/system/hermes-stock-agent-worker.service
 install -m 0644 "$NEW/deploy/systemd/hermes-stock-tool-worker.service" /etc/systemd/system/hermes-stock-tool-worker.service
 systemctl daemon-reload
 systemctl enable hermes-stock-sandboxd >/dev/null 2>&1
-systemctl enable hermes-stock-api-a hermes-stock-api-b hermes-stock-background >/dev/null 2>&1
+systemctl enable hermes-stock-api-a hermes-stock-api-b hermes-stock-background hermes-stock-agent-worker >/dev/null 2>&1
 systemctl enable hermes-stock-tool-worker >/dev/null 2>&1
 ln -sfn "$NEW" "$CUR"
 echo SWITCHED
@@ -271,6 +279,7 @@ echo SWITCHED
             if (
                 not self._restart_sandbox()
                 or not self._restart_background()
+                or not self._restart_agent_worker()
                 or not self._restart_tool_worker()
                 or not self._rolling_restart()
             ):
@@ -311,12 +320,26 @@ echo SWITCHED
             log("无旧版本可回滚（首次部署失败），请手动检查服务。")
             return
         self.run(f"ln -sfn {old} {cur}")
+        self.run(
+            "set -u; OLD='" + old + "'; "
+            "for unit in hermes-stock-api-a hermes-stock-api-b hermes-stock-background hermes-stock-tool-worker; do "
+            "src=\"$OLD/deploy/systemd/$unit.service\"; "
+            "[ ! -f \"$src\" ] || install -m 0644 \"$src\" \"/etc/systemd/system/$unit.service\"; "
+            "done; "
+            "if [ -f \"$OLD/deploy/systemd/hermes-stock-agent-worker.service\" ]; then "
+            "install -m 0644 \"$OLD/deploy/systemd/hermes-stock-agent-worker.service\" "
+            '"/etc/systemd/system/hermes-stock-agent-worker.service"; '
+            "else systemctl disable --now hermes-stock-agent-worker >/dev/null 2>&1 || true; fi; "
+            "systemctl daemon-reload"
+        )
         if self._sandbox_enabled() and self.run(f"test -f {old}/backend/app/execution/broker.py")[0] == 0:
             self._restart_sandbox()
         elif self._sandbox_enabled():
             self.run("systemctl stop hermes-stock-sandboxd")
         if self._ha_enabled():
             self._restart_background()
+            if self.run(f"test -f {old}/deploy/systemd/hermes-stock-agent-worker.service")[0] == 0:
+                self._restart_agent_worker()
             if self.run(f"test -f {old}/backend/app/agent_runtime/tool_worker.py")[0] == 0:
                 self._restart_tool_worker()
             else:

@@ -13,7 +13,10 @@ from backend.app.feishu.feishu import (
     BUILTIN_CHANNEL_KEYS,
     SCHEDULE_CHANNEL_KEY,
     _build_payload,
+    _build_payloads,
+    encrypt_value,
     _gen_sign,
+    send_feishu,
 )
 from backend.app.scheduler import rhythm_scheduler
 from backend.app.scheduler.rhythm_api import (
@@ -49,13 +52,96 @@ class FeishuCardTests(unittest.TestCase):
         self.assertEqual(payload["timestamp"], "1599360473")
         self.assertEqual(payload["sign"], "l1N0gAcBjdwBvGm1xMjOF0XSyaLRpR7tuO5dHfhAYc8=")
         card = payload["card"]
+        self.assertEqual(card["schema"], "2.0")
         self.assertTrue(card["config"]["wide_screen_mode"])
         self.assertTrue(card["config"]["enable_forward"])
         self.assertEqual(card["header"]["template"], "wathet")
-        self.assertEqual([element["tag"] for element in card["elements"]], ["div", "hr", "markdown", "hr", "note"])
-        self.assertEqual(card["elements"][0]["fields"][0]["text"]["tag"], "lark_md")
-        self.assertIn("核心结论", card["elements"][2]["content"])
-        self.assertEqual(card["elements"][-1]["elements"][0]["content"], "SixRabbits Stock | 自动任务")
+        elements = card["body"]["elements"]
+        self.assertEqual(
+            [element["tag"] for element in elements],
+            ["markdown", "hr", "markdown", "hr", "markdown"],
+        )
+        self.assertIn("| 项目 | 内容 |", elements[0]["content"])
+        self.assertIn("核心结论", elements[2]["content"])
+        self.assertEqual(elements[-1]["content"], "SixRabbits Stock | 自动任务")
+
+    def test_json_2_card_linearizes_tables_and_continues_long_reports(self) -> None:
+        table = "| 指标 | 数值 |\n| --- | --- |\n| 总收益 | +12.3% |"
+        section = "## 分析章节\n\n" + ("这是完整报告内容。" * 500)
+        content = table + "\n\n" + "\n\n".join(section for _ in range(12)) + "\n\nEND-OF-REPORT"
+
+        payloads = _build_payloads("长报告", content, None, "schedule")
+
+        self.assertGreater(len(payloads), 1)
+        self.assertTrue(all(payload["card"]["schema"] == "2.0" for payload in payloads))
+        rendered = "\n".join(
+            element["content"]
+            for payload in payloads
+            for element in payload["card"]["body"]["elements"]
+            if element["tag"] == "markdown" and element["element_id"].startswith("content_")
+        )
+        self.assertNotIn(table, rendered)
+        self.assertIn("**总收益**", rendered)
+        self.assertIn("+12.3%", rendered)
+        self.assertIn("END-OF-REPORT", rendered)
+        self.assertNotIn("内容过长，已截断", rendered)
+
+    def test_table_dense_report_is_mobile_safe_and_keeps_every_row(self) -> None:
+        tables = [
+            f"## 表格 {index}\n\n| 指标 | 数值 |\n| --- | --- |\n| 项目 {index} | {index} |"
+            for index in range(11)
+        ]
+
+        payloads = _build_payloads(
+            "多表格报告",
+            "\n\n".join(tables),
+            None,
+            "schedule",
+            metadata=[("任务", "盘前简报"), ("数字人", "情报官")],
+        )
+
+        rendered = []
+        for payload in payloads:
+            markdown = [
+                element["content"]
+                for element in payload["card"]["body"]["elements"]
+                if element["tag"] == "markdown"
+            ]
+            table_count = sum(
+                1
+                for content in markdown
+                for line in content.splitlines()
+                if line.strip().startswith("| ---")
+            )
+            self.assertLessEqual(table_count, 5)
+            rendered.extend(markdown)
+
+        joined = "\n".join(rendered)
+        content_joined = "\n".join(
+            element["content"]
+            for payload in payloads
+            for element in payload["card"]["body"]["elements"]
+            if element["tag"] == "markdown" and element["element_id"].startswith("content_")
+        )
+        self.assertNotIn("| --- | --- |", content_joined)
+        for index in range(11):
+            self.assertIn(f"项目 {index}", joined)
+
+    def test_long_table_cell_is_not_clipped_or_discarded(self) -> None:
+        detail = "放量反弹是积极信号，但需要继续观察量能、公告与关键支撑位。" * 12
+        content = f"| 维度 | 内容 |\n| --- | --- |\n| 推断 | {detail} |"
+
+        payloads = _build_payloads("移动端长单元格", content, None, "schedule")
+        rendered = "\n".join(
+            element["content"]
+            for payload in payloads
+            for element in payload["card"]["body"]["elements"]
+            if element["tag"] == "markdown" and element["element_id"].startswith("content_")
+        )
+
+        self.assertIn("**推断**", rendered)
+        self.assertIn(detail, rendered)
+        self.assertNotIn("| --- |", rendered)
 
     def test_only_one_builtin_channel_is_exposed(self) -> None:
         self.assertEqual(BUILTIN_CHANNEL_KEYS, (SCHEDULE_CHANNEL_KEY,))
@@ -135,6 +221,33 @@ class FeishuChannelMigrationTests(unittest.TestCase):
         self.assertIsNotNone(
             self.db.scalar(select(JobRun).where(JobRun.run_id == "run-active"))
         )
+
+    def test_long_delivery_posts_every_card_before_marking_notification_sent(self) -> None:
+        self.db.add(
+            NotifyChannel(
+                channel_key="long-report",
+                name="长报告",
+                purpose="schedule",
+                channel_type="feishu_webhook",
+                webhook_url_cipher=encrypt_value(
+                    "https://open.feishu.cn/open-apis/bot/v2/hook/test-long-report"
+                ),
+                status="enabled",
+            )
+        )
+        self.db.commit()
+        content = "\n\n".join("## 章节\n" + ("完整正文" * 900) for _ in range(8))
+        expected_pages = len(_build_payloads("长报告", content, None, "schedule"))
+
+        with (
+            patch("backend.app.feishu.feishu._acquire_rate_slots", return_value=True),
+            patch("backend.app.feishu.feishu._post_with_retry", return_value=(True, 200, "")) as post,
+        ):
+            notification = send_feishu(self.db, "long-report", "长报告", content)
+
+        self.assertGreater(expected_pages, 1)
+        self.assertEqual(post.call_count, expected_pages)
+        self.assertEqual(notification.status, "sent")
 
     def test_legacy_channel_and_jobs_migrate_to_single_schedule_channel(self) -> None:
         self.db.add(
@@ -231,6 +344,33 @@ class SchedulerDeliveryTests(unittest.TestCase):
             self.assertEqual(run.notification_id, 17)
             self.assertIn("签名校验失败", run.error)
             self.assertEqual(job.last_status, "failed")
+
+    def test_due_job_claiming_never_exceeds_available_capacity(self) -> None:
+        with self.SessionFactory() as db:
+            db.add_all(
+                [
+                    ScheduledJob(
+                        job_key=f"due-job-{index}",
+                        name=f"到期任务 {index}",
+                        job_kind="agent_report",
+                        schedule_type="daily",
+                        run_time="08:30",
+                        enabled=True,
+                        sort_order=index,
+                    )
+                    for index in range(3)
+                ]
+            )
+            db.commit()
+
+        with patch.object(rhythm_scheduler, "SessionLocal", self.SessionFactory):
+            claimed = rhythm_scheduler._claim_due_jobs(datetime(2026, 7, 31, 8, 30), limit=1)
+
+        self.assertEqual(len(claimed), 1)
+        with self.SessionFactory() as db:
+            running = db.scalars(select(JobRun).where(JobRun.status == "running")).all()
+            # One fixture run already exists; only one due job may be claimed.
+            self.assertEqual(len(running), 2)
 
 
 class ScheduleAdminSafetyTests(unittest.TestCase):

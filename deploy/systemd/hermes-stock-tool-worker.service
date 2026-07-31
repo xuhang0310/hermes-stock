@@ -12,6 +12,9 @@ WorkingDirectory=/opt/hermes-stock/current
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/opt/hermes-stock/redis/connection.env
 ExecStart=/opt/hermes-stock/venv/bin/python -m backend.app.agent_runtime.tool_worker
+Nice=5
+CPUWeight=50
+IOWeight=50
 Restart=always
 RestartSec=1
 TimeoutStopSec=130

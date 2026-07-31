@@ -212,6 +212,30 @@ class ProgressiveSkillTests(unittest.TestCase):
         self.assertIn("technical-analysis", context)
         self.assertIn("可按需加载", context)
 
+    def test_explicit_skill_is_pinned_before_automatic_routing(self) -> None:
+        selected = self.registry.resolve_manifests(
+            "分析这只股票",
+            "research",
+            "stock-pm",
+            selected_names=["strategy-backtest"],
+        )
+        self.assertEqual(selected[0].name, "strategy-backtest")
+        self.assertGreaterEqual(len(selected), 8)
+
+    def test_explicit_skill_selection_is_canonical_and_role_scoped(self) -> None:
+        selected = self.registry.validate_manifest_selection(
+            ["news_and_events", "event-intelligence"],
+            "research",
+            "risk-officer",
+        )
+        self.assertEqual(selected, ["event-intelligence"])
+        with self.assertRaisesRegex(ValueError, "不适用于当前数字人"):
+            self.registry.validate_manifest_selection(
+                ["financial-statement-analysis"],
+                "research",
+                "risk-officer",
+            )
+
     def test_load_skill_returns_detailed_contract(self) -> None:
         result = self.registry.load_manifest("news_and_events")
         self.assertEqual(result["name"], "event-intelligence")

@@ -115,9 +115,11 @@ class AgentRuntimeWorker:
                 )
                 if pruned:
                     logger.info("Pruned %d expired Agent run events", pruned)
-            run_id = await self.broker.dequeue(timeout_seconds=1)
-            if not run_id:
-                run_id = await asyncio.to_thread(self.repository.next_queued_run)
+            # Redis is a wake-up bus; MySQL is the ordered source of truth.
+            # Always select the next run from MySQL so a queued web request can
+            # overtake lower-priority scheduled work already present in Redis.
+            await self.broker.dequeue(timeout_seconds=1)
+            run_id = await asyncio.to_thread(self.repository.next_queued_run)
             if not run_id:
                 await asyncio.sleep(0.4)
                 continue

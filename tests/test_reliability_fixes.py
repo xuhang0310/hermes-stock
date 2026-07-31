@@ -60,6 +60,18 @@ class DeploymentCommandTests(unittest.TestCase):
         self.assertIn("proxy_pass http://127.0.0.1:18084;", config[config.index(route):])
         self.assertLess(config.index(route), config.index("location /api/"))
 
+    def test_agent_worker_is_isolated_from_scheduler_and_api_resources_are_prioritized(self) -> None:
+        background = Path("deploy/systemd/hermes-stock-background.service").read_text(encoding="utf-8")
+        worker = Path("deploy/systemd/hermes-stock-agent-worker.service").read_text(encoding="utf-8")
+        api = Path("deploy/systemd/hermes-stock-api-a.service").read_text(encoding="utf-8")
+
+        self.assertIn("STOCK_AGENT_RUNTIME_WORKER_ENABLED=false", background)
+        self.assertIn("STOCK_SCHEDULER_MAX_CONCURRENT_JOBS=2", background)
+        self.assertIn("STOCK_BACKGROUND_SERVICES_ENABLED=false", worker)
+        self.assertIn("STOCK_AGENT_RUNTIME_WORKER_ENABLED=true", worker)
+        self.assertIn("CPUWeight=200", api)
+        self.assertIn("CPUWeight=40", background)
+
 
 class FeishuBotRuntimeTests(unittest.TestCase):
     def test_missing_worker_is_stopped_instead_of_connecting(self) -> None:

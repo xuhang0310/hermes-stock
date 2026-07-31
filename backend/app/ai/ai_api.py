@@ -136,6 +136,7 @@ class AgentChatIn(BaseModel):
     model_config_id: int | None = None
     chat_mode: Literal["research", "stock", "knowledge"] = "research"
     skills: list[str] = []
+    selected_skill_names: list[str] = Field(default_factory=list, max_length=8)
     attachments: list[AgentAttachmentIn] = Field(default_factory=list, max_length=6)
     approval_policy: Literal["ask", "smart", "full"] | None = None
     # One-shot capability grant. The frontend resets it after every message;
@@ -2394,6 +2395,15 @@ def _prepare_agent_chat(
         elif allowed_profiles:
             profile = allowed_profiles[0]
 
+    try:
+        selected_skill_names = skill_registry.validate_manifest_selection(
+            payload.selected_skill_names,
+            payload.chat_mode,
+            profile.code if profile else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     model_config: LlmModelConfig | None = None
     if payload.model_config_id:
         model_config = db.scalar(
@@ -2553,6 +2563,7 @@ def _prepare_agent_chat(
             "model_config_id": model_config_id,
             "chat_mode": payload.chat_mode,
             "skills": payload.skills,
+            "selected_skill_names": selected_skill_names,
             "memory_context": memory_context,
             "can_write_positions": can_write_positions,
             "default_account_id": default_account_id,

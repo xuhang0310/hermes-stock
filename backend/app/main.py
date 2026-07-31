@@ -206,13 +206,14 @@ def create_app(init_db: bool = True) -> FastAPI:
             start_prompt_recommendation_scheduler()
             start_rhythm_scheduler()
             start_feishu_bots()
-            if settings.agent_runtime_worker_enabled:
-                agent_runtime_worker.start()
-            log_event("system", "INFO", "后台组件已启动：Agent Runtime + 调度器 + 飞书机器人 + 推荐刷新")
+            log_event("system", "INFO", "后台组件已启动：调度器 + 飞书机器人 + 推荐刷新")
             # 启动时清理一次过期日志（每日健康检查还会再清理），控制表体积
             await asyncio.to_thread(prune_system_logs)
-        elif init_db:
+        elif init_db and not settings.agent_runtime_worker_enabled:
             log_event("system", "INFO", "API replica started; background services run separately", to_db=False)
+        if init_db and settings.agent_runtime_worker_enabled:
+            agent_runtime_worker.start()
+            log_event("system", "INFO", "Agent Runtime worker started", to_db=False)
         try:
             yield
         finally:
@@ -220,8 +221,9 @@ def create_app(init_db: bool = True) -> FastAPI:
                 log_event("system", "INFO", "应用关闭：停止后台组件", to_db=False)
                 await stop_rhythm_scheduler()
                 await stop_prompt_recommendation_scheduler()
-                await agent_runtime_worker.stop()
                 stop_feishu_bots()
+            if init_db and settings.agent_runtime_worker_enabled:
+                await agent_runtime_worker.stop()
             await redis_broker.close()
 
     app = FastAPI(

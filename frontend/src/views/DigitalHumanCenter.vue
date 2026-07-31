@@ -6,9 +6,11 @@ import AgentProcessDisclosure from '../components/AgentProcessDisclosure.vue'
 import ApprovalPolicyControl from '../components/ApprovalPolicyControl.vue'
 import BacktestSummaryCard from '../components/BacktestSummaryCard.vue'
 import ChatAttachmentPicker from '../components/ChatAttachmentPicker.vue'
+import SkillSlashMenu from '../components/SkillSlashMenu.vue'
 import FeishuBotPanel from './FeishuBotPanel.vue'
 import type {
   AgentAttachment,
+  AgentSkill,
   AgentMessage,
   AgentSession,
   AgentSessionDetail,
@@ -71,6 +73,12 @@ type ChatAttachmentPickerHandle = {
   handlePaste: (event: ClipboardEvent) => Promise<boolean>
 }
 
+type SkillSlashMenuHandle = {
+  sync: (text: string, caret: number) => void
+  handleKeydown: (event: KeyboardEvent) => boolean
+  close: () => void
+}
+
 type ActiveChatRequest = {
   key: string
   sessionId: number | null
@@ -101,6 +109,9 @@ const question = ref('')
 const approvalPolicy = ref<ApprovalPolicy>('ask')
 const pendingAttachments = ref<AgentAttachment[]>([])
 const attachmentPicker = ref<ChatAttachmentPickerHandle | null>(null)
+const composerTextarea = ref<HTMLTextAreaElement | null>(null)
+const skillSlashMenu = ref<SkillSlashMenuHandle | null>(null)
+const selectedCoreSkills = ref<AgentSkill[]>([])
 const workspaceExecAvailable = ref(false)
 const selectedProfileId = ref<number | null>(null)
 const selectedModelId = ref<number | null>(null)
@@ -122,6 +133,30 @@ function closeMobileRail() { mobileRailOpen.value = false }
 function pasteIntoComposer(event: ClipboardEvent) {
   if (selectedSessionReadOnly.value) return
   void attachmentPicker.value?.handlePaste(event)
+}
+
+function syncSkillSlashMenu() {
+  const caret = composerTextarea.value?.selectionStart ?? question.value.length
+  skillSlashMenu.value?.sync(question.value, caret)
+}
+
+function selectCoreSkill(payload: { skill: AgentSkill; start: number; end: number }) {
+  const alreadySelected = selectedCoreSkills.value.some((item) => item.name === payload.skill.name)
+  if (!alreadySelected && selectedCoreSkills.value.length >= 8) {
+    error.value = '每轮最多选择 8 个技能'
+  } else if (!alreadySelected) {
+    selectedCoreSkills.value = [...selectedCoreSkills.value, payload.skill]
+    error.value = ''
+  }
+  question.value = `${question.value.slice(0, payload.start)}${question.value.slice(payload.end)}`
+  nextTick(() => {
+    composerTextarea.value?.focus()
+    composerTextarea.value?.setSelectionRange(payload.start, payload.start)
+  })
+}
+
+function removeCoreSkill(name: string) {
+  selectedCoreSkills.value = selectedCoreSkills.value.filter((item) => item.name !== name)
 }
 
 const selectedProfile = computed(() => profiles.value.find((item) => item.id === selectedProfileId.value) || null)
@@ -243,6 +278,8 @@ function toChatMessages(items: AgentMessage[]): ChatMessage[] {
 }
 
 function selectSessionDetail(detail: AgentSessionDetail, sessionMessages: ChatMessage[]) {
+  selectedCoreSkills.value = []
+  skillSlashMenu.value?.close()
   selectedSessionId.value = detail.id
   selectedProfileId.value = detail.digital_human_id || selectedProfileId.value
   selectedModelId.value = detail.model_config_id || selectedModelId.value
@@ -255,6 +292,8 @@ function selectSessionDetail(detail: AgentSessionDetail, sessionMessages: ChatMe
 
 async function openSession(id: number) {
   closeMobileRail()
+  selectedCoreSkills.value = []
+  skillSlashMenu.value?.close()
   error.value = ''
   const activeRequest = activeRequests.get(sessionKey(id))
   if (activeRequest) {
@@ -295,6 +334,8 @@ function newSession(profileId?: number | null) {
   selectedProfileId.value = profileId ?? selectedProfileId.value ?? profiles.value[0]?.id ?? null
   messages.value = []
   question.value = ''
+  selectedCoreSkills.value = []
+  skillSlashMenu.value?.close()
   pendingAttachments.value = []
   approvalPolicy.value = 'ask'
   error.value = ''
@@ -678,6 +719,7 @@ async function send() {
   const requestKey = selectedConversationKey.value
   if ((!enteredText && !sentAttachments.length) || activeRequests.has(requestKey)) return
   const text = enteredText || '请分析我上传的附件。'
+  const selectedSkillNames = selectedCoreSkills.value.map((item) => item.name)
   const requestSessionId = selectedSessionId.value
   const requestProfileId = selectedProfileId.value
   const requestModelId = selectedModelId.value
@@ -689,6 +731,8 @@ async function send() {
     .slice(-8)
   error.value = ''
   question.value = ''
+  selectedCoreSkills.value = []
+  skillSlashMenu.value?.close()
   pendingAttachments.value = []
   requestMessages.push({
     id: Date.now(),
@@ -739,6 +783,7 @@ async function send() {
         session_id: requestSessionId,
         digital_human_id: requestProfileId,
         model_config_id: requestModelId,
+        selected_skill_names: selectedSkillNames,
         attachments: sentAttachments.map((item) => ({ path: item.path })),
         approval_policy: approvalPolicy.value
       },
@@ -901,6 +946,11 @@ function submitFromKeyboard(event: KeyboardEvent) {
   if (event.isComposing || event.shiftKey) return
   event.preventDefault()
   void send()
+}
+
+function composerKeydown(event: KeyboardEvent) {
+  if (skillSlashMenu.value?.handleKeydown(event)) return
+  if (event.key === 'Enter') submitFromKeyboard(event)
 }
 
 onMounted(async () => {
@@ -1126,12 +1176,24 @@ function requestIsVisible(request: ActiveChatRequest) {
       </div>
       <form v-else class="chat-composer" @paste="pasteIntoComposer" @submit.prevent="send">
         <textarea
+          ref="composerTextarea"
           v-model="question"
           rows="2"
           placeholder="输入问题，或上传研报、表格和图片"
           :disabled="selectedSessionRunning || !selectedProfile"
-          @keydown.enter="submitFromKeyboard"
+          @input="syncSkillSlashMenu"
+          @click="syncSkillSlashMenu"
+          @keydown="composerKeydown"
         ></textarea>
+        <SkillSlashMenu
+          ref="skillSlashMenu"
+          chat-mode="research"
+          :role-code="selectedProfile?.code || null"
+          :selected-skills="selectedCoreSkills"
+          :disabled="selectedSessionRunning || !selectedProfile"
+          @select="selectCoreSkill"
+          @remove="removeCoreSkill"
+        />
         <footer class="chat-composer-toolbar">
           <ChatAttachmentPicker ref="attachmentPicker" v-model="pendingAttachments" :disabled="selectedSessionRunning || !selectedProfile" />
           <ApprovalPolicyControl v-model="approvalPolicy" :disabled="selectedSessionRunning" :exec-available="workspaceExecAvailable" />

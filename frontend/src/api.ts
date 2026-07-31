@@ -774,6 +774,7 @@ export const api = {
       model_config_id?: number | null
       chat_mode?: 'research' | 'stock' | 'knowledge'
       skills?: string[]
+      selected_skill_names?: string[]
       attachments?: Array<{ path: string }>
       approval_policy?: ApprovalPolicy
       allow_code_execution?: boolean
@@ -788,6 +789,7 @@ export const api = {
       session_id?: number | null
       model_config_id?: number | null
       skills?: string[]
+      selected_skill_names?: string[]
       attachments?: Array<{ path: string }>
       approval_policy?: ApprovalPolicy
       allow_code_execution?: boolean

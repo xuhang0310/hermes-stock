@@ -271,11 +271,25 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
     role_code = request_payload.get("digital_human_code")
     memory_context = str(request_payload.get("memory_context") or "")
     skills = list(request_payload.get("skills") or [])
+    explicitly_selected_names = list(request_payload.get("selected_skill_names") or [])
     question = str(request_payload.get("user_text") or request_payload.get("question") or "")
-    selected_manifests = skill_registry.resolve_manifests(question, chat_mode, role_code)
+    selected_manifests = skill_registry.resolve_manifests(
+        question,
+        chat_mode,
+        role_code,
+        selected_names=explicitly_selected_names,
+    )
     request_payload["resolved_skills"] = [item.name for item in selected_manifests]
     progressive_context = skill_registry.build_progressive_context(
         selected_manifests, chat_mode, role_code
+    )
+    explicitly_selected = [
+        item for item in selected_manifests if item.name in explicitly_selected_names
+    ]
+    explicit_progressive_context = (
+        skill_registry.build_progressive_context(explicitly_selected, chat_mode, role_code)
+        if explicitly_selected
+        else ""
     )
     write_names: set[str] = set()
     if role_code == "position-entry-agent":
@@ -283,8 +297,10 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
 
         write_names = {"save_position_holdings"}
         return (
-            _position_agent_prompt() + transaction_state_service.prompt_context(request_payload),
-            list(POSITION_AGENT_TOOLS),
+            _position_agent_prompt()
+            + transaction_state_service.prompt_context(request_payload)
+            + (f"\n\n{explicit_progressive_context}" if explicit_progressive_context else ""),
+            [*POSITION_AGENT_TOOLS, *([LOAD_SKILL_TOOL_SCHEMA] if explicitly_selected else [])],
             write_names,
         )
     if role_code == "watchlist-entry-agent":
@@ -292,8 +308,10 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
 
         write_names = {"add_watchlist_items", "remove_watchlist_items"}
         return (
-            _watchlist_agent_prompt() + transaction_state_service.prompt_context(request_payload),
-            list(WATCHLIST_AGENT_TOOLS),
+            _watchlist_agent_prompt()
+            + transaction_state_service.prompt_context(request_payload)
+            + (f"\n\n{explicit_progressive_context}" if explicit_progressive_context else ""),
+            [*WATCHLIST_AGENT_TOOLS, *([LOAD_SKILL_TOOL_SCHEMA] if explicitly_selected else [])],
             write_names,
         )
     if chat_mode == "stock":

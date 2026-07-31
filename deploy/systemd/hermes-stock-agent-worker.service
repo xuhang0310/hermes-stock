@@ -1,0 +1,26 @@
+[Unit]
+Description=SixRabbits Stock durable Agent runtime worker
+After=network-online.target docker.service hermes-stock-background.service
+Wants=network-online.target docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-stock/current
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/hermes-stock/redis/connection.env
+Environment=STOCK_BACKGROUND_SERVICES_ENABLED=false
+Environment=STOCK_AGENT_RUNTIME_WORKER_ENABLED=true
+Environment=STOCK_AGENT_WORKER_CONCURRENCY=6
+ExecStart=/opt/hermes-stock/venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 18086 --timeout-graceful-shutdown 120
+CPUWeight=100
+IOWeight=100
+Restart=always
+RestartSec=1
+TimeoutStopSec=130
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

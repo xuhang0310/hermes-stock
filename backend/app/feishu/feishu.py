@@ -26,8 +26,10 @@ DAILY_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
 LEGACY_CHANNEL_KEYS = ("feishu-alert",)
 BUILTIN_CHANNEL_KEYS = (SCHEDULE_CHANNEL_KEY,)
 
-FEISHU_CONTENT_LIMIT = 3800  # 飞书单 markdown 元素上限约 4000，留 200 余量
-FEISHU_MAX_CARD_ELEMENTS = 80  # 飞书卡片元素上限保护，避免超长内容被拒
+FEISHU_CONTENT_LIMIT = 3600
+FEISHU_COMPONENTS_PER_CARD = 3
+FEISHU_MAX_CARDS_PER_MESSAGE = 18
+FEISHU_MAX_TABLES_PER_CARD = 5
 RATE_LIMIT_PER_MINUTE = 20
 _RETRYABLE_STATUS = {500, 502, 503, 504}
 _CARD_TEMPLATES = {
@@ -130,24 +132,133 @@ _FEISHU_STRIP_TAGS = re.compile(
 _FEISHU_IMG_TAG = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 
 
+def _split_markdown_table_row(line: str) -> list[str] | None:
+    """Split a table row without treating escaped or code-span pipes as separators."""
+    stripped = line.strip()
+    if "|" not in stripped:
+        return None
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith(r"\|"):
+        stripped = stripped[:-1]
+
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    in_code = False
+    for char in stripped:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            current.append(char)
+            continue
+        if char == "`":
+            in_code = not in_code
+            current.append(char)
+            continue
+        if char == "|" and not in_code:
+            cells.append("".join(current).strip().replace(r"\|", "|"))
+            current = []
+            continue
+        current.append(char)
+    cells.append("".join(current).strip().replace(r"\|", "|"))
+    return cells if len(cells) >= 2 else None
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    """Return whether a line is the separator row of a Markdown table."""
+    cells = _split_markdown_table_row(line)
+    return bool(cells) and all(
+        re.fullmatch(r"\s*:?-{3,}:?\s*", cell) is not None
+        for cell in cells
+    )
+
+
+def _format_table_for_mobile(headers: list[str], rows: list[list[str]]) -> str:
+    """Render a table as vertical blocks that Feishu mobile does not clip."""
+    blocks: list[str] = []
+    width = len(headers)
+    for row_index, raw_row in enumerate(rows, start=1):
+        row = (raw_row + [""] * width)[:width]
+        if width == 2:
+            label = row[0] or f"第 {row_index} 项"
+            blocks.append(f"**{label}**\n{row[1] or '-'}")
+            continue
+
+        title = row[0] or f"第 {row_index} 项"
+        lines = [f"**{title}**"]
+        lines.extend(
+            f"**{header or f'字段 {column_index + 1}'}：** {value or '-'}"
+            for column_index, (header, value) in enumerate(zip(headers[1:], row[1:]), start=1)
+        )
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _linearize_markdown_tables(text: str) -> str:
+    """Replace content tables with mobile-safe blocks while preserving every cell."""
+    lines = text.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        if index + 1 >= len(lines) or not _is_markdown_table_separator(lines[index + 1]):
+            output.append(lines[index])
+            index += 1
+            continue
+
+        headers = _split_markdown_table_row(lines[index])
+        if not headers:
+            output.append(lines[index])
+            index += 1
+            continue
+
+        rows: list[list[str]] = []
+        cursor = index + 2
+        while cursor < len(lines):
+            row = _split_markdown_table_row(lines[cursor])
+            if not row:
+                break
+            rows.append(row)
+            cursor += 1
+
+        if not rows:
+            output.extend(lines[index:cursor])
+        else:
+            output.append(_format_table_for_mobile(headers, rows))
+        index = cursor
+    return "\n".join(output)
+
+
 def _sanitize_markdown_for_feishu(text: str) -> str:
     """清洗 markdown 使之在飞书卡片中尽量正确渲染。
 
     处理：
     1. CRLF → LF（避免段落分割失效）
     2. 去除飞书不支持的 HTML 块级标签（保留行内 <font>/<a>/<at> 等）
-    3. 图片语法 ![alt](url) 转为飞书可识别的链接（飞书不支持标准图片语法）
-    4. 连续空行压缩为两段（飞书渲染多段间距无差异，减少无效字符）
+    3. Markdown 表格转为纵向信息块，避免移动端长单元格被裁剪
+    4. 图片语法 ![alt](url) 转为飞书可识别的链接（飞书不支持标准图片语法）
+    5. 连续空行压缩为两段（飞书渲染多段间距无差异，减少无效字符）
     """
     # 1. 统一换行
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Keep table cells on one line before removing unsupported block HTML.
+    text = re.sub(r"<br\s*/?>", " / ", text, flags=re.IGNORECASE)
     # 2. 去除不支持的 HTML 块级标签
     text = _FEISHU_STRIP_TAGS.sub("", text)
-    # 3. 图片 → 链接（飞书 markdown 组件不渲染标准图片语法）
+    # 3. 飞书移动端会裁剪 Markdown 表格的长单元格，改为纵向信息块完整展示。
+    text = _linearize_markdown_tables(text)
+    # 4. 图片 → 链接（飞书 markdown 组件不渲染标准图片语法）
     text = _FEISHU_IMG_TAG.sub(r"[📷 \1](\2)", text)
-    # 4. 连续 3+ 空行 → 2 空行
+    # 5. 连续 3+ 空行 → 2 空行
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text
+    # Do not render an entire model response as a code block merely because
+    # the model wrapped it in a markdown fence.
+    stripped = text.strip()
+    outer_fence = re.match(r"^```(?:markdown|md)?\s*\n([\s\S]*)\n```$", stripped, re.IGNORECASE)
+    return outer_fence.group(1).strip() if outer_fence else stripped
 
 
 # ── markdown 分片 ────────────────────────────────────────────────────
@@ -157,7 +268,7 @@ _MIN_CHUNK_FRACTION = 3  # 分片最小长度 = limit // 此值，避免碎片
 def split_markdown_content(
     text: str,
     limit: int = FEISHU_CONTENT_LIMIT,
-    max_chunks: int = FEISHU_MAX_CARD_ELEMENTS,
+    max_chunks: int | None = FEISHU_COMPONENTS_PER_CARD * FEISHU_MAX_CARDS_PER_MESSAGE,
 ) -> list[str]:
     """将长 markdown 拆分为多个分片，每片不超过 limit 字符。
 
@@ -184,7 +295,7 @@ def split_markdown_content(
             break
 
         # 达到最大分片数：最后一片截断并提示
-        if len(chunks) >= max_chunks - 1:
+        if max_chunks is not None and len(chunks) >= max_chunks - 1:
             tail = remaining[:limit]
             chunks.append(tail.rstrip() + "\n\n……内容过长，已截断。全文见系统内记录。")
             break
@@ -242,9 +353,225 @@ def _find_code_block_boundary(text: str, limit: int, min_chunk: int) -> int:
     return -1
 
 
-def markdown_elements(text: str) -> list[dict]:
+def _count_markdown_tables(text: str) -> int:
+    """Count tables the Feishu Markdown renderer expands into table components."""
+    lines = text.splitlines()
+    return sum(
+        1
+        for index, line in enumerate(lines)
+        if index > 0
+        and "|" in lines[index - 1]
+        and _is_markdown_table_separator(line)
+    )
+
+
+def _split_table_dense_chunk(text: str, max_tables: int) -> list[str]:
+    """Split a chunk so no part can expand to more than ``max_tables`` tables."""
+    if max_tables <= 0 or _count_markdown_tables(text) <= max_tables:
+        return [text]
+
+    parts: list[str] = []
+    remaining = text
+    while _count_markdown_tables(remaining) > max_tables:
+        lines = remaining.splitlines()
+        table_headers = [
+            index - 1
+            for index, line in enumerate(lines)
+            if index > 0
+            and "|" in lines[index - 1]
+            and _is_markdown_table_separator(line)
+        ]
+        split_at = table_headers[max_tables]
+        head = "\n".join(lines[:split_at]).strip()
+        if not head:
+            break
+        parts.append(head)
+        remaining = "\n".join(lines[split_at:]).strip()
+
+    if remaining:
+        parts.append(remaining)
+    return parts or [text]
+
+
+def _paginate_markdown(
+    text: str,
+    *,
+    has_metadata_table: bool,
+) -> list[list[str]]:
+    """Paginate by characters, component count and Feishu's five-table limit."""
+    content_table_limit = FEISHU_MAX_TABLES_PER_CARD - (1 if has_metadata_table else 0)
+    chunks = [
+        part
+        for chunk in split_markdown_content(text)
+        for part in _split_table_dense_chunk(chunk, content_table_limit)
+    ]
+
+    pages: list[list[str]] = []
+    current: list[str] = []
+    current_tables = 1 if has_metadata_table else 0
+
+    for chunk in chunks:
+        chunk_tables = _count_markdown_tables(chunk)
+        if current and (
+            len(current) >= FEISHU_COMPONENTS_PER_CARD
+            or current_tables + chunk_tables > FEISHU_MAX_TABLES_PER_CARD
+        ):
+            pages.append(current)
+            current = []
+            current_tables = 0
+
+        current.append(chunk)
+        current_tables += chunk_tables
+
+    if current:
+        pages.append(current)
+    return pages or [[text]]
+
+
+def markdown_elements(text: str, *, start_index: int = 0) -> list[dict]:
     """将 markdown 文本转为飞书卡片 markdown 元素列表（自动分片）。"""
-    return [{"tag": "markdown", "content": chunk} for chunk in split_markdown_content(text)]
+    return [
+        {
+            "tag": "markdown",
+            "element_id": f"content_{start_index + index + 1:03d}",
+            "content": chunk,
+            "text_size": "normal",
+            "text_align": "left",
+            "margin": "0px 0px 0px 0px",
+        }
+        for index, chunk in enumerate(split_markdown_content(text))
+    ]
+
+
+def _metadata_markdown(metadata: list[tuple[str, str]] | None) -> str:
+    items = [
+        (_compact_text(label, 20), _compact_text(value, 100) or "-")
+        for label, value in (metadata or [])[:6]
+    ]
+    if not items:
+        return ""
+    rows = ["| 项目 | 内容 | 项目 | 内容 |", "| --- | --- | --- | --- |"]
+    for index in range(0, len(items), 2):
+        left = items[index]
+        right = items[index + 1] if index + 1 < len(items) else ("", "")
+        escaped = [value.replace("|", "&#124;") for value in (*left, *right)]
+        rows.append("| " + " | ".join(escaped) + " |")
+    return "\n".join(rows)
+
+
+def _card_payload(
+    title: str,
+    content_elements: list[dict],
+    *,
+    purpose: str,
+    metadata: list[tuple[str, str]] | None,
+    footer: str | None,
+    template: str | None,
+    page: int,
+    page_count: int,
+) -> dict:
+    card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
+    elements: list[dict] = []
+    metadata_text = _metadata_markdown(metadata) if page == 1 else ""
+    if metadata_text:
+        elements.extend(
+            [
+                {
+                    "tag": "markdown",
+                    "element_id": "metadata",
+                    "content": metadata_text,
+                    "text_size": "normal",
+                    "text_align": "left",
+                },
+                {"tag": "hr"},
+            ]
+        )
+    elements.extend(content_elements)
+    footer_text = footer or (
+        "SixRabbits Stock | 系统告警，请及时核查"
+        if purpose == "alert"
+        else "SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议"
+    )
+    elements.extend(
+        [
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "element_id": f"footer_{page:02d}",
+                "content": footer_text[:200],
+                "text_size": "notation",
+                "text_align": "left",
+            },
+        ]
+    )
+    page_title = title if page_count == 1 else f"{title}（{page}/{page_count}）"
+    return {
+        "schema": "2.0",
+        "config": {
+            "wide_screen_mode": True,
+            "enable_forward": True,
+            "update_multi": True,
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 12px 12px",
+            "elements": elements,
+        },
+        "header": {
+            "title": {"tag": "plain_text", "content": page_title[:120]},
+            "template": card_template,
+        },
+    }
+
+
+def _build_payloads(
+    title: str,
+    content: str,
+    secret: str | None,
+    purpose: str,
+    *,
+    metadata: list[tuple[str, str]] | None = None,
+    footer: str | None = None,
+    template: str | None = None,
+) -> list[dict]:
+    text = content.strip() or "本次任务未返回正文。"
+    pages = _paginate_markdown(text, has_metadata_table=bool(metadata))
+    payloads: list[dict] = []
+    page_count = len(pages)
+    element_index = 0
+    for page_index, page_chunks in enumerate(pages, start=1):
+        content_elements: list[dict] = []
+        for chunk in page_chunks:
+            element_index += 1
+            content_elements.append(
+                {
+                    "tag": "markdown",
+                    "element_id": f"content_{element_index:03d}",
+                    "content": chunk,
+                    "text_size": "normal",
+                    "text_align": "left",
+                    "margin": "0px 0px 0px 0px",
+                }
+            )
+        payload: dict = {
+            "msg_type": "interactive",
+            "card": _card_payload(
+                title,
+                content_elements,
+                purpose=purpose,
+                metadata=metadata,
+                footer=footer,
+                template=template,
+                page=page_index,
+                page_count=page_count,
+            ),
+        }
+        if secret:
+            timestamp = int(time.time())
+            payload["timestamp"] = str(timestamp)
+            payload["sign"] = _gen_sign(secret, timestamp)
+        payloads.append(payload)
+    return payloads
 
 
 def _build_payload(
@@ -257,61 +584,31 @@ def _build_payload(
     footer: str | None = None,
     template: str | None = None,
 ) -> dict:
-    text = content.strip() or "本次任务未返回正文。"
-    card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
-    elements: list[dict] = []
-    fields = []
-    for label, value in (metadata or [])[:6]:
-        compact_label = _compact_text(label, 20)
-        compact_value = _compact_text(value, 100) or "-"
-        fields.append(
-            {
-                "is_short": True,
-                "text": {"tag": "lark_md", "content": f"**{compact_label}**\n{compact_value}"},
-            }
-        )
-    if fields:
-        elements.extend([{"tag": "div", "fields": fields}, {"tag": "hr"}])
-    # 长内容自动分片为多个 markdown 元素，避免截断
-    elements.extend(markdown_elements(text))
-    footer_text = footer or (
-        "SixRabbits Stock | 系统告警，请及时核查"
-        if purpose == "alert"
-        else "SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议"
-    )
-    elements.extend(
-        [
-            {"tag": "hr"},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": footer_text[:200]}]},
-        ]
-    )
-    payload: dict = {
-        "msg_type": "interactive",
-        "card": {
-            "config": {"wide_screen_mode": True, "enable_forward": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": title[:120]},
-                "template": card_template,
-            },
-            "elements": elements,
-        },
-    }
-    if secret:
-        timestamp = int(time.time())
-        payload["timestamp"] = str(timestamp)
-        payload["sign"] = _gen_sign(secret, timestamp)
-    return payload
+    return _build_payloads(
+        title,
+        content,
+        secret,
+        purpose,
+        metadata=metadata,
+        footer=footer,
+        template=template,
+    )[0]
 
 
-def _acquire_rate_slot(channel_key: str) -> bool:
+def _acquire_rate_slots(channel_key: str, count: int = 1) -> bool:
     now = time.monotonic()
     with _rate_lock:
         history = _rate_history.setdefault(channel_key, [])
         history[:] = [item for item in history if now - item < 60]
-        if len(history) >= RATE_LIMIT_PER_MINUTE:
+        requested = max(1, count)
+        if len(history) + requested > RATE_LIMIT_PER_MINUTE:
             return False
-        history.append(now)
+        history.extend([now] * requested)
         return True
+
+
+def _acquire_rate_slot(channel_key: str) -> bool:
+    return _acquire_rate_slots(channel_key, 1)
 
 
 def _post_with_retry(url: str, payload: dict, attempts: int = 3) -> tuple[bool, int | None, str]:
@@ -411,20 +708,13 @@ def send_feishu(
         db.commit()
         return notification
 
-    if not _acquire_rate_slot(channel_key):
-        notification.status = "failed"
-        notification.error = f"触发本地限流（每分钟最多 {RATE_LIMIT_PER_MINUTE} 条），消息未发送"
-        _log(db, "ERROR", f"飞书推送限流：通道 {channel_key}", {"title": title[:80]})
-        db.commit()
-        return notification
-
     secret = decrypt_value(channel.secret_cipher)
     purpose = card_kind or channel.purpose
     # 先提交 pending 审计行并释放数据库连接，再做外部 HTTP 调用：
     # 避免重试窗口（最长约 33 秒）占用连接池，且进程中途崩溃也能留下审计痕迹
     db.commit()
 
-    payload = _build_payload(
+    payloads = _build_payloads(
         title,
         content,
         secret,
@@ -433,8 +723,34 @@ def send_feishu(
         footer=card_footer,
         template=card_template,
     )
-    ok, status_code, error = _post_with_retry(webhook_url, payload)
-    if ok:
+    if not _acquire_rate_slots(channel_key, len(payloads)):
+        notification.status = "failed"
+        notification.error = (
+            f"触发本地限流（每分钟最多 {RATE_LIMIT_PER_MINUTE} 条），"
+            f"本次长消息需要连续发送 {len(payloads)} 页，消息未发送"
+        )
+        _log(
+            db,
+            "ERROR",
+            f"飞书推送限流：通道 {channel_key}",
+            {"title": title[:80], "total_pages": len(payloads)},
+        )
+        db.commit()
+        return notification
+
+    sent_pages = 0
+    status_code: int | None = None
+    error = ""
+    for page_index, payload in enumerate(payloads, start=1):
+        ok, status_code, error = _post_with_retry(webhook_url, payload)
+        if not ok:
+            error = f"第 {page_index}/{len(payloads)} 页发送失败：{error}"
+            break
+        sent_pages += 1
+        if page_index < len(payloads):
+            time.sleep(0.15)
+
+    if sent_pages == len(payloads):
         notification.status = "sent"
         notification.sent_at = datetime.now()
         channel.last_ok_at = notification.sent_at
@@ -447,7 +763,13 @@ def send_feishu(
             db,
             "ERROR",
             f"飞书推送失败：通道 {channel_key}",
-            {"title": title[:80], "status_code": status_code, "error": error[:300]},
+            {
+                "title": title[:80],
+                "status_code": status_code,
+                "error": error[:300],
+                "sent_pages": sent_pages,
+                "total_pages": len(payloads),
+            },
         )
     db.commit()
     return notification

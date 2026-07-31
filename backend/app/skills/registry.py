@@ -14,7 +14,7 @@ import hashlib
 import importlib
 import pkgutil
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from backend.app.core.applog import get_logger
 from backend.app.skills.manifests import (
@@ -263,12 +263,19 @@ class SkillRegistry:
         role_code: str | None = None,
         *,
         limit: int | None = None,
+        selected_names: Sequence[str] | None = None,
     ) -> list[SkillManifest]:
         """Select a deterministic capability set sized to the task."""
 
         normalized = (question or "").lower()
         intent = classify_research_intent(question)
-        effective_limit = max(1, min(limit or _intent_skill_limit(intent), 12))
+        requested_names = self.validate_manifest_selection(
+            selected_names or (), chat_mode, role_code
+        )
+        effective_limit = max(
+            1,
+            min(max(limit or _intent_skill_limit(intent), len(requested_names)), 12),
+        )
         eligible: dict[str, SkillManifest] = {
             manifest.name: manifest
             for manifest in self._manifests.values()
@@ -276,6 +283,8 @@ class SkillRegistry:
             and (not manifest.roles or role_code in manifest.roles)
         }
         selected: list[SkillManifest] = []
+        for name in requested_names:
+            selected.append(eligible[name])
         for name in _intent_skill_pack(intent):
             manifest = eligible.get(name)
             if manifest is not None and manifest not in selected:
@@ -434,6 +443,34 @@ class SkillRegistry:
             if manifest and manifest not in manifests:
                 manifests.append(manifest)
         return manifests
+
+    def validate_manifest_selection(
+        self,
+        names: Sequence[str],
+        chat_mode: str,
+        role_code: str | None = None,
+        *,
+        max_selected: int = 8,
+    ) -> list[str]:
+        """Canonicalize and validate explicitly selected skills for one chat turn."""
+
+        canonical_names: list[str] = []
+        for raw_name in names:
+            canonical_name = self._canonical_manifest_name(str(raw_name))
+            if not canonical_name or canonical_name in canonical_names:
+                continue
+            canonical_names.append(canonical_name)
+        if len(canonical_names) > max_selected:
+            raise ValueError(f"每轮最多选择 {max_selected} 个技能")
+        for name in canonical_names:
+            manifest = self._manifests.get(name)
+            if manifest is None:
+                raise ValueError(f"未知技能：{name}")
+            if chat_mode not in manifest.chat_modes:
+                raise ValueError(f"技能 {name} 不适用于当前对话模式")
+            if manifest.roles and role_code not in manifest.roles:
+                raise ValueError(f"技能 {name} 不适用于当前数字人")
+        return canonical_names
 
     def list_manifests(self) -> list[dict[str, Any]]:
         manifests: list[dict[str, Any]] = []
