@@ -5,7 +5,11 @@ import logging
 from datetime import datetime
 
 from backend.app.topnews.collectors.base import BaseCollector, MarketData
-from backend.app.topnews.collectors.cls_news import _fetch_tavily_news, _parse_tavily_to_news
+from backend.app.topnews.collectors.cls_news import (
+    _fetch_tavily_news,
+    _is_likely_news_headline,
+    _parse_tavily_to_news,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,10 @@ class MacroNewsCollector(BaseCollector):
         # 去重 + 过滤无效条目（太短、纯分类标签）
         seen_titles: set[str] = set()
         unique_items: list[dict] = []
-        skip_keywords = {"百科", "术语", "频道", "行情中心", "价格走势", "百度百科"}
+        skip_keywords = {
+            "百科", "术语", "频道", "行情中心", "价格走势", "百度百科",
+            "信息网", "研究院", "经济研究中心", "可汗学院", "牛津经济",
+        }
         for item in items:
             title = item.get("title", "")
             content = item.get("content", "")
@@ -41,6 +48,8 @@ class MacroNewsCollector(BaseCollector):
             if len(title) < 8 and len(content) < 20:
                 continue
             if any(kw in title for kw in skip_keywords):
+                continue
+            if not _is_likely_news_headline(title, content):
                 continue
             key = title[:30]
             if key and key not in seen_titles:
