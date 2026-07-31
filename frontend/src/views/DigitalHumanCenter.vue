@@ -19,7 +19,8 @@ import type {
   ApprovalPolicy,
   DigitalHuman,
   ModelConfig,
-  PromptRecommendation
+  PromptRecommendation,
+  SwarmTeam
 } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
@@ -157,6 +158,33 @@ function selectCoreSkill(payload: { skill: AgentSkill; start: number; end: numbe
 
 function removeCoreSkill(name: string) {
   selectedCoreSkills.value = selectedCoreSkills.value.filter((item) => item.name !== name)
+}
+
+function selectSwarmTeam(payload: { team: SwarmTeam; start: number; end: number }) {
+  const team = payload.team
+  const membersLabel = team.members.map((m) => m.label).join(' + ')
+  const before = question.value.slice(0, payload.start)
+  const after = question.value.slice(payload.end)
+  // 若 // 前已键入股票代码（6 位），自动填入 objective 的 {symbol} 占位符
+  let objective = team.objective_template
+  if (objective.includes('{symbol}')) {
+    const codeMatch = before.match(/\d{6}/)
+    if (codeMatch) objective = objective.replace(/\{symbol\}/g, codeMatch[0])
+  }
+  const insert = `${team.icon} [${team.name}: ${membersLabel}] ${objective}`
+  question.value = before + insert + after
+  nextTick(() => {
+    composerTextarea.value?.focus()
+    const placeholder = insert.search(/\{[^}]+\}/)
+    if (placeholder >= 0) {
+      const start = before.length + placeholder
+      const match = insert.slice(placeholder).match(/\{[^}]+\}/)!
+      composerTextarea.value?.setSelectionRange(start, start + match[0].length)
+    } else {
+      const pos = before.length + insert.length
+      composerTextarea.value?.setSelectionRange(pos, pos)
+    }
+  })
 }
 
 const selectedProfile = computed(() => profiles.value.find((item) => item.id === selectedProfileId.value) || null)
@@ -1192,6 +1220,7 @@ function requestIsVisible(request: ActiveChatRequest) {
           :selected-skills="selectedCoreSkills"
           :disabled="selectedSessionRunning || !selectedProfile"
           @select="selectCoreSkill"
+          @select-swarm="selectSwarmTeam"
           @remove="removeCoreSkill"
         />
         <footer class="chat-composer-toolbar">
