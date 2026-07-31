@@ -168,14 +168,19 @@ function selectCoreSkill(payload: { skill: AgentSkill; start: number; end: numbe
 function selectSwarmTeam(payload: { team: import('../types').SwarmTeam; start: number; end: number }) {
   const team = payload.team
   const membersLabel = team.members.map(m => m.label).join(' + ')
-  const objective = team.objective_template
-  const insert = `${team.icon} [${team.name}: ${membersLabel}] ${objective}`
   const before = question.value.slice(0, payload.start)
   const after = question.value.slice(payload.end)
+  // 若 // 前已键入股票代码（6 位），自动填入 objective 的 {symbol} 占位符，省去手动替换
+  let objective = team.objective_template
+  if (objective.includes('{symbol}')) {
+    const codeMatch = before.match(/\d{6}/)
+    if (codeMatch) objective = objective.replace(/\{symbol\}/g, codeMatch[0])
+  }
+  const insert = `${team.icon} [${team.name}: ${membersLabel}] ${objective}`
   question.value = before + insert + after
   nextTick(() => {
     composerTextarea.value?.focus()
-    // 优先选中 objective 里的占位符（{symbol}/{sector}/{event}），方便直接键入；否则光标移到末尾
+    // 仍有占位符（{sector}/{event} 或未自动填入的 {symbol}）则选中它，方便直接键入；否则光标移到末尾
     const placeholder = insert.search(/\{[^}]+\}/)
     if (placeholder >= 0) {
       const start = before.length + placeholder
