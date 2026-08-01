@@ -6,7 +6,7 @@ ScheduledJob、JobRun 的关联数据。
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -25,6 +25,20 @@ from backend.app.core.models import (
 )
 
 router = APIRouter(prefix="/api/agent-board", tags=["agent-board"])
+
+# 北京时间 (UTC+8) 偏移
+_CST_OFFSET = timedelta(hours=8)
+
+
+def _cst_date_to_utc_range(date_str: str) -> tuple[datetime, datetime]:
+    """把北京日期字符串转为 UTC 起止时间。
+
+    例如 "2026-08-01" → (2026-07-31 16:00:00, 2026-08-01 15:59:59)
+    """
+    dt = datetime.fromisoformat(date_str)
+    utc_start = dt - _CST_OFFSET  # 北京 00:00 → UTC 前一天 16:00
+    utc_end = dt.replace(hour=23, minute=59, second=59) - _CST_OFFSET  # 北京 23:59:59 → UTC 15:59:59
+    return utc_start, utc_end
 
 
 def _get_session():
@@ -60,18 +74,17 @@ def _get_status_counts(session, user_id: int | None = None, skip_user_filter: bo
     )
     if user_id is not None and not skip_user_filter:
         query = query.where(AgentRun.user_id == user_id)
-    # 时间筛选
+    # 时间筛选（用户传入的是北京日期，需要转为 UTC 范围）
     if date_from:
         try:
-            dt_from = datetime.fromisoformat(date_from)
-            query = query.where(AgentRun.created_at >= dt_from)
+            utc_start, _ = _cst_date_to_utc_range(date_from)
+            query = query.where(AgentRun.created_at >= utc_start)
         except ValueError:
             pass
     if date_to:
         try:
-            dt_to = datetime.fromisoformat(date_to)
-            dt_to_end = dt_to.replace(hour=23, minute=59, second=59)
-            query = query.where(AgentRun.created_at <= dt_to_end)
+            _, utc_end = _cst_date_to_utc_range(date_to)
+            query = query.where(AgentRun.created_at <= utc_end)
         except ValueError:
             pass
     query = query.group_by(AgentRun.status)
@@ -121,19 +134,17 @@ def _query_tasks(
     if scheduled_job_key:
         query = query.where(AgentRun.source_ref == scheduled_job_key)
 
-    # 时间筛选
+    # 时间筛选（用户传入的是北京日期，需要转为 UTC 范围）
     if date_from:
         try:
-            dt_from = datetime.fromisoformat(date_from)
-            query = query.where(AgentRun.created_at >= dt_from)
+            utc_start, _ = _cst_date_to_utc_range(date_from)
+            query = query.where(AgentRun.created_at >= utc_start)
         except ValueError:
             pass
     if date_to:
         try:
-            dt_to = datetime.fromisoformat(date_to)
-            # date_to 是结束日期，需要包含当天整天
-            dt_to_end = dt_to.replace(hour=23, minute=59, second=59)
-            query = query.where(AgentRun.created_at <= dt_to_end)
+            _, utc_end = _cst_date_to_utc_range(date_to)
+            query = query.where(AgentRun.created_at <= utc_end)
         except ValueError:
             pass
 
