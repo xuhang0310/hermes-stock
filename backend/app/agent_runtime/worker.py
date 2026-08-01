@@ -65,15 +65,16 @@ class AgentRuntimeWorker:
         这些任务可能因为 Redis 唤醒失败而未被 Worker 领取。
         重新 enqueue 是幂等的（已在 Redis 中的不会重复执行）。
         """
-        from datetime import datetime, timedelta
+        from datetime import timedelta
 
         from sqlalchemy import select
 
+        from backend.app.agent_runtime.repository import _utcnow
         from backend.app.core.database import SessionLocal
         from backend.app.core.models import AgentRun
 
         orphan_run_ids: list[str] = []
-        cutoff = datetime.now() - timedelta(minutes=5)
+        cutoff = _utcnow() - timedelta(minutes=5)
         try:
             with SessionLocal() as db:
                 orphans = db.scalars(

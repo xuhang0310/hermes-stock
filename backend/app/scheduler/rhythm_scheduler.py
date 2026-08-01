@@ -757,7 +757,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
                                 leader_run_id=leader_run_id,
                                 user_id=snapshot.get("owner_user_id"),
                                 job_run_id=run_id,
-                                _from_legacy_report=True,
+                                skip_leader_validation=True,
                             )
                             for task_id in board_result["task_ids"]:
                                 redis_broker.enqueue(task_id)

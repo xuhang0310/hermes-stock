@@ -506,6 +506,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         ):
             _add_column("agent_delegations", column, ddl)
         _add_unique_index("agent_delegations", "uq_team_action", "team_id, action_key")
+        # action_key 全局唯一：防止并发 create_task_batch 产生重复
+        _add_unique_index("agent_delegations", "uq_delegation_action_key", "action_key")
 
 
 engine = create_engine_for_url(settings.database_url)

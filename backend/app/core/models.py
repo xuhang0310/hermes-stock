@@ -832,6 +832,7 @@ class AgentDelegation(Base):
         UniqueConstraint("team_id", "member_index", name="uq_agent_delegation_member"),
         UniqueConstraint("child_run_id", name="uq_agent_delegation_child_run"),
         UniqueConstraint("team_id", "action_key", name="uq_team_action"),
+        UniqueConstraint("action_key", name="uq_delegation_action_key"),
         Index("ix_agent_delegations_team_status", "team_id", "status"),
     )
 

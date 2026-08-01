@@ -605,6 +605,9 @@ class OrphanRecoveryTests(unittest.TestCase):
     """测试 Worker._recover_orphan_board_tasks 孤儿扫描"""
 
     def setUp(self) -> None:
+        from backend.app.agent_runtime.repository import _utcnow
+        self._utcnow = _utcnow
+
         self.engine = _make_engine()
         self.SessionFactory = sessionmaker(bind=self.engine, expire_on_commit=False)
 
@@ -645,7 +648,7 @@ class OrphanRecoveryTests(unittest.TestCase):
 
     def test_recovers_old_queued_board_tasks(self) -> None:
         """queued 超过 5 分钟的 board_visible 任务应被回收"""
-        old_time = datetime.now() - timedelta(minutes=10)
+        old_time = self._utcnow() - timedelta(minutes=10)
         with self.SessionFactory() as db:
             db.add(AgentRun(
                 run_id="orphan-old",
@@ -669,7 +672,7 @@ class OrphanRecoveryTests(unittest.TestCase):
 
     def test_skips_recent_queued_tasks(self) -> None:
         """刚入队不到 5 分钟的任务不应被回收"""
-        recent_time = datetime.now() - timedelta(minutes=2)
+        recent_time = self._utcnow() - timedelta(minutes=2)
         with self.SessionFactory() as db:
             db.add(AgentRun(
                 run_id="orphan-recent",
@@ -693,7 +696,7 @@ class OrphanRecoveryTests(unittest.TestCase):
 
     def test_skips_non_board_tasks(self) -> None:
         """board_visible=False 的任务不应被回收"""
-        old_time = datetime.now() - timedelta(minutes=10)
+        old_time = self._utcnow() - timedelta(minutes=10)
         with self.SessionFactory() as db:
             db.add(AgentRun(
                 run_id="non-board",
@@ -717,7 +720,7 @@ class OrphanRecoveryTests(unittest.TestCase):
 
     def test_skips_cancel_requested_tasks(self) -> None:
         """已取消的任务不应被回收"""
-        old_time = datetime.now() - timedelta(minutes=10)
+        old_time = self._utcnow() - timedelta(minutes=10)
         with self.SessionFactory() as db:
             db.add(AgentRun(
                 run_id="cancelled-orphan",

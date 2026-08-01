@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import patch
 
@@ -24,6 +25,22 @@ from backend.app.core.models import (
     User,
 )
 from backend.app.quant import agent_board_service
+
+
+def _make_session_scope(session_factory):
+    """返回一个用指定 session_factory 的 session_scope 替代品"""
+    @contextmanager
+    def _scope():
+        session = session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+    return _scope
 
 
 class AgentBoardServiceTests(unittest.TestCase):
@@ -148,7 +165,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             ],
         )
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             result = agent_board_service.create_task_batch(
                 batch, leader_run_id=leader_run_id, user_id=self.user_id
             )
@@ -208,7 +225,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             ],
         )
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             result = agent_board_service.create_task_batch(
                 batch, leader_run_id=leader_run_id, user_id=self.user_id
             )
@@ -237,7 +254,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             ],
         )
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             with self.assertRaises(ValueError) as ctx:
                 agent_board_service.create_task_batch(
                     batch, leader_run_id=leader_run_id, user_id=self.user_id
@@ -247,7 +264,7 @@ class AgentBoardServiceTests(unittest.TestCase):
     def test_create_task_batch_rejects_empty_batch(self) -> None:
         """测试 create_task_batch 拒绝空批次"""
         batch = agent_board_service.TaskBatchSpec(objective="空批次", tasks=[])
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             with self.assertRaises(ValueError) as ctx:
                 agent_board_service.create_task_batch(batch)
         self.assertIn("不能为空", str(ctx.exception))
@@ -271,7 +288,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             db.add(failed_run)
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             result = agent_board_service.retry_failed_task("failed-run-001")
 
         self.assertEqual(result["status"], "queued")
@@ -300,7 +317,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             db.add(running_run)
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             with self.assertRaises(ValueError) as ctx:
                 agent_board_service.retry_failed_task("running-run-001")
         self.assertIn("只有失败", str(ctx.exception))
@@ -323,7 +340,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             db.add(exhausted_run)
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             with self.assertRaises(ValueError) as ctx:
                 agent_board_service.retry_failed_task("exhausted-run-001", max_retries=3)
         self.assertIn("最大重试次数", str(ctx.exception))
@@ -344,7 +361,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             db.add(queued_run)
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             result = agent_board_service.cancel_task("queued-run-001")
 
         self.assertEqual(result["status"], "cancelled")
@@ -371,7 +388,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             db.add(running_run)
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             result = agent_board_service.cancel_task("running-cancel-001")
 
         self.assertEqual(result["status"], "running")
@@ -398,7 +415,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             db.add(run)
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             result = agent_board_service.update_task_priority("priority-run-001", 500)
 
         self.assertEqual(result["priority"], 500)
@@ -454,7 +471,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             ])
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             queue = agent_board_service.get_task_queue_for_agent(self.intelligence.id)
 
         self.assertEqual(len(queue), 3)
@@ -496,7 +513,7 @@ class AgentBoardServiceTests(unittest.TestCase):
             ])
             db.commit()
 
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             queue = agent_board_service.get_task_queue_for_agent(self.risk.id)
 
         self.assertEqual(len(queue), 2)
@@ -506,7 +523,7 @@ class AgentBoardServiceTests(unittest.TestCase):
 
     def test_get_task_queue_for_agent_empty(self) -> None:
         """测试无任务时返回空列表"""
-        with patch.object(agent_board_service, "SessionLocal", self.SessionFactory):
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
             queue = agent_board_service.get_task_queue_for_agent(9999)
         self.assertEqual(queue, [])
 
