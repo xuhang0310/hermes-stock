@@ -1,6 +1,11 @@
 """Deterministic A-share strategy backtesting tools."""
 
 from backend.app.quant.backtest_engine import create_backtest
+from backend.app.quant.backtest_runner import (
+    list_signal_engines,
+    run_signal_backtest,
+)
+from backend.app.quant.factor_signal_engine import FactorSignalEngine
 
 
 BACKTEST_TOOL_SCHEMAS = [
@@ -79,6 +84,109 @@ BACKTEST_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_signal_backtest",
+            "description": (
+                "运行基于信号引擎的策略回测。支持多种内置策略：MACD、均线交叉、布林带、RSI 等。"
+                "返回完整绩效指标、逐笔交易和权益曲线。支持 T+1、涨跌停、整手交易等 A 股规则。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "strategy": {
+                        "type": "string",
+                        "enum": ["macd", "ma_cross", "bollinger", "rsi"],
+                        "description": "策略名称：macd（MACD金叉死叉）、ma_cross（均线交叉）、bollinger（布林带）、rsi（RSI超买超卖）",
+                    },
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "description": "A 股代码列表，如 ['000001.SZ'] 或 ['600519.SH', '000858.SZ']",
+                    },
+                    "start_date": {"type": "string", "description": "YYYYMMDD，回测起始日期"},
+                    "end_date": {"type": "string", "description": "YYYYMMDD，回测结束日期"},
+                    "strategy_params": {
+                        "type": "object",
+                        "description": "策略参数（可选），如 MACD: {fast: 12, slow: 26, signal: 9}",
+                    },
+                    "initial_cash": {"type": "number", "default": 1000000, "description": "初始资金"},
+                    "commission_rate": {"type": "number", "default": 0.00025, "description": "佣金率"},
+                    "slippage": {"type": "number", "default": 0.001, "description": "滑点率"},
+                },
+                "required": ["strategy", "symbols", "start_date", "end_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_backtest_strategies",
+            "description": "列出所有可用的回测策略及其描述。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_factor_backtest",
+            "description": (
+                "运行基于因子组合的多因子策略回测。支持从462个预置因子中选择，"
+                "横截面标准化，加权组合，TopN选股。可做多、做空或多空组合。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "factor_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "description": "因子ID列表，如 ['alpha101_001', 'qlib158_roc20']",
+                    },
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 5,
+                        "maxItems": 100,
+                        "description": "股票池（至少5只，用于横截面比较）",
+                    },
+                    "weights": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "因子权重（可选，默认等权）",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "做多前N只股票",
+                    },
+                    "bottom_n": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "做空后N只股票（可选）",
+                    },
+                    "standardize": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "是否横截面Z-score标准化",
+                    },
+                    "start_date": {"type": "string", "description": "YYYYMMDD"},
+                    "end_date": {"type": "string", "description": "YYYYMMDD"},
+                    "initial_cash": {"type": "number", "default": 1000000},
+                },
+                "required": ["factor_ids", "symbols", "start_date", "end_date"],
+            },
+        },
+    },
 ]
 
 
@@ -142,25 +250,161 @@ def _run_portfolio(args: dict) -> dict:
     return run_portfolio_backtest_tool(args)
 
 
+def _run_signal(args: dict) -> dict:
+    return run_signal_backtest(
+        strategy=args["strategy"],
+        symbols=args["symbols"],
+        start_date=args["start_date"],
+        end_date=args["end_date"],
+        strategy_params=args.get("strategy_params"),
+        initial_cash=args.get("initial_cash", 1_000_000),
+        commission_rate=args.get("commission_rate", 0.00025),
+        slippage=args.get("slippage", 0.001),
+    )
+
+
+def _list_strategies(args: dict) -> dict:
+    return {"strategies": list_signal_engines()}
+
+
+def _run_factor_backtest(args: dict) -> dict:
+    """运行多因子策略回测"""
+    from backend.app.quant.backtest_runner import _enrich_report, _load_stock_data, _save_backtest_result
+    from backend.app.quant.engines.china_a import ChinaAEngine
+
+    # 创建因子信号引擎
+    engine = FactorSignalEngine.from_factors(
+        factor_ids=args["factor_ids"],
+        weights=args.get("weights"),
+        standardize=args.get("standardize", True),
+        top_n=args.get("top_n"),
+        bottom_n=args.get("bottom_n"),
+    )
+
+    # 加载数据
+    data_map = _load_stock_data(args["symbols"], args["start_date"], args["end_date"])
+
+    # 配置市场引擎
+    config = {
+        "initial_cash": args.get("initial_cash", 1_000_000),
+        "commission_rate": 0.00025,
+        "slippage": 0.001,
+    }
+    market_engine = ChinaAEngine(config)
+
+    # 运行回测
+    metrics = market_engine.run_backtest(config, data_map, engine)
+
+    # 计算回撤
+    equity_values = [s.equity for s in market_engine.equity_snapshots]
+    peak = 0
+    drawdowns = []
+    for eq in equity_values:
+        peak = max(peak, eq)
+        dd = (eq - peak) / peak if peak > 0 else 0
+        drawdowns.append(dd)
+
+    # 提取 K 线数据（使用第一个标的）
+    price_series = []
+    first_symbol = args["symbols"][0] if args["symbols"] else None
+    if first_symbol and first_symbol in data_map:
+        df = data_map[first_symbol]
+        for idx, row in df.iterrows():
+            price_series.append({
+                "time": str(idx.date()) if hasattr(idx, "date") else str(idx),
+                "open": float(row["open"]) if "open" in row else 0,
+                "high": float(row["high"]) if "high" in row else 0,
+                "low": float(row["low"]) if "low" in row else 0,
+                "close": float(row["close"]) if "close" in row else 0,
+                "volume": int(row["volume"]) if "volume" in row else 0,
+                "macd": 0,
+                "signal": 0,
+                "histogram": 0,
+            })
+
+    # 提取交易标记
+    trade_markers = []
+    for t in market_engine.trades:
+        entry_date = str(t.entry_time.date()) if hasattr(t.entry_time, "date") else str(t.entry_time)
+        exit_date = str(t.exit_time.date()) if hasattr(t.exit_time, "date") else str(t.exit_time)
+        trade_markers.append({
+            "time": entry_date,
+            "shape": "arrowUp",
+            "text": f"买入 {t.symbol}",
+        })
+        trade_markers.append({
+            "time": exit_date,
+            "shape": "arrowDown",
+            "text": f"卖出 {t.symbol}",
+        })
+
+    result = {
+        "strategy": "factor_combination",
+        "factor_ids": args["factor_ids"],
+        "symbols": args["symbols"],
+        "period": {"start": args["start_date"], "end": args["end_date"]},
+        "price_series": price_series,
+        "trade_markers": trade_markers,
+        "metrics": metrics,
+        "trades": [
+            {
+                "symbol": t.symbol,
+                "entry_date": str(t.entry_time.date()) if hasattr(t.entry_time, "date") else str(t.entry_time),
+                "exit_date": str(t.exit_time.date()) if hasattr(t.exit_time, "date") else str(t.exit_time),
+                "entry_price": round(t.entry_price, 2),
+                "exit_price": round(t.exit_price, 2),
+                "size": int(t.size),
+                "pnl": round(t.pnl, 2),
+                "pnl_pct": round(t.pnl_pct, 2),
+                "holding_bars": t.holding_bars,
+            }
+            for t in market_engine.trades
+        ],
+        "equity_curve": [
+            {
+                "time": str(s.timestamp.date()) if hasattr(s.timestamp, "date") else str(s.timestamp),
+                "equity": round(s.equity, 2),
+                "drawdown": round(drawdowns[i], 4),
+                "positions": s.positions,
+            }
+            for i, s in enumerate(market_engine.equity_snapshots)
+        ],
+    }
+
+    # 补全报告字段
+    result = _enrich_report(result, strategy_code="factor_combination")
+
+    # 保存结果到数据库，生成报告URL
+    result = _save_backtest_result(result, strategy_code="factor_combination")
+
+    return result
+
+
 SKILL = {
     "name": "strategy_backtest",
     "display_name": "策略回测",
-    "description": "A 股 MACD 与风险平价组合的可复现回测、绩效指标、归因和完整可视化报告。",
-    "version": "1.0.0",
+    "description": "A 股完整量化回测平台：462个因子库、多因子组合策略、技术指标策略、完整绩效分析。",
+    "version": "3.0.0",
     "chat_modes": ["research", "stock"],
     "roles": [],
     "tools": BACKTEST_TOOL_SCHEMAS,
     "executors": {
         "run_macd_backtest": _run,
         "run_portfolio_backtest": _run_portfolio,
+        "run_signal_backtest": _run_signal,
+        "list_backtest_strategies": _list_strategies,
+        "run_factor_backtest": _run_factor_backtest,
     },
     "prompt_instructions": [
-        "用户要求 MACD 策略回测时，必须调用 run_macd_backtest，不要自行编造收益和交易记录。",
-        "用户要求风险平价、等权对比、多标的组合回测或组合归因时，必须调用 run_portfolio_backtest，不要编写临时 Python 回测脚本。",
-        "最终回答必须原样保留工具返回的完整报告链接，并披露 confidence 与 warnings。",
-        "样本不足或低置信度时不得使用'策略健康''稳定盈利'等确定性表述。",
-        "当用户描述一个交易策略或买卖思路（如'均线金叉买入死叉卖出'、'放量突破追入'、'MACD 金叉做多'）时，即使没有明确说'回测'，也应主动建议用历史数据验证该策略，并询问是否需要跑回测。",
-        "当用户问'这只股票过去表现怎么样'、'如果当时买入能赚多少'、'这个策略历史胜率如何'等假设性历史问题时，应识别为回测意图并调用相应工具。",
-        "当用户持有或关注某只股票且讨论了技术策略时，可以主动提议：'要不要我帮你回测一下这个策略在这只股票上的历史表现？'",
+        "用户要求回测时，根据需求选择工具：",
+        "  - 技术指标策略（MACD/均线/布林带/RSI）→ run_signal_backtest",
+        "  - 因子组合策略（用462个因子）→ run_factor_backtest",
+        "  - 风险平价组合 → run_portfolio_backtest",
+        "用户想分析因子有效性时 → 使用 factor_research 技能的 benchmark_factor_alphas",
+        "用户想对比多个因子 → 使用 factor_research 技能的 benchmark_factor_alphas",
+        "用户想知道有哪些因子 → 使用 factor_research 技能的 list_factor_alphas",
+        "run_factor_backtest 支持：选择因子、横截面标准化、TopN选股、多空策略",
+        "最终回答必须原样保留工具返回的完整结果。",
+        "样本不足时不得使用确定性表述。",
     ],
 }
