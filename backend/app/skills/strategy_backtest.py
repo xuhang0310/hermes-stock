@@ -295,11 +295,56 @@ def _run_factor_backtest(args: dict) -> dict:
     # 运行回测
     metrics = market_engine.run_backtest(config, data_map, engine)
 
+    # 计算回撤
+    equity_values = [s.equity for s in market_engine.equity_snapshots]
+    peak = 0
+    drawdowns = []
+    for eq in equity_values:
+        peak = max(peak, eq)
+        dd = (eq - peak) / peak if peak > 0 else 0
+        drawdowns.append(dd)
+
+    # 提取 K 线数据（使用第一个标的）
+    price_series = []
+    first_symbol = args["symbols"][0] if args["symbols"] else None
+    if first_symbol and first_symbol in data_map:
+        df = data_map[first_symbol]
+        for idx, row in df.iterrows():
+            price_series.append({
+                "time": str(idx.date()) if hasattr(idx, "date") else str(idx),
+                "open": float(row["open"]) if "open" in row else 0,
+                "high": float(row["high"]) if "high" in row else 0,
+                "low": float(row["low"]) if "low" in row else 0,
+                "close": float(row["close"]) if "close" in row else 0,
+                "volume": int(row["volume"]) if "volume" in row else 0,
+                "macd": 0,
+                "signal": 0,
+                "histogram": 0,
+            })
+
+    # 提取交易标记
+    trade_markers = []
+    for t in market_engine.trades:
+        entry_date = str(t.entry_time.date()) if hasattr(t.entry_time, "date") else str(t.entry_time)
+        exit_date = str(t.exit_time.date()) if hasattr(t.exit_time, "date") else str(t.exit_time)
+        trade_markers.append({
+            "time": entry_date,
+            "shape": "arrowUp",
+            "text": f"买入 {t.symbol}",
+        })
+        trade_markers.append({
+            "time": exit_date,
+            "shape": "arrowDown",
+            "text": f"卖出 {t.symbol}",
+        })
+
     result = {
         "strategy": "factor_combination",
         "factor_ids": args["factor_ids"],
         "symbols": args["symbols"],
         "period": {"start": args["start_date"], "end": args["end_date"]},
+        "price_series": price_series,
+        "trade_markers": trade_markers,
         "metrics": metrics,
         "trades": [
             {
@@ -317,11 +362,12 @@ def _run_factor_backtest(args: dict) -> dict:
         ],
         "equity_curve": [
             {
-                "date": str(s.timestamp.date()) if hasattr(s.timestamp, "date") else str(s.timestamp),
+                "time": str(s.timestamp.date()) if hasattr(s.timestamp, "date") else str(s.timestamp),
                 "equity": round(s.equity, 2),
+                "drawdown": round(drawdowns[i], 4),
                 "positions": s.positions,
             }
-            for s in market_engine.equity_snapshots
+            for i, s in enumerate(market_engine.equity_snapshots)
         ],
     }
 
