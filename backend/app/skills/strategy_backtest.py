@@ -5,6 +5,12 @@ from backend.app.quant.backtest_runner import (
     list_signal_engines,
     run_signal_backtest,
 )
+from backend.app.quant.factor_signal_engine import FactorSignalEngine
+from backend.app.quant.factor_analysis import (
+    analyze_factor,
+    compare_factors,
+    recommend_factors,
+)
 
 
 BACKTEST_TOOL_SCHEMAS = [
@@ -131,6 +137,141 @@ BACKTEST_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_factor_backtest",
+            "description": (
+                "运行基于因子组合的多因子策略回测。支持从462个预置因子中选择，"
+                "横截面标准化，加权组合，TopN选股。可做多、做空或多空组合。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "factor_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "description": "因子ID列表，如 ['alpha101_001', 'qlib158_roc20']",
+                    },
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 5,
+                        "maxItems": 100,
+                        "description": "股票池（至少5只，用于横截面比较）",
+                    },
+                    "weights": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "因子权重（可选，默认等权）",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "做多前N只股票",
+                    },
+                    "bottom_n": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "做空后N只股票（可选）",
+                    },
+                    "standardize": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "是否横截面Z-score标准化",
+                    },
+                    "start_date": {"type": "string", "description": "YYYYMMDD"},
+                    "end_date": {"type": "string", "description": "YYYYMMDD"},
+                    "initial_cash": {"type": "number", "default": 1000000},
+                },
+                "required": ["factor_ids", "symbols", "start_date", "end_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_factor_performance",
+            "description": (
+                "分析单个因子的有效性。计算IC（信息系数）、ICIR、分组收益、"
+                "因子多空收益、换手率等指标，评估因子预测能力。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "factor_id": {
+                        "type": "string",
+                        "description": "因子ID，如 'alpha101_001'",
+                    },
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 5,
+                        "description": "股票列表",
+                    },
+                    "start_date": {"type": "string", "description": "YYYYMMDD"},
+                    "end_date": {"type": "string", "description": "YYYYMMDD"},
+                },
+                "required": ["factor_id", "symbols", "start_date", "end_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_multiple_factors",
+            "description": "对比多个因子的有效性，生成对比表格。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "factor_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 2,
+                        "maxItems": 20,
+                        "description": "要对比的因子ID列表",
+                    },
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 5,
+                        "description": "股票列表",
+                    },
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                },
+                "required": ["factor_ids", "symbols", "start_date", "end_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recommend_factors",
+            "description": "推荐因子（按主题筛选），返回经典因子列表。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "theme": {
+                        "type": "string",
+                        "enum": ["momentum", "reversal", "value", "volatility", "quality", "liquidity"],
+                        "description": "因子主题（可选）",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "返回前N个因子",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -211,11 +352,80 @@ def _list_strategies(args: dict) -> dict:
     return {"strategies": list_signal_engines()}
 
 
+def _run_factor_backtest(args: dict) -> dict:
+    """运行多因子策略回测"""
+    from backend.app.quant.backtest_runner import _load_stock_data
+    from backend.app.quant.engines.china_a import ChinaAEngine
+    from backend.app.quant.factor_signal_engine import FactorSignalEngine
+
+    # 创建因子信号引擎
+    engine = FactorSignalEngine.from_factors(
+        factor_ids=args["factor_ids"],
+        weights=args.get("weights"),
+        standardize=args.get("standardize", True),
+        top_n=args.get("top_n"),
+        bottom_n=args.get("bottom_n"),
+    )
+
+    # 加载数据
+    data_map = _load_stock_data(args["symbols"], args["start_date"], args["end_date"])
+
+    # 配置市场引擎
+    config = {
+        "initial_cash": args.get("initial_cash", 1_000_000),
+        "commission_rate": 0.00025,
+        "slippage": 0.001,
+    }
+    market_engine = ChinaAEngine(config)
+
+    # 运行回测
+    metrics = market_engine.run_backtest(config, data_map, engine)
+
+    return {
+        "factor_ids": args["factor_ids"],
+        "symbols": args["symbols"],
+        "period": {"start": args["start_date"], "end": args["end_date"]},
+        "metrics": metrics,
+        "trades": len(market_engine.trades),
+        "final_equity": market_engine.equity_snapshots[-1].equity if market_engine.equity_snapshots else config["initial_cash"],
+    }
+
+
+def _analyze_factor(args: dict) -> dict:
+    """分析单个因子"""
+    return analyze_factor(
+        factor_id=args["factor_id"],
+        symbols=args["symbols"],
+        start_date=args["start_date"],
+        end_date=args["end_date"],
+    )
+
+
+def _compare_factors(args: dict) -> dict:
+    """对比多个因子"""
+    df = compare_factors(
+        factor_ids=args["factor_ids"],
+        symbols=args["symbols"],
+        start_date=args["start_date"],
+        end_date=args["end_date"],
+    )
+    return {"comparison_table": df.to_dict(orient="records")}
+
+
+def _recommend_factors_tool(args: dict) -> dict:
+    """推荐因子"""
+    factors = recommend_factors(
+        theme=args.get("theme"),
+        top_n=args.get("top_n", 10),
+    )
+    return {"recommended_factors": factors}
+
+
 SKILL = {
     "name": "strategy_backtest",
     "display_name": "策略回测",
-    "description": "A 股多策略回测引擎：MACD、均线交叉、布林带、RSI、风险平价组合，完整绩效指标与交易模拟。",
-    "version": "2.0.0",
+    "description": "A 股完整量化回测平台：462个因子库、多因子组合策略、技术指标策略、完整绩效分析。",
+    "version": "3.0.0",
     "chat_modes": ["research", "stock"],
     "roles": [],
     "tools": BACKTEST_TOOL_SCHEMAS,
@@ -224,15 +434,21 @@ SKILL = {
         "run_portfolio_backtest": _run_portfolio,
         "run_signal_backtest": _run_signal,
         "list_backtest_strategies": _list_strategies,
+        "run_factor_backtest": _run_factor_backtest,
+        "analyze_factor_performance": _analyze_factor,
+        "compare_multiple_factors": _compare_factors,
+        "recommend_factors": _recommend_factors_tool,
     },
     "prompt_instructions": [
-        "用户要求回测时，根据策略类型选择工具：MACD 用 run_macd_backtest，组合用 run_portfolio_backtest，其他策略用 run_signal_backtest。",
-        "用户询问有哪些策略时，调用 list_backtest_strategies 列出所有可用策略。",
-        "用户描述交易策略（如'均线金叉买入死叉卖出'、'布林带突破'、'RSI 超卖买入'）时，识别对应策略并调用 run_signal_backtest。",
-        "run_signal_backtest 支持多种策略：macd（MACD 金叉死叉）、ma_cross（均线交叉）、bollinger（布林带均值回归）、rsi（RSI 超买超卖）。",
-        "最终回答必须原样保留工具返回的完整结果，包括绩效指标、逐笔交易和权益曲线。",
-        "样本不足或低置信度时不得使用'策略健康''稳定盈利'等确定性表述。",
-        "当用户描述一个交易策略或买卖思路时，即使没有明确说'回测'，也应主动建议用历史数据验证该策略。",
-        "当用户问'这只股票过去表现怎么样'、'如果当时用某个策略买入能赚多少'等假设性历史问题时，应识别为回测意图。",
+        "用户要求回测时，根据需求选择工具：",
+        "  - 技术指标策略（MACD/均线/布林带/RSI）→ run_signal_backtest",
+        "  - 因子组合策略（用462个因子）→ run_factor_backtest",
+        "  - 风险平价组合 → run_portfolio_backtest",
+        "用户想分析因子有效性时 → analyze_factor_performance",
+        "用户想对比多个因子 → compare_multiple_factors",
+        "用户想知道有哪些因子 → recommend_factors",
+        "run_factor_backtest 支持：选择因子、横截面标准化、TopN选股、多空策略",
+        "最终回答必须原样保留工具返回的完整结果。",
+        "样本不足时不得使用确定性表述。",
     ],
 }
