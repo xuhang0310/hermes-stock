@@ -47,13 +47,19 @@ def calc_metrics(
         Dict of performance metrics.
     """
     if len(equity_curve) < 2:
-        return {"error": "insufficient data"}
+        return {"error": "数据不足，无法计算指标"}
 
     # Basic returns
     total_return = equity_curve.iloc[-1] / initial_cash - 1
     n_days = (equity_curve.index[-1] - equity_curve.index[0]).days
     n_years = n_days / 365.25 if n_days > 0 else 1.0
-    annual_return = (1 + total_return) ** (1 / n_years) - 1 if n_years > 0 else 0.0
+    # Handle total_return < -1 (lost more than 100%) to avoid complex numbers
+    if total_return <= -1.0:
+        annual_return = -1.0  # Total loss
+    elif n_years > 0:
+        annual_return = (1 + total_return) ** (1 / n_years) - 1
+    else:
+        annual_return = 0.0
 
     # Daily returns
     port_ret = equity_curve.pct_change().fillna(0.0)
@@ -73,8 +79,11 @@ def calc_metrics(
     excess_ret = port_ret - daily_rf
     sharpe = (excess_ret.mean() / excess_ret.std() * math.sqrt(bars_per_year)
               if excess_ret.std() > 1e-10 else 0.0)
-    sortino = (excess_ret.mean() / downside_ret.std() * math.sqrt(bars_per_year)
-               if len(downside_ret) > 0 and downside_ret.std() > 1e-10 else 0.0)
+    # Sortino: use excess returns for downside risk calculation (consistent with Sharpe)
+    downside_excess = excess_ret[excess_ret < 0]
+    downside_std = downside_excess.std() if len(downside_excess) > 0 else 0.0
+    sortino = (excess_ret.mean() / downside_std * math.sqrt(bars_per_year)
+               if downside_std > 1e-10 else 0.0)
     calmar = annual_return / abs(max_drawdown) if abs(max_drawdown) > 1e-10 else 0.0
 
     # Trade statistics
@@ -112,7 +121,11 @@ def calc_metrics(
             var_bench = cov[1, 1]
             if var_bench > 1e-10:
                 beta = cov[0, 1] / var_bench
-                alpha = (port_ret.mean() - beta * bench_ret.mean()) * bars_per_year
+                # Jensen's alpha: α = Rf·(1-β) + (Rp - β·Rb)
+                # Annualized version
+                port_ret_annual = port_ret.mean() * bars_per_year
+                bench_ret_annual = bench_ret.mean() * bars_per_year
+                alpha = risk_free_rate * (1 - beta) + (port_ret_annual - beta * bench_ret_annual)
         tracking_error = active_ret.std() * math.sqrt(bars_per_year)
         if tracking_error > 1e-10:
             information_ratio = active_ret.mean() * bars_per_year / tracking_error

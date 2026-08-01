@@ -71,19 +71,37 @@ def run_signal_backtest(
 
     Returns:
         Dict with backtest results including metrics, trades, and equity curve.
+
+    Raises:
+        ValueError: 输入参数无效时抛出（中文错误消息）
     """
+    # 输入验证
     if strategy not in SIGNAL_ENGINE_REGISTRY:
-        raise ValueError(f"Unknown strategy: {strategy}. Available: {list(SIGNAL_ENGINE_REGISTRY.keys())}")
+        available = ", ".join(SIGNAL_ENGINE_REGISTRY.keys())
+        raise ValueError(f"未知策略: {strategy}，可用策略: {available}")
+
+    if not symbols:
+        raise ValueError("股票代码列表不能为空")
+
+    if initial_cash < 10000:
+        raise ValueError(f"初始资金({initial_cash})不能少于10000元")
+
+    if commission_rate < 0 or commission_rate > 0.01:
+        raise ValueError(f"佣金率({commission_rate})必须在0到0.01之间")
+
+    if slippage < 0 or slippage > 0.01:
+        raise ValueError(f"滑点率({slippage})必须在0到0.01之间")
 
     # Instantiate signal engine
     engine_class = SIGNAL_ENGINE_REGISTRY[strategy]
     params = strategy_params or {}
-    signal_engine = engine_class(**params)
+    try:
+        signal_engine = engine_class(**params)
+    except TypeError as e:
+        raise ValueError(f"策略参数错误: {str(e)}")
 
     # Load data
     data_map = _load_stock_data(symbols, start_date, end_date)
-    if not data_map:
-        raise ValueError("No data loaded. Check symbols and date range.")
 
     # Configure market engine
     config = {
@@ -134,7 +152,7 @@ def _load_stock_data(
     start_date: str,
     end_date: str,
 ) -> Dict[str, pd.DataFrame]:
-    """Load stock data from TuShare.
+    """Load stock data from TuShare via HTTP (consistent with stock_tools.py).
 
     Args:
         symbols: List of stock codes.
@@ -143,59 +161,72 @@ def _load_stock_data(
 
     Returns:
         Dict mapping symbol codes to OHLCV DataFrames.
+
+    Raises:
+        ValueError: 输入参数无效时抛出（中文错误消息）
     """
-    try:
-        pro = _get_tushare_api()
-        data_map = {}
+    from backend.app.market.stock_tools import _tushare_request
 
-        for symbol in symbols:
-            # Convert symbol format: 000001.SZ -> 000001.SZ (tushare format)
-            ts_code = symbol
+    # 验证日期格式
+    import re
+    date_pattern = re.compile(r"^\d{8}$")
+    if not date_pattern.match(start_date):
+        raise ValueError(f"开始日期格式错误：{start_date}，应为YYYYMMDD格式")
+    if not date_pattern.match(end_date):
+        raise ValueError(f"结束日期格式错误：{end_date}，应为YYYYMMDD格式")
 
-            # Fetch daily data
-            df = pro.daily(
-                ts_code=ts_code,
-                start_date=start_date,
-                end_date=end_date,
-            )
+    # 验证日期范围
+    if start_date > end_date:
+        raise ValueError(f"开始日期({start_date})必须早于结束日期({end_date})")
 
-            if df is None or df.empty:
-                logger.warning("No data for %s", symbol)
-                continue
+    # 验证股票代码格式
+    for symbol in symbols:
+        if not re.match(r"^\d{6}\.(SH|SZ|BJ)$", symbol):
+            raise ValueError(f"股票代码格式错误：{symbol}，应为6位数字.交易所（如000001.SZ）")
 
-            # Rename columns to standard OHLCV
-            df = df.rename(columns={
-                "trade_date": "date",
-                "vol": "volume",
-            })
+    data_map = {}
+    fields = "trade_date,open,high,low,close,vol,pct_chg,pre_close"
 
-            # Convert date to datetime and set as index
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.set_index("date").sort_index()
+    for symbol in symbols:
+        result = _tushare_request(
+            "daily",
+            {"ts_code": symbol, "start_date": start_date, "end_date": end_date},
+            fields,
+        )
 
-            # Keep only needed columns
-            df = df[["open", "high", "low", "close", "volume", "pct_chg", "pre_close"]]
+        if "error" in result:
+            logger.warning("加载%s数据失败: %s", symbol, result["error"])
+            continue
 
-            data_map[symbol] = df
+        rows = result.get("rows", [])
+        if not rows:
+            logger.warning("%s在指定日期范围内无数据", symbol)
+            continue
 
-        return data_map
+        # 转换为DataFrame
+        df = pd.DataFrame(rows)
 
-    except Exception as e:
-        logger.error("Failed to load stock data: %s", e)
-        raise
+        # 重命名列
+        df = df.rename(columns={"trade_date": "date", "vol": "volume"})
 
+        # 转换日期并设置为索引
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
 
-def _get_tushare_api():
-    """Get TuShare API instance."""
-    try:
-        import tushare as ts
-        token = getattr(settings, "tushare_token", None)
-        if not token:
-            raise ValueError("TuShare token not configured")
-        ts.set_token(token)
-        return ts.pro_api()
-    except ImportError:
-        raise ImportError("tushare not installed. Install with: pip install tushare")
+        # 只保留需要的列
+        required_cols = ["open", "high", "low", "close", "volume", "pct_chg", "pre_close"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            logger.warning("%s缺少必需列: %s", symbol, missing_cols)
+            continue
+
+        df = df[required_cols]
+        data_map[symbol] = df
+
+    if not data_map:
+        raise ValueError("未能加载任何股票数据，请检查股票代码和日期范围")
+
+    return data_map
 
 
 def run_custom_signal_backtest(
@@ -225,8 +256,6 @@ def run_custom_signal_backtest(
     """
     # Load data
     data_map = _load_stock_data(symbols, start_date, end_date)
-    if not data_map:
-        raise ValueError("No data loaded")
 
     # Configure market engine
     config = {

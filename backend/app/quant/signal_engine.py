@@ -87,7 +87,7 @@ class SignalEngine(ABC):
         validated = {}
         for code, signal in signal_map.items():
             if not isinstance(signal, pd.Series):
-                raise TypeError(f"Signal for {code} must be pd.Series, got {type(signal)}")
+                raise TypeError(f"{code} 的信号必须是 pd.Series，实际为 {type(signal)}")
             # Fill NaN with 0 (flat)
             signal = signal.fillna(0.0)
             # Clip to [-1, 1]

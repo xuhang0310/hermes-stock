@@ -113,9 +113,16 @@ class BaseEngine(ABC):
         Returns:
             Metrics dictionary.
         """
+        # Reset engine state for fresh run
+        self.capital = self.initial_capital
+        self.positions = {}
+        self.trades = []
+        self.equity_snapshots = []
+        self._bar_idx = 0
+
         codes = list(data_map.keys())
         if not codes:
-            raise ValueError("No data provided")
+            raise ValueError("未提供任何股票数据")
 
         # 1. Generate signals
         signal_map = signal_engine.generate(data_map)
@@ -126,7 +133,7 @@ class BaseEngine(ABC):
 
         valid_codes = sorted(c for c in signal_map if c in data_map)
         if not valid_codes:
-            raise ValueError("No valid signals generated")
+            raise ValueError("未生成有效信号")
 
         # 2. Align signals (shift by 1 to avoid lookahead)
         dates, close_df, target_pos, ret_df = self._align_signals(

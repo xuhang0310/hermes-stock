@@ -170,11 +170,11 @@ class RsiSignalEngine(SignalEngine):
             rs = avg_gain / avg_loss.replace(0, np.nan)
             rsi = 100 - (100 / (1 + rs))
 
-            # Position: 1 when RSI < oversold, 0 when RSI > overbought
-            position = pd.Series(0.5, index=df.index)  # hold middle
-            position[rsi < self.oversold] = 1.0
-            position[rsi > self.overbought] = 0.0
-
+            # Position: buy when RSI < oversold, sell when RSI > overbought, hold otherwise
+            position = pd.Series(np.nan, index=df.index)
+            position[rsi < self.oversold] = 1.0  # oversold: buy signal
+            position[rsi > self.overbought] = 0.0  # overbought: sell signal
+            # Forward fill to hold position between signals
             position = position.ffill().fillna(0.0)
             signals[code] = position
 
