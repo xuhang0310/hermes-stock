@@ -269,7 +269,7 @@ def _list_strategies(args: dict) -> dict:
 
 def _run_factor_backtest(args: dict) -> dict:
     """运行多因子策略回测"""
-    from backend.app.quant.backtest_runner import _load_stock_data
+    from backend.app.quant.backtest_runner import _load_stock_data, _save_backtest_result
     from backend.app.quant.engines.china_a import ChinaAEngine
 
     # 创建因子信号引擎
@@ -295,14 +295,40 @@ def _run_factor_backtest(args: dict) -> dict:
     # 运行回测
     metrics = market_engine.run_backtest(config, data_map, engine)
 
-    return {
+    result = {
+        "strategy": "factor_combination",
         "factor_ids": args["factor_ids"],
         "symbols": args["symbols"],
         "period": {"start": args["start_date"], "end": args["end_date"]},
         "metrics": metrics,
-        "trades": len(market_engine.trades),
-        "final_equity": market_engine.equity_snapshots[-1].equity if market_engine.equity_snapshots else config["initial_cash"],
+        "trades": [
+            {
+                "symbol": t.symbol,
+                "entry_date": str(t.entry_time.date()) if hasattr(t.entry_time, "date") else str(t.entry_time),
+                "exit_date": str(t.exit_time.date()) if hasattr(t.exit_time, "date") else str(t.exit_time),
+                "entry_price": round(t.entry_price, 2),
+                "exit_price": round(t.exit_price, 2),
+                "size": int(t.size),
+                "pnl": round(t.pnl, 2),
+                "pnl_pct": round(t.pnl_pct, 2),
+                "holding_bars": t.holding_bars,
+            }
+            for t in market_engine.trades
+        ],
+        "equity_curve": [
+            {
+                "date": str(s.timestamp.date()) if hasattr(s.timestamp, "date") else str(s.timestamp),
+                "equity": round(s.equity, 2),
+                "positions": s.positions,
+            }
+            for s in market_engine.equity_snapshots
+        ],
     }
+
+    # 保存结果到数据库，生成报告URL
+    result = _save_backtest_result(result, strategy_code="factor_combination")
+
+    return result
 
 
 SKILL = {

@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from backend.app.core.database import SessionLocal
+from backend.app.core.models import BacktestRun
 from backend.app.core.settings import settings
 from backend.app.data.repository import StockRepository
 from backend.app.quant.engines.china_a import ChinaAEngine
@@ -143,6 +146,79 @@ def run_signal_backtest(
             for s in market_engine.equity_snapshots
         ],
     }
+
+    # 保存结果到数据库，生成报告URL
+    result = _save_backtest_result(result, strategy_code=f"signal_{strategy}")
+
+    return result
+
+
+def _save_backtest_result(
+    result: Dict[str, Any],
+    *,
+    owner_user_id: int | None = None,
+    strategy_code: str = "signal",
+) -> Dict[str, Any]:
+    """保存回测结果到数据库，生成 report_url 和 summary_markdown
+
+    Args:
+        result: 回测结果字典
+        owner_user_id: 用户ID
+        strategy_code: 策略代码
+
+    Returns:
+        添加了 run_id 和 report_url 的结果
+    """
+    run_id = uuid.uuid4().hex
+    result["run_id"] = run_id
+    result["report_url"] = f"/backtests/{run_id}"
+
+    # 生成摘要
+    metrics = result.get("metrics", {})
+    total_return = metrics.get("total_return", 0)
+    sharpe = metrics.get("sharpe", 0)
+    max_dd = metrics.get("max_drawdown", 0)
+    n_trades = metrics.get("n_trades", 0)
+    win_rate = metrics.get("win_rate", 0)
+
+    summary = (
+        f"## {result.get('strategy', 'Signal')} 策略回测\n\n"
+        f"- 年化收益：**{total_return * 100:.2f}%**\n"
+        f"- 夏普比率：{sharpe:.2f}\n"
+        f"- 最大回撤：{max_dd * 100:.2f}%\n"
+        f"- 交易：{n_trades} 笔 ｜ 胜率：{win_rate * 100:.1f}%\n\n"
+        f"[查看完整回测报告](/backtests/{run_id})"
+    )
+    result["summary_markdown"] = summary
+
+    # 保存到数据库
+    session = SessionLocal()
+    try:
+        session.add(
+            BacktestRun(
+                run_id=run_id,
+                owner_user_id=owner_user_id,
+                status="completed",
+                symbol=result.get("symbols", [""])[0] if result.get("symbols") else "",
+                strategy_code=strategy_code,
+                timeframe="1D",
+                start_date=result["period"]["start"],
+                end_date=result["period"]["end"],
+                config_json=json.dumps({"strategy": result.get("strategy")}, ensure_ascii=False),
+                metrics_json=json.dumps(metrics, ensure_ascii=False),
+                result_json=json.dumps(result, ensure_ascii=False),
+                summary_markdown=summary,
+                finished_at=datetime.now(),
+            )
+        )
+        session.commit()
+        logger.info("回测结果已保存: run_id=%s", run_id)
+    except Exception:
+        session.rollback()
+        logger.exception("保存回测结果失败")
+        raise
+    finally:
+        session.close()
 
     return result
 
