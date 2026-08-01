@@ -29,8 +29,10 @@ import { elapsedStreamMilliseconds, formatStreamDuration } from '../utils/stream
 
 const props = withDefaults(defineProps<{
   initialTab?: 'chat' | 'feishuBots'
+  initialSessionId?: number | null
 }>(), {
-  initialTab: 'chat'
+  initialTab: 'chat',
+  initialSessionId: null
 })
 
 const emit = defineEmits<{
@@ -990,6 +992,11 @@ function composerKeydown(event: KeyboardEvent) {
 onMounted(async () => {
   await load()
   await recoverActiveRuns()
+  // 从任务看板跳入时，打开对应的对话窗口
+  if (props.initialSessionId) {
+    await openSession(props.initialSessionId)
+    await refreshSessions(selectedProfileId.value)
+  }
 })
 
 function sessionIsRunning(sessionId: number) {

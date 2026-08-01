@@ -101,6 +101,7 @@ const selectedChartPosition = ref<PositionItem | null>(null)
 const selectedChartInstrument = ref<{ symbol: string; name: string } | null>(null)
 const chartReturnPage = ref<'positions' | 'watchlist'>('positions')
 const digitalHumanInitialTab = ref<'chat' | 'feishuBots'>('chat')
+const digitalHumanInitialSession = ref<number | null>(null)
 const askStockInitialQuestion = ref('')
 const backtestRunId = ref('')
 const positionAgentTargetAccount = ref<number | null>(null)
@@ -910,7 +911,10 @@ function backFromChart() {
 }
 
 function navigate(page: PageKey) {
-  if (page === 'digitalHumans') digitalHumanInitialTab.value = 'chat'
+  if (page === 'digitalHumans') {
+    digitalHumanInitialTab.value = 'chat'
+    digitalHumanInitialSession.value = null
+  }
   if (page === 'askStock') askStockInitialQuestion.value = ''
   if (page === 'workbench') void refreshDashboard()
   if (page !== 'backtestReport' && window.location.pathname.startsWith('/backtests/')) {
@@ -942,6 +946,13 @@ function closeBacktest() {
 
 function openFeishuBindings() {
   digitalHumanInitialTab.value = 'feishuBots'
+  activePage.value = 'digitalHumans'
+}
+
+function openBoardSession(sessionId: number) {
+  // 任务看板点击卡片 → 进入数字中心对应的对话窗口
+  digitalHumanInitialTab.value = 'chat'
+  digitalHumanInitialSession.value = sessionId
   activePage.value = 'digitalHumans'
 }
 
@@ -1014,6 +1025,7 @@ onBeforeUnmount(() => {
       <DigitalHumanCenter
         v-else-if="activePage === 'digitalHumans'"
         :initial-tab="digitalHumanInitialTab"
+        :initial-session-id="digitalHumanInitialSession"
         @open-backtest="openBacktest"
       />
 
@@ -1053,7 +1065,10 @@ onBeforeUnmount(() => {
 
       <SkillSquareView v-else-if="activePage === 'skillSquare'" />
 
-      <AgentTaskBoardView v-else-if="activePage === 'agentTaskBoard'" />
+      <AgentTaskBoardView
+        v-else-if="activePage === 'agentTaskBoard'"
+        @open-session="openBoardSession"
+      />
 
       <SettingsView
         v-else-if="activePage === 'settings'"

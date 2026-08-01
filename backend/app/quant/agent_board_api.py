@@ -226,6 +226,7 @@ def _query_tasks(
 
         items.append({
             "run_id": run.run_id,
+            "session_id": run.session_id,
             "task_title": run.task_title or f"Agent 任务 {run.run_id[:8]}",
             "status": run.status,
             "board_column": _status_to_column(run.status),

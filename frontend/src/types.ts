@@ -1240,6 +1240,7 @@ export type AgentBoardCounts = {
 
 export type AgentTask = {
   run_id: string
+  session_id: number | null
   task_title: string
   status: string
   board_column: 'queued' | 'running' | 'approval' | 'completed' | 'abnormal'

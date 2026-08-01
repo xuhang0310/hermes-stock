@@ -191,9 +191,11 @@ async function handlePriority(task: AgentTask, priority: number) {
   }
 }
 
-function openTaskDetail(task: AgentTask) {
-  // 跳转到任务详情（后续实现）
-  window.open(`/api/agent-board/tasks/${task.run_id}`, '_blank')
+function openTaskSession(task: AgentTask) {
+  // 点击任务卡片 → 进入数字中心对应的对话窗口
+  if (task.session_id) {
+    emit('openSession', task.session_id)
+  }
 }
 
 watch(() => props.runId, load)
@@ -304,6 +306,8 @@ onBeforeUnmount(() => {
               :key="task.run_id"
               class="task-card"
               :class="task.board_column"
+              title="点击进入数字中心对应会话"
+              @click.stop="openTaskSession(task)"
             >
               <div class="card-header">
                 <div class="card-agent">
@@ -346,8 +350,8 @@ onBeforeUnmount(() => {
                 <button type="button" class="btn-retry" @click.stop="handleRetry(task)">
                   重试
                 </button>
-                <button type="button" class="btn-detail" @click.stop="openTaskDetail(task)">
-                  查看原因
+                <button type="button" class="btn-detail" @click.stop="openTaskSession(task)">
+                  查看会话
                 </button>
               </div>
               <div class="card-actions" v-if="task.board_column === 'approval'">
@@ -592,6 +596,7 @@ onBeforeUnmount(() => {
   border: 1px solid #30363d;
   border-radius: 6px;
   padding: 12px;
+  cursor: pointer;
   transition: border-color 0.2s;
 }
 
