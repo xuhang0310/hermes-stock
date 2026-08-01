@@ -247,6 +247,8 @@ def _tool_preview(name: str, result: dict[str, Any]) -> str:
         return f"可委派数字人 {len(result.get('agents', []))} 个。"
     if name == "dispatch_agent_tasks":
         return str(result.get("summary") or f"Agent Team {result.get('status', '已完成')}。")
+    if name == "create_agent_task_batch":
+        return str(result.get("summary") or f"任务批次 {result.get('status', '已创建')}，{result.get('created_count', 0)} 个子任务。")
     if name == "list_agent_schedules":
         return (
             f"定时任务共 {int(result.get('total', len(result.get('jobs', []))))} 个，"
@@ -349,6 +351,11 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
     if role_code == "stock-pm":
         tools.extend(TEAM_AND_SCHEDULE_TOOL_SCHEMAS)
         write_names.update(SCHEDULE_MUTATION_TOOL_NAMES)
+    # delegation_mode=none 时移除所有编排工具
+    delegation_config = request_payload.get("delegation_config") or {}
+    if isinstance(delegation_config, dict) and delegation_config.get("mode") == "none":
+        blocked_orchestration = {"dispatch_agent_tasks", "create_agent_task_batch", "run_agent_workflow"}
+        tools = [item for item in tools if item.get("function", {}).get("name") not in blocked_orchestration]
     if request_payload.get("can_write_positions"):
         schemas = write_tool_schemas()
         tools.extend(schemas)
@@ -563,7 +570,7 @@ def _build_tools(request_payload: dict[str, Any], schemas: list[dict], write_nam
             self.spec = tool_spec(self.name, write_names=write_names)
             self.is_concurrency_safe = self.spec.is_concurrency_safe
             self.is_read_only = self.spec.is_read_only
-            self.is_external_tool = self.name in {"dispatch_agent_tasks", "run_agent_workflow"}
+            self.is_external_tool = self.name in {"dispatch_agent_tasks", "run_agent_workflow", "create_agent_task_batch"}
 
         async def check_permissions(self, tool_input, _context):
             risk = classify_tool_risk(self.name, tool_input, write_names)
@@ -1271,7 +1278,7 @@ async def run_agentscope(
 
             await close_text("thought")
             for tool_call in event.tool_calls:
-                if tool_call.name not in {"dispatch_agent_tasks", "run_agent_workflow"}:
+                if tool_call.name not in {"dispatch_agent_tasks", "run_agent_workflow", "create_agent_task_batch"}:
                     raise RuntimeError(f"不支持的外部编排工具：{tool_call.name}")
                 try:
                     args = json.loads(tool_call.input or "{}")
@@ -1323,6 +1330,55 @@ async def run_agentscope(
                         )
                     for child_run_id in workflow.get("queued_run_ids") or []:
                         await redis_broker.enqueue(child_run_id)
+                    continue
+                if tool_call.name == "create_agent_task_batch":
+                    from backend.app.quant.agent_board_service import TaskBatchSpec, TaskSpec, create_task_batch
+
+                    tasks = [
+                        TaskSpec(
+                            action_key=str(t["action_key"]),
+                            title=str(t["title"]),
+                            agent_code=str(t["agent_code"]),
+                            instruction=str(t["instruction"]),
+                            expected_output=str(t.get("expected_output") or ""),
+                            required=bool(t.get("required", True)),
+                            priority=int(t.get("priority", 100)),
+                        )
+                        for t in args.get("tasks", [])
+                    ]
+                    batch = TaskBatchSpec(
+                        objective=str(args.get("objective", "")),
+                        execution_mode=str(args.get("execution_mode", "serial_items")),
+                        completion_policy=str(args.get("completion_policy", "all_required")),
+                        child_timeout_seconds=int(args.get("child_timeout_seconds", 600)),
+                        tasks=tasks,
+                    )
+                    board_result = await asyncio.to_thread(
+                        create_task_batch,
+                        batch,
+                        leader_run_id=run_id,
+                        user_id=int(request_payload.get("user_id", 0)),
+                    )
+                    waiting.append(
+                        {
+                            "type": "task_batch",
+                            "team_id": board_result["team_id"],
+                            "tool_call_id": tool_call.id,
+                            "created_count": board_result["created_count"],
+                            "status": "running",
+                        }
+                    )
+                    await emit(
+                        {
+                            "type": "task_batch_created",
+                            "team_id": board_result["team_id"],
+                            "objective": batch.objective,
+                            "created_count": board_result["created_count"],
+                            "task_ids": board_result["task_ids"],
+                        }
+                    )
+                    for task_id in board_result["task_ids"]:
+                        await redis_broker.enqueue(task_id)
                     continue
                 team = await asyncio.to_thread(
                     agent_team_service.start_team,

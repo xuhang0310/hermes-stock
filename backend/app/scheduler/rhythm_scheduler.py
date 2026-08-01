@@ -302,8 +302,21 @@ def _run_scheduled_agent(
         user_label=owner_label,
         allow_code_execution=bool(snap.get("allow_code_execution")),
         approval_policy=str(snap.get("approval_policy") or "full"),
+        delegation_config={
+            "mode": str(snap.get("delegation_mode") or "none"),
+            "extraction_mode": str(snap.get("task_extraction_mode") or "structured_tool"),
+            "completion_policy": str(snap.get("completion_policy") or "all_required"),
+            "child_timeout_seconds": int(snap.get("child_timeout_seconds") or 600),
+            "max_delegated_tasks": int(snap.get("max_delegated_tasks") or 20),
+        },
     )
     run = create_channel_run(request_payload, idempotency_key=f"schedule:{job_run_id}")
+    # 关联 leader AgentRun 到 JobRun，便于任务提取和审计追溯
+    with SessionLocal() as db:
+        job_run = db.get(JobRun, job_run_id)
+        if job_run is not None:
+            job_run.leader_agent_run_id = run["run_id"]
+            db.commit()
     if run["created"]:
         with SessionLocal() as db:
             db.add(AiChatMessage(session_id=session_id, role="user", content=question, event_count=0))
@@ -623,6 +636,11 @@ def _job_snapshot(job: ScheduledJob) -> dict:
         "owner_user_id": job.owner_user_id,
         "allow_code_execution": bool(job.allow_code_execution),
         "approval_policy": job.approval_policy,
+        "delegation_mode": getattr(job, "delegation_mode", "none"),
+        "task_extraction_mode": getattr(job, "task_extraction_mode", "structured_tool"),
+        "completion_policy": getattr(job, "completion_policy", "all_required"),
+        "child_timeout_seconds": getattr(job, "child_timeout_seconds", 600),
+        "max_delegated_tasks": getattr(job, "max_delegated_tasks", 20),
     }
 
 
@@ -706,6 +724,49 @@ def _execute_job(job_key: str, run_id: str) -> None:
             if push_error:
                 status = "failed"
                 error = f"报告已生成，但飞书任务群推送失败: {push_error}"
+            # legacy_report 模式：从报告输出中提取协同任务
+            elif (
+                snapshot.get("task_extraction_mode") == "legacy_report"
+                and output_content
+            ):
+                try:
+                    from backend.app.quant.task_extractor import ScheduledTaskExtractor
+
+                    extractor = ScheduledTaskExtractor()
+                    plan = extractor.extract(output_content, job_run_id=run_id)
+                    if plan.get("has_tasks") and plan.get("confidence", 0) >= 0.8:
+                        from backend.app.agent_runtime.redis_broker import redis_broker
+                        from backend.app.quant.agent_board_service import (
+                            TaskBatchSpec,
+                            TaskSpec,
+                            create_task_batch,
+                        )
+
+                        with SessionLocal() as db:
+                            jr = db.get(JobRun, run_id)
+                            leader_run_id = jr.leader_agent_run_id if jr else None
+                        if leader_run_id:
+                            batch = extractor.to_task_batch(
+                                plan,
+                                objective=f"定时任务 [{snapshot['name']}] 产出协同任务",
+                                completion_policy=str(snapshot.get("completion_policy") or "all_required"),
+                                child_timeout_seconds=int(snapshot.get("child_timeout_seconds") or 600),
+                            )
+                            board_result = create_task_batch(
+                                batch,
+                                leader_run_id=leader_run_id,
+                                user_id=snapshot.get("owner_user_id"),
+                                job_run_id=run_id,
+                            )
+                            for task_id in board_result["task_ids"]:
+                                redis_broker.enqueue(task_id)
+                            _log(
+                                "INFO",
+                                f"定时任务 {snapshot['job_key']} 提取了 {len(board_result['task_ids'])} 个协同任务",
+                                {"confidence": plan.get("confidence"), "team_id": board_result["team_id"]},
+                            )
+                except Exception as extract_exc:  # noqa: BLE001
+                    _log("WARNING", f"定时任务 {snapshot['job_key']} 协同任务提取失败", {"error": str(extract_exc)[:500]})
         elif snapshot["job_kind"] == "topnews_brief":
             output_content = _run_topnews_brief(snapshot, ran_at)
         else:

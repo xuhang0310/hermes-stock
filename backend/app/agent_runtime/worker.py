@@ -59,6 +59,41 @@ class AgentRuntimeWorker:
         self._running.clear()
         self._inflight_ids.clear()
 
+    def _recover_orphan_board_tasks(self) -> list[str]:
+        """恢复孤儿看板任务：board_visible=True 且 queued 超过 5 分钟的任务。
+
+        这些任务可能因为 Redis 唤醒失败而未被 Worker 领取。
+        重新 enqueue 是幂等的（已在 Redis 中的不会重复执行）。
+        """
+        from datetime import datetime, timedelta
+
+        from sqlalchemy import select
+
+        from backend.app.core.database import SessionLocal
+        from backend.app.core.models import AgentRun
+
+        orphan_run_ids: list[str] = []
+        cutoff = datetime.now() - timedelta(minutes=5)
+        try:
+            with SessionLocal() as db:
+                orphans = db.scalars(
+                    select(AgentRun.run_id).where(
+                        AgentRun.board_visible.is_(True),
+                        AgentRun.status == "queued",
+                        AgentRun.queued_at.isnot(None),
+                        AgentRun.queued_at < cutoff,
+                        AgentRun.cancel_requested.is_(False),
+                    )
+                ).all()
+                orphan_run_ids = list(orphans)
+        except Exception as exc:
+            logger.warning("孤儿看板任务扫描失败: %s", exc)
+            return []
+
+        if orphan_run_ids:
+            logger.info("发现 %d 个孤儿看板任务，重新入队", len(orphan_run_ids))
+        return orphan_run_ids
+
     def _launch(self, run_id: str) -> None:
         if run_id in self._inflight_ids:
             return
@@ -106,6 +141,10 @@ class AgentRuntimeWorker:
                     await self.broker.enqueue(run_id)
                 resumed_workflow_runs = await asyncio.to_thread(self.workflow_service.reconcile)
                 for run_id in resumed_workflow_runs:
+                    await self.broker.enqueue(run_id)
+                # 孤儿看板任务恢复：board_visible=True 且 queued 超过 5 分钟的任务
+                orphan_board_runs = await asyncio.to_thread(self._recover_orphan_board_tasks)
+                for run_id in orphan_board_runs:
                     await self.broker.enqueue(run_id)
             if now - last_cleanup >= 3600:
                 last_cleanup = now
