@@ -28,6 +28,7 @@ def build_channel_request(
     pending_action: dict[str, Any] | None = None,
     allow_code_execution: bool = False,
     approval_policy: str = "full",
+    delegation_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     with SessionLocal() as db:
         chat_session = db.get(AiChatSession, session_id)
@@ -82,6 +83,7 @@ def build_channel_request(
         "source_type": source_type,
         "source_ref": source_ref,
         "pending_action": pending_action,
+        "delegation_config": delegation_config,
     }
 
 

@@ -436,6 +436,7 @@ class AgentRunRepository:
     def next_queued_run(self) -> str | None:
         with self.session_factory() as db:
             active = aliased(AgentRun)
+            agent_active = aliased(AgentRun)
             return db.scalar(
                 select(AgentRun.run_id)
                 .where(
@@ -446,6 +447,15 @@ class AgentRunRepository:
                             active.session_id == AgentRun.session_id,
                             active.run_id != AgentRun.run_id,
                             active.status.in_(["running", "waiting_approval", "waiting_children"]),
+                        )
+                    ),
+                    # 同一 Agent 串行：如果有 assignee_profile_id，确保该 Agent 没有其他活动运行
+                    ~exists(
+                        select(agent_active.run_id).where(
+                            AgentRun.assignee_profile_id.isnot(None),
+                            agent_active.assignee_profile_id == AgentRun.assignee_profile_id,
+                            agent_active.run_id != AgentRun.run_id,
+                            agent_active.status.in_(["running", "waiting_approval", "waiting_children"]),
                         )
                     ),
                 )

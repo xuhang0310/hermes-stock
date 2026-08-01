@@ -202,6 +202,86 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
             "required": ["job_key"],
         },
     ),
+    _tool(
+        "create_agent_task_batch",
+        "当报告或分析产生需要其他数字人继续完成的动作时，必须调用本工具以结构化参数提交任务批次。"
+        "禁止只在正文中输出'待完成'。调用后总调度挂起，所有子任务完成或超时后自动恢复。",
+        {
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "description": "本批次任务要完成的总目标。",
+                },
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "action_key": {
+                                "type": "string",
+                                "description": "本批次内唯一标识，格式建议：动作-标的-日期，如 verify-600984-20260801。",
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "看板卡片标题，简明扼要。",
+                            },
+                            "agent_code": {
+                                "type": "string",
+                                "description": (
+                                    "必须原样使用 list_delegatable_agents 返回的 code。"
+                                    "同一轮每个 agent_code 可出现多次（串行执行）。"
+                                ),
+                            },
+                            "instruction": {
+                                "type": "string",
+                                "description": "边界明确、可独立完成的子任务指令。",
+                            },
+                            "expected_output": {
+                                "type": "string",
+                                "description": "希望返回的结构或验收条件。",
+                            },
+                            "required": {
+                                "type": "boolean",
+                                "default": True,
+                                "description": "是否为必选任务。",
+                            },
+                            "priority": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 999,
+                                "default": 100,
+                                "description": "优先级，数值越大越先执行。默认 100。",
+                            },
+                        },
+                        "required": ["action_key", "title", "agent_code", "instruction"],
+                    },
+                },
+                "execution_mode": {
+                    "type": "string",
+                    "enum": ["serial_items", "merge_by_agent"],
+                    "default": "serial_items",
+                    "description": "serial_items：每个动作独立执行；merge_by_agent：同一 Agent 的任务合并。",
+                },
+                "completion_policy": {
+                    "type": "string",
+                    "enum": ["all_required", "best_effort"],
+                    "default": "all_required",
+                    "description": "all_required：必选任务全部成功才算成功；best_effort：到期后汇总已有结果。",
+                },
+                "child_timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 3600,
+                    "default": 600,
+                    "description": "整个批次的截止时间，默认 600 秒。",
+                },
+            },
+            "required": ["objective", "tasks"],
+        },
+    ),
 ]
 
 
@@ -235,6 +315,7 @@ Swarm 工作流规则：
 6. 定时代码只在用户隔离工作区的 Docker 沙箱执行；不要把密钥、数据库密码或宿主机路径写进任务指令。
 7. 用户询问“有多少定时任务、有哪些任务、是否启用、最近是否成功”时，必须调用 list_agent_schedules 查询真实数据，禁止用会话记忆推断，更不能把未查询解释成 0。
 8. 修改、暂停、恢复和删除任务时，先用 list_agent_schedules 找到准确 job_key，再用 get_agent_schedule 核对当前配置；update_agent_schedule 只提交需要变化的字段。
+9. 当报告或分析产生需要其他数字人继续完成的动作时，禁止只在正文中输出"待完成"。必须调用 create_agent_task_batch，以结构化参数提交任务批次。每个任务必须有唯一的 action_key、明确的 agent_code 和可独立完成的 instruction。
 """
 
 
@@ -249,4 +330,5 @@ TOOL_DISPLAY_NAMES = {
     "update_agent_schedule": "修改定时 Agent 任务",
     "pause_agent_schedule": "暂停或恢复定时 Agent 任务",
     "delete_agent_schedule": "删除定时 Agent 任务",
+    "create_agent_task_batch": "创建看板任务批次",
 }
