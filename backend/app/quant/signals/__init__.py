@@ -7,6 +7,7 @@ from backend.app.quant.signals.example_signals import (
     RsiSignalEngine,
 )
 from backend.app.quant.signals.momentum_signal import MomentumSignalEngine
+from backend.app.quant.signals.turtle_signal import TurtleSignalEngine
 
 __all__ = [
     "MacdSignalEngine",
@@ -14,4 +15,5 @@ __all__ = [
     "BollingerBandSignalEngine",
     "RsiSignalEngine",
     "MomentumSignalEngine",
+    "TurtleSignalEngine",
 ]

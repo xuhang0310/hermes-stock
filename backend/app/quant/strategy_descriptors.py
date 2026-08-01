@@ -134,6 +134,42 @@ STRATEGY_DESCRIPTORS: List[Dict[str, Any]] = [
         "default_params": {"lookback": 20, "top_n": 5},
         "param_schema": {"lookback": "回看排名天数（涨幅窗口）", "top_n": "持有最强的前 N 只"},
     },
+    {
+        "code": "turtle",
+        "name": "海龟趋势跟踪",
+        "description": "经典突破追趋势：创新高买入、跌破通道离场，自带加仓和止损",
+        "explain": (
+            "海龟交易法则是最经典的趋势策略之一，1983 年由传奇交易员理查德·丹尼斯"
+            "用一群零基础学员验证成名。规则很纪律：股价创出最近 20 日新高就买入"
+            "（突破入场）；趋势延续、每再涨一段（按日常波动幅度 ATR 的一半）就加"
+            "一次仓，最多加到 4 次；跌破买入均价两个波动幅度（2N 止损）无条件认错；"
+            "或者股价跌回最近 10 日最低点以下（通道离场）全部卖出。通俗讲就是"
+            "「追创新高、顺趋势加码、破位就跑」，风险管理是它的精髓。适合走出大"
+            "趋势的个股；横盘震荡时会被反复止损打脸。"
+        ),
+        "scenario": "趋势明显的个股，看重纪律化风险管理",
+        "risk_level": "medium",
+        "kind": "single",
+        "default_symbols": _SINGLE_DEFAULT_SYMBOL,
+        "default_params": {
+            "entry_period": 20,
+            "exit_period": 10,
+            "atr_period": 20,
+            "max_units": 4,
+            "unit_weight": 0.25,
+            "stop_atr_mult": 2.0,
+            "add_atr_mult": 0.5,
+        },
+        "param_schema": {
+            "entry_period": "入场突破窗口（前 N 日高点）",
+            "exit_period": "离场通道窗口（前 N 日低点）",
+            "atr_period": "波动幅度 ATR 的计算窗口",
+            "max_units": "最多加仓几次",
+            "unit_weight": "每次建仓占多少仓位",
+            "stop_atr_mult": "止损距离（几个波动幅度）",
+            "add_atr_mult": "加仓间距（几个波动幅度）",
+        },
+    },
 ]
 
 

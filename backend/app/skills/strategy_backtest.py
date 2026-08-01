@@ -91,7 +91,7 @@ BACKTEST_TOOL_SCHEMAS = [
             "name": "run_signal_backtest",
             "description": (
                 "运行基于信号引擎的策略回测。支持多种内置策略：MACD、均线交叉、布林带、RSI、"
-                "横截面动量（强者恒强，需传多只股票做横向比较）等。"
+                "横截面动量（强者恒强，需传多只股票做横向比较）、海龟趋势跟踪（突破+ATR止损）等。"
                 "返回完整绩效指标、逐笔交易和权益曲线。支持 T+1、涨跌停、整手交易等 A 股规则。"
             ),
             "parameters": {
@@ -100,7 +100,7 @@ BACKTEST_TOOL_SCHEMAS = [
                     "strategy": {
                         "type": "string",
                         "enum": strategy_enum(),
-                        "description": "策略名称：macd（MACD金叉死叉）、ma_cross（均线交叉）、bollinger（布林带）、rsi（RSI超买超卖）、momentum（强者恒强/横截面动量选股）",
+                        "description": "策略名称：macd（MACD金叉死叉）、ma_cross（均线交叉）、bollinger（布林带）、rsi（RSI超买超卖）、momentum（强者恒强/横截面动量选股）、turtle（海龟趋势跟踪）",
                     },
                     "symbols": {
                         "type": "array",
@@ -415,6 +415,7 @@ SKILL = {
         "用户要求回测时，根据需求选择工具：",
         "  - 技术指标策略（MACD/均线/布林带/RSI）→ run_signal_backtest",
         "  - 动量选股/强者恒强/横截面动量 → run_signal_backtest(strategy='momentum', symbols=多只股票)",
+        "  - 海龟法则/趋势跟踪/突破策略 → run_signal_backtest(strategy='turtle')",
         "  - 因子组合策略（用462个因子）→ run_factor_backtest",
         "  - 风险平价组合 → run_portfolio_backtest",
         "用户想分析因子有效性时 → 使用 factor_research 技能的 benchmark_factor_alphas",

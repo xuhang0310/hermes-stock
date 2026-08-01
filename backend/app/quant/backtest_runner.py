@@ -30,6 +30,7 @@ from backend.app.quant.signals.example_signals import (
     RsiSignalEngine,
 )
 from backend.app.quant.signals.momentum_signal import MomentumSignalEngine
+from backend.app.quant.signals.turtle_signal import TurtleSignalEngine
 from backend.app.quant.strategy_descriptors import (
     STRATEGY_DESCRIPTORS,
     report_name,
@@ -46,6 +47,7 @@ SIGNAL_ENGINE_REGISTRY: Dict[str, type] = {
     "bollinger": BollingerBandSignalEngine,
     "rsi": RsiSignalEngine,
     "momentum": MomentumSignalEngine,
+    "turtle": TurtleSignalEngine,
 }
 
 
