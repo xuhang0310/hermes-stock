@@ -128,7 +128,7 @@ def _query_tasks(
             if profile:
                 agent_name = profile.name
                 agent_code = profile.code
-                agent_avatar = profile.avatar_url
+                agent_avatar = None
 
         # 获取关联信息
         job_run_info = None
@@ -498,7 +498,7 @@ def get_board_agents(
                 "id": p.id,
                 "code": p.code,
                 "name": p.name,
-                "avatar_url": p.avatar_url,
+                "avatar_tone": p.avatar_tone,
             }
             for p in profiles
         ]
