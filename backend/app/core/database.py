@@ -460,6 +460,53 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             )
         )
 
+        # === Agent 任务看板字段（v3.1） ===
+        for column, ddl in (
+            ("assignee_profile_id", "assignee_profile_id INT NULL"),
+            ("task_title", "task_title VARCHAR(240) NULL"),
+            ("board_visible", "board_visible TINYINT(1) NOT NULL DEFAULT 0"),
+            ("queued_at", "queued_at DATETIME NULL"),
+        ):
+            _add_column("agent_runs", column, ddl)
+        _add_index("agent_runs", "ix_agent_run_board", "board_visible, status, updated_at")
+        _add_index("agent_runs", "ix_agent_run_agent_queue", "assignee_profile_id, status, priority, created_at")
+
+        for column, ddl in (
+            ("delegation_mode", "delegation_mode VARCHAR(24) NOT NULL DEFAULT 'execute_and_wait'"),
+            ("task_extraction_mode", "task_extraction_mode VARCHAR(24) NOT NULL DEFAULT 'structured_tool'"),
+            ("completion_policy", "completion_policy VARCHAR(24) NOT NULL DEFAULT 'all_required'"),
+            ("child_timeout_seconds", "child_timeout_seconds INT NOT NULL DEFAULT 600"),
+            ("max_delegated_tasks", "max_delegated_tasks INT NOT NULL DEFAULT 20"),
+        ):
+            _add_column("scheduled_jobs", column, ddl)
+
+        for column, ddl in (
+            ("leader_agent_run_id", "leader_agent_run_id VARCHAR(64) NULL"),
+            ("orchestration_type", "orchestration_type VARCHAR(24) NULL"),
+            ("orchestration_id", "orchestration_id VARCHAR(64) NULL"),
+            ("handoff_status", "handoff_status VARCHAR(24) NOT NULL DEFAULT 'none'"),
+            ("handoff_plan_json", "handoff_plan_json LONGTEXT NULL"),
+            ("handoff_error", "handoff_error TEXT NULL"),
+        ):
+            _add_column("job_runs", column, ddl)
+        _add_index("job_runs", "ix_job_run_leader", "leader_agent_run_id")
+        _add_index("job_runs", "ix_job_run_orchestration", "orchestration_type, orchestration_id")
+
+        for column, ddl in (
+            ("execution_mode", "execution_mode VARCHAR(24) NOT NULL DEFAULT 'merge_by_agent'"),
+            ("completion_policy", "completion_policy VARCHAR(24) NOT NULL DEFAULT 'all_required'"),
+        ):
+            _add_column("agent_team_runs", column, ddl)
+
+        for column, ddl in (
+            ("title", "title VARCHAR(240) NULL"),
+            ("action_key", "action_key VARCHAR(120) NULL"),
+            ("priority", "priority INT NOT NULL DEFAULT 100"),
+            ("extraction_source", "extraction_source VARCHAR(24) NOT NULL DEFAULT 'tool_call'"),
+        ):
+            _add_column("agent_delegations", column, ddl)
+        _add_unique_index("agent_delegations", "uq_team_action", "team_id, action_key")
+
 
 engine = create_engine_for_url(settings.database_url)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)

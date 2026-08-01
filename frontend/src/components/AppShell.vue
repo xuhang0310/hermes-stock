@@ -10,6 +10,7 @@ export type PageKey =
   | 'positionChart'
   | 'watchlist'
   | 'digitalHumans'
+  | 'agentTaskBoard'
   | 'rhythm'
   | 'knowledge'
   | 'knowledgeSearch'
@@ -52,6 +53,7 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'askStock', label: '问股' },
   { key: 'workbench', label: '工作台' },
   { key: 'digitalHumans', label: '数字人中心' },
+  ...(canViewRhythm.value ? [{ key: 'agentTaskBoard' as PageKey, label: 'Agent 任务' }] : []),
   { key: 'positions', label: '持仓' },
   { key: 'watchlist', label: '自选池' },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),
