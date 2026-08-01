@@ -112,8 +112,8 @@ def run_strategy_from_catalog(
             slippage=payload.slippage,
             owner_user_id=context.user.id,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"回测执行失败: {exc}") from exc
 
     return {
         "run_id": result["run_id"],

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
+import numpy as np
 import pandas as pd
 
 from backend.app.core.database import SessionLocal
@@ -216,6 +218,27 @@ def run_signal_backtest(
     return result
 
 
+def _json_safe_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """指标统一转 JSON 安全类型：numpy 标量 → Python 原生；NaN/±inf → None。
+
+    零交易等退化场景下 backtest_metrics 会返回 numpy 标量（如 final_equity 为
+    int64），json.dumps 与 FastAPI 编码都会因此 500；NaN 字面量则会破坏前端
+    JSON.parse。所有消费方（落库 / 接口 / 摘要）都经过本函数后再用。
+    """
+    safe: Dict[str, Any] = {}
+    for key, value in metrics.items():
+        if isinstance(value, np.integer):
+            safe[key] = int(value)
+        elif isinstance(value, np.floating):
+            value = float(value)
+            safe[key] = value if math.isfinite(value) else None
+        elif isinstance(value, float):
+            safe[key] = value if math.isfinite(value) else None
+        else:
+            safe[key] = value
+    return safe
+
+
 def _save_backtest_result(
     result: Dict[str, Any],
     *,
@@ -236,16 +259,21 @@ def _save_backtest_result(
     result["run_id"] = run_id
     result["report_url"] = f"/backtests/{run_id}"
 
-    # 生成摘要
+    # 生成摘要（None 安全：零交易场景指标可能为 None）
     metrics = result.get("metrics", {})
-    total_return = metrics.get("total_return", 0)
-    sharpe = metrics.get("sharpe", 0)
-    max_dd = metrics.get("max_drawdown", 0)
-    n_trades = metrics.get("n_trades", 0)
-    win_rate = metrics.get("win_rate", 0)
+    total_return = metrics.get("total_return") or 0
+    sharpe = metrics.get("sharpe") or 0
+    max_dd = metrics.get("max_drawdown") or 0
+    n_trades = metrics.get("n_trades", 0) or 0
+    win_rate = metrics.get("win_rate") or 0
+
+    # _enrich_report 会把 strategy 字符串替换成 {"name": ...} 结构，摘要需取名而非 repr
+    strategy_label = result.get("strategy", "Signal")
+    if isinstance(strategy_label, dict):
+        strategy_label = strategy_label.get("name") or "Signal"
 
     summary = (
-        f"## {result.get('strategy', 'Signal')} 策略回测\n\n"
+        f"## {strategy_label} 策略回测\n\n"
         f"- 年化收益：**{total_return * 100:.2f}%**\n"
         f"- 夏普比率：{sharpe:.2f}\n"
         f"- 最大回撤：{max_dd * 100:.2f}%\n"
@@ -296,7 +324,8 @@ def _enrich_report(result: Dict[str, Any], *, strategy_code: str) -> Dict[str, A
     - attribution (top_winner, top_loser, exit_reasons)
     - source_code, data_fingerprint
     """
-    metrics = result.get("metrics", {})
+    metrics = _json_safe_metrics(result.get("metrics", {}))
+    result["metrics"] = metrics
     trades = result.get("trades", [])
     symbols = result.get("symbols", [])
 
