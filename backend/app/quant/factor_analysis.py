@@ -12,6 +12,9 @@
   result = analyze_factor("alpha101_001", ["000001.SZ", "600519.SH"], "20220101", "20240101")
   print(result["ic_mean"])  # 平均IC
   print(result["group_returns"])  # 分组收益
+
+注意：本模块复用 factor_analysis_core.py 的核心计算函数，
+     避免重复实现 IC 和分组收益逻辑。
 """
 
 from __future__ import annotations
@@ -21,6 +24,11 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+
+from backend.app.quant.factors.factor_analysis_core import (
+    compute_group_equity,
+    compute_ic_series,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,18 +83,19 @@ def analyze_factor(
     close = panel["close"]
     forward_ret = close.shift(-forward_days) / close - 1
 
-    # Step 5: IC 分析
-    ic_series = _calc_ic_series(factor_values, forward_ret)
-    ic_mean = ic_series.mean()
-    ic_std = ic_series.std()
+    # Step 5: IC 分析（使用现有核心函数）
+    ic_series = compute_ic_series(factor_values, forward_ret)
+    ic_mean = ic_series.mean() if len(ic_series) > 0 else 0.0
+    ic_std = ic_series.std() if len(ic_series) > 0 else 0.0
     icir = ic_mean / ic_std if ic_std > 1e-10 else 0.0
-    positive_ratio = (ic_series > 0).mean()
+    positive_ratio = (ic_series > 0).mean() if len(ic_series) > 0 else 0.0
 
-    # Step 6: 分组收益分析
-    group_returns = _calc_group_returns(factor_values, forward_ret, groups)
+    # Step 6: 分组收益分析（使用现有核心函数）
+    equity_df = compute_group_equity(factor_values, forward_ret, groups)
+    group_returns = _extract_group_returns(equity_df)
 
     # Step 7: 因子多空收益
-    factor_return = group_returns.iloc[0] - group_returns.iloc[-1]
+    factor_return = group_returns.iloc[0] - group_returns.iloc[-1] if len(group_returns) >= 2 else 0.0
 
     # Step 8: 换手率分析
     turnover = _calc_factor_turnover(factor_values, groups)
@@ -125,86 +134,25 @@ def _data_map_to_panel(data_map: dict[str, pd.DataFrame]) -> dict[str, pd.DataFr
     return panel
 
 
-def _calc_ic_series(
-    factor_values: pd.DataFrame,
-    forward_ret: pd.DataFrame,
-) -> pd.Series:
-    """计算IC时间序列（每天计算横截面相关系数）
-
-    IC = corr(factor_t, return_{t+1})
+def _extract_group_returns(equity_df: pd.DataFrame) -> pd.Series:
+    """从分组权益曲线提取每组平均收益
 
     Args:
-        factor_values: 因子值宽表 (date × instruments)
-        forward_ret: 未来收益宽表 (date × instruments)
+        equity_df: 分组权益曲线 (index=date, columns=Group_1...Group_N)
 
     Returns:
-        IC时间序列
+        每组平均收益（index=组号，0=最高组，N-1=最低组）
     """
-    ic_list = []
+    if equity_df.empty:
+        return pd.Series(dtype=float)
 
-    for date in factor_values.index:
-        if date not in forward_ret.index:
-            ic_list.append(np.nan)
-            continue
+    # 计算每组最终收益（最后一个值 / 1 - 1）
+    final_equity = equity_df.iloc[-1] if len(equity_df) > 0 else pd.Series(dtype=float)
+    total_returns = final_equity - 1
 
-        factor_row = factor_values.loc[date].dropna()
-        ret_row = forward_ret.loc[date].dropna()
-
-        # 对齐
-        common = factor_row.index.intersection(ret_row.index)
-        if len(common) < 3:
-            ic_list.append(np.nan)
-            continue
-
-        ic = factor_row[common].corr(ret_row[common])
-        ic_list.append(ic)
-
-    return pd.Series(ic_list, index=factor_values.index)
-
-
-def _calc_group_returns(
-    factor_values: pd.DataFrame,
-    forward_ret: pd.DataFrame,
-    groups: int,
-) -> pd.Series:
-    """计算分组收益（按因子值排序，分N组）
-
-    Args:
-        factor_values: 因子值宽表
-        forward_ret: 未来收益宽表
-        groups: 分组数量
-
-    Returns:
-        每组平均收益（index=组号，0=最高组，groups-1=最低组）
-    """
-    group_returns_list = [[] for _ in range(groups)]
-
-    for date in factor_values.index:
-        if date not in forward_ret.index:
-            continue
-
-        factor_row = factor_values.loc[date].dropna()
-        ret_row = forward_ret.loc[date].dropna()
-
-        # 对齐
-        common = factor_row.index.intersection(ret_row.index)
-        if len(common) < groups:
-            continue
-
-        # 排序并分组
-        sorted_codes = factor_row[common].sort_values(ascending=False).index
-        group_size = len(sorted_codes) // groups
-
-        for g in range(groups):
-            start_idx = g * group_size
-            end_idx = start_idx + group_size if g < groups - 1 else len(sorted_codes)
-            group_codes = sorted_codes[start_idx:end_idx]
-            group_ret = ret_row[group_codes].mean()
-            group_returns_list[g].append(group_ret)
-
-    # 计算每组平均收益
-    group_means = [np.mean(rets) if rets else 0.0 for rets in group_returns_list]
-    return pd.Series(group_means, index=range(groups))
+    # 转换为Series，组号从0开始
+    n_groups = len(total_returns)
+    return pd.Series(total_returns.values, index=range(n_groups))
 
 
 def _calc_factor_turnover(
