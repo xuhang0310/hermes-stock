@@ -27,26 +27,36 @@ from backend.app.quant.signals.example_signals import (
     MaCrossSignalEngine,
     RsiSignalEngine,
 )
+from backend.app.quant.signals.momentum_signal import MomentumSignalEngine
+from backend.app.quant.strategy_descriptors import (
+    STRATEGY_DESCRIPTORS,
+    report_name,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Registry of available signal engines
+# 引擎注册在此；人话名/科普/默认参数等元数据统一在 strategy_descriptors.py
 SIGNAL_ENGINE_REGISTRY: Dict[str, type] = {
     "macd": MacdSignalEngine,
     "ma_cross": MaCrossSignalEngine,
     "bollinger": BollingerBandSignalEngine,
     "rsi": RsiSignalEngine,
+    "momentum": MomentumSignalEngine,
 }
 
 
-def list_signal_engines() -> Dict[str, str]:
-    """List available signal engines with descriptions."""
+def list_signal_engines() -> Dict[str, Dict[str, Any]]:
+    """List available signal engines (derived from the strategy registry)."""
     return {
-        "macd": "MACD 金叉死叉策略（快线 12，慢线 26，信号线 9）",
-        "ma_cross": "均线交叉策略（短期 5 日，长期 20 日）",
-        "bollinger": "布林带均值回归策略（周期 20，标准差倍数 2.0）",
-        "rsi": "RSI 超买超卖策略（周期 14，超卖 30，超买 70）",
+        descriptor["code"]: {
+            "name": descriptor["name"],
+            "description": descriptor["description"],
+            "risk_level": descriptor["risk_level"],
+            "kind": descriptor["kind"],
+        }
+        for descriptor in STRATEGY_DESCRIPTORS
     }
 
 
@@ -59,11 +69,12 @@ def run_signal_backtest(
     initial_cash: float = 1_000_000,
     commission_rate: float = 0.00025,
     slippage: float = 0.001,
+    owner_user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run a signal-based backtest.
 
     Args:
-        strategy: Strategy name (one of: macd, ma_cross, bollinger, rsi).
+        strategy: Strategy name (one of: macd, ma_cross, bollinger, rsi, momentum).
         symbols: List of stock codes (e.g., ["000001.SZ", "600519.SH"]).
         start_date: Start date in YYYYMMDD format.
         end_date: End date in YYYYMMDD format.
@@ -71,6 +82,7 @@ def run_signal_backtest(
         initial_cash: Initial capital (default 1,000,000).
         commission_rate: Commission rate (default 0.00025).
         slippage: Slippage rate (default 0.001).
+        owner_user_id: Optional owner user id persisted with the run.
 
     Returns:
         Dict with backtest results including metrics, trades, and equity curve.
@@ -195,7 +207,11 @@ def run_signal_backtest(
 
     # 保存结果到数据库，生成报告URL
     result = _enrich_report(result, strategy_code=f"signal_{strategy}")
-    result = _save_backtest_result(result, strategy_code=f"signal_{strategy}")
+    result = _save_backtest_result(
+        result,
+        strategy_code=f"signal_{strategy}",
+        owner_user_id=owner_user_id,
+    )
 
     return result
 
@@ -387,16 +403,13 @@ def _enrich_report(result: Dict[str, Any], *, strategy_code: str) -> Dict[str, A
 
     result["attribution"] = attribution
 
-    # 策略名
-    strategy_names = {
-        "macd": "MACD 信号回测",
-        "ma_cross": "均线交叉回测",
-        "bollinger": "布林带回测",
-        "rsi": "RSI 回测",
+    # 策略名（信号类派生自策略登记；因子组合等非信号类在此兜底）
+    extra_names = {
         "factor_combination": "多因子组合回测",
     }
+    base_code = strategy_code.replace("signal_", "")
     result["strategy"] = {
-        "name": strategy_names.get(strategy_code.replace("signal_", ""), strategy_code),
+        "name": extra_names.get(base_code, report_name(base_code)),
     }
 
     # 周期

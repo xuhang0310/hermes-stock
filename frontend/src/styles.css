@@ -2798,6 +2798,15 @@ button.btn-stop:hover {
   color: var(--ok);
 }
 
+.chat-empty-wrap {
+  margin: auto;
+  display: grid;
+  justify-items: center;
+  width: 100%;
+  max-width: 1024px;
+  padding: 0 8px;
+}
+
 .chat-empty {
   margin: auto;
   display: grid;

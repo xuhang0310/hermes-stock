@@ -59,6 +59,7 @@ import type {
   WorkspaceStatus,
   BacktestRun,
   BacktestListItem,
+  StrategyDescriptor,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -625,6 +626,21 @@ export const api = {
   workspaceStatus: () => request<WorkspaceStatus>('/api/workspace/status'),
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
   backtests: () => request<{ items: BacktestListItem[] }>('/api/backtests'),
+  strategyCatalog: () => request<{ items: StrategyDescriptor[] }>('/api/backtests/strategies'),
+  runStrategyBacktest: (payload: {
+    strategy_code: string
+    symbols: string[]
+    start_date: string
+    end_date: string
+    strategy_params?: Record<string, number>
+  }) =>
+    request<{ run_id: string; report_url: string; summary_markdown?: string | null }>(
+      '/api/backtests/run',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }
+    ),
   backtest: (runId: string) =>
     request<BacktestRun>(`/api/backtests/${encodeURIComponent(runId)}`),
   createMacdBacktest: (payload: Record<string, unknown>) =>

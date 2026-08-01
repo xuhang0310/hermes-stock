@@ -7,6 +7,7 @@ import ApprovalPolicyControl from '../components/ApprovalPolicyControl.vue'
 import BacktestSummaryCard from '../components/BacktestSummaryCard.vue'
 import ChatAttachmentPicker from '../components/ChatAttachmentPicker.vue'
 import SkillSlashMenu from '../components/SkillSlashMenu.vue'
+import StrategyLibrary from '../components/StrategyLibrary.vue'
 import FeishuBotPanel from './FeishuBotPanel.vue'
 import type {
   AgentAttachment,
@@ -1122,9 +1123,12 @@ function requestIsVisible(request: ActiveChatRequest) {
           />
         </div>
 
-        <div v-if="!messages.length" class="chat-empty">
-          <strong>{{ selectedProfile?.name || 'A股研究数字人' }}</strong>
-          <span>选择数字人和模型后开始会话，ReAct 的 Thought / Action / Observation 会在这里随回答一起出现。</span>
+        <div v-if="!messages.length" class="chat-empty-wrap">
+          <div class="chat-empty">
+            <strong>{{ selectedProfile?.name || 'A股研究数字人' }}</strong>
+            <span>选择数字人和模型后开始会话，ReAct 的 Thought / Action / Observation 会在这里随回答一起出现。</span>
+          </div>
+          <StrategyLibrary @open-backtest="(runId) => emit('openBacktest', runId)" />
         </div>
 
         <article v-for="item in messages" :key="item.id" class="message" :class="item.role">

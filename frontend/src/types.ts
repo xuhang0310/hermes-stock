@@ -885,6 +885,18 @@ export type StockStrategy = {
   description: string
 }
 
+export type StrategyDescriptor = {
+  code: string
+  name: string
+  description: string
+  explain: string
+  scenario: string
+  risk_level: 'low' | 'medium' | 'high'
+  kind: 'single' | 'cross_sectional'
+  default_symbols: string[]
+  default_params: Record<string, number>
+}
+
 export type AgentSkillCriterion = {
   code: string
   description: string
