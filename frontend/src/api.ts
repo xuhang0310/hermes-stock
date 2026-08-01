@@ -57,7 +57,13 @@ import type {
   WatchlistItem,
   WorkspaceDoc,
   WorkspaceStatus,
-  BacktestRun
+  BacktestRun,
+  AgentBoardCounts,
+  AgentTask,
+  AgentTaskDetail,
+  AgentTaskEvent,
+  AgentBoardAgent,
+  TaskBatch,
 } from './types'
 import { readSseStream } from './utils/sse'
 
@@ -797,5 +803,52 @@ export const api = {
     },
     onEvent: (event: AgentStreamEvent) => void,
     signal?: AbortSignal
-  ) => durableAgentStreamRequest({ ...payload, chat_mode: 'stock' }, onEvent, signal)
+  ) => durableAgentStreamRequest({ ...payload, chat_mode: 'stock' }, onEvent, signal),
+  // Agent 任务看板
+  agentBoardSummary: () => request<{ counts: AgentBoardCounts }>('/api/agent-board/summary'),
+  agentBoardTasks: (params: {
+    status?: string
+    agent_code?: string
+    source_type?: string
+    scheduled_job_key?: string
+    page?: number
+    page_size?: number
+  } = {}) => {
+    const query = new URLSearchParams()
+    if (params.status) query.set('status', params.status)
+    if (params.agent_code) query.set('agent_code', params.agent_code)
+    if (params.source_type) query.set('source_type', params.source_type)
+    if (params.scheduled_job_key) query.set('scheduled_job_key', params.scheduled_job_key)
+    if (params.page) query.set('page', String(params.page))
+    if (params.page_size) query.set('page_size', String(params.page_size))
+    const suffix = query.toString()
+    return request<{ items: AgentTask[]; total: number; page: number; page_size: number }>(
+      `/api/agent-board/tasks${suffix ? `?${suffix}` : ''}`
+    )
+  },
+  agentBoardTaskDetail: (runId: string) =>
+    request<AgentTaskDetail>(`/api/agent-board/tasks/${encodeURIComponent(runId)}`),
+  agentBoardTaskEvents: (runId: string, limit = 50) =>
+    request<{ events: AgentTaskEvent[] }>(
+      `/api/agent-board/tasks/${encodeURIComponent(runId)}/events?limit=${limit}`
+    ),
+  agentBoardRetry: (runId: string) =>
+    request<{ status: string; attempts: number; message: string }>(
+      `/api/agent-board/tasks/${encodeURIComponent(runId)}/retry`,
+      { method: 'POST' }
+    ),
+  agentBoardCancel: (runId: string) =>
+    request<{ status: string; message: string }>(
+      `/api/agent-board/tasks/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' }
+    ),
+  agentBoardSetPriority: (runId: string, priority: number) =>
+    request<{ priority: number; old_priority: number; message: string }>(
+      `/api/agent-board/tasks/${encodeURIComponent(runId)}/priority?priority=${priority}`,
+      { method: 'POST' }
+    ),
+  agentBoardBatchDetail: (batchId: string) =>
+    request<TaskBatch>(`/api/agent-board/batches/${encodeURIComponent(batchId)}`),
+  agentBoardAgents: () =>
+    request<{ agents: AgentBoardAgent[] }>('/api/agent-board/agents'),
 }

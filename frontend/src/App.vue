@@ -16,6 +16,7 @@ import WorkbenchView from './views/WorkbenchView.vue'
 import WatchlistView from './views/WatchlistView.vue'
 import SkillSquareView from './views/SkillSquareView.vue'
 import BacktestReportView from './views/BacktestReportView.vue'
+import AgentTaskBoardView from './views/AgentTaskBoardView.vue'
 import { renderMarkdown } from './utils/markdown'
 import type {
   AgentItem,
@@ -39,6 +40,7 @@ type PageKey =
   | 'positionChart'
   | 'watchlist'
   | 'digitalHumans'
+  | 'agentTaskBoard'
   | 'rhythm'
   | 'knowledge'
   | 'knowledgeSearch'
@@ -212,6 +214,7 @@ const pageTitle = computed(() => {
     askStock: '问股',
     workbench: '今日工作台',
     digitalHumans: '数字人中心',
+    agentTaskBoard: 'Agent 任务',
     positions: '持仓',
     positionChart: '行情图表',
     watchlist: '自选池',
@@ -1049,6 +1052,8 @@ onBeforeUnmount(() => {
       <WorkspaceDocsView v-else-if="activePage === 'workspaceDocs'" />
 
       <SkillSquareView v-else-if="activePage === 'skillSquare'" />
+
+      <AgentTaskBoardView v-else-if="activePage === 'agentTaskBoard'" />
 
       <SettingsView
         v-else-if="activePage === 'settings'"

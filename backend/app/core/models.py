@@ -624,6 +624,8 @@ class AgentRun(Base):
         UniqueConstraint("user_id", "idempotency_key", name="uq_agent_run_idempotency"),
         Index("ix_agent_runs_status_heartbeat", "status", "heartbeat_at"),
         Index("ix_agent_runs_session_created", "session_id", "created_at"),
+        Index("ix_agent_run_board", "board_visible", "status", "updated_at"),
+        Index("ix_agent_run_agent_queue", "assignee_profile_id", "status", "priority", "created_at"),
     )
 
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -656,6 +658,11 @@ class AgentRun(Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # 任务看板字段
+    assignee_profile_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("digital_human_profiles.id"))
+    task_title: Mapped[str | None] = mapped_column(String(240))
+    board_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -812,6 +819,10 @@ class AgentTeamRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    # 任务看板字段
+    execution_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="merge_by_agent")
+    completion_policy: Mapped[str] = mapped_column(String(24), nullable=False, default="all_required")
+
 
 class AgentDelegation(Base):
     """A child Agent assignment within a durable Team run."""
@@ -820,6 +831,7 @@ class AgentDelegation(Base):
     __table_args__ = (
         UniqueConstraint("team_id", "member_index", name="uq_agent_delegation_member"),
         UniqueConstraint("child_run_id", name="uq_agent_delegation_child_run"),
+        UniqueConstraint("team_id", "action_key", name="uq_team_action"),
         Index("ix_agent_delegations_team_status", "team_id", "status"),
     )
 
@@ -842,6 +854,12 @@ class AgentDelegation(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # 任务看板字段
+    title: Mapped[str | None] = mapped_column(String(240))
+    action_key: Mapped[str | None] = mapped_column(String(120))
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    extraction_source: Mapped[str] = mapped_column(String(24), nullable=False, default="tool_call")
 
 
 class AgentWorkflowTemplate(Base):
@@ -1426,10 +1444,21 @@ class ScheduledJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    # 任务看板字段
+    delegation_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="execute_and_wait")
+    task_extraction_mode: Mapped[str] = mapped_column(String(24), nullable=False, default="structured_tool")
+    completion_policy: Mapped[str] = mapped_column(String(24), nullable=False, default="all_required")
+    child_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
+    max_delegated_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+
 
 class JobRun(Base):
     __tablename__ = "job_runs"
-    __table_args__ = (UniqueConstraint("job_key", "fire_key", name="uq_job_run_fire"),)
+    __table_args__ = (
+        UniqueConstraint("job_key", "fire_key", name="uq_job_run_fire"),
+        Index("ix_job_run_leader", "leader_agent_run_id"),
+        Index("ix_job_run_orchestration", "orchestration_type", "orchestration_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
@@ -1446,6 +1475,14 @@ class JobRun(Base):
     output_content: Mapped[str | None] = mapped_column(LONG_TEXT)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+    # 任务看板字段
+    leader_agent_run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"))
+    orchestration_type: Mapped[str | None] = mapped_column(String(24))
+    orchestration_id: Mapped[str | None] = mapped_column(String(64))
+    handoff_status: Mapped[str] = mapped_column(String(24), nullable=False, default="none")
+    handoff_plan_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    handoff_error: Mapped[str | None] = mapped_column(Text)
 
 
 class NotifyChannel(Base):

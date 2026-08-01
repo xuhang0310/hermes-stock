@@ -1228,3 +1228,116 @@ export type BacktestRun = {
   source_code?: string | null
   data_fingerprint: string
 }
+
+// Agent 任务看板
+export type AgentBoardCounts = {
+  queued: number
+  running: number
+  approval: number
+  completed: number
+  abnormal: number
+}
+
+export type AgentTask = {
+  run_id: string
+  task_title: string
+  status: string
+  board_column: 'queued' | 'running' | 'approval' | 'completed' | 'abnormal'
+  priority: number
+  agent_name: string | null
+  agent_code: string | null
+  agent_avatar: string | null
+  wait_seconds: number | null
+  run_seconds: number | null
+  attempts: number
+  max_attempts: number
+  error: string | null
+  created_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  job_run: { job_key: string; status: string } | null
+  scheduled_job: { name: string; job_key: string } | null
+  team: { team_id: string; objective: string } | null
+  current_step: string | null
+  recent_tool: string | null
+}
+
+export type AgentTaskDetail = {
+  run_id: string
+  task_title: string | null
+  status: string
+  priority: number
+  agent_name: string | null
+  agent_code: string | null
+  source_type: string
+  source_ref: string | null
+  parent_run_id: string | null
+  team_id: string | null
+  attempts: number
+  max_attempts: number
+  error: string | null
+  created_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  queued_at: string | null
+  delegation: {
+    delegation_id: string
+    title: string | null
+    action_key: string | null
+    instruction: string
+    expected_output: string | null
+    required: boolean
+    extraction_source: string
+  } | null
+  team: {
+    team_id: string
+    leader_run_id: string
+    objective: string
+    status: string
+    execution_mode: string
+    completion_policy: string
+  } | null
+  job: {
+    job_run_id: string
+    job_key: string
+    status: string
+    started_at: string | null
+    scheduled_job_name: string | null
+  } | null
+}
+
+export type AgentTaskEvent = {
+  event_id: number
+  seq: number
+  event_type: string
+  payload_json: string
+  created_at: string | null
+}
+
+export type AgentBoardAgent = {
+  id: number
+  code: string
+  name: string
+  avatar_url: string | null
+}
+
+export type TaskBatch = {
+  team_id: string
+  leader_run_id: string
+  objective: string
+  status: string
+  execution_mode: string
+  completion_policy: string
+  deadline_at: string | null
+  finished_at: string | null
+  children: Array<{
+    delegation_id: string
+    title: string | null
+    action_key: string | null
+    agent_name: string | null
+    agent_code: string
+    status: string
+    priority: number
+    created_at: string | null
+  }>
+}
