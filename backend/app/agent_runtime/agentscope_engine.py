@@ -190,6 +190,10 @@ def _builtin_backtest_route(question: str) -> str | None:
     )
     if not has_backtest_intent:
         return None
+    # 动量/横截面意图交给 LLM 按 prompt_instructions 选 run_signal_backtest(momentum)，
+    # 否则"多只股票"会被下面的规则误导向风险平价组合
+    if any(term in normalized for term in ("动量", "强者恒强", "横截面")):
+        return None
     symbols = re.findall(r"(?<!\d)\d{6}(?:\.(?:SH|SZ|BJ))?(?!\d)", normalized.upper())
     if (
         any(term in normalized for term in ("风险平价", "等权", "组合回测", "组合归因"))
@@ -518,22 +522,22 @@ def _execute_tool(
             default_account_id=request_payload.get("default_account_id"),
             digital_human_code=request_payload.get("digital_human_code"),
         )
-    if name in {"run_macd_backtest", "run_portfolio_backtest"}:
+    if name in {"run_macd_backtest", "run_portfolio_backtest", "run_signal_backtest", "run_factor_backtest"}:
         from backend.app.skills.strategy_backtest import (
             run_backtest_tool,
+            run_factor_backtest_tool,
             run_portfolio_backtest_tool,
+            run_signal_backtest_tool,
         )
 
-        executor = (
-            run_portfolio_backtest_tool
-            if name == "run_portfolio_backtest"
-            else run_backtest_tool
-        )
-        return executor(
-            args,
-            owner_user_id=int(request_payload["user_id"]),
-            agent_run_id=str(request_payload.get("run_id") or "") or None,
-        )
+        owner_user_id = int(request_payload["user_id"])
+        agent_run_id = str(request_payload.get("run_id") or "") or None
+        if name == "run_macd_backtest":
+            return run_backtest_tool(args, owner_user_id=owner_user_id, agent_run_id=agent_run_id)
+        if name == "run_portfolio_backtest":
+            return run_portfolio_backtest_tool(args, owner_user_id=owner_user_id, agent_run_id=agent_run_id)
+        executor = run_signal_backtest_tool if name == "run_signal_backtest" else run_factor_backtest_tool
+        return executor(args, owner_user_id=owner_user_id)
     if skill_registry.has_tool(name):
         from backend.app.data.user_scope import data_user_scope
 
@@ -1225,7 +1229,7 @@ async def run_agentscope(
                 "success": str(event.state) == "success",
                 "execution_id": execution_id,
             }
-            if name in {"run_macd_backtest", "run_portfolio_backtest"} and raw_result.get("run_id"):
+            if name in {"run_macd_backtest", "run_portfolio_backtest", "run_signal_backtest", "run_factor_backtest"} and raw_result.get("run_id"):
                 tool_done_event["report_run_id"] = str(raw_result["run_id"])
                 tool_done_event["report_url"] = str(
                     raw_result.get("report_url") or f"/backtests/{raw_result['run_id']}"

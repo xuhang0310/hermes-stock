@@ -253,6 +253,10 @@ def _run_portfolio(args: dict) -> dict:
 
 
 def _run_signal(args: dict) -> dict:
+    return run_signal_backtest_tool(args)
+
+
+def run_signal_backtest_tool(args: dict, *, owner_user_id: int | None = None) -> dict:
     return run_signal_backtest(
         strategy=args["strategy"],
         symbols=args["symbols"],
@@ -262,6 +266,7 @@ def _run_signal(args: dict) -> dict:
         initial_cash=args.get("initial_cash", 1_000_000),
         commission_rate=args.get("commission_rate", 0.00025),
         slippage=args.get("slippage", 0.001),
+        owner_user_id=owner_user_id,
     )
 
 
@@ -271,6 +276,11 @@ def _list_strategies(args: dict) -> dict:
 
 def _run_factor_backtest(args: dict) -> dict:
     """运行多因子策略回测"""
+    return run_factor_backtest_tool(args)
+
+
+def run_factor_backtest_tool(args: dict, *, owner_user_id: int | None = None) -> dict:
+    """运行多因子策略回测（可带 owner_user_id 落库）"""
     from backend.app.quant.backtest_runner import _enrich_report, _load_stock_data, _save_backtest_result
     from backend.app.quant.engines.china_a import ChinaAEngine
 
@@ -377,7 +387,11 @@ def _run_factor_backtest(args: dict) -> dict:
     result = _enrich_report(result, strategy_code="factor_combination")
 
     # 保存结果到数据库，生成报告URL
-    result = _save_backtest_result(result, strategy_code="factor_combination")
+    result = _save_backtest_result(
+        result,
+        strategy_code="factor_combination",
+        owner_user_id=owner_user_id,
+    )
 
     return result
 
