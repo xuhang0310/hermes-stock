@@ -14,7 +14,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import BacktestRun
+from backend.app.core.models import BacktestRun, Instrument, StockLatestPrice
 from backend.app.market.stock_tools import (
     get_index_daily,
     get_tushare_daily,
@@ -572,10 +572,28 @@ def list_backtests(owner_user_id: int, *, limit: int = 30, db: Session | None = 
             .order_by(BacktestRun.created_at.desc())
             .limit(max(1, min(limit, 100)))
         ).all()
+        # 一次性查股票名称：先 instruments，缺失的用最新价缓存兜底（组合占位符无名称）。
+        # 名称等于代码本身视为脏数据，跳过，交给兜底源。
+        symbols = {row.symbol for row in rows}
+        name_map: dict[str, str] = {}
+        if symbols:
+            for sym, name in session.execute(
+                select(Instrument.symbol, Instrument.name).where(Instrument.symbol.in_(symbols))
+            ).all():
+                if name and name != sym:
+                    name_map[sym] = name
+            missing = symbols - set(name_map)
+            if missing:
+                for sym, name in session.execute(
+                    select(StockLatestPrice.symbol, StockLatestPrice.name).where(StockLatestPrice.symbol.in_(missing))
+                ).all():
+                    if name and name != sym:
+                        name_map[sym] = name
         return [
             {
                 "run_id": row.run_id,
                 "symbol": row.symbol,
+                "symbol_name": name_map.get(row.symbol),
                 "strategy_code": row.strategy_code,
                 "timeframe": row.timeframe,
                 "start_date": row.start_date,

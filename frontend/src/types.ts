@@ -1088,6 +1088,7 @@ export type BacktestMetrics = {
 export type BacktestListItem = {
   run_id: string
   symbol: string
+  symbol_name: string | null
   strategy_code: string
   timeframe: string
   start_date: string
