@@ -5,7 +5,7 @@ import json
 import math
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
 import numpy as np
@@ -582,7 +582,9 @@ def list_backtests(owner_user_id: int, *, limit: int = 30, db: Session | None = 
                 "end_date": row.end_date,
                 "confidence": row.confidence,
                 "metrics": json.loads(row.metrics_json),
-                "created_at": row.created_at.isoformat() if row.created_at else None,
+                # created_at 由数据库 func.now() 写入（服务器 SYSTEM 时区=UTC），
+                # 标注 +00:00 让前端 new Date() 正确转为北京时间。
+                "created_at": row.created_at.replace(tzinfo=timezone.utc).isoformat() if row.created_at else None,
                 "report_url": f"/backtests/{row.run_id}",
             }
             for row in rows

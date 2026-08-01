@@ -16,6 +16,7 @@ export type PageKey =
   | 'knowledgeSearch'
   | 'workspaceDocs'
   | 'skillSquare'
+  | 'backtestHistory'
   | 'settings'
 
 const props = defineProps<{
@@ -56,6 +57,7 @@ const navItems = computed<NavItem[]>(() => [
   ...(canViewRhythm.value ? [{ key: 'agentTaskBoard' as PageKey, label: 'Agent 任务' }] : []),
   { key: 'positions', label: '持仓' },
   { key: 'watchlist', label: '自选池' },
+  { key: 'backtestHistory', label: '回测报告' },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),
   ...(canViewKnowledge.value ? [{
     key: 'knowledge' as PageKey,

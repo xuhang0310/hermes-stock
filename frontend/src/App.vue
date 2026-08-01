@@ -16,6 +16,7 @@ import WorkbenchView from './views/WorkbenchView.vue'
 import WatchlistView from './views/WatchlistView.vue'
 import SkillSquareView from './views/SkillSquareView.vue'
 import BacktestReportView from './views/BacktestReportView.vue'
+import BacktestHistoryView from './views/BacktestHistoryView.vue'
 import AgentTaskBoardView from './views/AgentTaskBoardView.vue'
 import { renderMarkdown } from './utils/markdown'
 import type {
@@ -46,6 +47,7 @@ type PageKey =
   | 'knowledgeSearch'
   | 'workspaceDocs'
   | 'skillSquare'
+  | 'backtestHistory'
   | 'backtestReport'
   | 'settings'
 
@@ -104,6 +106,8 @@ const digitalHumanInitialTab = ref<'chat' | 'feishuBots'>('chat')
 const digitalHumanInitialSession = ref<number | null>(null)
 const askStockInitialQuestion = ref('')
 const backtestRunId = ref('')
+type BacktestReturnPage = 'digitalHumans' | 'backtestHistory'
+const backtestReturnPage = ref<BacktestReturnPage>('digitalHumans')
 const positionAgentTargetAccount = ref<number | null>(null)
 const positionAgentAccounts = ref<PositionAccount[]>([])
 const positionAgentPendingAction = ref<PositionAgentPendingAction | null>(null)
@@ -224,6 +228,7 @@ const pageTitle = computed(() => {
     knowledgeSearch: '检索agent',
     workspaceDocs: '生成文档',
     skillSquare: '技能广场',
+    backtestHistory: '回测报告',
     backtestReport: '策略回测报告',
     settings: '设置'
   }
@@ -933,15 +938,20 @@ function syncPageFromLocation() {
   }
 }
 
-function openBacktest(runId: string) {
+function openBacktest(runId: string, returnPage: BacktestReturnPage = 'digitalHumans') {
   backtestRunId.value = runId
+  backtestReturnPage.value = returnPage
   window.history.pushState({ backtestRunId: runId }, '', `/backtests/${runId}`)
   activePage.value = 'backtestReport'
 }
 
+function openBacktestFromHistory(runId: string) {
+  openBacktest(runId, 'backtestHistory')
+}
+
 function closeBacktest() {
   window.history.pushState({}, '', '/')
-  activePage.value = 'digitalHumans'
+  activePage.value = backtestReturnPage.value
 }
 
 function openFeishuBindings() {
@@ -989,7 +999,7 @@ onBeforeUnmount(() => {
 
   <AppShell
     v-else
-    :active-page="activePage === 'positionChart' ? chartReturnPage : activePage === 'backtestReport' ? 'digitalHumans' : activePage"
+    :active-page="activePage === 'positionChart' ? chartReturnPage : activePage === 'backtestReport' ? backtestReturnPage : activePage"
     :page-title="pageTitle"
     :page-subtitle="pageSubtitle"
     :health="health"
@@ -1017,6 +1027,10 @@ onBeforeUnmount(() => {
       />
 
       <AskStockView v-else-if="activePage === 'askStock'" :initial-question="askStockInitialQuestion" />
+      <BacktestHistoryView
+        v-else-if="activePage === 'backtestHistory'"
+        @open="openBacktestFromHistory"
+      />
       <BacktestReportView
         v-else-if="activePage === 'backtestReport'"
         :run-id="backtestRunId"

@@ -58,6 +58,7 @@ import type {
   WorkspaceDoc,
   WorkspaceStatus,
   BacktestRun,
+  BacktestListItem,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -623,7 +624,7 @@ export const api = {
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
   workspaceStatus: () => request<WorkspaceStatus>('/api/workspace/status'),
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
-  backtests: () => request<{ items: Array<Partial<BacktestRun>> }>('/api/backtests'),
+  backtests: () => request<{ items: BacktestListItem[] }>('/api/backtests'),
   backtest: (runId: string) =>
     request<BacktestRun>(`/api/backtests/${encodeURIComponent(runId)}`),
   createMacdBacktest: (payload: Record<string, unknown>) =>

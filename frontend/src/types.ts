@@ -1085,6 +1085,19 @@ export type BacktestMetrics = {
   total_cost?: number
 }
 
+export type BacktestListItem = {
+  run_id: string
+  symbol: string
+  strategy_code: string
+  timeframe: string
+  start_date: string
+  end_date: string
+  confidence: string
+  metrics: BacktestMetrics
+  created_at: string | null
+  report_url: string
+}
+
 export type BacktestPricePoint = {
   time: string
   open: number
