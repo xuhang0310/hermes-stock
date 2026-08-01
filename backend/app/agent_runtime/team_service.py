@@ -449,6 +449,10 @@ class AgentTeamService:
                     request_json=json.dumps(child_request, ensure_ascii=False, default=str),
                     attempts=1,
                     max_attempts=max(1, settings.agent_run_max_attempts),
+                    board_visible=True,
+                    queued_at=_utcnow(),
+                    assignee_profile_id=profile.id,
+                    task_title=f"[Team] {profile.name} · {instruction_summary}"[:160],
                 )
                 db.add(child_run)
                 # These mappers have no ORM relationship, so make the FK parent
