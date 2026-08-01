@@ -59,6 +59,7 @@ def create_task_batch(
     leader_run_id: str | None = None,
     user_id: int | None = None,
     job_run_id: str | None = None,
+    _from_legacy_report: bool = False,
 ) -> dict[str, Any]:
     """创建任务批次（原子事务）
 
@@ -67,8 +68,12 @@ def create_task_batch(
     3. 校验 action_key 唯一性
     4. 创建 AgentTeamRun
     5. 创建 AgentDelegation + 子 AgentRun
-    6. 更新父运行状态为 waiting_children
+    6. 更新父运行状态为 waiting_children（legacy_report 模式跳过此步）
     7. 提交后发送 Redis 唤醒消息（外部调用方负责）
+
+    _from_legacy_report=True 时：
+    - 跳过 leader status=="running" 校验（调度器调用时 leader 已完成）
+    - 不更新 leader 状态为 waiting_children（fire-and-forget 语义）
 
     Returns:
         {"team_id": ..., "created_count": N, "task_ids": [...]}
@@ -84,10 +89,11 @@ def create_task_batch(
             leader = session.get(AgentRun, leader_run_id)
             if not leader:
                 raise ValueError(f"父运行不存在：{leader_run_id}")
-            if leader.status != "running":
+            # legacy_report 模式：调度器调用时 leader 已完成，跳过状态校验
+            if not _from_legacy_report and leader.status != "running":
                 raise ValueError(f"父运行状态不是 running：{leader.status}")
             leader_session_id = leader.session_id
-        else:
+        elif not _from_legacy_report:
             raise ValueError("创建任务批次必须提供 leader_run_id")
 
         if not user_id:
@@ -201,10 +207,12 @@ def create_task_batch(
             session.add(child_run)
             created_ids.append(child_run_id)
 
-        # 更新父运行状态
-        if leader_run_id:
-            leader.status = "waiting_children"
-            leader.completion_state = "waiting_children"
+        # 更新父运行状态（legacy_report 模式跳过：leader 已完成，fire-and-forget）
+        if leader_run_id and not _from_legacy_report:
+            leader = session.get(AgentRun, leader_run_id)
+            if leader is not None:
+                leader.status = "waiting_children"
+                leader.completion_state = "waiting_children"
 
         session.commit()
 
