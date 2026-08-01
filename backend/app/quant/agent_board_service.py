@@ -93,25 +93,30 @@ def create_task_batch(
 
         profile_map: dict[str, DigitalHumanProfile] = {}
         for p in profiles:
-            if not p.is_enabled:
+            if p.status != "enabled":
                 logger.warning("数字人未启用，跳过: %s", p.code)
                 continue
-            if not getattr(p, "delegation_enabled", True):
+            if not p.delegation_enabled:
                 logger.warning("数字人未开启委派，跳过: %s", p.code)
                 continue
             profile_map[p.code] = p
 
-        # 校验 action_key 唯一性
+        # 校验批次内部 action_key 唯一性
+        batch_keys = [t.action_key for t in batch.tasks]
+        intra_dups = [k for k in batch_keys if batch_keys.count(k) > 1]
+        if intra_dups:
+            raise ValueError(f"任务 action_key 批次内重复：{', '.join(set(intra_dups))}")
+
+        # 校验 action_key 与数据库已有记录的唯一性
         existing_keys = set(
             session.execute(
                 select(AgentDelegation.action_key).where(
-                    AgentDelegation.action_key.in_([t.action_key for t in batch.tasks])
+                    AgentDelegation.action_key.in_(batch_keys)
                 )
             ).scalars().all()
         )
-        dup_keys = existing_keys.intersection(t.action_key for t in batch.tasks)
-        if dup_keys:
-            raise ValueError(f"任务 action_key 已存在：{', '.join(dup_keys)}")
+        if existing_keys:
+            raise ValueError(f"任务 action_key 已存在：{', '.join(existing_keys)}")
 
         # 创建 TeamRun
         team_id = uuid.uuid4().hex
