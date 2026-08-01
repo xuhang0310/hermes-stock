@@ -6,7 +6,7 @@ ScheduledJob、JobRun 的关联数据。
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,6 +23,19 @@ from backend.app.core.models import (
     JobRun,
     ScheduledJob,
 )
+
+
+def _fmt(dt: datetime | None) -> str | None:
+    """格式化时间，确保带时区标识（UTC+8 北京时间）。
+
+    数据库存的 datetime 是 naive（无 tzinfo），实际是北京时间。
+    加上 +08:00 后前端 new Date() 能正确解析。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    return dt.isoformat()
 
 router = APIRouter(prefix="/api/agent-board", tags=["agent-board"])
 
@@ -223,9 +236,9 @@ def _query_tasks(
             "attempts": run.attempts,
             "max_attempts": run.max_attempts,
             "error": run.error[:200] if run.error else None,
-            "created_at": run.created_at.isoformat() if run.created_at else None,
-            "started_at": run.started_at.isoformat() if run.started_at else None,
-            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "created_at": _fmt(run.created_at),
+            "started_at": _fmt(run.started_at),
+            "finished_at": _fmt(run.finished_at),
             "job_run": job_run_info,
             "scheduled_job": scheduled_job_info,
             "team": team_info,
@@ -345,7 +358,7 @@ def get_task_detail(
                 "job_run_id": jr.run_id,
                 "job_key": jr.job_key,
                 "status": jr.status,
-                "started_at": jr.started_at.isoformat() if jr.started_at else None,
+                "started_at": _fmt(jr.started_at),
             }
             sj = session.execute(select(ScheduledJob).where(ScheduledJob.job_key == jr.job_key)).scalar()
             if sj:
@@ -365,10 +378,10 @@ def get_task_detail(
         "attempts": run.attempts,
         "max_attempts": run.max_attempts,
         "error": run.error,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-        "started_at": run.started_at.isoformat() if run.started_at else None,
-        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-        "queued_at": run.queued_at.isoformat() if run.queued_at else None,
+        "created_at": _fmt(run.created_at),
+        "started_at": _fmt(run.started_at),
+        "finished_at": _fmt(run.finished_at),
+        "queued_at": _fmt(run.queued_at),
         "delegation": delegation_info,
         "team": team_info,
         "job": job_info,
@@ -402,7 +415,7 @@ def get_task_events(
                 "seq": e.seq,
                 "event_type": e.event_type,
                 "payload_json": e.payload_json,
-                "created_at": e.created_at.isoformat() if e.created_at else None,
+                "created_at": _fmt(e.created_at),
             }
             for e in events
         ],
@@ -512,7 +525,7 @@ def get_batch_detail(
             "agent_code": d.target_profile_code,
             "status": child_run.status if child_run else d.status,
             "priority": d.priority,
-            "created_at": d.created_at.isoformat() if d.created_at else None,
+            "created_at": _fmt(d.created_at),
         })
 
     return {
@@ -522,8 +535,8 @@ def get_batch_detail(
         "status": team.status,
         "execution_mode": team.execution_mode,
         "completion_policy": team.completion_policy,
-        "deadline_at": team.deadline_at.isoformat() if team.deadline_at else None,
-        "finished_at": team.finished_at.isoformat() if team.finished_at else None,
+        "deadline_at": _fmt(team.deadline_at),
+        "finished_at": _fmt(team.finished_at),
         "children": children,
     }
 
