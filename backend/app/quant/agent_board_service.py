@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -77,13 +78,20 @@ def create_task_batch(
 
     session = SessionLocal()
     try:
-        # 校验 leader run
+        # 校验 leader run 并获取 session_id（子任务需要继承）
+        leader_session_id: int | None = None
         if leader_run_id:
             leader = session.get(AgentRun, leader_run_id)
             if not leader:
                 raise ValueError(f"父运行不存在：{leader_run_id}")
             if leader.status != "running":
                 raise ValueError(f"父运行状态不是 running：{leader.status}")
+            leader_session_id = leader.session_id
+        else:
+            raise ValueError("创建任务批次必须提供 leader_run_id")
+
+        if not user_id:
+            raise ValueError("创建任务批次必须提供 user_id")
 
         # 预查所有数字人
         agent_codes = [t.agent_code for t in batch.tasks]
@@ -123,9 +131,9 @@ def create_task_batch(
         deadline = datetime.now() + timedelta(seconds=batch.child_timeout_seconds * len(batch.tasks))
         team_run = AgentTeamRun(
             team_id=team_id,
-            leader_run_id=leader_run_id or "",
-            root_run_id=leader_run_id or "",
-            user_id=user_id or 0,
+            leader_run_id=leader_run_id,
+            root_run_id=leader_run_id,
+            user_id=user_id,
             tool_call_id=f"batch_{team_id}",
             objective=batch.objective,
             status="running",
@@ -148,7 +156,7 @@ def create_task_batch(
             delegation = AgentDelegation(
                 delegation_id=uuid.uuid4().hex,
                 team_id=team_id,
-                parent_run_id=leader_run_id or "",
+                parent_run_id=leader_run_id,
                 child_run_id=child_run_id,
                 member_index=i,
                 target_profile_id=profile.id,
@@ -168,8 +176,8 @@ def create_task_batch(
 
             child_run = AgentRun(
                 run_id=child_run_id,
-                session_id=0,  # 系统任务，无用户会话
-                user_id=user_id or 0,
+                session_id=leader_session_id,
+                user_id=user_id,
                 engine="task_board",
                 chat_mode="stock",
                 source_type="task_batch",
@@ -181,7 +189,10 @@ def create_task_batch(
                 deadline_at=deadline,
                 status="queued",
                 priority=task.priority,
-                request_json=f'{{"action_key": "{task.action_key}", "title": "{task.title}", "instruction": "{task.instruction}"}}',
+                request_json=json.dumps(
+                    {"action_key": task.action_key, "title": task.title, "instruction": task.instruction},
+                    ensure_ascii=False,
+                ),
                 board_visible=True,
                 queued_at=datetime.now(),
                 assignee_profile_id=profile.id,
