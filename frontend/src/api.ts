@@ -805,12 +805,22 @@ export const api = {
     signal?: AbortSignal
   ) => durableAgentStreamRequest({ ...payload, chat_mode: 'stock' }, onEvent, signal),
   // Agent 任务看板
-  agentBoardSummary: () => request<{ counts: AgentBoardCounts }>('/api/agent-board/summary'),
+  agentBoardSummary: (params?: { date_from?: string; date_to?: string }) => {
+    const query = new URLSearchParams()
+    if (params?.date_from) query.set('date_from', params.date_from)
+    if (params?.date_to) query.set('date_to', params.date_to)
+    const suffix = query.toString()
+    return request<{ counts: AgentBoardCounts }>(
+      `/api/agent-board/summary${suffix ? `?${suffix}` : ''}`
+    )
+  },
   agentBoardTasks: (params: {
     status?: string
     agent_code?: string
     source_type?: string
     scheduled_job_key?: string
+    date_from?: string
+    date_to?: string
     page?: number
     page_size?: number
   } = {}) => {
@@ -819,6 +829,8 @@ export const api = {
     if (params.agent_code) query.set('agent_code', params.agent_code)
     if (params.source_type) query.set('source_type', params.source_type)
     if (params.scheduled_job_key) query.set('scheduled_job_key', params.scheduled_job_key)
+    if (params.date_from) query.set('date_from', params.date_from)
+    if (params.date_to) query.set('date_to', params.date_to)
     if (params.page) query.set('page', String(params.page))
     if (params.page_size) query.set('page_size', String(params.page_size))
     const suffix = query.toString()

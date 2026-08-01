@@ -53,13 +53,27 @@ def _status_to_column(status: str) -> str:
     return "queued"
 
 
-def _get_status_counts(session, user_id: int | None = None, skip_user_filter: bool = False) -> dict[str, int]:
+def _get_status_counts(session, user_id: int | None = None, skip_user_filter: bool = False, date_from: str | None = None, date_to: str | None = None) -> dict[str, int]:
     """查询各状态数量"""
     query = select(AgentRun.status, func.count(AgentRun.run_id)).where(
         AgentRun.board_visible == True,
     )
     if user_id is not None and not skip_user_filter:
         query = query.where(AgentRun.user_id == user_id)
+    # 时间筛选
+    if date_from:
+        try:
+            dt_from = datetime.fromisoformat(date_from)
+            query = query.where(AgentRun.created_at >= dt_from)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            dt_to = datetime.fromisoformat(date_to)
+            dt_to_end = dt_to.replace(hour=23, minute=59, second=59)
+            query = query.where(AgentRun.created_at <= dt_to_end)
+        except ValueError:
+            pass
     query = query.group_by(AgentRun.status)
     rows = session.execute(query).all()
 
@@ -79,6 +93,8 @@ def _query_tasks(
     agent_code: str | None = None,
     source_type: str | None = None,
     scheduled_job_key: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     page: int = 1,
     page_size: int = 30,
 ) -> tuple[list[dict], int]:
@@ -104,6 +120,22 @@ def _query_tasks(
 
     if scheduled_job_key:
         query = query.where(AgentRun.source_ref == scheduled_job_key)
+
+    # 时间筛选
+    if date_from:
+        try:
+            dt_from = datetime.fromisoformat(date_from)
+            query = query.where(AgentRun.created_at >= dt_from)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            dt_to = datetime.fromisoformat(date_to)
+            # date_to 是结束日期，需要包含当天整天
+            dt_to_end = dt_to.replace(hour=23, minute=59, second=59)
+            query = query.where(AgentRun.created_at <= dt_to_end)
+        except ValueError:
+            pass
 
     # 总数
     count_query = select(func.count()).select_from(query.subquery())
@@ -195,11 +227,16 @@ def _query_tasks(
 
 @router.get("/summary")
 def get_board_summary(
+    date_from: Optional[str] = Query(None, description="开始日期 ISO 格式：2026-08-01"),
+    date_to: Optional[str] = Query(None, description="结束日期 ISO 格式：2026-08-01"),
     context: AuthContext = Depends(require_permission("agent:use")),
     session=Depends(_get_session),
 ) -> dict:
     """查询看板各状态数量"""
-    counts = _get_status_counts(session, user_id=context.user.id, skip_user_filter=context.user.is_super_admin)
+    counts = _get_status_counts(
+        session, user_id=context.user.id, skip_user_filter=context.user.is_super_admin,
+        date_from=date_from, date_to=date_to,
+    )
     return {"counts": counts}
 
 
@@ -209,6 +246,8 @@ def get_board_tasks(
     agent_code: Optional[str] = Query(None),
     source_type: Optional[str] = Query(None),
     scheduled_job_key: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="开始日期 ISO 格式：2026-08-01"),
+    date_to: Optional[str] = Query(None, description="结束日期 ISO 格式：2026-08-01"),
     page: int = Query(1, ge=1),
     page_size: int = Query(30, ge=1, le=100),
     context: AuthContext = Depends(require_permission("agent:use")),
@@ -223,6 +262,8 @@ def get_board_tasks(
         agent_code=agent_code,
         source_type=source_type,
         scheduled_job_key=scheduled_job_key,
+        date_from=date_from,
+        date_to=date_to,
         page=page,
         page_size=page_size,
     )

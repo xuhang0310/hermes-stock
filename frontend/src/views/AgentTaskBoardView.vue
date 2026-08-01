@@ -7,6 +7,7 @@ const props = defineProps<{ runId?: string }>()
 const emit = defineEmits<{ openSession: [sessionId: number] }>()
 
 type BoardColumn = 'queued' | 'running' | 'approval' | 'completed' | 'abnormal'
+type TimeFilter = 'today' | 'yesterday' | 'this_week' | 'last_week' | 'custom'
 
 const loading = ref(false)
 const error = ref('')
@@ -16,6 +17,9 @@ const agents = ref<AgentBoardAgent[]>([])
 const searchQuery = ref('')
 const filterStatus = ref('')
 const filterAgent = ref('')
+const timeFilter = ref<TimeFilter>('today')
+const customDateFrom = ref('')
+const customDateTo = ref('')
 const activeColumn = ref<BoardColumn | ''>('')
 const refreshTimer = ref<number | null>(null)
 const refreshSeconds = ref(15)
@@ -86,13 +90,57 @@ function formatTime(iso: string | null): string {
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
+function formatDate(d: Date): string {
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function getDateRange(): { date_from?: string; date_to?: string } {
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+
+  switch (timeFilter.value) {
+    case 'today':
+      return { date_from: formatDate(today), date_to: formatDate(today) }
+    case 'yesterday': {
+      const y = new Date(today)
+      y.setDate(y.getDate() - 1)
+      return { date_from: formatDate(y), date_to: formatDate(y) }
+    }
+    case 'this_week': {
+      const day = today.getDay() || 7
+      const mon = new Date(today)
+      mon.setDate(today.getDate() - day + 1)
+      return { date_from: formatDate(mon), date_to: formatDate(today) }
+    }
+    case 'last_week': {
+      const day = today.getDay() || 7
+      const lastMon = new Date(today)
+      lastMon.setDate(today.getDate() - day - 6)
+      const lastSun = new Date(today)
+      lastSun.setDate(today.getDate() - day)
+      return { date_from: formatDate(lastMon), date_to: formatDate(lastSun) }
+    }
+    case 'custom':
+      return {
+        date_from: customDateFrom.value || undefined,
+        date_to: customDateTo.value || undefined,
+      }
+    default:
+      return {}
+  }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
   try {
+    const dateRange = getDateRange()
     const [summaryRes, tasksRes, agentsRes] = await Promise.all([
-      api.agentBoardSummary(),
-      api.agentBoardTasks({ page_size: 100 }),
+      api.agentBoardSummary(dateRange),
+      api.agentBoardTasks({ page_size: 100, ...dateRange }),
       api.agentBoardAgents(),
     ])
     counts.value = summaryRes.counts
@@ -198,6 +246,18 @@ onBeforeUnmount(() => {
         <option value="failed">failed</option>
         <option value="timed_out">timed_out</option>
       </select>
+      <select v-model="timeFilter" class="filter-select" @change="load">
+        <option value="today">今天</option>
+        <option value="yesterday">昨天</option>
+        <option value="this_week">本周</option>
+        <option value="last_week">上周</option>
+        <option value="custom">自定义</option>
+      </select>
+      <template v-if="timeFilter === 'custom'">
+        <input v-model="customDateFrom" type="date" class="filter-date" @change="load" />
+        <span class="filter-date-sep">至</span>
+        <input v-model="customDateTo" type="date" class="filter-date" @change="load" />
+      </template>
       <div class="refresh-control">
         <span>自动刷新：{{ refreshSeconds }} 秒</span>
         <button
@@ -404,6 +464,28 @@ onBeforeUnmount(() => {
   outline: none;
   cursor: pointer;
   min-width: 120px;
+}
+
+.filter-date {
+  padding: 10px 12px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  min-width: 140px;
+}
+
+.filter-date:focus {
+  border-color: #eabf63;
+}
+
+.filter-date-sep {
+  color: #8b949e;
+  font-size: 13px;
+  padding: 0 4px;
 }
 
 .refresh-control {
