@@ -476,6 +476,10 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    @property
+    def is_super_admin(self) -> bool:
+        return self.role == "super_admin"
+
 
 class LlmModelPlatform(Base):
     __tablename__ = "llm_model_platforms"

@@ -53,12 +53,12 @@ def _status_to_column(status: str) -> str:
     return "queued"
 
 
-def _get_status_counts(session, user_id: int | None = None) -> dict[str, int]:
+def _get_status_counts(session, user_id: int | None = None, skip_user_filter: bool = False) -> dict[str, int]:
     """查询各状态数量"""
     query = select(AgentRun.status, func.count(AgentRun.run_id)).where(
         AgentRun.board_visible == True,
     )
-    if user_id is not None:
+    if user_id is not None and not skip_user_filter:
         query = query.where(AgentRun.user_id == user_id)
     query = query.group_by(AgentRun.status)
     rows = session.execute(query).all()
@@ -74,6 +74,7 @@ def _query_tasks(
     session,
     *,
     user_id: int | None = None,
+    skip_user_filter: bool = False,
     status: str | None = None,
     agent_code: str | None = None,
     source_type: str | None = None,
@@ -87,7 +88,7 @@ def _query_tasks(
         .outerjoin(DigitalHumanProfile, AgentRun.assignee_profile_id == DigitalHumanProfile.id)
         .where(AgentRun.board_visible == True)
     )
-    if user_id is not None:
+    if user_id is not None and not skip_user_filter:
         query = query.where(AgentRun.user_id == user_id)
 
     # 状态筛选：把看板列名展开为具体状态
@@ -198,7 +199,7 @@ def get_board_summary(
     session=Depends(_get_session),
 ) -> dict:
     """查询看板各状态数量"""
-    counts = _get_status_counts(session, user_id=context.user.id)
+    counts = _get_status_counts(session, user_id=context.user.id, skip_user_filter=context.user.is_super_admin)
     return {"counts": counts}
 
 
@@ -217,6 +218,7 @@ def get_board_tasks(
     items, total = _query_tasks(
         session,
         user_id=context.user.id,
+        skip_user_filter=context.user.is_super_admin,
         status=status,
         agent_code=agent_code,
         source_type=source_type,
