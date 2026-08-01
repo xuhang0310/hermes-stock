@@ -26,20 +26,22 @@ from backend.app.core.models import (
 
 
 def _fmt(dt: datetime | None) -> str | None:
-    """格式化时间，确保带时区标识（UTC+8 北京时间）。
+    """格式化 naive datetime 为带 UTC 标识的 ISO 字符串。
 
-    数据库存的 datetime 是 naive（无 tzinfo），实际是北京时间。
-    加上 +08:00 后前端 new Date() 能正确解析。
+    数据库存的是 UTC（通过 _utcnow() / datetime.utcnow() 写入），
+    但没有 tzinfo。前端 new Date() 解析无时区字符串时当本地时间，
+    导致少 8 小时。加上 +00:00 后前端能正确转为北京时间。
     """
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+        dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
+
 
 router = APIRouter(prefix="/api/agent-board", tags=["agent-board"])
 
-# 北京时间 (UTC+8) 偏移
+# 用户传入的日期是北京日期，查询时需要转为 UTC 范围
 _CST_OFFSET = timedelta(hours=8)
 
 
@@ -214,9 +216,9 @@ def _query_tasks(
         wait_seconds = None
         run_seconds = None
         if run.status in ("queued", "waiting_dependency") and run.queued_at:
-            wait_seconds = int((datetime.now() - run.queued_at).total_seconds())
+            wait_seconds = int((datetime.utcnow() - run.queued_at).total_seconds())
         elif run.status == "running" and run.started_at:
-            run_seconds = int((datetime.now() - run.started_at).total_seconds())
+            run_seconds = int((datetime.utcnow() - run.started_at).total_seconds())
 
         # 当前步骤
         current_step = None
@@ -443,7 +445,7 @@ def retry_task(
     run.attempts = run.attempts + 1
     run.error = None
     run.cancel_requested = False
-    run.queued_at = datetime.now()
+    run.queued_at = datetime.utcnow()
     run.started_at = None
     run.finished_at = None
     session.commit()
@@ -468,7 +470,7 @@ def cancel_task(
     run.cancel_requested = True
     if run.status in ("queued", "waiting_dependency", "waiting_approval"):
         run.status = "cancelled"
-        run.finished_at = datetime.now()
+        run.finished_at = datetime.utcnow()
     session.commit()
 
     return {"status": "cancelled" if run.status == "cancelled" else "cancelling", "message": "取消请求已提交"}
