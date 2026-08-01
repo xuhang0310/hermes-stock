@@ -194,6 +194,7 @@ def run_signal_backtest(
     }
 
     # 保存结果到数据库，生成报告URL
+    result = _enrich_report(result, strategy_code=f"signal_{strategy}")
     result = _save_backtest_result(result, strategy_code=f"signal_{strategy}")
 
     return result
@@ -265,6 +266,152 @@ def _save_backtest_result(
         raise
     finally:
         session.close()
+
+    return result
+
+
+def _enrich_report(result: Dict[str, Any], *, strategy_code: str) -> Dict[str, Any]:
+    """补全报告所需字段，匹配前端 BacktestReportView 的数据结构
+
+    前端期望的字段：
+    - metrics.trade_count / winning_trades / losing_trades / avg_holding_days
+    - period.trading_days
+    - strategy.name
+    - attribution (top_winner, top_loser, exit_reasons)
+    - source_code, data_fingerprint
+    """
+    metrics = result.get("metrics", {})
+    trades = result.get("trades", [])
+    symbols = result.get("symbols", [])
+
+    # 指标字段名映射
+    n_trades = metrics.get("n_trades", len(trades))
+    metrics["trade_count"] = n_trades
+    metrics["winning_trades"] = metrics.get("win_rate", 0) * n_trades if metrics.get("win_rate") else sum(1 for t in trades if t.get("pnl", 0) > 0)
+    metrics["losing_trades"] = n_trades - int(metrics["winning_trades"])
+    metrics["avg_holding_days"] = metrics.get("avg_holding_bars", 0)
+    metrics["annual_volatility"] = metrics.get("volatility", 0)
+    metrics["final_equity"] = metrics.get("final_equity", result.get("equity_curve", [{}])[-1].get("equity", 0) if result.get("equity_curve") else 0)
+    metrics["profit_loss_ratio"] = metrics.get("profit_factor", 0)
+    metrics["excess_return"] = metrics.get("alpha", 0)
+    metrics["benchmark_return"] = 0
+
+    # 交易数据字段映射
+    for t in trades:
+        if "quantity" not in t:
+            t["quantity"] = t.get("size", 0)
+        if "direction" not in t:
+            t["direction"] = 1
+        if "holding_days" not in t:
+            t["holding_days"] = t.get("holding_bars", 0)
+        if "gross_pnl" not in t:
+            t["gross_pnl"] = t.get("pnl", 0)
+        if "fees" not in t:
+            t["fees"] = 0
+        if "return_pct" not in t:
+            t["return_pct"] = t.get("pnl_pct", 0)
+        if "exit_reason" not in t:
+            t["exit_reason"] = "signal"
+
+    # 归因分析
+    attribution = {}
+
+    # 最大盈利交易
+    if trades:
+        winner = max(trades, key=lambda t: t.get("pnl", 0))
+        loser = min(trades, key=lambda t: t.get("pnl", 0))
+        attribution["top_winner"] = {
+            "symbol": winner.get("symbol", ""),
+            "pnl": winner.get("pnl", 0),
+            "entry_date": winner.get("entry_date", ""),
+            "exit_date": winner.get("exit_date", ""),
+        }
+        attribution["top_loser"] = {
+            "symbol": loser.get("symbol", ""),
+            "pnl": loser.get("pnl", 0),
+            "entry_date": loser.get("entry_date", ""),
+            "exit_date": loser.get("exit_date", ""),
+        }
+        attribution["remove_top_winner_pnl"] = sum(t.get("pnl", 0) for t in trades if t is not winner)
+
+    # 退出原因统计
+    exit_reasons_map: Dict[str, Dict] = {}
+    for t in trades:
+        reason = t.get("exit_reason", "signal")
+        if reason not in exit_reasons_map:
+            exit_reasons_map[reason] = {"reason": reason, "count": 0, "total_pnl": 0}
+        exit_reasons_map[reason]["count"] += 1
+        exit_reasons_map[reason]["total_pnl"] += t.get("pnl", 0)
+    attribution["exit_reasons"] = list(exit_reasons_map.values())
+
+    # 标的统计
+    asset_stats: Dict[str, Dict] = {}
+    for t in trades:
+        sym = t.get("symbol", "")
+        if sym not in asset_stats:
+            asset_stats[sym] = {"symbol": sym, "n_trades": 0, "total_pnl": 0, "win_rate": 0, "wins": 0}
+        asset_stats[sym]["n_trades"] += 1
+        asset_stats[sym]["total_pnl"] += t.get("pnl", 0)
+        if t.get("pnl", 0) > 0:
+            asset_stats[sym]["wins"] += 1
+    for sym, stat in asset_stats.items():
+        stat["win_rate"] = stat["wins"] / stat["n_trades"] if stat["n_trades"] > 0 else 0
+    attribution["asset_stats"] = list(asset_stats.values())
+
+    # 市场回归
+    attribution["market_regression"] = {
+        "benchmark": "000300.SH",
+        "beta": metrics.get("beta", 0),
+        "alpha_annual": metrics.get("alpha", 0),
+        "alpha_t_stat": 0,
+        "r_squared": 0,
+    }
+
+    # 统计检验（跳过）
+    attribution["statistical_tests"] = {
+        "status": "skipped",
+        "reason": "需要基准数据和更多交易日才能进行统计检验",
+    }
+
+    # 区间分析（跳过）
+    attribution["regime_analysis"] = {
+        "status": "skipped",
+        "reason": "需要基准数据和更多交易日才能进行区间分析",
+    }
+
+    attribution["concentration"] = {
+        "top_contributor": {"symbol": "", "pnl_contribution": 0},
+        "top_positive_share": 0,
+        "remove_top_contributor_pnl": 0,
+    }
+
+    result["attribution"] = attribution
+
+    # 策略名
+    strategy_names = {
+        "macd": "MACD 信号回测",
+        "ma_cross": "均线交叉回测",
+        "bollinger": "布林带回测",
+        "rsi": "RSI 回测",
+        "factor_combination": "多因子组合回测",
+    }
+    result["strategy"] = {
+        "name": strategy_names.get(strategy_code.replace("signal_", ""), strategy_code),
+    }
+
+    # 周期
+    result["period"]["trading_days"] = len(result.get("equity_curve", []))
+
+    # 基准标签
+    result["benchmark_label"] = "沪深300"
+
+    # 源码
+    result["source_code"] = f"# {strategy_code}\n# 策略代码未保存，请查看回测配置"
+
+    # 数据指纹
+    result["data_fingerprint"] = f"signal-{strategy_code}-{'-'.join(symbols)}-{result['period']['start']}-{result['period']['end']}"
+
+    result["report_type"] = "single"
 
     return result
 

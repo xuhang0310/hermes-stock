@@ -269,7 +269,7 @@ def _list_strategies(args: dict) -> dict:
 
 def _run_factor_backtest(args: dict) -> dict:
     """运行多因子策略回测"""
-    from backend.app.quant.backtest_runner import _load_stock_data, _save_backtest_result
+    from backend.app.quant.backtest_runner import _enrich_report, _load_stock_data, _save_backtest_result
     from backend.app.quant.engines.china_a import ChinaAEngine
 
     # 创建因子信号引擎
@@ -370,6 +370,9 @@ def _run_factor_backtest(args: dict) -> dict:
             for i, s in enumerate(market_engine.equity_snapshots)
         ],
     }
+
+    # 补全报告字段
+    result = _enrich_report(result, strategy_code="factor_combination")
 
     # 保存结果到数据库，生成报告URL
     result = _save_backtest_result(result, strategy_code="factor_combination")
