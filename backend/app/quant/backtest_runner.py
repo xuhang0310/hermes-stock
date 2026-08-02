@@ -330,6 +330,8 @@ def _enrich_report(result: Dict[str, Any], *, strategy_code: str) -> Dict[str, A
     result["metrics"] = metrics
     trades = result.get("trades", [])
     symbols = result.get("symbols", [])
+    if not result.get("symbol"):
+        result["symbol"] = symbols[0] if symbols else ""
 
     # 指标字段名映射
     n_trades = metrics.get("n_trades", len(trades))

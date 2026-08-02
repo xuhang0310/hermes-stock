@@ -202,8 +202,10 @@ function renderCharts() {
     close: item.close
   })))
   createSeriesMarkers(candles, run.value.trade_markers.map((marker) => ({
-    ...marker,
     time: marker.time as Time,
+    position: marker.shape === 'arrowUp' ? 'aboveBar' : 'belowBar',
+    shape: marker.shape,
+    text: '',
     color: marker.shape === 'arrowUp' ? '#42dfad' : '#ff6b70'
   })))
   const volume = priceChart.addSeries(HistogramSeries, {
@@ -455,7 +457,7 @@ onBeforeUnmount(destroyCharts)
           <header>
             <div>
               <span>PRICE ACTION</span>
-              <strong>{{ isPortfolio ? '标的归一化走势（起点 = 100）' : `${run.symbol} K线与成交量` }}</strong>
+              <strong>{{ isPortfolio ? '标的归一化走势（起点 = 100）' : `${run.symbol || run.symbols?.[0] || run.strategy?.name || '标的'} K线与成交量` }}</strong>
             </div>
             <div v-if="!isPortfolio" class="chart-legend">
               <span class="buy">● 买入</span>
