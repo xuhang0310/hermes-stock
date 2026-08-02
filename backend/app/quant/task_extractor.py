@@ -172,13 +172,13 @@ class ScheduledTaskExtractor:
         if config is None:
             raise RuntimeError("没有可用的 LLM 配置")
 
-        url = f"{config.base_url.rstrip('/')}/chat/completions"
+        url = f"{config['base_url'].rstrip('/')}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {config.api_key}",
+            "Authorization": f"Bearer {config['api_key']}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": config.model_name,
+            "model": config["model"],
             "messages": [
                 {"role": "system", "content": "你是任务提取器，严格输出 JSON。"},
                 {"role": "user", "content": prompt},
