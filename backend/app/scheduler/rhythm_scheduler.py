@@ -89,6 +89,13 @@ def _should_extract_report_tasks(
     )
     return has_pending_action and has_agent_assignment
 
+
+async def _enqueue_agent_tasks(task_ids: list[str]) -> None:
+    from backend.app.agent_runtime.redis_broker import redis_broker
+
+    for task_id in task_ids:
+        await redis_broker.enqueue(task_id)
+
 _CARD_TEMPLATE_BY_JOB = {
     "topnews-morning-0630": "wathet",
     "premarket-brief-0830": "wathet",
@@ -781,7 +788,6 @@ def _execute_job(job_key: str, run_id: str) -> None:
                     extractor = ScheduledTaskExtractor()
                     plan = extractor.extract(output_content, job_run_id=run_id)
                     if plan.get("has_tasks") and plan.get("confidence", 0) >= 0.8:
-                        from backend.app.agent_runtime.redis_broker import redis_broker
                         from backend.app.quant.agent_board_service import (
                             create_task_batch,
                         )
@@ -811,8 +817,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
                                     jr.orchestration_id = board_result["team_id"]
                                     jr.handoff_status = "created"
                                     db.commit()
-                            for task_id in board_result["task_ids"]:
-                                redis_broker.enqueue(task_id)
+                            asyncio.run(_enqueue_agent_tasks(board_result["task_ids"]))
                             _log(
                                 "INFO",
                                 f"定时任务 {snapshot['job_key']} 提取了 {len(board_result['task_ids'])} 个协同任务",

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import patch
@@ -195,9 +196,15 @@ class AgentBoardServiceTests(unittest.TestCase):
             for child in children:
                 self.assertTrue(child.board_visible)
                 self.assertEqual(child.status, "queued")
+                self.assertEqual(child.engine, "agentscope")
                 self.assertIsNotNone(child.assignee_profile_id)
                 self.assertIsNotNone(child.task_title)
                 self.assertIsNotNone(child.queued_at)
+                request = json.loads(child.request_json)
+                self.assertEqual(request["session_id"], child.session_id)
+                self.assertEqual(request["user_id"], self.user_id)
+                self.assertEqual(request["delegation_config"], {"mode": "none"})
+                self.assertTrue(request["question"])
 
             delegations = db.scalars(
                 select(AgentDelegation).where(AgentDelegation.team_id == result["team_id"])

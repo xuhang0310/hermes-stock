@@ -22,6 +22,8 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.database import session_scope
 from backend.app.core.models import (
+    AiChatMessage,
+    AiChatSession,
     AgentDelegation,
     AgentRun,
     AgentTeamRun,
@@ -89,7 +91,9 @@ def create_task_batch(
 
     with session_scope() as session:
         # 校验 leader run 并获取 session_id（子任务需要继承）
-        leader_session_id: int | None = None
+        leader_request: dict[str, Any] = {}
+        leader_engine = "agentscope"
+        root_run_id = leader_run_id
         if leader_run_id:
             leader = session.get(AgentRun, leader_run_id)
             if not leader:
@@ -97,7 +101,13 @@ def create_task_batch(
             # skip_leader_validation 模式：调度器调用时 leader 已完成，跳过状态校验
             if not skip_leader_validation and leader.status != "running":
                 raise ValueError(f"父运行状态不是 running：{leader.status}")
-            leader_session_id = leader.session_id
+            leader_engine = leader.engine
+            root_run_id = leader.root_run_id or leader.run_id
+            try:
+                loaded_request = json.loads(leader.request_json or "{}")
+                leader_request = loaded_request if isinstance(loaded_request, dict) else {}
+            except json.JSONDecodeError:
+                leader_request = {}
         elif not skip_leader_validation:
             raise ValueError("创建任务批次必须提供 leader_run_id")
 
@@ -167,6 +177,69 @@ def create_task_batch(
                 continue
 
             child_run_id = uuid.uuid4().hex
+            child_question = f"协同目标：{batch.objective}\n当前任务：{task.instruction}"
+            if task.expected_output:
+                child_question += f"\n期望输出：{task.expected_output}"
+            child_session = AiChatSession(
+                user_id=user_id,
+                digital_human_id=profile.id,
+                model_config_id=leader_request.get("model_config_id"),
+                title=f"任务 · {profile.name} · {task.title}"[:160],
+                status="active",
+                chat_mode="research",
+                source_type="task_batch",
+                external_conversation_id=f"{team_id}:{i}"[:160],
+                source_label="Agent 任务看板",
+            )
+            session.add(child_session)
+            session.flush()
+            session.add(
+                AiChatMessage(
+                    session_id=child_session.id,
+                    role="user",
+                    content=child_question,
+                    event_count=0,
+                )
+            )
+            digital_context = "\n".join(
+                [
+                    f"当前数字人：{profile.name}",
+                    f"风格：{profile.avatar_tone}",
+                    f"职责：{profile.description}",
+                    f"系统提示：{profile.system_prompt}",
+                    "当前任务来自 Agent 任务看板，只完成分配给你的任务，不要继续委派。",
+                ]
+            )
+            child_request = {
+                "session_id": child_session.id,
+                "user_id": user_id,
+                "user_label": str(leader_request.get("user_label") or "task-owner"),
+                "question": child_question,
+                "user_text": child_question,
+                "attachments": list(leader_request.get("attachments") or []),
+                "history": [],
+                "digital_human_id": profile.id,
+                "digital_human_code": profile.code,
+                "digital_human_context": digital_context,
+                "model_config_id": leader_request.get("model_config_id"),
+                "chat_mode": "research",
+                "skills": [],
+                "memory_context": "",
+                "can_write_positions": profile.code == "position-entry-agent",
+                "default_account_id": leader_request.get("default_account_id"),
+                "allow_code_execution": False,
+                "approval_policy": str(leader_request.get("approval_policy") or "full"),
+                "delegation_read_only": profile.code
+                not in {"position-entry-agent", "watchlist-entry-agent"},
+                "delegation_config": {"mode": "none"},
+                "source_type": "task_batch",
+                "source_ref": job_run_id or team_id,
+                "parent_run_id": leader_run_id,
+                "root_run_id": root_run_id,
+                "team_id": team_id,
+                "orchestration_depth": 1,
+                "action_key": task.action_key,
+            }
             delegation = AgentDelegation(
                 delegation_id=uuid.uuid4().hex,
                 team_id=team_id,
@@ -188,10 +261,10 @@ def create_task_batch(
             )
             child_run = AgentRun(
                 run_id=child_run_id,
-                session_id=leader_session_id,
+                session_id=child_session.id,
                 user_id=user_id,
-                engine="task_board",
-                chat_mode="stock",
+                engine=leader_engine,
+                chat_mode="research",
                 source_type="task_batch",
                 source_ref=job_run_id,
                 parent_run_id=leader_run_id,
@@ -201,10 +274,7 @@ def create_task_batch(
                 deadline_at=deadline,
                 status="queued",
                 priority=task.priority,
-                request_json=json.dumps(
-                    {"action_key": task.action_key, "title": task.title, "instruction": task.instruction},
-                    ensure_ascii=False,
-                ),
+                request_json=json.dumps(child_request, ensure_ascii=False, default=str),
                 board_visible=True,
                 queued_at=_utcnow(),
                 assignee_profile_id=profile.id,
