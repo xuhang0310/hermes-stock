@@ -2089,14 +2089,20 @@ def _session_visibility(context: AuthContext):
     owned_session = and_(
         AiChatSession.user_id == context.user.id,
         or_(
-            AiChatSession.source_type.in_(["web", "delegation", "workflow"]),
+            AiChatSession.source_type.in_(["web", "delegation", "workflow", "task_batch"]),
             AiChatSession.source_type.is_(None),
         ),
     )
     if "all" in context.permissions or "digital_human:manage" in context.permissions:
         return or_(
             owned_session,
-            AiChatSession.source_type.in_(["feishu", "scheduler", "delegation", "workflow"]),
+            AiChatSession.source_type.in_([
+                "feishu",
+                "scheduler",
+                "delegation",
+                "workflow",
+                "task_batch",
+            ]),
         )
     return owned_session
 
@@ -2112,27 +2118,32 @@ def _session_source_out(row: AiChatSession) -> dict:
         source_identifier = f"FS-{digest}"
     elif source_type == "scheduler" and row.external_conversation_id:
         source_identifier = f"SC-{row.external_conversation_id[:20]}"
-    elif source_type == "delegation" and row.external_conversation_id:
-        team_id, _, index_text = row.external_conversation_id.rpartition(":")
+    elif source_type in {"delegation", "task_batch"} and row.external_conversation_id:
+        parts = row.external_conversation_id.split(":")
+        team_id = parts[0]
+        index_text = parts[1] if len(parts) > 1 else ""
         try:
             child_task_index = int(index_text)
         except ValueError:
             child_task_index = None
         team_marker = (team_id or row.external_conversation_id)[:8].upper()
         index_marker = f"-{child_task_index:02d}" if child_task_index is not None else ""
-        source_identifier = f"TEAM-{team_marker}{index_marker}"
+        source_prefix = "TASK" if source_type == "task_batch" else "TEAM"
+        source_identifier = f"{source_prefix}-{team_marker}{index_marker}"
     elif source_type == "workflow" and row.external_conversation_id:
         workflow_id, _, remainder = row.external_conversation_id.partition(":")
         node_key, _, attempt = remainder.partition(":")
         workflow_marker = (workflow_id or row.external_conversation_id)[:8].upper()
         attempt_marker = f"-{attempt.upper()}" if attempt else ""
         source_identifier = f"SWARM-{workflow_marker}-{node_key[:16].upper()}{attempt_marker}"
-    is_child_task = source_type in {"delegation", "workflow"}
+    is_child_task = source_type in {"delegation", "workflow", "task_batch"}
     return {
         "source_type": source_type,
         "source_label": (
             "Agent Team 子任务"
             if is_child_task and source_type == "delegation"
+            else "Agent 任务看板"
+            if source_type == "task_batch"
             else "Swarm 工作流子任务"
             if source_type == "workflow"
             else row.source_label or ("网页" if source_type == "web" else source_type)

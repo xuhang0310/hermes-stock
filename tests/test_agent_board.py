@@ -17,6 +17,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core.database import Base
+from backend.app.ai import ai_api
+from backend.app.auth.auth import AuthContext
 from backend.app.core.models import (
     AiChatSession,
     AgentDelegation,
@@ -212,6 +214,28 @@ class AgentBoardServiceTests(unittest.TestCase):
             self.assertEqual(len(delegations), 2)
             action_keys = {d.action_key for d in delegations}
             self.assertEqual(action_keys, {"intel_news_check", "risk_assessment"})
+
+            child_sessions = db.scalars(
+                select(AiChatSession).where(AiChatSession.source_type == "task_batch")
+            ).all()
+            self.assertEqual(len(child_sessions), 2)
+            owner = db.get(User, self.user_id)
+            visible = db.scalars(
+                select(AiChatSession).where(
+                    ai_api._session_visibility(
+                        AuthContext(user=owner, permissions={"agent:use"})
+                    )
+                )
+            ).all()
+            self.assertTrue(
+                {row.id for row in child_sessions}.issubset({row.id for row in visible})
+            )
+            marker = ai_api._session_source_out(child_sessions[0])
+            self.assertEqual(marker["source_type"], "task_batch")
+            self.assertEqual(marker["source_label"], "Agent 任务看板")
+            self.assertTrue(marker["read_only"])
+            self.assertTrue(marker["is_child_task"])
+            self.assertRegex(marker["source_identifier"], r"^TASK-[0-9A-F]{8}-0[01]$")
 
     def test_create_task_batch_skips_disabled_agent(self) -> None:
         """测试 create_task_batch 跳过未启用的数字人"""
