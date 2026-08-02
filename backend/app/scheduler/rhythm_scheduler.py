@@ -827,6 +827,10 @@ def _execute_job(job_key: str, run_id: str) -> None:
                     _log("WARNING", f"定时任务 {snapshot['job_key']} 协同任务提取失败", {"error": str(extract_exc)[:500]})
         elif snapshot["job_kind"] == "topnews_brief":
             output_content = _run_topnews_brief(snapshot, ran_at)
+        elif snapshot["job_kind"] == "news_ingest":
+            from backend.app.data.tushare_news_ingest import run_news_ingest
+
+            output_content = run_news_ingest(snapshot["job_key"])
         else:
             status = "skipped"
             output_content = f"暂不支持的任务类型: {snapshot['job_kind']}"
@@ -1092,6 +1096,42 @@ DEFAULT_JOBS = [
         "run_time": "16:30",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
+        "enabled": True,
+    },
+    {
+        "job_key": "news-ingest-quick-15m",
+        "name": "快讯入库(每15分)",
+        "description": "每15分钟拉 TuShare 新闻快讯(news)入知识库（规则任务不经 LLM、不推送；content_hash 去重，失败自动重试）。",
+        "job_kind": "news_ingest",
+        "schedule_type": "interval",
+        "run_time": None,
+        "interval_minutes": 15,
+        "window_start": "00:00",
+        "window_end": "23:59",
+        "trading_day_only": False,
+        "enabled": True,
+    },
+    {
+        "job_key": "news-ingest-major-1h",
+        "name": "要闻入库(每小时)",
+        "description": "每小时拉 TuShare 新闻通讯(major_news)入知识库（规则任务不经 LLM、不推送；content_hash 去重，失败自动重试）。",
+        "job_kind": "news_ingest",
+        "schedule_type": "interval",
+        "run_time": None,
+        "interval_minutes": 60,
+        "window_start": "00:00",
+        "window_end": "23:59",
+        "trading_day_only": False,
+        "enabled": True,
+    },
+    {
+        "job_key": "news-ingest-cctv-daily",
+        "name": "联播入库(每日)",
+        "description": "每日拉 TuShare 新闻联播文字稿(cctv_news)入知识库（规则任务不经 LLM、不推送；content_hash 去重，失败自动重试）。",
+        "job_kind": "news_ingest",
+        "schedule_type": "daily",
+        "run_time": "21:30",
+        "trading_day_only": False,
         "enabled": True,
     },
     {
