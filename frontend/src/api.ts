@@ -626,7 +626,12 @@ export const api = {
     request<DigitalHumanCapabilities>(`/api/digital-humans/${id}/capabilities`),
   workspaceStatus: () => request<WorkspaceStatus>('/api/workspace/status'),
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
-  backtests: () => request<{ items: BacktestListItem[] }>('/api/backtests'),
+  backtests: (params: { limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<{ items: BacktestListItem[] }>(`/api/backtests${suffix}`)
+  },
   strategyCatalog: () => request<{ items: StrategyDescriptor[] }>('/api/backtests/strategies'),
   searchStocks: (q: string) =>
     request<{ items: StockCandidate[] }>(`/api/stocks/search?q=${encodeURIComponent(q)}`),

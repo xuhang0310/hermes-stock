@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import type { BacktestListItem } from '../types'
 
@@ -10,6 +10,8 @@ const error = ref('')
 const items = ref<BacktestListItem[]>([])
 const searchQuery = ref('')
 const revealKey = ref(0)
+const currentPage = ref(1)
+const PAGE_SIZE = 10
 
 const strategyNames: Record<string, string> = {
   macd_cross: 'MACD 交叉',
@@ -55,6 +57,22 @@ const filtered = computed(() => {
       it.strategy_code.toLowerCase().includes(q) ||
       strategyLabel(it.strategy_code).toLowerCase().includes(q)
   )
+})
+
+const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / PAGE_SIZE)))
+const pagedItems = computed(() => {
+  const start = (currentPage.value - 1) * PAGE_SIZE
+  return filtered.value.slice(start, start + PAGE_SIZE)
+})
+const pageStart = computed(() => filtered.value.length ? (currentPage.value - 1) * PAGE_SIZE + 1 : 0)
+const pageEnd = computed(() => Math.min(currentPage.value * PAGE_SIZE, filtered.value.length))
+
+watch(searchQuery, () => {
+  currentPage.value = 1
+})
+
+watch(pageCount, (count) => {
+  if (currentPage.value > count) currentPage.value = count
 })
 
 const summary = computed(() => {
@@ -141,7 +159,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const res = await api.backtests()
+    const res = await api.backtests({ limit: 100 })
     items.value = res.items
     revealKey.value += 1
   } catch (reason) {
@@ -239,7 +257,7 @@ onMounted(load)
         </thead>
         <tbody :key="revealKey">
           <tr
-            v-for="(it, idx) in filtered"
+            v-for="(it, idx) in pagedItems"
             :key="it.run_id"
             class="bt-row"
             :class="tone(it.metrics.total_return)"
@@ -288,6 +306,42 @@ onMounted(load)
         </tbody>
       </table>
     </div>
+
+    <nav v-if="!error && filtered.length > PAGE_SIZE" class="bt-pagination" aria-label="回测报告分页">
+      <span class="page-summary">显示 {{ pageStart }}–{{ pageEnd }}，共 {{ filtered.length }} 条</span>
+      <div class="page-controls">
+        <button
+          type="button"
+          class="page-btn page-step"
+          :disabled="currentPage === 1"
+          aria-label="上一页"
+          @click="currentPage -= 1"
+        >
+          ‹
+        </button>
+        <button
+          v-for="page in pageCount"
+          :key="page"
+          type="button"
+          class="page-btn"
+          :class="{ active: page === currentPage }"
+          :aria-current="page === currentPage ? 'page' : undefined"
+          :aria-label="`第 ${page} 页`"
+          @click="currentPage = page"
+        >
+          {{ page }}
+        </button>
+        <button
+          type="button"
+          class="page-btn page-step"
+          :disabled="currentPage === pageCount"
+          aria-label="下一页"
+          @click="currentPage += 1"
+        >
+          ›
+        </button>
+      </div>
+    </nav>
   </section>
 </template>
 
@@ -541,32 +595,23 @@ onMounted(load)
 }
 
 .bt-row {
-  position: relative;
   cursor: pointer;
   animation: rowIn 0.42s cubic-bezier(0.22, 0.61, 0.36, 1) both;
   animation-delay: var(--d);
   transition: background 0.16s;
 }
 
-.bt-row::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--accent, #30363d);
-  opacity: 0.55;
-  transition: width 0.16s, opacity 0.16s;
+.bt-row > td:first-child {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent, #30363d) 55%, transparent);
+  transition: box-shadow 0.16s;
 }
 
 .bt-row:hover {
   background: rgba(28, 37, 48, 0.85);
 }
 
-.bt-row:hover::before {
-  width: 5px;
-  opacity: 1;
+.bt-row:hover > td:first-child {
+  box-shadow: inset 5px 0 0 var(--accent, #30363d);
 }
 
 .bt-row:last-child td {
@@ -708,6 +753,61 @@ onMounted(load)
   transition: color 0.16s;
 }
 
+.bt-pagination {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.page-summary {
+  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+}
+
+.page-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.page-btn {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid #30363d;
+  border-radius: 7px;
+  background: rgba(22, 27, 34, 0.8);
+  color: #8b949e;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.16s, background 0.16s, color 0.16s;
+}
+
+.page-btn:hover:not(:disabled) {
+  border-color: #eabf63;
+  color: #eabf63;
+}
+
+.page-btn.active {
+  border-color: #eabf63;
+  background: rgba(234, 191, 99, 0.14);
+  color: #f3d36b;
+}
+
+.page-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.page-step {
+  font-size: 18px;
+  line-height: 1;
+}
+
 .bt-row:hover .open-hint {
   color: #eabf63;
 }
@@ -755,13 +855,14 @@ onMounted(load)
 
 @media (max-width: 900px) {
   .bt-summary { grid-template-columns: repeat(2, 1fr); }
+  .bt-pagination { align-items: flex-start; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .bt-row,
   .btn-spin.spin,
   .loading-mark { animation: none; }
-  .bt-row::before,
+  .bt-row > td:first-child,
   .chev,
   .stat,
   .btn-outline { transition: none; }
