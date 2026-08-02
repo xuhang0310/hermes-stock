@@ -884,7 +884,8 @@ def extract_position_ocr_arguments(
         messages,
         llm_config,
         tools=[POSITION_AGENT_TOOLS[2]],
-        tool_choice="auto",
+        tool_choice="required",
+        enable_thinking=False,
     )
     choices = body.get("choices") or []
     message = (choices[0].get("message") or {}) if choices else {}

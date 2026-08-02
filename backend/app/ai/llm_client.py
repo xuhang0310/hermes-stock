@@ -50,6 +50,7 @@ def _build_payload(
     tool_choice: str | None,
     temperature: float | None,
     stream: bool,
+    enable_thinking: bool | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
     """组装 url / payload / headers。temperature=None 时沿用 llm_config 里的值。"""
     if not llm_config.get("api_key") or not llm_config.get("base_url"):
@@ -65,6 +66,8 @@ def _build_payload(
         payload["tools"] = tools
         if tool_choice:
             payload["tool_choice"] = tool_choice
+    if enable_thinking is not None:
+        payload["enable_thinking"] = enable_thinking
     headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
     return url, payload, headers
 
@@ -76,6 +79,7 @@ def chat_completion(
     *,
     tool_choice: str | None = "auto",
     temperature: float | None = None,
+    enable_thinking: bool | None = None,
     timeout: float = 120.0,
     log_module: str | None = None,
 ) -> dict:
@@ -86,7 +90,11 @@ def chat_completion(
     """
     url, payload, headers = _build_payload(
         llm_config, messages,
-        tools=tools, tool_choice=tool_choice, temperature=temperature, stream=False,
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        stream=False,
+        enable_thinking=enable_thinking,
     )
     with httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
         response = client.post(url, json=payload, headers=headers)

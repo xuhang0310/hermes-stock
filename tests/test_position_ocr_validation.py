@@ -29,7 +29,7 @@ class _CaptureWriteRepository:
 
 
 class PositionOcrValidationTests(unittest.TestCase):
-    def test_ocr_uses_thinking_compatible_tool_choice(self) -> None:
+    def test_ocr_disables_thinking_and_requires_structured_tool_output(self) -> None:
         response = {
             "choices": [
                 {
@@ -71,7 +71,8 @@ class PositionOcrValidationTests(unittest.TestCase):
             )
 
         resolve_model.assert_called_once_with(None)
-        self.assertEqual(chat.call_args.kwargs["tool_choice"], "auto")
+        self.assertEqual(chat.call_args.kwargs["tool_choice"], "required")
+        self.assertIs(chat.call_args.kwargs["enable_thinking"], False)
         self.assertEqual(result["model"]["model_name"], "qwen3.7-plus")
 
     def test_position_prompt_requires_incremental_rows_only(self) -> None:
