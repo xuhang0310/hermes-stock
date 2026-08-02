@@ -33,7 +33,7 @@ from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, star
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
 from backend.app.feishu.feishu_bot_api import router as feishu_bot_router
 from backend.app.quant.factor_api import router as factor_router
-from backend.app.quant.backtest_api import router as backtest_router
+from backend.app.quant.backtest_api import router as backtest_router, stocks_router
 from backend.app.quant.agent_board_api import router as agent_board_router
 from backend.app.data.repository import StockRepository
 from backend.app.scheduler.rhythm_api import router as rhythm_router
@@ -275,6 +275,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(ai_router)
     app.include_router(factor_router)
     app.include_router(backtest_router)
+    app.include_router(stocks_router)
     app.include_router(agent_board_router)
     app.include_router(rhythm_router)
     app.include_router(feishu_bot_router)

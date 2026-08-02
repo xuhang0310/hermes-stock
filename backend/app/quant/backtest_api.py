@@ -12,10 +12,12 @@ from pydantic import BaseModel, Field
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.quant.backtest_engine import create_backtest, get_backtest, list_backtests
 from backend.app.quant.backtest_runner import SIGNAL_ENGINE_REGISTRY, run_signal_backtest
+from backend.app.market.stock_tools import _stock_basic_item, resolve_stock
 from backend.app.quant.strategy_descriptors import descriptor_public, get_descriptor
 
 
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
+stocks_router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
 
 class MacdBacktestRequest(BaseModel):
@@ -75,8 +77,20 @@ def post_backtest(
 def list_strategy_catalog(
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
-    """策略库卡片数据源：派生自策略登记（strategy_descriptors.py）。"""
-    return {"items": descriptor_public()}
+    """策略库卡片数据源：派生自策略登记（strategy_descriptors.py）。
+
+    每项附 ``symbol_labels``（默认标的 code→名称），供卡片回显——研究员看
+    名称而非代码。名称取自 TuShare 主数据，取不到时该 code 缺省、前端回退显示代码。
+    """
+    items = descriptor_public()
+    for item in items:
+        labels: dict[str, str] = {}
+        for code in item.get("default_symbols", []):
+            name = (_stock_basic_item(code) or {}).get("name")
+            if name:
+                labels[code] = str(name)
+        item["symbol_labels"] = labels
+    return {"items": items}
 
 
 @router.post("/run")
@@ -183,3 +197,25 @@ def download_backtest_metrics(
         media_type="application/json; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{run_id}-metrics.json"'},
     )
+
+
+@stocks_router.get("/search")
+def search_stocks(
+    q: str = Query(default="", max_length=32),
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """按代码或名称模糊检索 A 股标的（确定性主数据，不依赖 LLM）。
+
+    供策略库卡片输入框联想：研究员输名称或代码片段，返回候选
+    ``[{ts_code, symbol, name}]``。空查询返回空列表，绝不回吐全市场。
+    """
+    query = q.strip()
+    if not query:
+        return {"items": []}
+    candidates = resolve_stock(query).get("candidates") or []
+    return {
+        "items": [
+            {"ts_code": c.get("ts_code"), "symbol": c.get("symbol"), "name": c.get("name")}
+            for c in candidates
+        ]
+    }

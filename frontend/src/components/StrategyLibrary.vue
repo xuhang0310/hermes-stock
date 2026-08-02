@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import type { StrategyDescriptor } from '../types'
+import StockSymbolPicker from './StockSymbolPicker.vue'
 
 const emit = defineEmits<{ openBacktest: [runId: string] }>()
 
@@ -10,6 +11,7 @@ const catalogError = ref('')
 const strategies = ref<StrategyDescriptor[]>([])
 const explainOpen = ref<string | null>(null)
 const symbolInputs = reactive<Record<string, string>>({})
+const poolInputs = reactive<Record<string, string[]>>({})
 const runningCode = ref<string | null>(null)
 const runErrors = reactive<Record<string, string>>({})
 
@@ -41,13 +43,34 @@ async function runStrategy(strategy: StrategyDescriptor) {
   runningCode.value = strategy.code
   runErrors[strategy.code] = ''
   try {
-    const symbols =
-      strategy.kind === 'single'
-        ? [(symbolInputs[strategy.code] || '').trim()].filter(Boolean)
-        : strategy.default_symbols
-    if (!symbols.length) {
-      runErrors[strategy.code] = '请先填写股票代码'
-      return
+    let symbols: string[]
+    if (strategy.kind === 'single') {
+      const raw = (symbolInputs[strategy.code] || '').trim()
+      if (!raw) {
+        runErrors[strategy.code] = '请填写股票名称或代码'
+        return
+      }
+      if (/^\d{6}\.(SH|SZ|BJ)$/.test(raw)) {
+        symbols = [raw]
+      } else {
+        try {
+          const matched = (await api.searchStocks(raw)).items[0]
+          if (!matched) {
+            runErrors[strategy.code] = `未找到“${raw}”，请从联想列表选择或检查名称`
+            return
+          }
+          symbols = [matched.ts_code]
+        } catch {
+          runErrors[strategy.code] = '股票识别失败，请稍后重试'
+          return
+        }
+      }
+    } else {
+      symbols = (poolInputs[strategy.code] || []).slice()
+      if (symbols.length < 3) {
+        runErrors[strategy.code] = '横截面策略至少需要 3 只股票'
+        return
+      }
     }
     const { start, end } = defaultPeriod()
     const res = await api.runStrategyBacktest({
@@ -83,6 +106,7 @@ onMounted(async () => {
     strategies.value = res.items
     for (const strategy of strategies.value) {
       symbolInputs[strategy.code] = strategy.default_symbols[0] || ''
+      poolInputs[strategy.code] = (strategy.default_symbols || []).slice()
     }
   } catch (reason) {
     catalogError.value = reason instanceof Error ? reason.message : '加载策略库失败'
@@ -129,16 +153,21 @@ onBeforeUnmount(() => {
           <span class="sl-kind">{{ strategy.kind === 'cross_sectional' ? '一篮子选股' : '单只股票' }}</span>
         </div>
 
-        <div v-if="strategy.kind === 'single'" class="sl-input-row">
-          <input
-            v-model="symbolInputs[strategy.code]"
-            class="sl-input"
-            type="text"
-            placeholder="股票代码，如 000001.SZ"
-            :disabled="runningCode !== null"
-          />
-        </div>
-        <div v-else class="sl-pool">默认股票池 · {{ strategy.default_symbols.length }} 只大盘股</div>
+        <StockSymbolPicker
+          v-if="strategy.kind === 'single'"
+          v-model="symbolInputs[strategy.code]"
+          :labels="strategy.symbol_labels || {}"
+          :disabled="runningCode !== null"
+          placeholder="股票名称或代码，如 平安银行 / 000001.SZ"
+        />
+        <StockSymbolPicker
+          v-else
+          v-model="poolInputs[strategy.code]"
+          multiple
+          :labels="strategy.symbol_labels || {}"
+          :disabled="runningCode !== null"
+          placeholder="加减股票：名称或代码，如 茅台 / 600519.SH"
+        />
 
         <button
           type="button"

@@ -60,6 +60,7 @@ import type {
   BacktestRun,
   BacktestListItem,
   StrategyDescriptor,
+  StockCandidate,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -627,6 +628,8 @@ export const api = {
   workspaceDocuments: () => request<WorkspaceDoc[]>('/api/workspace/documents'),
   backtests: () => request<{ items: BacktestListItem[] }>('/api/backtests'),
   strategyCatalog: () => request<{ items: StrategyDescriptor[] }>('/api/backtests/strategies'),
+  searchStocks: (q: string) =>
+    request<{ items: StockCandidate[] }>(`/api/stocks/search?q=${encodeURIComponent(q)}`),
   runStrategyBacktest: (payload: {
     strategy_code: string
     symbols: string[]

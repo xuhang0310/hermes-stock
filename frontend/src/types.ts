@@ -895,6 +895,13 @@ export type StrategyDescriptor = {
   kind: 'single' | 'cross_sectional'
   default_symbols: string[]
   default_params: Record<string, number>
+  symbol_labels?: Record<string, string>
+}
+
+export type StockCandidate = {
+  ts_code: string
+  symbol: string
+  name: string
 }
 
 export type AgentSkillCriterion = {
