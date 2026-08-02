@@ -31,6 +31,7 @@ from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.feishu.feishu import send_feishu
 from backend.app.core.models import (
     AgentReport,
+    AgentTeamRun,
     AiChatMessage,
     AiChatSession,
     DigitalHumanProfile,
@@ -65,6 +66,27 @@ _inflight_runs: set[str] = set()
 _semaphore: asyncio.Semaphore | None = None
 _trade_day_cache: dict[str, bool] = {}
 _position_price_sync_lock = threading.Lock()
+
+
+def _should_extract_report_tasks(
+    *,
+    extraction_mode: str,
+    output_content: str,
+    has_task_batch: bool,
+) -> bool:
+    content = str(output_content or "").strip()
+    if not content:
+        return False
+    if extraction_mode == "legacy_report":
+        return True
+    if extraction_mode != "structured_tool" or has_task_batch:
+        return False
+    has_pending_action = "待完成" in content
+    has_agent_assignment = any(
+        marker in content
+        for marker in ("负责 Agent", "负责人 Agent", "负责Agent", "负责人Agent")
+    )
+    return has_pending_action and has_agent_assignment
 
 _CARD_TEMPLATE_BY_JOB = {
     "topnews-morning-0630": "wathet",
@@ -726,10 +748,28 @@ def _execute_job(job_key: str, run_id: str) -> None:
             if push_error:
                 status = "failed"
                 error = f"报告已生成，但飞书任务群推送失败: {push_error}"
-            # legacy_report 模式：从报告输出中提取协同任务
-            elif (
-                snapshot.get("task_extraction_mode") == "legacy_report"
-                and output_content
+            else:
+                extraction_mode = str(
+                    snapshot.get("task_extraction_mode") or "structured_tool"
+                )
+                leader_run_id = None
+                has_task_batch = False
+                with SessionLocal() as db:
+                    jr = db.scalar(
+                        select(JobRun).where(JobRun.run_id == run_id).limit(1)
+                    )
+                    leader_run_id = jr.leader_agent_run_id if jr else None
+                    if leader_run_id:
+                        has_task_batch = db.scalar(
+                            select(AgentTeamRun.team_id)
+                            .where(AgentTeamRun.leader_run_id == leader_run_id)
+                            .limit(1)
+                        ) is not None
+
+            if not push_error and _should_extract_report_tasks(
+                extraction_mode=extraction_mode,
+                output_content=output_content or "",
+                has_task_batch=has_task_batch,
             ):
                 try:
                     from backend.app.quant.task_extractor import ScheduledTaskExtractor
@@ -742,11 +782,6 @@ def _execute_job(job_key: str, run_id: str) -> None:
                             create_task_batch,
                         )
 
-                        with SessionLocal() as db:
-                            jr = db.scalar(
-                                select(JobRun).where(JobRun.run_id == run_id).limit(1)
-                            )
-                            leader_run_id = jr.leader_agent_run_id if jr else None
                         if leader_run_id:
                             batch = extractor.to_task_batch(
                                 plan,
@@ -761,6 +796,17 @@ def _execute_job(job_key: str, run_id: str) -> None:
                                 job_run_id=run_id,
                                 skip_leader_validation=True,
                             )
+                            with SessionLocal() as db:
+                                jr = db.scalar(
+                                    select(JobRun)
+                                    .where(JobRun.run_id == run_id)
+                                    .limit(1)
+                                )
+                                if jr is not None:
+                                    jr.orchestration_type = "task_batch"
+                                    jr.orchestration_id = board_result["team_id"]
+                                    jr.handoff_status = "created"
+                                    db.commit()
                             for task_id in board_result["task_ids"]:
                                 redis_broker.enqueue(task_id)
                             _log(

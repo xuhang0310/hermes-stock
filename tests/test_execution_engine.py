@@ -901,6 +901,58 @@ class StructuredTaskHandoffDefinitionTests(unittest.TestCase):
         self.assertNotIn("create_agent_task_batch", system_prompt)
 
 
+class ScheduledTaskFallbackTests(unittest.TestCase):
+    def test_structured_mode_extracts_explicit_pending_agent_tasks_when_batch_missing(self) -> None:
+        from backend.app.scheduler.rhythm_scheduler import _should_extract_report_tasks
+
+        report = """
+## 核验动作清单（转交）
+| 动作 | 负责 Agent | 状态 |
+| 读公告全文 | 研究员 | ❌ 待完成 |
+"""
+        self.assertTrue(
+            _should_extract_report_tasks(
+                extraction_mode="structured_tool",
+                output_content=report,
+                has_task_batch=False,
+            )
+        )
+
+    def test_structured_mode_does_not_duplicate_existing_task_batch(self) -> None:
+        from backend.app.scheduler.rhythm_scheduler import _should_extract_report_tasks
+
+        report = "| 动作 | 负责 Agent | 状态 |\n| 读公告 | 研究员 | 待完成 |"
+        self.assertFalse(
+            _should_extract_report_tasks(
+                extraction_mode="structured_tool",
+                output_content=report,
+                has_task_batch=True,
+            )
+        )
+
+    def test_structured_mode_ignores_plain_report_without_explicit_handoff(self) -> None:
+        from backend.app.scheduler.rhythm_scheduler import _should_extract_report_tasks
+
+        self.assertFalse(
+            _should_extract_report_tasks(
+                extraction_mode="structured_tool",
+                output_content="今日仍有数据待完成采集，但无需委派 Agent。",
+                has_task_batch=False,
+            )
+        )
+
+    def test_legacy_mode_always_extracts_non_empty_report(self) -> None:
+        from backend.app.scheduler.rhythm_scheduler import _should_extract_report_tasks
+
+        self.assertTrue(
+            _should_extract_report_tasks(
+                extraction_mode="legacy_report",
+                output_content="普通报告正文",
+                has_task_batch=False,
+            )
+        )
+
+
 class ChannelRunsDelegationConfigTests(unittest.TestCase):
     """测试 channel_runs.build_channel_request 传递 delegation_config"""
 
