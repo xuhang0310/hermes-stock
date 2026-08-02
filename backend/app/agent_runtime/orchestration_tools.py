@@ -285,6 +285,24 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
 ]
 
 
+TASK_HANDOFF_TOOL_NAMES = frozenset(
+    {"list_delegatable_agents", "create_agent_task_batch"}
+)
+TASK_HANDOFF_TOOL_SCHEMAS = tuple(
+    schema
+    for schema in TEAM_AND_SCHEDULE_TOOL_SCHEMAS
+    if schema["function"]["name"] in TASK_HANDOFF_TOOL_NAMES
+)
+TASK_HANDOFF_PROMPT = """
+
+任务转交规则：
+1. 当报告或分析产生需要其他数字人继续完成的动作时，禁止只在正文中输出“待完成”。
+2. 先调用 list_delegatable_agents，并逐字使用返回的 agent_code。
+3. 必须调用 create_agent_task_batch 提交任务。每个任务都要有唯一的 action_key、明确的 agent_code 和可独立完成的 instruction。
+4. 只创建报告确实要求继续执行的任务，不要把普通建议或观察项转成任务。
+"""
+
+
 ORCHESTRATION_TOOL_NAMES = frozenset(
     schema["function"]["name"] for schema in TEAM_AND_SCHEDULE_TOOL_SCHEMAS
 )

@@ -370,6 +370,75 @@ class TaskExtractorExtractTests(unittest.TestCase):
         self.assertFalse(result["has_tasks"])
         self.assertTrue(any("LLM 调用失败" in w for w in result["warnings"]))
 
+    def test_save_extraction_plan_finds_job_run_by_public_run_id(self) -> None:
+        from backend.app.quant.task_extractor import ScheduledTaskExtractor
+
+        extractor = ScheduledTaskExtractor()
+        plan = {
+            "has_tasks": True,
+            "confidence": 0.95,
+            "tasks": [],
+            "warnings": [],
+        }
+
+        with self.SessionFactory() as db:
+            extractor._save_extraction_plan(db, self.job_run_id, plan)
+            db.commit()
+
+        with self.SessionFactory() as db:
+            job_run = db.scalar(
+                select(JobRun).where(JobRun.run_id == self.job_run_id)
+            )
+            self.assertIsNotNone(job_run)
+            self.assertEqual(json.loads(job_run.handoff_plan_json), plan)
+
+    def test_scheduled_agent_links_leader_by_public_job_run_id(self) -> None:
+        from backend.app.scheduler.rhythm_scheduler import _run_scheduled_agent
+
+        snapshot = {
+            "job_key": self.job_key,
+            "name": "测试任务",
+            "digital_human_code": "intelligence-officer",
+            "owner_user_id": self.user_id,
+            "allow_code_execution": False,
+            "approval_policy": "full",
+            "delegation_mode": "execute_and_wait",
+            "task_extraction_mode": "structured_tool",
+            "completion_policy": "all_required",
+            "child_timeout_seconds": 600,
+            "max_delegated_tasks": 20,
+        }
+        leader_run_id = "leader-agent-run-001"
+
+        with (
+            patch("backend.app.scheduler.rhythm_scheduler.SessionLocal", self.SessionFactory),
+            patch(
+                "backend.app.scheduler.rhythm_scheduler.build_channel_request",
+                return_value={"request": "payload"},
+            ),
+            patch(
+                "backend.app.scheduler.rhythm_scheduler.create_channel_run",
+                return_value={"run_id": leader_run_id, "created": True},
+            ),
+            patch(
+                "backend.app.scheduler.rhythm_scheduler.wait_for_channel_run",
+                return_value=("report", "model", None),
+            ),
+        ):
+            answer, model_name = _run_scheduled_agent(
+                snapshot,
+                "生成盘前简报",
+                self.job_run_id,
+            )
+
+        self.assertEqual((answer, model_name), ("report", "model"))
+        with self.SessionFactory() as db:
+            job_run = db.scalar(
+                select(JobRun).where(JobRun.run_id == self.job_run_id)
+            )
+            self.assertIsNotNone(job_run)
+            self.assertEqual(job_run.leader_agent_run_id, leader_run_id)
+
 
 class SerialConstraintTests(unittest.TestCase):
     """测试 next_queued_run 的串行约束（同一 assignee_profile_id 不能有多个 running）"""
@@ -757,7 +826,6 @@ class OrchestrationToolSchemaTests(unittest.TestCase):
 
     def test_schema_registered(self) -> None:
         from backend.app.agent_runtime.orchestration_tools import (
-            TEAM_AND_SCHEDULE_TOOL_SCHEMAS,
             ORCHESTRATION_TOOL_NAMES,
             TOOL_DISPLAY_NAMES,
         )
@@ -792,6 +860,45 @@ class OrchestrationToolSchemaTests(unittest.TestCase):
         from backend.app.agent_runtime.orchestration_tools import ORCHESTRATION_PROMPT
         self.assertIn("create_agent_task_batch", ORCHESTRATION_PROMPT)
         self.assertIn("待完成", ORCHESTRATION_PROMPT)
+
+
+class StructuredTaskHandoffDefinitionTests(unittest.TestCase):
+    def _definition(self, *, mode: str = "execute_and_wait", extraction_mode: str = "structured_tool"):
+        from backend.app.agent_runtime.agentscope_engine import _build_definition
+
+        payload = {
+            "chat_mode": "research",
+            "digital_human_code": "intelligence-officer",
+            "user_id": 1,
+            "session_id": 1,
+            "user_text": "生成盘前简报",
+            "delegation_config": {
+                "mode": mode,
+                "extraction_mode": extraction_mode,
+            },
+        }
+        with patch(
+            "backend.app.agent_runtime.agentscope_engine.artifact_service.active_context",
+            return_value="",
+        ):
+            return _build_definition(payload)
+
+    def test_structured_handoff_is_available_to_non_coordinator_agent(self) -> None:
+        system_prompt, tools, _ = self._definition()
+        tool_names = {item["function"]["name"] for item in tools}
+
+        self.assertIn("list_delegatable_agents", tool_names)
+        self.assertIn("create_agent_task_batch", tool_names)
+        self.assertIn("create_agent_task_batch", system_prompt)
+        self.assertNotIn("create_agent_schedule", tool_names)
+
+    def test_disabled_delegation_does_not_expose_handoff_tools(self) -> None:
+        system_prompt, tools, _ = self._definition(mode="none")
+        tool_names = {item["function"]["name"] for item in tools}
+
+        self.assertNotIn("list_delegatable_agents", tool_names)
+        self.assertNotIn("create_agent_task_batch", tool_names)
+        self.assertNotIn("create_agent_task_batch", system_prompt)
 
 
 class ChannelRunsDelegationConfigTests(unittest.TestCase):

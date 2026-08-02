@@ -313,7 +313,9 @@ def _run_scheduled_agent(
     run = create_channel_run(request_payload, idempotency_key=f"schedule:{job_run_id}")
     # 关联 leader AgentRun 到 JobRun，便于任务提取和审计追溯
     with SessionLocal() as db:
-        job_run = db.get(JobRun, job_run_id)
+        job_run = db.scalar(
+            select(JobRun).where(JobRun.run_id == job_run_id).limit(1)
+        )
         if job_run is not None:
             job_run.leader_agent_run_id = run["run_id"]
             db.commit()
@@ -737,13 +739,13 @@ def _execute_job(job_key: str, run_id: str) -> None:
                     if plan.get("has_tasks") and plan.get("confidence", 0) >= 0.8:
                         from backend.app.agent_runtime.redis_broker import redis_broker
                         from backend.app.quant.agent_board_service import (
-                            TaskBatchSpec,
-                            TaskSpec,
                             create_task_batch,
                         )
 
                         with SessionLocal() as db:
-                            jr = db.get(JobRun, run_id)
+                            jr = db.scalar(
+                                select(JobRun).where(JobRun.run_id == run_id).limit(1)
+                            )
                             leader_run_id = jr.leader_agent_run_id if jr else None
                         if leader_run_id:
                             batch = extractor.to_task_batch(

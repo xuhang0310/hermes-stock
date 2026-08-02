@@ -16,6 +16,8 @@ from backend.app.agent_runtime.orchestration_tools import (
     ORCHESTRATION_PROMPT,
     ORCHESTRATION_TOOL_NAMES,
     SCHEDULE_MUTATION_TOOL_NAMES,
+    TASK_HANDOFF_PROMPT,
+    TASK_HANDOFF_TOOL_SCHEMAS,
     TEAM_AND_SCHEDULE_TOOL_SCHEMAS,
     TOOL_DISPLAY_NAMES as ORCHESTRATION_DISPLAY_NAMES,
 )
@@ -352,11 +354,18 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         *skill_registry.get_tools_for("research", role_code=role_code),
         LOAD_SKILL_TOOL_SCHEMA,
     ]
+    delegation_config = request_payload.get("delegation_config") or {}
+    structured_task_handoff = (
+        isinstance(delegation_config, dict)
+        and delegation_config.get("mode") != "none"
+        and delegation_config.get("extraction_mode") == "structured_tool"
+    )
     if role_code == "stock-pm":
         tools.extend(TEAM_AND_SCHEDULE_TOOL_SCHEMAS)
         write_names.update(SCHEDULE_MUTATION_TOOL_NAMES)
+    elif structured_task_handoff:
+        tools.extend(TASK_HANDOFF_TOOL_SCHEMAS)
     # delegation_mode=none 时移除所有编排工具
-    delegation_config = request_payload.get("delegation_config") or {}
     if isinstance(delegation_config, dict) and delegation_config.get("mode") == "none":
         blocked_orchestration = {"dispatch_agent_tasks", "create_agent_task_batch", "run_agent_workflow"}
         tools = [item for item in tools if item.get("function", {}).get("name") not in blocked_orchestration]
@@ -386,6 +395,8 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         system_prompt += f"\n\n{progressive_context}"
     if role_code == "stock-pm":
         system_prompt += ORCHESTRATION_PROMPT
+    elif structured_task_handoff:
+        system_prompt += TASK_HANDOFF_PROMPT
     active_artifacts = artifact_service.active_context(
         user_id=int(request_payload["user_id"]),
         session_id=int(request_payload["session_id"]) if request_payload.get("session_id") else None,
@@ -1362,6 +1373,11 @@ async def run_agentscope(
                         batch,
                         leader_run_id=run_id,
                         user_id=int(request_payload.get("user_id", 0)),
+                        job_run_id=(
+                            str(request_payload.get("source_ref") or "") or None
+                            if request_payload.get("source_type") == "scheduler"
+                            else None
+                        ),
                     )
                     waiting.append(
                         {

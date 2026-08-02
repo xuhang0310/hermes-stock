@@ -17,7 +17,6 @@ from typing import Any
 
 from sqlalchemy import select
 
-from backend.app.core.database import SessionLocal
 from backend.app.core.llm_config import active_llm_config
 from backend.app.core.models import DigitalHumanProfile, JobRun
 from backend.app.quant.agent_board_service import TaskBatchSpec, TaskSpec
@@ -275,6 +274,8 @@ class ScheduledTaskExtractor:
 
     def _save_extraction_plan(self, session, job_run_id: str, plan: dict[str, Any]) -> None:
         """保存提取结果到 JobRun.handoff_plan_json"""
-        job_run = session.get(JobRun, job_run_id)
+        job_run = session.scalar(
+            select(JobRun).where(JobRun.run_id == job_run_id).limit(1)
+        )
         if job_run is not None:
             job_run.handoff_plan_json = json.dumps(plan, ensure_ascii=False, default=str)
