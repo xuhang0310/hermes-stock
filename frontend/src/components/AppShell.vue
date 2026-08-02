@@ -54,10 +54,10 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'askStock', label: '问股' },
   { key: 'workbench', label: '工作台' },
   { key: 'digitalHumans', label: '数字人中心' },
-  ...(canViewRhythm.value ? [{ key: 'agentTaskBoard' as PageKey, label: 'Agent 任务' }] : []),
+  ...(canViewRhythm.value ? [{ key: 'agentTaskBoard' as PageKey, label: 'Agent 任务', icon: 'agentTaskBoard.svg' }] : []),
   { key: 'positions', label: '持仓' },
   { key: 'watchlist', label: '自选池' },
-  { key: 'backtestHistory', label: '回测报告' },
+  { key: 'backtestHistory', label: '回测报告', icon: 'backtestHistory.svg' },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),
   ...(canViewKnowledge.value ? [{
     key: 'knowledge' as PageKey,
@@ -71,6 +71,11 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'skillSquare', label: '技能广场', icon: 'knowledge' },
   { key: 'settings', label: '设置' }
 ])
+
+function navIconUrl(item: NavItem): string {
+  const icon = item.icon || (item.children ? 'knowledge' : item.key)
+  return `/icons/${icon.includes('.') ? icon : `${icon}.png`}`
+}
 
 function isExpanded(item: NavItem): boolean {
   if (!item.children) return false
@@ -136,7 +141,7 @@ function handleChildClick(key: PageKey) {
             type="button"
             @click="handleParentClick(item)"
           >
-            <img class="nav-icon" :src="`/icons/${item.icon || (item.children ? 'knowledge' : item.key)}.png`" alt="" aria-hidden="true" @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')" />
+            <img class="nav-icon" :src="navIconUrl(item)" alt="" aria-hidden="true" @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')" />
             <span>{{ item.label }}</span>
             <svg v-if="item.children" class="nav-chevron" :class="{ open: isExpanded(item) }" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
               <path d="M4 2.5L7.5 6L4 9.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
