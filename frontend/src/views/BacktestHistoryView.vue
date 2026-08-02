@@ -247,15 +247,17 @@ onMounted(load)
             @click="emit('open', it.run_id)"
           >
             <td class="muted mono">{{ formatTime(it.created_at) }}</td>
-            <td class="instrument">
-              <template v-if="isPortfolio(it)">
-                <span class="inst-name">组合</span>
-                <span class="inst-code mono">PORTFOLIO</span>
-              </template>
-              <template v-else>
-                <span class="inst-name">{{ it.symbol_name || it.symbol }}</span>
-                <span class="inst-code mono" v-if="it.symbol_name">{{ it.symbol }}</span>
-              </template>
+            <td>
+              <div class="instrument">
+                <template v-if="isPortfolio(it)">
+                  <span class="inst-name">组合</span>
+                  <span class="inst-code mono">PORTFOLIO</span>
+                </template>
+                <template v-else>
+                  <span class="inst-name">{{ it.symbol_name || it.symbol }}</span>
+                  <span class="inst-code mono" v-if="it.symbol_name">{{ it.symbol }}</span>
+                </template>
+              </div>
             </td>
             <td>
               <span class="chip" :style="{ '--c': strategyColor(it.strategy_code) }">
@@ -270,9 +272,11 @@ onMounted(load)
             </td>
             <td class="num mono neg">{{ percent(it.metrics.max_drawdown, false) }}</td>
             <td class="num mono" :class="tone(it.metrics.sharpe)">{{ num(it.metrics.sharpe) }}</td>
-            <td class="num winrate">
-              <span class="wr-num mono">{{ percent(it.metrics.win_rate, false) }}</span>
-              <span class="wr-meter"><i :style="{ width: winMeter(it.metrics.win_rate) }"></i></span>
+            <td class="num">
+              <div class="winrate">
+                <span class="wr-num mono">{{ percent(it.metrics.win_rate, false) }}</span>
+                <span class="wr-meter"><i :style="{ width: winMeter(it.metrics.win_rate) }"></i></span>
+              </div>
             </td>
             <td>
               <span class="conf-tag" :class="confidenceClass(it.confidence)">{{ confidenceLabel(it.confidence) }}</span>
