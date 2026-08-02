@@ -23,6 +23,20 @@ from backend.app.quant.agent_board_service import TaskBatchSpec, TaskSpec
 
 logger = logging.getLogger(__name__)
 
+_REPORT_EXCERPT_CHARS = 16_000
+
+
+def _report_excerpt(content: str) -> str:
+    """Keep both the report context and its trailing handoff/task section."""
+    if len(content) <= _REPORT_EXCERPT_CHARS:
+        return content
+    half = _REPORT_EXCERPT_CHARS // 2
+    return (
+        content[:half]
+        + "\n\n...[报告中段已截断，保留末尾任务清单]...\n\n"
+        + content[-half:]
+    )
+
 # 提取结果的 JSON Schema
 EXTRACTION_PROMPT = """你是一个任务提取器。从以下定时任务报告中，提取需要其他数字人继续完成的动作。
 
@@ -101,7 +115,7 @@ class ScheduledTaskExtractor:
         prompt = EXTRACTION_PROMPT.replace(
             "{agent_codes}", "\n".join(f"- {code}: {name}" for code, name in agent_codes.items())
         ).replace(
-            "{report_content}", output_content[:8000],  # 截断避免超长
+            "{report_content}", _report_excerpt(output_content),
         )
 
         # 调用 LLM 提取（不持 DB session）

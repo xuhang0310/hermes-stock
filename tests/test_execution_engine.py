@@ -307,6 +307,17 @@ class TaskExtractorExtractTests(unittest.TestCase):
         self.assertFalse(result["has_tasks"])
         self.assertIn("报告内容为空", result["warnings"])
 
+    def test_report_excerpt_preserves_trailing_task_list(self) -> None:
+        from backend.app.quant.task_extractor import _report_excerpt
+
+        report = "context-" + ("x" * 20_000) + "-负责 Agent-待完成"
+        excerpt = _report_excerpt(report)
+
+        self.assertLess(len(excerpt), len(report))
+        self.assertTrue(excerpt.startswith("context-"))
+        self.assertIn("负责 Agent", excerpt)
+        self.assertTrue(excerpt.endswith("待完成"))
+
     def test_extract_no_agents_available(self) -> None:
         """Mock _get_agent_codes 返回空，测试无可用 Agent 分支"""
         from backend.app.quant.task_extractor import ScheduledTaskExtractor
