@@ -117,6 +117,38 @@ class PositionOcrValidationTests(unittest.TestCase):
         self.assertEqual(result["suggested_symbol"], "600519.SH")
         self.assertEqual(result["suggested_name"], "贵州茅台")
 
+    def test_bse_symbol_can_fall_back_to_exact_local_instrument(self) -> None:
+        with (
+            patch.object(
+                position_agent,
+                "lookup_a_share_instrument",
+                return_value={
+                    "available": True,
+                    "normalized_symbol": "834599.BJ",
+                    "instrument": None,
+                },
+            ),
+            patch.object(
+                position_agent,
+                "resolve_stock",
+                return_value={
+                    "candidates": [
+                        {
+                            "ts_code": "834599.BJ",
+                            "name": "同力天启",
+                            "source": "local.instruments",
+                        }
+                    ]
+                },
+            ),
+        ):
+            result = position_agent.validate_position_symbol("834599.BJ", "同力天启")
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["normalized_symbol"], "834599.BJ")
+        self.assertEqual(result["canonical_name"], "同力天启")
+        self.assertEqual(result["status"], "valid_local")
+
     def test_ocr_rows_require_review_before_database_write(self) -> None:
         with patch.object(
             position_agent,

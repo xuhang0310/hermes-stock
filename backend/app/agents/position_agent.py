@@ -320,12 +320,6 @@ def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, 
         }
 
     lookup = lookup_a_share_instrument(normalized)
-    if not lookup.get("available"):
-        return {
-            **base,
-            "status": "catalog_unavailable",
-            "message": "上市证券目录暂时不可用，当前不能可靠校验，请稍后重试。",
-        }
     exact = lookup.get("instrument")
     if exact:
         canonical_name = str(exact.get("name") or input_name or normalized)
@@ -341,6 +335,44 @@ def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, 
             "normalized_symbol": normalized,
             "canonical_name": canonical_name,
             "message": message,
+        }
+
+    local_resolution = resolve_stock(normalized)
+    local_candidates = (
+        local_resolution.get("candidates")
+        if isinstance(local_resolution, dict)
+        else []
+    )
+    local_exact = next(
+        (
+            candidate
+            for candidate in local_candidates or []
+            if normalize_a_share_symbol(str(candidate.get("ts_code") or ""))
+            == normalized
+        ),
+        None,
+    )
+    if local_exact:
+        canonical_name = str(local_exact.get("name") or input_name or normalized)
+        status = "valid_local"
+        message = "代码已通过本地证券目录校验"
+        if input_name and canonical_name and input_name != canonical_name:
+            status = "name_corrected"
+            message = f"代码有效，证券名称已校正为“{canonical_name}”。"
+        return {
+            **base,
+            "valid": True,
+            "status": status,
+            "normalized_symbol": normalized,
+            "canonical_name": canonical_name,
+            "message": message,
+        }
+
+    if not lookup.get("available"):
+        return {
+            **base,
+            "status": "catalog_unavailable",
+            "message": "上市证券目录暂时不可用，当前不能可靠校验，请稍后重试。",
         }
 
     suggestion = None
