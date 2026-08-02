@@ -39,7 +39,7 @@ onMounted(() => {
     tags.value = (props.modelValue as string[]).map((code) => ({ code, name: labelFor(code) }))
   } else {
     const v = (props.modelValue as string) || ''
-    displayText.value = v && props.labels[v] ? `${props.labels[v]}  ${v}` : v
+    displayText.value = v && props.labels[v] ? `${props.labels[v]} · ${v}` : v
   }
 })
 
@@ -86,7 +86,7 @@ function pick(item: StockCandidate) {
     }
     displayText.value = ''
   } else {
-    displayText.value = item.name ? `${item.name}  ${item.ts_code}` : item.ts_code
+    displayText.value = item.name ? `${item.name} · ${item.ts_code}` : item.ts_code
     emit('update:modelValue', item.ts_code)
   }
   candidates.value = []
@@ -145,10 +145,9 @@ async function onKeydown(event: KeyboardEvent) {
 <template>
   <div ref="root" class="ssp" :class="{ 'ssp-multi': multiple }">
     <div class="ssp-tags" v-if="multiple && tags.length">
-      <span v-for="(tag, i) in tags" :key="tag.code" class="ssp-tag">
+      <span v-for="(tag, i) in tags" :key="tag.code" class="ssp-tag" :title="tag.code">
         <span class="ssp-tag-name">{{ tag.name }}</span>
-        <span class="ssp-tag-code" v-if="tag.name !== tag.code">{{ tag.code }}</span>
-        <button type="button" class="ssp-tag-x" :disabled="disabled" @click="removeTag(i)">×</button>
+        <button type="button" class="ssp-tag-x" :disabled="disabled" :title="`移除 ${tag.name}`" @click="removeTag(i)">×</button>
       </span>
     </div>
     <input
@@ -189,8 +188,27 @@ async function onKeydown(event: KeyboardEvent) {
 .ssp-tags {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
   gap: 5px;
   margin-bottom: 6px;
+  max-height: 88px;
+  overflow-y: auto;
+  padding: 2px 4px 2px 0;
+  -webkit-mask-image: linear-gradient(180deg, #000 86%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 86%, transparent 100%);
+}
+
+.ssp-tags::-webkit-scrollbar {
+  width: 5px;
+}
+
+.ssp-tags::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+}
+
+.ssp-tags::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .ssp-tag {
@@ -238,7 +256,7 @@ async function onKeydown(event: KeyboardEvent) {
   width: 100%;
   padding: 7px 10px;
   background: var(--bg-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
   color: var(--text);
   font-size: 12.5px;

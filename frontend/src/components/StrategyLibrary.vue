@@ -23,6 +23,7 @@ const strategyColors: Record<string, string> = {
   bollinger: 'var(--pink)',
   rsi: 'var(--warning)',
   momentum: 'var(--ok)',
+  turtle: '#e08a5a',
 }
 
 function strategyColor(code: string): string {
@@ -246,6 +247,7 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
   gap: 12px;
+  align-items: start;
 }
 
 .sl-card {
@@ -257,6 +259,7 @@ onBeforeUnmount(() => {
   background: linear-gradient(180deg, var(--surface-2), var(--surface));
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   transition: border-color 0.18s, transform 0.15s, box-shadow 0.18s;
   animation: sl-in 0.4s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
@@ -277,7 +280,7 @@ onBeforeUnmount(() => {
 .sl-card:hover {
   border-color: var(--line-strong);
   transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4), 0 0 22px -10px var(--c), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
 .sl-card:hover::before {
@@ -330,8 +333,12 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 12.5px;
   line-height: 1.55;
-  color: var(--muted);
-  flex: 1;
+  color: rgba(242, 240, 232, 0.72);
+  min-height: 3.1em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .sl-tags {
@@ -363,6 +370,11 @@ onBeforeUnmount(() => {
 .sl-risk.risk-high {
   color: var(--danger);
   border-color: rgba(255, 93, 93, 0.35);
+}
+
+.sl-kind {
+  color: rgba(242, 240, 232, 0.8);
+  border-color: var(--line-strong);
 }
 
 .sl-input-row {
