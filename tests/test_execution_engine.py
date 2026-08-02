@@ -318,6 +318,29 @@ class TaskExtractorExtractTests(unittest.TestCase):
         self.assertIn("负责 Agent", excerpt)
         self.assertTrue(excerpt.endswith("待完成"))
 
+    def test_explicit_task_table_is_parsed_without_llm(self) -> None:
+        from backend.app.quant.task_extractor import ScheduledTaskExtractor
+
+        report = """
+| # | 动作 | 负责 Agent | 状态 |
+|---|------|-----------|------|
+| 1 | 读建设机械整改报告全文 | 研究员 | ❌ 待完成 |
+| 2 | 为持仓设置止损价 | 风控官 | ❌ 待完成 |
+"""
+        plan = ScheduledTaskExtractor()._extract_explicit_task_table(
+            report,
+            agent_codes={"researcher": "研究员", "risk-officer": "风控官"},
+            job_run_id="abcdef1234567890-job",
+            max_tasks=20,
+        )
+
+        self.assertTrue(plan["has_tasks"])
+        self.assertEqual(plan["confidence"], 1.0)
+        self.assertEqual(len(plan["tasks"]), 2)
+        self.assertEqual(plan["tasks"][0]["agent_code"], "researcher")
+        self.assertEqual(plan["tasks"][1]["agent_code"], "risk-officer")
+        self.assertEqual(plan["tasks"][0]["action_key"], "scheduled-abcdef1234567890-1")
+
     def test_extract_no_agents_available(self) -> None:
         """Mock _get_agent_codes 返回空，测试无可用 Agent 分支"""
         from backend.app.quant.task_extractor import ScheduledTaskExtractor

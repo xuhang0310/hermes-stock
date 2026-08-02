@@ -37,6 +37,10 @@ def _report_excerpt(content: str) -> str:
         + content[-half:]
     )
 
+
+def _clean_table_cell(value: str) -> str:
+    return re.sub(r"[`*_]", "", value).strip()
+
 # 提取结果的 JSON Schema
 EXTRACTION_PROMPT = """你是一个任务提取器。从以下定时任务报告中，提取需要其他数字人继续完成的动作。
 
@@ -111,6 +115,17 @@ class ScheduledTaskExtractor:
             if not agent_codes:
                 return {"has_tasks": False, "confidence": 1.0, "tasks": [], "warnings": ["没有可用的数字人"]}
 
+        explicit_plan = self._extract_explicit_task_table(
+            output_content,
+            agent_codes=agent_codes,
+            job_run_id=job_run_id,
+            max_tasks=max_tasks,
+        )
+        if explicit_plan["has_tasks"]:
+            with session_scope() as session:
+                self._save_extraction_plan(session, job_run_id, explicit_plan)
+            return explicit_plan
+
         # 构建提取 prompt（用 .replace 避免 JSON 花括号冲突）
         prompt = EXTRACTION_PROMPT.replace(
             "{agent_codes}", "\n".join(f"- {code}: {name}" for code, name in agent_codes.items())
@@ -133,6 +148,66 @@ class ScheduledTaskExtractor:
             self._save_extraction_plan(session, job_run_id, validated)
 
         return validated
+
+    def _extract_explicit_task_table(
+        self,
+        output_content: str,
+        *,
+        agent_codes: dict[str, str],
+        job_run_id: str,
+        max_tasks: int,
+    ) -> dict[str, Any]:
+        """Parse explicit Markdown handoff rows without another LLM call."""
+        assignee_codes = {
+            re.sub(r"\s+", "", code).lower(): code for code in agent_codes
+        }
+        assignee_codes.update(
+            {
+                re.sub(r"\s+", "", name).lower(): code
+                for code, name in agent_codes.items()
+            }
+        )
+        tasks: list[dict[str, Any]] = []
+        for line in output_content.splitlines():
+            if "|" not in line or "待完成" not in line:
+                continue
+            cells = [_clean_table_cell(cell) for cell in line.strip().strip("|").split("|")]
+            if len(cells) < 3:
+                continue
+            assignee_index = next(
+                (
+                    index
+                    for index, cell in enumerate(cells)
+                    if re.sub(r"\s+", "", cell).lower() in assignee_codes
+                ),
+                None,
+            )
+            if assignee_index is None or assignee_index == 0:
+                continue
+            assignee = re.sub(r"\s+", "", cells[assignee_index]).lower()
+            action = cells[assignee_index - 1].strip()
+            if not action:
+                continue
+            task_number = len(tasks) + 1
+            tasks.append(
+                {
+                    "action_key": f"scheduled-{job_run_id[:16]}-{task_number}",
+                    "title": action[:240],
+                    "agent_code": assignee_codes[assignee],
+                    "instruction": f"完成定时报告转交的待办事项：{action}",
+                    "expected_output": "完成结果及可核验依据",
+                    "required": True,
+                    "priority": 100,
+                }
+            )
+            if len(tasks) >= max_tasks:
+                break
+        return {
+            "has_tasks": bool(tasks),
+            "confidence": 1.0,
+            "tasks": tasks,
+            "warnings": [],
+        }
 
     def to_task_batch(
         self,
