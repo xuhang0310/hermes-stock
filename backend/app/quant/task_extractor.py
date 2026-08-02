@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from backend.app.agent_runtime.team_service import AGENT_CODE_ALIASES
 from backend.app.core.llm_config import active_llm_config
 from backend.app.core.models import DigitalHumanProfile, JobRun
 from backend.app.quant.agent_board_service import TaskBatchSpec, TaskSpec
@@ -165,6 +166,13 @@ class ScheduledTaskExtractor:
             {
                 re.sub(r"\s+", "", name).lower(): code
                 for code, name in agent_codes.items()
+            }
+        )
+        assignee_codes.update(
+            {
+                re.sub(r"\s+", "", alias).lower(): code
+                for alias, code in AGENT_CODE_ALIASES.items()
+                if code in agent_codes
             }
         )
         tasks: list[dict[str, Any]] = []

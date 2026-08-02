@@ -329,7 +329,10 @@ class TaskExtractorExtractTests(unittest.TestCase):
 """
         plan = ScheduledTaskExtractor()._extract_explicit_task_table(
             report,
-            agent_codes={"researcher": "研究员", "risk-officer": "风控官"},
+            agent_codes={
+                "research-analyst": "个股研究员",
+                "risk-officer": "风控复盘官",
+            },
             job_run_id="abcdef1234567890-job",
             max_tasks=20,
         )
@@ -337,7 +340,7 @@ class TaskExtractorExtractTests(unittest.TestCase):
         self.assertTrue(plan["has_tasks"])
         self.assertEqual(plan["confidence"], 1.0)
         self.assertEqual(len(plan["tasks"]), 2)
-        self.assertEqual(plan["tasks"][0]["agent_code"], "researcher")
+        self.assertEqual(plan["tasks"][0]["agent_code"], "research-analyst")
         self.assertEqual(plan["tasks"][1]["agent_code"], "risk-officer")
         self.assertEqual(plan["tasks"][0]["action_key"], "scheduled-abcdef1234567890-1")
 

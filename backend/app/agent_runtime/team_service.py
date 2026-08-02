@@ -31,6 +31,7 @@ AGENT_CODE_ALIASES = {
     "stock-research-analyst": "research-analyst",
     "researcher": "research-analyst",
     "individual-stock-researcher": "research-analyst",
+    "研究员": "research-analyst",
     "个股研究员": "research-analyst",
     "risk-manager": "risk-officer",
     "risk-analyst": "risk-officer",
