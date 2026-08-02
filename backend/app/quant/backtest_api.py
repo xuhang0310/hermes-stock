@@ -7,9 +7,16 @@ from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+import logging
 
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+
+from backend.app.ai.llm_client import chat_completion
 from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.core.database import SessionLocal
+from backend.app.core.llm_config import active_llm_config
+from backend.app.core.models import BacktestRun
 from backend.app.quant.backtest_engine import create_backtest, get_backtest, list_backtests
 from backend.app.quant.backtest_runner import SIGNAL_ENGINE_REGISTRY, run_signal_backtest
 from backend.app.market.stock_tools import _stock_basic_item, resolve_stock
@@ -18,6 +25,8 @@ from backend.app.quant.strategy_descriptors import descriptor_public, get_descri
 
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
 stocks_router = APIRouter(prefix="/api/stocks", tags=["stocks"])
+
+logger = logging.getLogger(__name__)
 
 
 class MacdBacktestRequest(BaseModel):
@@ -219,3 +228,125 @@ def search_stocks(
             for c in candidates
         ]
     }
+
+
+def _pct(value: object) -> str:
+    """百分比格式化，None/非数 → N/A。"""
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _num(value: object, digits: int = 2) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _build_takeaway_messages(result: dict) -> list[dict[str, str]]:
+    """把回测结果压成一段事实，交给 LLM 做人话点评。"""
+    metrics = result.get("metrics") or {}
+    strategy = result.get("strategy")
+    strategy_name = strategy.get("name") if isinstance(strategy, dict) else (strategy or "未命名策略")
+    symbols = result.get("symbols") or []
+    period = result.get("period") or {}
+    trades = result.get("trades") or []
+
+    trade_lines = []
+    for trade in trades[:6]:
+        trade_lines.append(
+            f"  - {trade.get('symbol')} 盈亏{_num(trade.get('pnl'))}元 "
+            f"({_pct(trade.get('pnl_pct'))}) 持{trade.get('holding_days') or trade.get('holding_bars') or '?'}天"
+        )
+
+    facts = (
+        f"策略：{strategy_name}\n"
+        f"标的：{', '.join(symbols) if symbols else '组合'}\n"
+        f"回测区间：{period.get('start', '?')} ~ {period.get('end', '?')}\n"
+        f"总收益：{_pct(metrics.get('total_return'))}　最大回撤：{_pct(metrics.get('max_drawdown'))}　"
+        f"夏普：{_num(metrics.get('sharpe'))}　胜率：{_pct(metrics.get('win_rate'))}　"
+        f"交易笔数：{metrics.get('trade_count') or metrics.get('n_trades') or len(trades)}　"
+        f"盈/亏笔：{metrics.get('winning_trades', '?')}/{metrics.get('losing_trades', '?')}　"
+        f"平均持仓：{metrics.get('avg_holding_days', '?')}天\n"
+        f"逐笔概览：\n{chr(10).join(trade_lines) if trade_lines else '  （无成交）'}"
+    )
+
+    system = (
+        "你是 A 股量化回测的解读顾问，服务对象是股票研究员。给你一次策略回测的绩效与逐笔统计，"
+        "请用 2 到 4 句通俗中文点评「这次回测说明了什么」。\n"
+        "要求：\n"
+        "1. 结合策略特性给判断，而非复述数字。例如趋势/海龟类策略在震荡市小亏、频繁止损，往往是纪律性风控的正常表现，"
+        "不等于策略失效；动量/横截面策略要留意持仓是否集中在同一板块或风格。\n"
+        "2. 从收益、回撤、夏普、胜率、交易笔数的组合里读出信号（如交易太少则结论不可靠、胜率低但靠少数大赚支撑等）。\n"
+        "3. 点明局限：样本区间长短、是否覆盖牛熊、交易次数是否足够支撑统计结论。\n"
+        "4. 这是研究复盘，绝不给出买入/卖出建议，也不预测未来涨跌。\n"
+        "只输出点评正文，不要标题、不要列表、不要 JSON、不要复述原始数字清单。"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": facts},
+    ]
+
+
+def _generate_takeaway(result: dict) -> str | None:
+    """调活跃模型生成人话点评；任何失败返回 None（best-effort，不影响回测）。"""
+    try:
+        llm_config = active_llm_config()
+        if not llm_config.get("api_key") or not llm_config.get("base_url"):
+            return None
+        data = chat_completion(
+            _build_takeaway_messages(result),
+            llm_config,
+            temperature=0.3,
+            timeout=45.0,
+            log_module="backtest_takeaway",
+        )
+        choices = data.get("choices") or []
+        content = (choices[0].get("message") or {}).get("content") if choices else ""
+        text = (content or "").strip()
+        return text or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("回测 AI 解读生成失败: %s", str(exc)[:200])
+        return None
+
+
+def _save_takeaway(run_id: str, text: str) -> None:
+    """把解读写回 result_json 作缓存；失败静默（下次重算即可）。"""
+    try:
+        with SessionLocal() as db:
+            row = db.scalar(select(BacktestRun).where(BacktestRun.run_id == run_id).limit(1))
+            if row is None:
+                return
+            payload = json.loads(row.result_json) if row.result_json else {}
+            payload["ai_takeaway"] = text
+            row.result_json = json.dumps(payload, ensure_ascii=False)
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("回测 AI 解读缓存写入失败: %s", str(exc)[:200])
+
+
+@router.get("/{run_id}/takeaway")
+def get_backtest_takeaway(
+    run_id: str,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """回测的 AI 人话点评：首次懒生成并缓存，之后直接读缓存。
+
+    失败时返回 ``status=unavailable`` 与空文本，前端据此降级，绝不影响回测本身。
+    """
+    try:
+        result = get_backtest(run_id, owner_user_id=context.user.id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    cached = (result.get("ai_takeaway") or "").strip()
+    if cached:
+        return {"text": cached, "status": "ready"}
+
+    text = _generate_takeaway(result)
+    if not text:
+        return {"text": "", "status": "unavailable"}
+    _save_takeaway(run_id, text)
+    return {"text": text, "status": "ready"}

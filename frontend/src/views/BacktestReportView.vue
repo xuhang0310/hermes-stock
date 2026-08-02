@@ -21,6 +21,8 @@ type MetricTone = 'positive' | 'negative' | 'neutral' | 'accent'
 const run = ref<BacktestRun | null>(null)
 const loading = ref(false)
 const error = ref('')
+const takeaway = ref<{ text: string; status: string } | null>(null)
+const takeawayLoading = ref(false)
 const activeTab = ref<ReportTab>('chart')
 const priceHost = ref<HTMLElement | null>(null)
 const equityHost = ref<HTMLElement | null>(null)
@@ -321,6 +323,7 @@ function renderPortfolioCharts() {
 async function load() {
   loading.value = true
   error.value = ''
+  takeaway.value = null
   try {
     run.value = await api.backtest(props.runId)
   } catch (reason) {
@@ -331,6 +334,18 @@ async function load() {
   if (run.value && !error.value) {
     await nextTick()
     renderCharts()
+    void loadTakeaway()
+  }
+}
+
+async function loadTakeaway() {
+  takeawayLoading.value = true
+  try {
+    takeaway.value = await api.backtestTakeaway(props.runId)
+  } catch {
+    takeaway.value = { text: '', status: 'unavailable' }
+  } finally {
+    takeawayLoading.value = false
   }
 }
 
@@ -404,6 +419,14 @@ onBeforeUnmount(destroyCharts)
           <strong>{{ confidenceMeta.label }}</strong>
           <p>{{ confidenceMeta.description }}</p>
         </div>
+      </section>
+
+      <section v-if="takeawayLoading || (takeaway && takeaway.text)" class="ai-takeaway">
+        <header><span>AI 解读</span><strong>这次回测说明了什么</strong></header>
+        <p v-if="takeawayLoading" class="ai-takeaway-loading">
+          <span class="loading-mark"></span>正在生成 AI 点评…
+        </p>
+        <p v-else>{{ takeaway!.text }}</p>
       </section>
 
       <section class="primary-metrics" aria-label="核心回测指标">
@@ -818,6 +841,20 @@ button { font: inherit; }
 .confidence-panel.insufficient strong { color: var(--report-red); }
 .confidence-panel.medium { border-left-color: var(--report-cyan); }
 .confidence-panel.medium strong { color: var(--report-cyan); }
+
+.ai-takeaway {
+  display: grid;
+  gap: 9px;
+  padding: 16px 20px;
+  border: 1px solid var(--report-border);
+  border-left: 3px solid var(--report-gold);
+  background: linear-gradient(100deg, rgba(223, 182, 92, 0.06), rgba(16, 19, 21, 0.4));
+}
+.ai-takeaway header { display: flex; align-items: baseline; gap: 10px; }
+.ai-takeaway header span { color: #858c90; font-size: 9px; letter-spacing: 0.14em; }
+.ai-takeaway header strong { color: var(--report-gold); font-size: 13px; }
+.ai-takeaway p { margin: 0; color: #d7d3c8; font-size: 13px; line-height: 1.85; }
+.ai-takeaway-loading { display: flex; align-items: center; gap: 8px; color: var(--report-muted); font-size: 12px; }
 
 .primary-metrics {
   display: grid;

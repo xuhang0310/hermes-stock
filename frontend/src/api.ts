@@ -646,6 +646,10 @@ export const api = {
     ),
   backtest: (runId: string) =>
     request<BacktestRun>(`/api/backtests/${encodeURIComponent(runId)}`),
+  backtestTakeaway: (runId: string) =>
+    request<{ text: string; status: 'ready' | 'unavailable' }>(
+      `/api/backtests/${encodeURIComponent(runId)}/takeaway`
+    ),
   createMacdBacktest: (payload: Record<string, unknown>) =>
     request<BacktestRun>('/api/backtests', {
       method: 'POST',
