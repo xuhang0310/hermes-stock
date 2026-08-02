@@ -6,6 +6,8 @@ from backend.app.quant.backtest_runner import (
     run_signal_backtest,
 )
 from backend.app.quant.factor_signal_engine import FactorSignalEngine
+from backend.app.quant.strategy_descriptors import get_descriptor
+from datetime import date, timedelta
 from backend.app.quant.strategy_descriptors import strategy_enum
 
 
@@ -105,12 +107,14 @@ BACKTEST_TOOL_SCHEMAS = [
                     "symbols": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "minItems": 1,
                         "maxItems": 30,
-                        "description": "A 股代码列表，如 ['000001.SZ']；momentum 等横截面策略需多只股票（建议 10 只以上）",
+                        "description": (
+                            "A 股代码列表，如 ['000001.SZ']；横截面策略需多只股票。"
+                            "可省略或传空：此时自动使用该策略登记的默认股票池（如 momentum 的默认大盘池），无需逐只罗列。"
+                        ),
                     },
-                    "start_date": {"type": "string", "description": "YYYYMMDD，回测起始日期"},
-                    "end_date": {"type": "string", "description": "YYYYMMDD，回测结束日期"},
+                    "start_date": {"type": "string", "description": "YYYYMMDD，回测起始日期；可省略，默认最近两年"},
+                    "end_date": {"type": "string", "description": "YYYYMMDD，回测结束日期；可省略，默认最近两年"},
                     "strategy_params": {
                         "type": "object",
                         "description": "策略参数（可选），如 MACD: {fast: 12, slow: 26, signal: 9}",
@@ -119,7 +123,7 @@ BACKTEST_TOOL_SCHEMAS = [
                     "commission_rate": {"type": "number", "default": 0.00025, "description": "佣金率"},
                     "slippage": {"type": "number", "default": 0.001, "description": "滑点率"},
                 },
-                "required": ["strategy", "symbols", "start_date", "end_date"],
+                "required": ["strategy"],
             },
         },
     },
@@ -257,11 +261,23 @@ def _run_signal(args: dict) -> dict:
 
 
 def run_signal_backtest_tool(args: dict, *, owner_user_id: int | None = None) -> dict:
+    strategy = args["strategy"]
+    symbols = [str(s).strip() for s in (args.get("symbols") or []) if str(s).strip()]
+    if not symbols:
+        descriptor = get_descriptor(strategy)
+        symbols = list(descriptor["default_symbols"]) if descriptor else []
+    start_date = str(args.get("start_date") or "").strip()
+    end_date = str(args.get("end_date") or "").strip()
+    if not start_date or not end_date:
+        end = date.today()
+        start = end - timedelta(days=730)
+        start_date = start_date or start.strftime("%Y%m%d")
+        end_date = end_date or end.strftime("%Y%m%d")
     return run_signal_backtest(
-        strategy=args["strategy"],
-        symbols=args["symbols"],
-        start_date=args["start_date"],
-        end_date=args["end_date"],
+        strategy=strategy,
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
         strategy_params=args.get("strategy_params"),
         initial_cash=args.get("initial_cash", 1_000_000),
         commission_rate=args.get("commission_rate", 0.00025),

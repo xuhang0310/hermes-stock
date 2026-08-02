@@ -402,6 +402,16 @@ function applyQuickPrompt(prompt: string) {
   question.value = prompt
 }
 
+function runStrategyPrompt(prompt: string) {
+  if (selectedSessionRunning.value) return
+  if (!selectedProfileId.value || !selectedModelId.value) {
+    error.value = '请先在上方选择数字人和模型，再让 AI 跑回测。'
+    return
+  }
+  applyQuickPrompt(prompt)
+  void send()
+}
+
 function recommendationSignature(items: PromptRecommendation[]) {
   return items.map((item) => `${item.id}:${item.updated_at || ''}`).join('|')
 }
@@ -1128,7 +1138,7 @@ function requestIsVisible(request: ActiveChatRequest) {
             <strong>{{ selectedProfile?.name || 'A股研究数字人' }}</strong>
             <span>选择数字人和模型后开始会话，ReAct 的 Thought / Action / Observation 会在这里随回答一起出现。</span>
           </div>
-          <StrategyLibrary @open-backtest="(runId) => emit('openBacktest', runId)" />
+          <StrategyLibrary @ask-agent="runStrategyPrompt" />
         </div>
 
         <article v-for="item in messages" :key="item.id" class="message" :class="item.role">

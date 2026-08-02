@@ -4,7 +4,7 @@ import { api } from '../api'
 import type { StrategyDescriptor } from '../types'
 import StockSymbolPicker from './StockSymbolPicker.vue'
 
-const emit = defineEmits<{ openBacktest: [runId: string] }>()
+const emit = defineEmits<{ askAgent: [prompt: string] }>()
 
 const loading = ref(true)
 const catalogError = ref('')
@@ -44,45 +44,57 @@ async function runStrategy(strategy: StrategyDescriptor) {
   runningCode.value = strategy.code
   runErrors[strategy.code] = ''
   try {
-    let symbols: string[]
+    const { start, end } = defaultPeriod()
+    const period = `区间 ${start} 至 ${end}`
+    let prompt: string
     if (strategy.kind === 'single') {
       const raw = (symbolInputs[strategy.code] || '').trim()
       if (!raw) {
         runErrors[strategy.code] = '请填写股票名称或代码'
         return
       }
-      if (/^\d{6}\.(SH|SZ|BJ)$/.test(raw)) {
-        symbols = [raw]
-      } else {
+      let tsCode = raw
+      let label = (strategy.symbol_labels || {})[raw] || ''
+      if (!/^\d{6}\.(SH|SZ|BJ)$/.test(raw)) {
         try {
           const matched = (await api.searchStocks(raw)).items[0]
           if (!matched) {
             runErrors[strategy.code] = `未找到“${raw}”，请从联想列表选择或检查名称`
             return
           }
-          symbols = [matched.ts_code]
+          tsCode = matched.ts_code
+          label = matched.name || label
         } catch {
           runErrors[strategy.code] = '股票识别失败，请稍后重试'
           return
         }
       }
+      const who = label ? `${label}（${tsCode}）` : tsCode
+      prompt =
+        `请用「${strategy.name}」策略对 ${who} 做历史回测，${period}。` +
+        '请直接调用 run_signal_backtest 工具执行，不要追问、不要编写临时脚本。'
     } else {
-      symbols = (poolInputs[strategy.code] || []).slice()
-      if (symbols.length < 3) {
+      const pool = (poolInputs[strategy.code] || []).slice()
+      if (pool.length < 3) {
         runErrors[strategy.code] = '横截面策略至少需要 3 只股票'
         return
       }
+      const defaults = strategy.default_symbols || []
+      const isDefault = pool.length === defaults.length && pool.every((code, i) => code === defaults[i])
+      if (isDefault) {
+        prompt =
+          `请用「${strategy.name}」（横截面动量 / 强者恒强）做历史回测，${period}，symbols 省略、使用该策略的默认股票池。` +
+          `请直接调用 run_signal_backtest，strategy 用 ${strategy.code}，不要追问、不要编写临时脚本。`
+      } else {
+        prompt =
+          `请用「${strategy.name}」（横截面动量 / 强者恒强）做历史回测，${period}，` +
+          `symbols 原样使用以下代码、不要增减：${pool.join('、')}。` +
+          `请直接调用 run_signal_backtest，strategy 用 ${strategy.code}，不要追问、不要编写临时脚本。`
+      }
     }
-    const { start, end } = defaultPeriod()
-    const res = await api.runStrategyBacktest({
-      strategy_code: strategy.code,
-      symbols,
-      start_date: start,
-      end_date: end
-    })
-    emit('openBacktest', res.run_id)
+    emit('askAgent', prompt)
   } catch (reason) {
-    runErrors[strategy.code] = reason instanceof Error ? reason.message : '回测失败，请稍后重试'
+    runErrors[strategy.code] = reason instanceof Error ? reason.message : '准备回测失败，请稍后重试'
   } finally {
     runningCode.value = null
   }
@@ -127,7 +139,7 @@ onBeforeUnmount(() => {
       <span class="sl-head-mark"></span>
       <div>
         <h3>策略库</h3>
-        <p>看不懂术语没关系——选一个策略，点「用默认回测」，两分钟后看历史表现。</p>
+        <p>看不懂术语没关系——选一个策略，点「让 AI 跑」，AI 会边思考边回测，把结果讲给你听。</p>
       </div>
     </header>
 
@@ -177,7 +189,7 @@ onBeforeUnmount(() => {
           @click="runStrategy(strategy)"
         >
           <span v-if="runningCode === strategy.code" class="sl-spin"></span>
-          {{ runningCode === strategy.code ? '回测中…' : '用默认回测' }}
+          {{ runningCode === strategy.code ? '解析中…' : '让 AI 跑' }}
         </button>
 
         <p v-if="runErrors[strategy.code]" class="sl-run-error">{{ runErrors[strategy.code] }}</p>
