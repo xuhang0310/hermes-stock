@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, select, func
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -52,6 +52,13 @@ class AgentBoardServiceTests(unittest.TestCase):
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
+
+        @event.listens_for(self.engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
         Base.metadata.create_all(self.engine)
         self.SessionFactory = sessionmaker(bind=self.engine, expire_on_commit=False)
 

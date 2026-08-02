@@ -20,13 +20,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from backend.app.core.database import SessionLocal, session_scope
+from backend.app.core.database import session_scope
 from backend.app.core.models import (
     AgentDelegation,
     AgentRun,
     AgentTeamRun,
     DigitalHumanProfile,
-    JobRun,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,6 +154,9 @@ def create_task_batch(
             completion_policy=batch.completion_policy,
         )
         session.add(team_run)
+        # No ORM relationship links these rows, so flush the parent before
+        # MySQL validates the Delegation foreign keys.
+        session.flush()
 
         # 创建 delegations 和子 AgentRun
         created_ids: list[str] = []
@@ -184,8 +186,6 @@ def create_task_batch(
                 priority=task.priority,
                 extraction_source="tool_call",
             )
-            session.add(delegation)
-
             child_run = AgentRun(
                 run_id=child_run_id,
                 session_id=leader_session_id,
@@ -211,6 +211,10 @@ def create_task_batch(
                 task_title=task.title,
             )
             session.add(child_run)
+            # Delegation has a foreign key to the child run and there is no
+            # ORM relationship that lets SQLAlchemy order these inserts.
+            session.flush()
+            session.add(delegation)
             created_ids.append(child_run_id)
 
         # 注意：leader 状态更新为 waiting_children 由 AgentRunExecutor 负责，本函数不处理
@@ -284,7 +288,7 @@ def cancel_task(
             raise ValueError(f"任务不存在：{run_id}")
 
         if run.status in ("completed", "cancelled"):
-            raise ValueError(f"任务已完成或已取消，无法再取消")
+            raise ValueError("任务已完成或已取消，无法再取消")
 
         run.cancel_requested = True
         if run.status in ("queued", "waiting_dependency", "waiting_approval"):

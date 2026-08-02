@@ -31,6 +31,7 @@ from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.feishu.feishu import send_feishu
 from backend.app.core.models import (
     AgentReport,
+    AgentRun,
     AgentTeamRun,
     AiChatMessage,
     AiChatSession,
@@ -753,6 +754,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
                     snapshot.get("task_extraction_mode") or "structured_tool"
                 )
                 leader_run_id = None
+                leader_user_id = None
                 has_task_batch = False
                 with SessionLocal() as db:
                     jr = db.scalar(
@@ -760,6 +762,8 @@ def _execute_job(job_key: str, run_id: str) -> None:
                     )
                     leader_run_id = jr.leader_agent_run_id if jr else None
                     if leader_run_id:
+                        leader_run = db.get(AgentRun, leader_run_id)
+                        leader_user_id = leader_run.user_id if leader_run else None
                         has_task_batch = db.scalar(
                             select(AgentTeamRun.team_id)
                             .where(AgentTeamRun.leader_run_id == leader_run_id)
@@ -792,7 +796,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
                             board_result = create_task_batch(
                                 batch,
                                 leader_run_id=leader_run_id,
-                                user_id=snapshot.get("owner_user_id"),
+                                user_id=leader_user_id or snapshot.get("owner_user_id"),
                                 job_run_id=run_id,
                                 skip_leader_validation=True,
                             )
