@@ -29,6 +29,51 @@ class _CaptureWriteRepository:
 
 
 class PositionOcrValidationTests(unittest.TestCase):
+    def test_ocr_uses_thinking_compatible_tool_choice(self) -> None:
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "save_position_holdings",
+                                    "arguments": '{"rows":[{"symbol":"000001.SZ"}]}',
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        llm_config = {
+            "id": 7,
+            "display_name": "Qwen3.7 Plus",
+            "provider_name": "百炼",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "test-key",
+            "model": "qwen3.7-plus",
+            "temperature": 0.2,
+        }
+
+        with (
+            patch.object(
+                position_agent,
+                "resolve_vision_model_config_id",
+                return_value=7,
+            ) as resolve_model,
+            patch.object(position_agent, "active_llm_config", return_value=llm_config),
+            patch.object(position_agent, "chat_completion", return_value=response) as chat,
+        ):
+            result = position_agent.extract_position_ocr_arguments(
+                user_content="image",
+                model_config_id=None,
+            )
+
+        resolve_model.assert_called_once_with(None)
+        self.assertEqual(chat.call_args.kwargs["tool_choice"], "auto")
+        self.assertEqual(result["model"]["model_name"], "qwen3.7-plus")
+
     def test_position_prompt_requires_incremental_rows_only(self) -> None:
         prompt = position_agent._position_agent_prompt()
 
