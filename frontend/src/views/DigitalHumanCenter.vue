@@ -116,6 +116,7 @@ const attachmentPicker = ref<ChatAttachmentPickerHandle | null>(null)
 const composerTextarea = ref<HTMLTextAreaElement | null>(null)
 const skillSlashMenu = ref<SkillSlashMenuHandle | null>(null)
 const selectedCoreSkills = ref<AgentSkill[]>([])
+const strategySelection = ref<{ instruction: string; label: string } | null>(null)
 const workspaceExecAvailable = ref(false)
 const selectedProfileId = ref<number | null>(null)
 const selectedModelId = ref<number | null>(null)
@@ -316,6 +317,7 @@ function toChatMessages(items: AgentMessage[]): ChatMessage[] {
 
 function selectSessionDetail(detail: AgentSessionDetail, sessionMessages: ChatMessage[]) {
   selectedCoreSkills.value = []
+  strategySelection.value = null
   skillSlashMenu.value?.close()
   selectedSessionId.value = detail.id
   selectedProfileId.value = detail.digital_human_id || selectedProfileId.value
@@ -330,6 +332,7 @@ function selectSessionDetail(detail: AgentSessionDetail, sessionMessages: ChatMe
 async function openSession(id: number) {
   closeMobileRail()
   selectedCoreSkills.value = []
+  strategySelection.value = null
   skillSlashMenu.value?.close()
   error.value = ''
   const activeRequest = activeRequests.get(sessionKey(id))
@@ -372,6 +375,7 @@ function newSession(profileId?: number | null) {
   messages.value = []
   question.value = ''
   selectedCoreSkills.value = []
+  strategySelection.value = null
   skillSlashMenu.value?.close()
   pendingAttachments.value = []
   approvalPolicy.value = 'ask'
@@ -402,14 +406,14 @@ function applyQuickPrompt(prompt: string) {
   question.value = prompt
 }
 
-function runStrategyPrompt(prompt: string) {
+function selectStrategyPrompt(payload: { instruction: string; label: string }) {
   if (selectedSessionRunning.value) return
   if (!selectedProfileId.value || !selectedModelId.value) {
-    error.value = '请先在上方选择数字人和模型，再让 AI 跑回测。'
+    error.value = '请先在上方选择数字人和模型，再选择策略。'
     return
   }
-  applyQuickPrompt(prompt)
-  void send()
+  strategySelection.value = payload
+  skillSlashMenu.value?.close()
 }
 
 function recommendationSignature(items: PromptRecommendation[]) {
@@ -765,7 +769,10 @@ async function send() {
   const sentAttachments = pendingAttachments.value.map(({ preview_url: _preview, ...item }) => item)
   const requestKey = selectedConversationKey.value
   if ((!enteredText && !sentAttachments.length) || activeRequests.has(requestKey)) return
-  const text = enteredText || '请分析我上传的附件。'
+  const strategyInstruction = strategySelection.value?.instruction
+  const text = strategyInstruction
+    ? `${strategyInstruction}\n${enteredText}`
+    : enteredText || '请分析我上传的附件。'
   const selectedSkillNames = selectedCoreSkills.value.map((item) => item.name)
   const requestSessionId = selectedSessionId.value
   const requestProfileId = selectedProfileId.value
@@ -779,6 +786,7 @@ async function send() {
   error.value = ''
   question.value = ''
   selectedCoreSkills.value = []
+  strategySelection.value = null
   skillSlashMenu.value?.close()
   pendingAttachments.value = []
   requestMessages.push({
@@ -1138,7 +1146,7 @@ function requestIsVisible(request: ActiveChatRequest) {
             <strong>{{ selectedProfile?.name || 'A股研究数字人' }}</strong>
             <span>选择数字人和模型后开始会话，ReAct 的 Thought / Action / Observation 会在这里随回答一起出现。</span>
           </div>
-          <StrategyLibrary @ask-agent="runStrategyPrompt" />
+          <StrategyLibrary @select-strategy="selectStrategyPrompt" />
         </div>
 
         <article v-for="item in messages" :key="item.id" class="message" :class="item.role">
@@ -1250,6 +1258,20 @@ function requestIsVisible(request: ActiveChatRequest) {
           @select-swarm="selectSwarmTeam"
           @remove="removeCoreSkill"
         />
+        <div v-if="strategySelection" class="strategy-selection">
+          <span class="strategy-selection-chip">
+            <span class="skill-selection-mark">#</span>
+            <span>策略：{{ strategySelection.label }}</span>
+            <button
+              type="button"
+              :aria-label="`移除${strategySelection.label}`"
+              :title="`移除${strategySelection.label}`"
+              :disabled="selectedSessionRunning || !selectedProfile"
+              @click="strategySelection = null"
+            >&times;</button>
+          </span>
+          <span class="strategy-selection-hint">点上方 ↑ 发送后开始回测，可先补充问题</span>
+        </div>
         <footer class="chat-composer-toolbar">
           <ChatAttachmentPicker ref="attachmentPicker" v-model="pendingAttachments" :disabled="selectedSessionRunning || !selectedProfile" />
           <ApprovalPolicyControl v-model="approvalPolicy" :disabled="selectedSessionRunning" :exec-available="workspaceExecAvailable" />
@@ -1264,7 +1286,7 @@ function requestIsVisible(request: ActiveChatRequest) {
             :class="{ stop: selectedSessionRunning }"
             :type="selectedSessionRunning ? 'button' : 'submit'"
             :title="selectedSessionRunning ? '停止当前会话' : '发送'"
-            :disabled="!selectedSessionRunning && ((!question.trim() && !pendingAttachments.length) || !selectedProfile)"
+            :disabled="!selectedSessionRunning && ((!question.trim() && !pendingAttachments.length && !strategySelection) || !selectedProfile)"
             @click="selectedSessionRunning ? stopSending() : undefined"
           >{{ selectedSessionRunning ? '■' : '↑' }}</button>
         </footer>

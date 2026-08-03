@@ -4,7 +4,7 @@ import { api } from '../api'
 import type { StrategyDescriptor } from '../types'
 import StockSymbolPicker from './StockSymbolPicker.vue'
 
-const emit = defineEmits<{ askAgent: [prompt: string] }>()
+const emit = defineEmits<{ selectStrategy: [payload: { instruction: string; label: string }] }>()
 
 const loading = ref(true)
 const catalogError = ref('')
@@ -12,8 +12,8 @@ const strategies = ref<StrategyDescriptor[]>([])
 const explainOpen = ref<string | null>(null)
 const symbolInputs = reactive<Record<string, string>>({})
 const poolInputs = reactive<Record<string, string[]>>({})
-const runningCode = ref<string | null>(null)
-const runErrors = reactive<Record<string, string>>({})
+const selectingCode = ref<string | null>(null)
+const selectErrors = reactive<Record<string, string>>({})
 
 const riskLabels: Record<string, string> = { low: '低风险', medium: '中风险', high: '高风险' }
 
@@ -39,64 +39,68 @@ function defaultPeriod(): { start: string; end: string } {
   return { start: fmt(start), end: fmt(end) }
 }
 
-async function runStrategy(strategy: StrategyDescriptor) {
-  if (runningCode.value) return
-  runningCode.value = strategy.code
-  runErrors[strategy.code] = ''
+async function selectStrategy(strategy: StrategyDescriptor) {
+  if (selectingCode.value) return
+  selectingCode.value = strategy.code
+  selectErrors[strategy.code] = ''
   try {
     const { start, end } = defaultPeriod()
     const period = `区间 ${start} 至 ${end}`
-    let prompt: string
+    let instruction: string
+    let label: string
     if (strategy.kind === 'single') {
       const raw = (symbolInputs[strategy.code] || '').trim()
       if (!raw) {
-        runErrors[strategy.code] = '请填写股票名称或代码'
+        selectErrors[strategy.code] = '请填写股票名称或代码'
         return
       }
       let tsCode = raw
-      let label = (strategy.symbol_labels || {})[raw] || ''
+      let who = (strategy.symbol_labels || {})[raw] || ''
       if (!/^\d{6}\.(SH|SZ|BJ)$/.test(raw)) {
         try {
           const matched = (await api.searchStocks(raw)).items[0]
           if (!matched) {
-            runErrors[strategy.code] = `未找到“${raw}”，请从联想列表选择或检查名称`
+            selectErrors[strategy.code] = `未找到“${raw}”，请从联想列表选择或检查名称`
             return
           }
           tsCode = matched.ts_code
-          label = matched.name || label
+          who = matched.name || who
         } catch {
-          runErrors[strategy.code] = '股票识别失败，请稍后重试'
+          selectErrors[strategy.code] = '股票识别失败，请稍后重试'
           return
         }
       }
-      const who = label ? `${label}（${tsCode}）` : tsCode
-      prompt =
-        `请用「${strategy.name}」策略对 ${who} 做历史回测，${period}。` +
-        '请直接调用 run_signal_backtest 工具执行，不要追问、不要编写临时脚本。'
+      const whom = who ? `${who}（${tsCode}）` : tsCode
+      label = `${strategy.name} · ${whom}`
+      instruction =
+        `请用「${strategy.name}」策略对 ${whom} 做历史回测，${period}。` +
+        '请直接调用 run_signal_backtest 工具执行，strategy 用 ' + strategy.code + '，不要追问、不要编写临时脚本。'
     } else {
       const pool = (poolInputs[strategy.code] || []).slice()
       if (pool.length < 3) {
-        runErrors[strategy.code] = '横截面策略至少需要 3 只股票'
+        selectErrors[strategy.code] = '横截面策略至少需要 3 只股票'
         return
       }
       const defaults = strategy.default_symbols || []
       const isDefault = pool.length === defaults.length && pool.every((code, i) => code === defaults[i])
+      label = `${strategy.name} · 默认股票池`
       if (isDefault) {
-        prompt =
+        instruction =
           `请用「${strategy.name}」（横截面动量 / 强者恒强）做历史回测，${period}，symbols 省略、使用该策略的默认股票池。` +
           `请直接调用 run_signal_backtest，strategy 用 ${strategy.code}，不要追问、不要编写临时脚本。`
       } else {
-        prompt =
+        label = `${strategy.name} · ${pool.length} 只股票`
+        instruction =
           `请用「${strategy.name}」（横截面动量 / 强者恒强）做历史回测，${period}，` +
           `symbols 原样使用以下代码、不要增减：${pool.join('、')}。` +
           `请直接调用 run_signal_backtest，strategy 用 ${strategy.code}，不要追问、不要编写临时脚本。`
       }
     }
-    emit('askAgent', prompt)
+    emit('selectStrategy', { instruction, label })
   } catch (reason) {
-    runErrors[strategy.code] = reason instanceof Error ? reason.message : '准备回测失败，请稍后重试'
+    selectErrors[strategy.code] = reason instanceof Error ? reason.message : '准备回测失败，请稍后重试'
   } finally {
-    runningCode.value = null
+    selectingCode.value = null
   }
 }
 
@@ -139,7 +143,7 @@ onBeforeUnmount(() => {
       <span class="sl-head-mark"></span>
       <div>
         <h3>策略库</h3>
-        <p>看不懂术语没关系——选一个策略，点「让 AI 跑」，AI 会边思考边回测，把结果讲给你听。</p>
+        <p>看不懂术语没关系——选一个策略，AI 会把回测结果讲给你听。</p>
       </div>
     </header>
 
@@ -170,7 +174,7 @@ onBeforeUnmount(() => {
           v-if="strategy.kind === 'single'"
           v-model="symbolInputs[strategy.code]"
           :labels="strategy.symbol_labels || {}"
-          :disabled="runningCode !== null"
+          :disabled="selectingCode !== null"
           placeholder="股票名称或代码，如 平安银行 / 000001.SZ"
         />
         <StockSymbolPicker
@@ -178,21 +182,21 @@ onBeforeUnmount(() => {
           v-model="poolInputs[strategy.code]"
           multiple
           :labels="strategy.symbol_labels || {}"
-          :disabled="runningCode !== null"
+          :disabled="selectingCode !== null"
           placeholder="加减股票：名称或代码，如 茅台 / 600519.SH"
         />
 
         <button
           type="button"
           class="sl-run"
-          :disabled="runningCode !== null"
-          @click="runStrategy(strategy)"
+          :disabled="selectingCode !== null"
+          @click="selectStrategy(strategy)"
         >
-          <span v-if="runningCode === strategy.code" class="sl-spin"></span>
-          {{ runningCode === strategy.code ? '解析中…' : '让 AI 跑' }}
+          <span v-if="selectingCode === strategy.code" class="sl-spin"></span>
+          {{ selectingCode === strategy.code ? '解析中…' : '选择策略' }}
         </button>
 
-        <p v-if="runErrors[strategy.code]" class="sl-run-error">{{ runErrors[strategy.code] }}</p>
+        <p v-if="selectErrors[strategy.code]" class="sl-run-error">{{ selectErrors[strategy.code] }}</p>
 
         <div v-if="explainOpen === strategy.code" class="sl-popover">
           <strong>它是什么？</strong>
