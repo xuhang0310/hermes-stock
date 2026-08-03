@@ -64,6 +64,14 @@ STRATEGY_DESCRIPTORS: List[Dict[str, Any]] = [
         "default_symbols": _SINGLE_DEFAULT_SYMBOL,
         "default_params": {"fast": 12, "slow": 26, "signal": 9},
         "param_schema": {"fast": "快线周期", "slow": "慢线周期", "signal": "信号线周期"},
+        "chart": {
+            "overlays": [],
+            "osc": [
+                {"key": "macd", "label": "DIF", "color": "#eabf63"},
+                {"key": "signal_line", "label": "DEA", "color": "#49b8d1"},
+                {"key": "histogram", "label": "MACD柱", "color": "#8f979d", "histogram": True},
+            ],
+        },
     },
     {
         "code": "ma_cross",
@@ -81,6 +89,13 @@ STRATEGY_DESCRIPTORS: List[Dict[str, Any]] = [
         "default_symbols": _SINGLE_DEFAULT_SYMBOL,
         "default_params": {"short_period": 5, "long_period": 20},
         "param_schema": {"short_period": "短期均线天数", "long_period": "长期均线天数"},
+        "chart": {
+            "overlays": [
+                {"key": "ma_short", "label": "MA{short_period}", "color": "#eabf63"},
+                {"key": "ma_long", "label": "MA{long_period}", "color": "#49b8d1"},
+            ],
+            "osc": [],
+        },
     },
     {
         "code": "bollinger",
@@ -98,6 +113,14 @@ STRATEGY_DESCRIPTORS: List[Dict[str, Any]] = [
         "default_symbols": _SINGLE_DEFAULT_SYMBOL,
         "default_params": {"period": 20, "num_std": 2.0},
         "param_schema": {"period": "均线周期", "num_std": "通道宽度（标准差倍数）"},
+        "chart": {
+            "overlays": [
+                {"key": "boll_upper", "label": "上轨", "color": "#ff6b70"},
+                {"key": "boll_mid", "label": "中轨", "color": "#eabf63"},
+                {"key": "boll_lower", "label": "下轨", "color": "#70a5ff"},
+            ],
+            "osc": [],
+        },
     },
     {
         "code": "rsi",
@@ -115,6 +138,14 @@ STRATEGY_DESCRIPTORS: List[Dict[str, Any]] = [
         "default_symbols": _SINGLE_DEFAULT_SYMBOL,
         "default_params": {"period": 14, "oversold": 30.0, "overbought": 70.0},
         "param_schema": {"period": "RSI 周期", "oversold": "超卖阈值", "overbought": "超买阈值"},
+        "chart": {
+            "overlays": [],
+            "osc": [
+                {"key": "rsi", "label": "RSI{period}", "color": "#4dd0be"},
+                {"key": "overbought_line", "label": "超买线", "color": "#ff6b70"},
+                {"key": "oversold_line", "label": "超卖线", "color": "#9cd36a"},
+            ],
+        },
     },
     {
         "code": "momentum",
@@ -133,6 +164,12 @@ STRATEGY_DESCRIPTORS: List[Dict[str, Any]] = [
         "default_symbols": _MOMENTUM_DEFAULT_POOL,
         "default_params": {"lookback": 20, "top_n": 5},
         "param_schema": {"lookback": "回看排名天数（涨幅窗口）", "top_n": "持有最强的前 N 只"},
+        "chart": {
+            "overlays": [],
+            "osc": [
+                {"key": "momentum", "label": "动量·{lookback}日（首标的视角）", "color": "#c78cff"},
+            ],
+        },
     },
     {
         "code": "turtle",
@@ -168,6 +205,16 @@ STRATEGY_DESCRIPTORS: List[Dict[str, Any]] = [
             "unit_weight": "每次建仓占多少仓位",
             "stop_atr_mult": "止损距离（几个波动幅度）",
             "add_atr_mult": "加仓间距（几个波动幅度）",
+        },
+        "chart": {
+            "overlays": [
+                {"key": "entry_channel", "label": "唐奇安上轨·入场", "color": "#9cd36a"},
+                {"key": "exit_channel", "label": "唐奇安下轨·离场", "color": "#70a5ff"},
+                {"key": "stop_line", "label": "2N止损线", "color": "#ff6b70"},
+            ],
+            "osc": [
+                {"key": "atr", "label": "ATR·波动幅度", "color": "#eabf63"},
+            ],
         },
     },
 ]

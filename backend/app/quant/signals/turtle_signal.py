@@ -73,9 +73,14 @@ class TurtleSignalEngine(SignalEngine):
         self.unit_weight = float(unit_weight)
         self.stop_atr_mult = float(stop_atr_mult)
         self.add_atr_mult = float(add_atr_mult)
+        # 决策可视化缓存（下划线名：不会被 vars() 参数快照带走）
+        self._indicators: dict[str, dict[str, pd.Series]] = {}
+        self._exit_events: dict[str, pd.Series] = {}
 
     def generate(self, data_map: dict[str, pd.DataFrame]) -> dict[str, pd.Series]:
         signals = {}
+        self._indicators = {}
+        self._exit_events = {}
         # warmup 必须覆盖三个窗口：突破高点、ATR、离场低点。
         # 若 exit_period 大于另两者而 warmup 未纳入它，循环早期 low[t-exit_period:t]
         # 会得到空切片，np.nanmin 抛 ValueError（自定义大窗口参数必崩）。
@@ -105,6 +110,11 @@ class TurtleSignalEngine(SignalEngine):
             atr = tr_series.rolling(window=self.atr_period).mean().to_numpy()
 
             signal = np.zeros(n)
+            # 决策可视化记录：通道/止损线（warmup 与空仓段保持 NaN → 报告侧缺点断线）
+            entry_channel = np.full(n, np.nan)
+            exit_channel = np.full(n, np.nan)
+            stop_line = np.full(n, np.nan)
+            exit_code = np.zeros(n, dtype=np.int8)
             units = 0
             avg_entry = 0.0
             last_add = 0.0
@@ -119,13 +129,19 @@ class TurtleSignalEngine(SignalEngine):
                 breakout = float(np.nanmax(high[t - self.entry_period : t]))
                 exit_low = float(np.nanmin(low[t - self.exit_period : t]))
                 price = close[t]
+                entry_channel[t] = breakout
+                exit_channel[t] = exit_low
 
                 if units > 0:
+                    # 决策时点的 2N 止损线（加仓推高均价后随之上移）
+                    stop_line[t] = avg_entry - self.stop_atr_mult * n_atr
                     if price <= avg_entry - self.stop_atr_mult * n_atr:
                         # 触及 2N 止损：纪律性全部离场
+                        exit_code[t] = 1
                         units = 0
                     elif price < exit_low:
                         # 跌出 10 日低点通道：趋势结束离场
+                        exit_code[t] = 2
                         units = 0
                     elif units < self.max_units and price >= last_add + self.add_atr_mult * n_atr:
                         # 顺势加仓：更新均价与加仓基准
@@ -141,4 +157,31 @@ class TurtleSignalEngine(SignalEngine):
                 signal[t] = units * self.unit_weight
 
             signals[code] = pd.Series(signal, index=df.index)
+            self._indicators[code] = {
+                "entry_channel": pd.Series(entry_channel, index=df.index),
+                "exit_channel": pd.Series(exit_channel, index=df.index),
+                "stop_line": pd.Series(stop_line, index=df.index),
+                "atr": pd.Series(atr, index=df.index),
+            }
+            self._exit_events[code] = pd.Series(exit_code, index=df.index)
         return signals
+
+    # 出场事件码 → 原因码（分支顺序即优先级：同 bar 止损先于通道离场判定）
+    _EXIT_CODE_TO_REASON = {1: "atr_stop", 2: "channel_exit"}
+
+    def exit_reason_for(self, symbol: str, exit_time) -> str | None:
+        """向前回溯执行 bar 之前最近的出场事件。
+
+        信号 shift(1) 次根开盘执行，跌停/停牌还可能把执行再往后推，
+        因此不能假设「执行 bar − 1」；每轮持仓恰好以一个事件结束，
+        回溯到的第一个非零事件即本笔交易的出场原因。
+        """
+        events = self._exit_events.get(symbol)
+        if events is None or len(events) == 0:
+            return None
+        pos = events.index.searchsorted(exit_time, side="left")
+        for i in range(pos - 1, -1, -1):
+            code = int(events.iat[i])
+            if code:
+                return self._EXIT_CODE_TO_REASON[code]
+        return None

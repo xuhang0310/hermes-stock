@@ -35,6 +35,7 @@ class MacdSignalEngine(SignalEngine):
 
     def generate(self, data_map: dict[str, pd.DataFrame]) -> dict[str, pd.Series]:
         signals = {}
+        self._indicators = {}
         for code, df in data_map.items():
             if "close" not in df.columns or len(df) < self.slow + self.signal:
                 signals[code] = pd.Series(0.0, index=df.index)
@@ -50,6 +51,11 @@ class MacdSignalEngine(SignalEngine):
             # Position: 1 when MACD > signal (bullish), 0 otherwise
             position = (macd_line > signal_line).astype(float)
             signals[code] = position
+            self._indicators[code] = {
+                "macd": macd_line,
+                "signal_line": signal_line,
+                "histogram": macd_line - signal_line,
+            }
 
         return signals
 
@@ -73,6 +79,7 @@ class MaCrossSignalEngine(SignalEngine):
 
     def generate(self, data_map: dict[str, pd.DataFrame]) -> dict[str, pd.Series]:
         signals = {}
+        self._indicators = {}
         for code, df in data_map.items():
             if "close" not in df.columns or len(df) < self.long_period:
                 signals[code] = pd.Series(0.0, index=df.index)
@@ -85,6 +92,7 @@ class MaCrossSignalEngine(SignalEngine):
             # Position: 1 when short MA > long MA, 0 otherwise
             position = (ma_short > ma_long).astype(float)
             signals[code] = position
+            self._indicators[code] = {"ma_short": ma_short, "ma_long": ma_long}
 
         return signals
 
@@ -108,6 +116,7 @@ class BollingerBandSignalEngine(SignalEngine):
 
     def generate(self, data_map: dict[str, pd.DataFrame]) -> dict[str, pd.Series]:
         signals = {}
+        self._indicators = {}
         for code, df in data_map.items():
             if "close" not in df.columns or len(df) < self.period:
                 signals[code] = pd.Series(0.0, index=df.index)
@@ -128,6 +137,11 @@ class BollingerBandSignalEngine(SignalEngine):
             # Hold position between bands
             position = position.ffill().fillna(0.0)
             signals[code] = position
+            self._indicators[code] = {
+                "boll_upper": upper_band,
+                "boll_mid": ma,
+                "boll_lower": lower_band,
+            }
 
         return signals
 
@@ -153,6 +167,7 @@ class RsiSignalEngine(SignalEngine):
 
     def generate(self, data_map: dict[str, pd.DataFrame]) -> dict[str, pd.Series]:
         signals = {}
+        self._indicators = {}
         for code, df in data_map.items():
             if "close" not in df.columns or len(df) < self.period + 1:
                 signals[code] = pd.Series(0.0, index=df.index)
@@ -177,5 +192,11 @@ class RsiSignalEngine(SignalEngine):
             # Forward fill to hold position between signals
             position = position.ffill().fillna(0.0)
             signals[code] = position
+            # 阈值线本身就是决策依据：画成常量 Series，与 RSI 同副图
+            self._indicators[code] = {
+                "rsi": rsi,
+                "overbought_line": pd.Series(self.overbought, index=df.index),
+                "oversold_line": pd.Series(self.oversold, index=df.index),
+            }
 
         return signals

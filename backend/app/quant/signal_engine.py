@@ -16,7 +16,7 @@ arbitrary strategies without modifying the core backtest engine.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -94,6 +94,25 @@ class SignalEngine(ABC):
             signal = signal.clip(-1.0, 1.0)
             validated[code] = signal
         return validated
+
+    # ── 可选：决策可视化支持（不影响信号契约，未实现的引擎自动降级） ──
+
+    def indicators(self) -> Dict[str, Dict[str, pd.Series]]:
+        """最近一次 generate() 的指标序列缓存（symbol → 指标名 → Series）。
+
+        引擎在 generate() 内顺手把决策依据（均线、通道、止损线等）存入
+        ``self._indicators``，报告层据此绘图。默认返回空 dict = 无可视化指标。
+        """
+        return getattr(self, "_indicators", None) or {}
+
+    def exit_reason_for(self, symbol: str, exit_time: Any) -> Optional[str]:
+        """该标的在执行 bar ``exit_time`` 出场的真实原因码（如 atr_stop）。
+
+        返回 None = 沿用回测引擎的默认原因（signal）。实现时注意：信号经
+        shift(1) 次根开盘执行，且跌停/停牌可能把执行再往后推，所以应基于
+        「执行 bar 之前最近的出场事件」判断，不能假设固定偏移。
+        """
+        return None
 
 
 class ConstantSignalEngine(SignalEngine):

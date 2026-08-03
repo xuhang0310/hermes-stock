@@ -34,6 +34,7 @@ from backend.app.quant.signals.momentum_signal import MomentumSignalEngine
 from backend.app.quant.signals.turtle_signal import TurtleSignalEngine
 from backend.app.quant.strategy_descriptors import (
     STRATEGY_DESCRIPTORS,
+    get_descriptor,
     report_name,
 )
 
@@ -49,6 +50,13 @@ SIGNAL_ENGINE_REGISTRY: Dict[str, type] = {
     "rsi": RsiSignalEngine,
     "momentum": MomentumSignalEngine,
     "turtle": TurtleSignalEngine,
+}
+
+# 出场原因码 → 卖出标记文案（signal 无专属文案，沿用「卖出 {标的}」）
+_EXIT_MARKER_TEXT = {
+    "atr_stop": "卖出·ATR止损",
+    "channel_exit": "卖出·通道离场",
+    "end_of_backtest": "卖出·到期平仓",
 }
 
 
@@ -78,6 +86,57 @@ def signal_source_code(strategy: str, params: Dict[str, Any] | None = None) -> s
     except (OSError, TypeError):
         lines.append("# 源码快照不可用，请查看 backend/app/quant/signals/ 下对应引擎。")
     return "\n".join(lines)
+
+
+def _build_indicator_series(
+    strategy: str,
+    engine: SignalEngine,
+    symbol: str,
+    params: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    """按策略登记的 chart 规格构建报告图表的指标序列载荷。
+
+    只保留有限点：warmup 段的 NaN 绝不入 JSON（裸 NaN 会破坏前端 JSON.parse）；
+    缺点即断线，海龟止损线的「仅持仓段」自然形成视觉间隙。
+    """
+    descriptor = get_descriptor(strategy)
+    spec = (descriptor or {}).get("chart") or {}
+    indicators = (engine.indicators() or {}).get(symbol) or {}
+    if not spec or not indicators:
+        return []
+
+    series_list: list[Dict[str, Any]] = []
+    for pane, pane_key in (("price", "overlays"), ("osc", "osc")):
+        for item in spec.get(pane_key) or []:
+            series = indicators.get(item["key"])
+            if series is None:
+                continue
+            label = item.get("label") or item["key"]
+            try:
+                label = label.format(**params)
+            except (KeyError, IndexError, ValueError):
+                pass  # 模板参数缺失时保留原文案
+            points = [
+                {
+                    "time": str(ts.date()) if hasattr(ts, "date") else str(ts),
+                    "value": round(float(value), 4),
+                }
+                for ts, value in series.items()
+                if pd.notna(value) and math.isfinite(float(value))
+            ]
+            if not points:
+                continue
+            entry: Dict[str, Any] = {
+                "key": item["key"],
+                "label": label,
+                "color": item.get("color", "#8f979d"),
+                "pane": pane,
+                "points": points,
+            }
+            if item.get("histogram"):
+                entry["histogram"] = True
+            series_list.append(entry)
+    return series_list
 
 
 def run_signal_backtest(
@@ -149,6 +208,21 @@ def run_signal_backtest(
     # Run backtest
     metrics = market_engine.run_backtest(config, data_map, signal_engine)
 
+    # 构造参数快照：只取公开参数，排除下划线缓存属性（_indicators 等 Series
+    # 对象一旦混入 config，json.dumps 会直接崩）
+    actual_params = {
+        key: value for key, value in vars(signal_engine).items() if not key.startswith("_")
+    }
+
+    # 出场原因：signal 离场按引擎记录的出场事件还原真实原因
+    # （海龟：ATR 止损 / 通道离场）；引擎不支持时维持原原因
+    exit_reasons = [
+        (signal_engine.exit_reason_for(t.symbol, t.exit_time) or t.exit_reason)
+        if t.exit_reason == "signal"
+        else t.exit_reason
+        for t in market_engine.trades
+    ]
+
     # Format results
     # 计算回撤
     equity_values = [s.equity for s in market_engine.equity_snapshots]
@@ -172,14 +246,11 @@ def run_signal_backtest(
                 "low": float(row["low"]) if "low" in row else 0,
                 "close": float(row["close"]) if "close" in row else 0,
                 "volume": int(row["volume"]) if "volume" in row else 0,
-                "macd": 0,
-                "signal": 0,
-                "histogram": 0,
             })
 
-    # 提取交易标记
+    # 提取交易标记（出场标记带真实原因文案；lightweight-charts 要求按时间有序）
     trade_markers = []
-    for t in market_engine.trades:
+    for i, t in enumerate(market_engine.trades):
         entry_date = str(t.entry_time.date()) if hasattr(t.entry_time, "date") else str(t.entry_time)
         exit_date = str(t.exit_time.date()) if hasattr(t.exit_time, "date") else str(t.exit_time)
         trade_markers.append({
@@ -190,14 +261,18 @@ def run_signal_backtest(
         trade_markers.append({
             "time": exit_date,
             "shape": "arrowDown",
-            "text": f"卖出 {t.symbol}",
+            "text": _EXIT_MARKER_TEXT.get(exit_reasons[i], f"卖出 {t.symbol}"),
         })
+    trade_markers.sort(key=lambda m: m["time"])
 
     result = {
         "strategy": strategy,
         "symbols": symbols,
         "period": {"start": start_date, "end": end_date},
         "price_series": price_series,
+        "indicator_series": _build_indicator_series(
+            strategy, signal_engine, first_symbol, actual_params
+        ),
         "trade_markers": trade_markers,
         "metrics": metrics,
         "trades": [
@@ -211,8 +286,9 @@ def run_signal_backtest(
                 "pnl": round(t.pnl, 2),
                 "pnl_pct": round(t.pnl_pct, 2),
                 "holding_bars": t.holding_bars,
+                "exit_reason": exit_reasons[i],
             }
-            for t in market_engine.trades
+            for i, t in enumerate(market_engine.trades)
         ],
         "equity_curve": [
             {
@@ -226,7 +302,6 @@ def run_signal_backtest(
     }
 
     # 保存结果到数据库，生成报告URL
-    actual_params = {key: value for key, value in vars(signal_engine).items()}
     result["config"] = {
         "strategy": strategy,
         **actual_params,

@@ -28,6 +28,8 @@ const priceHost = ref<HTMLElement | null>(null)
 const equityHost = ref<HTMLElement | null>(null)
 const macdHost = ref<HTMLElement | null>(null)
 const isPortfolio = computed(() => run.value?.report_type === 'portfolio')
+const overlaySeries = computed(() => (run.value?.indicator_series || []).filter((series) => series.pane === 'price'))
+const oscSeries = computed(() => (run.value?.indicator_series || []).filter((series) => series.pane === 'osc'))
 const reportSubject = computed(() => {
   if (!run.value) return ''
   return isPortfolio.value ? (run.value.symbols || []).join(' · ') : run.value.symbol
@@ -60,10 +62,12 @@ function tone(value: number | null | undefined): MetricTone {
 }
 
 function tradeReason(reason: string) {
-  if (reason === 'signal') return '死叉信号'
+  if (reason === 'signal') return '信号离场'
   if (reason === 'end_of_backtest') return '回测到期平仓'
   if (reason === 'stop_loss') return '止损'
   if (reason === 'take_profit') return '止盈'
+  if (reason === 'atr_stop') return 'ATR止损'
+  if (reason === 'channel_exit') return '通道离场'
   return reason || '-'
 }
 
@@ -177,7 +181,7 @@ function baseChart(host: HTMLElement, height: number) {
 }
 
 function renderCharts() {
-  if (!run.value || activeTab.value !== 'chart' || !priceHost.value || !equityHost.value || !macdHost.value) return
+  if (!run.value || activeTab.value !== 'chart' || !priceHost.value || !equityHost.value) return
   destroyCharts()
 
   if (isPortfolio.value) {
@@ -205,7 +209,7 @@ function renderCharts() {
     time: marker.time as Time,
     position: marker.shape === 'arrowUp' ? 'aboveBar' : 'belowBar',
     shape: marker.shape,
-    text: '',
+    text: marker.text || '',
     color: marker.shape === 'arrowUp' ? '#42dfad' : '#ff6b70'
   })))
   const volume = priceChart.addSeries(HistogramSeries, {
@@ -220,20 +224,43 @@ function renderCharts() {
     value: item.volume,
     color: item.close >= item.open ? 'rgba(32,201,151,.25)' : 'rgba(242,95,100,.25)'
   })))
+  // 决策依据叠加层（通道 / 均线 / 止损线……由后端按策略给出）
+  overlaySeries.value.forEach((series) => {
+    const line = priceChart!.addSeries(LineSeries, {
+      color: series.color,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: series.label
+    })
+    line.setData(series.points.map((point) => ({ time: point.time as Time, value: point.value })))
+  })
   priceChart.timeScale().fitContent()
 
-  macdChart = baseChart(macdHost.value, 220)
-  const macd = macdChart.addSeries(LineSeries, { color: '#eabf63', lineWidth: 2, priceLineVisible: false })
-  const signal = macdChart.addSeries(LineSeries, { color: '#49b8d1', lineWidth: 2, priceLineVisible: false })
-  const histogram = macdChart.addSeries(HistogramSeries, { priceLineVisible: false })
-  macd.setData(run.value.price_series.map((item) => ({ time: item.time as Time, value: item.macd })))
-  signal.setData(run.value.price_series.map((item) => ({ time: item.time as Time, value: item.signal })))
-  histogram.setData(run.value.price_series.map((item) => ({
-    time: item.time as Time,
-    value: item.histogram,
-    color: item.histogram >= 0 ? 'rgba(32,201,151,.58)' : 'rgba(242,95,100,.58)'
-  })))
-  macdChart.timeScale().fitContent()
+  // 副图指标：通用化，按策略载荷绘制（无副图序列的策略不建图、面板隐藏）
+  if (oscSeries.value.length && macdHost.value) {
+    macdChart = baseChart(macdHost.value, 220)
+    oscSeries.value.forEach((series) => {
+      if (series.histogram) {
+        const histogramSeries = macdChart!.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false })
+        histogramSeries.setData(series.points.map((point) => ({
+          time: point.time as Time,
+          value: point.value,
+          color: point.value >= 0 ? 'rgba(32,201,151,.58)' : 'rgba(242,95,100,.58)'
+        })))
+        return
+      }
+      const line = macdChart!.addSeries(LineSeries, {
+        color: series.color,
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        title: series.label
+      })
+      line.setData(series.points.map((point) => ({ time: point.time as Time, value: point.value })))
+    })
+    macdChart.timeScale().fitContent()
+  }
 
   equityChart = baseChart(equityHost.value, 280)
   const equity = equityChart.addSeries(LineSeries, {
@@ -259,7 +286,7 @@ function renderCharts() {
     if (equityChart && equityHost.value) equityChart.applyOptions({ width: equityHost.value.clientWidth })
   })
   resizeObserver.observe(priceHost.value)
-  resizeObserver.observe(macdHost.value)
+  if (macdChart && macdHost.value) resizeObserver.observe(macdHost.value)
   resizeObserver.observe(equityHost.value)
 }
 
@@ -462,20 +489,23 @@ onBeforeUnmount(destroyCharts)
             <div v-if="!isPortfolio" class="chart-legend">
               <span class="buy">● 买入</span>
               <span class="sell">● 卖出</span>
+              <span v-for="series in overlaySeries" :key="series.key" :style="{ color: series.color }">{{ series.label }}</span>
             </div>
             <div v-else class="chart-legend"><span class="equity">各资产相对表现</span></div>
           </header>
           <div ref="priceHost" class="report-chart price"></div>
         </article>
 
-        <div class="chart-grid">
-          <article class="chart-panel">
+        <div class="chart-grid" :class="{ single: !isPortfolio && !oscSeries.length }">
+          <article v-if="isPortfolio || oscSeries.length" class="chart-panel">
             <header>
               <div>
-              <span>MOMENTUM</span>
-                <strong>{{ isPortfolio ? '动态组合权重（%）' : 'MACD 动量结构' }}</strong>
+              <span>INDICATORS</span>
+                <strong>{{ isPortfolio ? '动态组合权重（%）' : '副图指标 · 决策依据' }}</strong>
               </div>
-              <div v-if="!isPortfolio" class="chart-legend"><span class="dif">DIF</span><span class="dea">DEA</span></div>
+              <div v-if="!isPortfolio" class="chart-legend">
+                <span v-for="series in oscSeries" :key="series.key" :style="{ color: series.color }">{{ series.label }}</span>
+              </div>
               <div v-else class="chart-legend"><span class="dif">仅调仓日更新</span></div>
             </header>
             <div ref="macdHost" class="report-chart macd"></div>
@@ -900,6 +930,7 @@ button { font: inherit; }
 .trade-section,
 .attribution-section { display: grid; gap: 12px; }
 .chart-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 12px; }
+.chart-grid.single { grid-template-columns: minmax(0, 1fr); }
 .chart-panel { min-width: 0; overflow: hidden; border: 1px solid var(--report-border); background: var(--report-surface); }
 .chart-panel > header {
   display: flex;

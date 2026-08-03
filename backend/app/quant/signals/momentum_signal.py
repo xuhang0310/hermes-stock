@@ -54,6 +54,13 @@ class MomentumSignalEngine(SignalEngine):
         # 过去 lookback 天涨幅；前 lookback 天为 NaN（数据不足 → 当日不持仓）
         returns = close_wide.pct_change(self.lookback)
 
+        # 决策依据可视化：各标的的回看涨幅（宽表索引是日期并集，reindex 回自身索引）
+        self._indicators = {
+            code: {"momentum": returns[code].reindex(data_map[code].index)}
+            for code in codes
+            if code in returns.columns
+        }
+
         # 横截面排名：每天降序（涨幅最高者 rank=1），NaN 排到最后
         ranks = returns.rank(axis=1, method="first", ascending=False, na_option="bottom")
         valid = returns.notna()

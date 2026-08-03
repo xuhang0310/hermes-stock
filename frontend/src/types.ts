@@ -1126,9 +1126,15 @@ export type BacktestPricePoint = {
   low: number
   close: number
   volume: number
-  macd: number
-  signal: number
-  histogram: number
+}
+
+export type BacktestIndicatorSeries = {
+  key: string
+  label: string
+  color: string
+  pane: 'price' | 'osc'
+  histogram?: boolean
+  points: Array<{ time: string; value: number }>
 }
 
 export type BacktestTrade = {
@@ -1173,6 +1179,7 @@ export type BacktestRun = {
   rating: string
   warnings: string[]
   price_series: BacktestPricePoint[]
+  indicator_series?: BacktestIndicatorSeries[]
   trade_markers: Array<{
     time: string
     position: 'aboveBar' | 'belowBar'
