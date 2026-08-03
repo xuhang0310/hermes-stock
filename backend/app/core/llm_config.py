@@ -40,6 +40,53 @@ def model_supports_vision(model_name: str | None) -> bool:
     )
 
 
+def resolve_model_config_ids_by_priority(model_names: tuple[str, ...]) -> list[int]:
+    """Return one enabled model configuration for each preferred model name.
+
+    The returned IDs preserve ``model_names`` order.  Duplicate configurations
+    for the same model are resolved in favour of the active, most recently
+    updated row.  Disabled model platforms are never selected.
+    """
+    normalized_names = tuple(
+        name.strip().lower()
+        for name in model_names
+        if name and name.strip()
+    )
+    if not normalized_names:
+        return []
+
+    with SessionLocal() as session:
+        candidates = session.scalars(
+            select(LlmModelConfig)
+            .options(selectinload(LlmModelConfig.platform))
+            .where(LlmModelConfig.status != "disabled")
+            .order_by(
+                LlmModelConfig.is_active.desc(),
+                LlmModelConfig.updated_at.desc(),
+                LlmModelConfig.id.desc(),
+            )
+        ).all()
+        available = [
+            row
+            for row in candidates
+            if row.platform is None or row.platform.status != "disabled"
+        ]
+
+        resolved: list[int] = []
+        for preferred_name in normalized_names:
+            preferred = next(
+                (
+                    row
+                    for row in available
+                    if (row.model_name or "").strip().lower() == preferred_name
+                ),
+                None,
+            )
+            if preferred is not None:
+                resolved.append(preferred.id)
+        return resolved
+
+
 def resolve_position_agent_model_config_id(model_config_id: int | None = None) -> int | None:
     """Choose the position-entry model, preferring Qwen3.7 Plus then k3."""
     with SessionLocal() as session:

@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from backend.app.core.database import Base
 from backend.app.core.llm_config import (
     model_supports_vision,
+    resolve_model_config_ids_by_priority,
     resolve_vision_model_config_id,
 )
 from backend.app.core.models import LlmModelConfig, LlmModelPlatform
@@ -75,6 +76,61 @@ class LlmVisionRoutingTests(unittest.TestCase):
                 resolve_vision_model_config_id(vision_model_id),
                 vision_model_id,
             )
+
+    def test_resolve_model_config_ids_preserves_requested_priority(self) -> None:
+        with self.SessionFactory() as db:
+            platform = LlmModelPlatform(
+                name="百炼推荐测试",
+                provider_type="OpenAI compatible",
+                base_url="https://example.invalid/v1",
+                status="enabled",
+            )
+            disabled_platform = LlmModelPlatform(
+                name="停用平台",
+                provider_type="OpenAI compatible",
+                base_url="https://disabled.invalid/v1",
+                status="disabled",
+            )
+            db.add_all([platform, disabled_platform])
+            db.flush()
+            primary = LlmModelConfig(
+                platform_id=platform.id,
+                display_name="DeepSeek Flash",
+                provider_name=platform.name,
+                base_url=platform.base_url,
+                api_key="test-key",
+                model_name="deepseek-v4-flash-0731",
+                is_active=False,
+                status="enabled",
+            )
+            fallback = LlmModelConfig(
+                platform_id=platform.id,
+                display_name="DeepSeek Pro",
+                provider_name=platform.name,
+                base_url=platform.base_url,
+                api_key="test-key",
+                model_name="deepseek-v4-pro",
+                is_active=True,
+                status="enabled",
+            )
+            ignored = LlmModelConfig(
+                platform_id=disabled_platform.id,
+                display_name="Disabled Flash",
+                provider_name=disabled_platform.name,
+                base_url=disabled_platform.base_url,
+                api_key="test-key",
+                model_name="deepseek-v4-flash-0731",
+                is_active=True,
+                status="enabled",
+            )
+            db.add_all([primary, fallback, ignored])
+            db.commit()
+
+        with patch("backend.app.core.llm_config.SessionLocal", self.SessionFactory):
+            resolved = resolve_model_config_ids_by_priority(
+                ("deepseek-v4-flash-0731", "deepseek-v4-pro")
+            )
+        self.assertEqual(resolved, [primary.id, fallback.id])
 
 
 if __name__ == "__main__":

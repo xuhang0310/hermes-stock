@@ -16,7 +16,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import chat_completion
-from backend.app.core.llm_config import active_llm_config
+from backend.app.core.llm_config import (
+    active_llm_config,
+    resolve_model_config_ids_by_priority,
+)
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import (
@@ -37,11 +40,23 @@ from backend.app.core.settings import settings
 
 SCHEDULER_INTERVAL_SECONDS = 30 * 60
 RECOMMENDATION_TTL_HOURS = 10
+FAILED_REFRESH_STALE_GRACE_HOURS = 2
 MAX_RECOMMENDATIONS = 8
+RECOMMENDATION_MODEL_PRIORITY = (
+    "deepseek-v4-flash-0731",
+    "deepseek-v4-pro",
+)
+RECOMMENDATION_MODEL_TIMEOUT_SECONDS = {
+    "deepseek-v4-flash-0731": 18.0,
+    "deepseek-v4-pro": 45.0,
+}
+RECOMMENDATION_FAILURE_BACKOFF_SECONDS = (300, 1800, 7200, 21600)
 _scheduler_task: asyncio.Task | None = None
 _refresh_tasks: set[asyncio.Task[None]] = set()
 _refresh_claims: set[str] = set()
 _refresh_claim_lock = threading.Lock()
+_refresh_failure_state: dict[str, tuple[int, datetime]] = {}
+_refresh_failure_lock = threading.Lock()
 
 # 问股（stock 模式）虚拟 profile：问股会话不绑数字人（agent_chat stock 置 digital_human_id=None），
 # 但 AiPromptRecommendation.digital_human_id NOT NULL，故用此虚拟 profile 作 persona / fallback /
@@ -129,6 +144,7 @@ def active_recommendations(
     chat_mode: str = "research",
 ) -> list[AiPromptRecommendation]:
     now = _utcnow()
+    stale_cutoff = now - timedelta(hours=FAILED_REFRESH_STALE_GRACE_HOURS)
     return db.scalars(
         select(AiPromptRecommendation)
         .where(
@@ -136,7 +152,14 @@ def active_recommendations(
             AiPromptRecommendation.digital_human_id == digital_human_id,
             AiPromptRecommendation.chat_mode == chat_mode,
             AiPromptRecommendation.status == "active",
-            (AiPromptRecommendation.expires_at.is_(None) | (AiPromptRecommendation.expires_at > now)),
+            (
+                AiPromptRecommendation.expires_at.is_(None)
+                | (AiPromptRecommendation.expires_at > now)
+                | (
+                    (AiPromptRecommendation.source_type != "fallback")
+                    & (AiPromptRecommendation.expires_at > stale_cutoff)
+                )
+            ),
         )
         .order_by(desc(AiPromptRecommendation.score), desc(AiPromptRecommendation.updated_at), desc(AiPromptRecommendation.id))
         .limit(limit)
@@ -189,7 +212,29 @@ def _refresh_recommendations(
         avoid_prompts=[row.prompt_text for row in existing],
         refresh_token=now.isoformat(timespec="seconds"),
     )
+    generated_by_llm = bool(candidates)
     if not candidates:
+        if context["messages"]:
+            _record_refresh_failure(user_id, profile.id, chat_mode)
+        if existing:
+            # Stale-while-revalidate: a transient model/provider failure must
+            # never replace a useful personalized batch with generic prompts.
+            # The read path admits a bounded stale window without mutating the
+            # old rows, so the scheduler can still see that a retry is needed.
+            previous = active_recommendations(
+                db,
+                user_id,
+                profile.id,
+                chat_mode=chat_mode,
+            )
+            if previous:
+                log_event(
+                    "agent",
+                    "WARNING",
+                    f"推荐刷新未生成有效结果，保留上一批推荐：user={user_id}, profile={profile.code}",
+                    to_db=False,
+                )
+                return previous
         candidates = _fallback_candidates(profile)
 
     expires_at = now + timedelta(hours=RECOMMENDATION_TTL_HOURS)
@@ -216,12 +261,16 @@ def _refresh_recommendations(
         db.commit()
     except IntegrityError:
         db.rollback()
+        if generated_by_llm:
+            _clear_refresh_failure(user_id, profile.id, chat_mode)
         return active_recommendations(
             db,
             user_id,
             profile.id,
             chat_mode=chat_mode,
         )
+    if generated_by_llm:
+        _clear_refresh_failure(user_id, profile.id, chat_mode)
     return active_recommendations(
         db,
         user_id,
@@ -259,23 +308,88 @@ def _recommendation_refresh_done(task: asyncio.Task[None]) -> None:
         )
 
 
+def _refresh_identity(user_id: int, profile_id: int, chat_mode: str) -> str:
+    identity = f"{user_id}:{profile_id}:{chat_mode}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _recommendation_redis_client():
+    if not settings.agent_redis_url:
+        return None
+    try:
+        from redis import Redis
+
+        return Redis.from_url(
+            settings.agent_redis_url,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            decode_responses=True,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _refresh_backoff_active(user_id: int, profile_id: int, chat_mode: str) -> bool:
+    digest = _refresh_identity(user_id, profile_id, chat_mode)
+    redis_client = _recommendation_redis_client()
+    if redis_client is not None:
+        try:
+            return bool(redis_client.exists(f"hermes:prompt-refresh-cooldown:{digest}"))
+        except Exception:  # noqa: BLE001
+            pass
+    with _refresh_failure_lock:
+        state = _refresh_failure_state.get(digest)
+        return bool(state and state[1] > _utcnow())
+
+
+def _record_refresh_failure(user_id: int, profile_id: int, chat_mode: str) -> None:
+    digest = _refresh_identity(user_id, profile_id, chat_mode)
+    redis_client = _recommendation_redis_client()
+    if redis_client is not None:
+        try:
+            failures_key = f"hermes:prompt-refresh-failures:{digest}"
+            failure_count = int(redis_client.incr(failures_key))
+            delay = RECOMMENDATION_FAILURE_BACKOFF_SECONDS[
+                min(failure_count - 1, len(RECOMMENDATION_FAILURE_BACKOFF_SECONDS) - 1)
+            ]
+            redis_client.expire(failures_key, RECOMMENDATION_FAILURE_BACKOFF_SECONDS[-1] * 2)
+            redis_client.set(f"hermes:prompt-refresh-cooldown:{digest}", "1", ex=delay)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    with _refresh_failure_lock:
+        previous_count = _refresh_failure_state.get(digest, (0, _utcnow()))[0]
+        failure_count = previous_count + 1
+        delay = RECOMMENDATION_FAILURE_BACKOFF_SECONDS[
+            min(failure_count - 1, len(RECOMMENDATION_FAILURE_BACKOFF_SECONDS) - 1)
+        ]
+        _refresh_failure_state[digest] = (
+            failure_count,
+            _utcnow() + timedelta(seconds=delay),
+        )
+
+
+def _clear_refresh_failure(user_id: int, profile_id: int, chat_mode: str) -> None:
+    digest = _refresh_identity(user_id, profile_id, chat_mode)
+    redis_client = _recommendation_redis_client()
+    if redis_client is not None:
+        with contextlib.suppress(Exception):
+            redis_client.delete(
+                f"hermes:prompt-refresh-failures:{digest}",
+                f"hermes:prompt-refresh-cooldown:{digest}",
+            )
+    with _refresh_failure_lock:
+        _refresh_failure_state.pop(digest, None)
+
+
 @contextlib.contextmanager
 def _recommendation_refresh_lease(user_id: int, profile_id: int, chat_mode: str):
-    identity = f"{user_id}:{profile_id}:{chat_mode}"
-    lock_key = f"hermes:prompt-refresh:{hashlib.sha256(identity.encode()).hexdigest()}"
+    lock_key = f"hermes:prompt-refresh:{_refresh_identity(user_id, profile_id, chat_mode)}"
     token = uuid.uuid4().hex
-    redis_client = None
+    redis_client = _recommendation_redis_client()
 
-    if settings.agent_redis_url:
+    if redis_client is not None:
         try:
-            from redis import Redis
-
-            redis_client = Redis.from_url(
-                settings.agent_redis_url,
-                socket_connect_timeout=0.5,
-                socket_timeout=0.5,
-                decode_responses=True,
-            )
             if not redis_client.set(lock_key, token, nx=True, ex=90):
                 yield False
                 return
@@ -398,6 +512,9 @@ def refresh_all_recommendations(db: Session) -> int:
             if profile is None or profile.status != "enabled":
                 continue
         else:
+            continue
+
+        if _refresh_backoff_active(user_id, profile.id, chat_mode):
             continue
 
         latest_recommendation = db.scalar(
@@ -644,38 +761,70 @@ def _call_llm_for_recommendations(
     avoid_prompts: list[str] | None = None,
     refresh_token: str | None = None,
 ) -> list[CandidatePrompt]:
-    """调用 LLM 分析对话并生成推荐。失败返回空列表。"""
-    try:
-        llm_config = active_llm_config()
-        if not llm_config["api_key"] or not llm_config["base_url"]:
-            log_event("agent", "WARNING", "LLM 推荐跳过：未配置 API Key/Base URL", to_db=False)
-            return []
-
-        messages = _build_llm_messages(
-            profile,
-            context,
-            avoid_prompts=avoid_prompts,
-            refresh_token=refresh_token,
-        )
-        # 不覆盖模型自身温度。部分模型（如 k3）只允许 temperature=1。
-        data = chat_completion(
-            messages,
-            llm_config,
-            temperature=None,
-            timeout=30.0,
-            log_module="prompt_recommendations",
-        )
-        content = data["choices"][0]["message"]["content"]
-        parsed = _extract_json(content)
-        return _parse_llm_response(parsed)
-    except Exception as exc:  # noqa: BLE001
+    """Generate recommendations with the dedicated model fallback chain."""
+    model_config_ids = resolve_model_config_ids_by_priority(RECOMMENDATION_MODEL_PRIORITY)
+    if not model_config_ids:
         log_event(
             "agent",
             "WARNING",
-            f"LLM 推荐生成失败，将使用 fallback: {str(exc)[:300]}",
+            "LLM 推荐跳过：未找到 deepseek-v4-flash-0731 或 deepseek-v4-pro 的可用配置",
             to_db=False,
         )
         return []
+
+    messages = _build_llm_messages(
+        profile,
+        context,
+        avoid_prompts=avoid_prompts,
+        refresh_token=refresh_token,
+    )
+    errors: list[str] = []
+    for attempt_index, model_config_id in enumerate(model_config_ids):
+        model_label = str(model_config_id)
+        try:
+            llm_config = active_llm_config(model_config_id)
+            model_label = str(llm_config.get("model") or model_config_id)
+            if not llm_config.get("api_key") or not llm_config.get("base_url"):
+                raise RuntimeError("未配置 API Key/Base URL")
+            timeout_seconds = RECOMMENDATION_MODEL_TIMEOUT_SECONDS.get(model_label, 30.0)
+
+            # 不覆盖模型自身温度，避免触发模型特有的 temperature 限制。
+            data = chat_completion(
+                messages,
+                llm_config,
+                temperature=None,
+                timeout=timeout_seconds,
+                log_module="prompt_recommendations",
+            )
+            content = data["choices"][0]["message"]["content"]
+            candidates = _parse_llm_response(_extract_json(content))
+            if not candidates:
+                raise ValueError("模型未返回有效推荐")
+            if attempt_index > 0:
+                log_event(
+                    "agent",
+                    "INFO",
+                    f"推荐模型已切换至兜底模型 {model_label}",
+                    to_db=False,
+                )
+            return candidates
+        except Exception as exc:  # noqa: BLE001
+            error = f"{model_label}: {str(exc)[:240]}"
+            errors.append(error)
+            log_event(
+                "agent",
+                "WARNING",
+                f"推荐模型 {model_label} 调用失败，尝试下一优先级模型: {str(exc)[:240]}",
+                to_db=False,
+            )
+
+    log_event(
+        "agent",
+        "WARNING",
+        f"LLM 推荐模型全部失败，将使用角色预设 fallback: {'; '.join(errors)[:500]}",
+        to_db=False,
+    )
+    return []
 
 
 def _build_llm_messages(
