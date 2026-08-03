@@ -74,6 +74,7 @@ def _open_transaction_session(
     code: str,
     question: str,
     model_config_id: int | None,
+    client_session_id: str | None = None,
 ) -> tuple[int, list[dict[str, str]]]:
     with SessionLocal() as db:
         profile = db.scalar(
@@ -82,6 +83,8 @@ def _open_transaction_session(
         if profile is None:
             raise ValueError(f"Transaction Agent profile does not exist: {code}")
         external_id = f"transaction:{user_id}:{code}"
+        if client_session_id:
+            external_id = f"{external_id}:{client_session_id}"
         chat_session = db.scalar(
             select(AiChatSession)
             .where(
@@ -148,6 +151,7 @@ def create_transaction_run(
     pending_action: dict[str, Any] | None = None,
     image_base64: str | None = None,
     mime_type: str = "image/png",
+    client_session_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     existing = agent_run_repository.get_by_idempotency_key(user_id, idempotency_key)
@@ -169,6 +173,7 @@ def create_transaction_run(
         code=code,
         question=question,
         model_config_id=model_config_id,
+        client_session_id=client_session_id,
     )
     active_run = agent_run_repository.active_run_for_session(user_id, session_id)
     if active_run is not None:

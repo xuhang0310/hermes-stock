@@ -161,6 +161,12 @@ class PositionAgentAddIn(BaseModel):
     mime_type: str = Field(default="image/png", max_length=80)
     account_id: int | None = Field(default=None, ge=1)
     model_config_id: int | None = None
+    client_session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
     history: list[dict[str, str]] = Field(default_factory=list, max_length=8)
     pending_action: dict | None = None
 
@@ -614,7 +620,8 @@ def create_app(init_db: bool = True) -> FastAPI:
                         "type": "text",
                         "text": (
                             "识别这张 A 股券商持仓截图。只提取持仓明细行，不要提取资产汇总、"
-                            "按钮或广告；返回完整持仓快照，每个标的只出现一次。"
+                            "按钮或广告；返回完整持仓快照，每个标的只出现一次。截图没有显示股票"
+                            "代码时，symbol 和 name 都填写截图中的证券名称，严禁凭记忆猜代码。"
                         ),
                     },
                     {
@@ -631,7 +638,8 @@ def create_app(init_db: bool = True) -> FastAPI:
             if not isinstance(source_rows, list) or not source_rows:
                 raise ValueError("图片中没有识别到持仓明细")
             rows, validations = validate_position_rows(
-                [dict(row) for row in source_rows if isinstance(row, dict)]
+                [dict(row) for row in source_rows if isinstance(row, dict)],
+                prefer_name_on_conflict=True,
             )
             for row in rows:
                 row["action"] = "replace"
@@ -816,6 +824,7 @@ def create_app(init_db: bool = True) -> FastAPI:
                 pending_action=payload.pending_action,
                 image_base64=payload.image_base64,
                 mime_type=payload.mime_type,
+                client_session_id=payload.client_session_id,
                 idempotency_key=request.headers.get("Idempotency-Key"),
             )
         except ValueError as exc:

@@ -114,6 +114,7 @@ const positionAgentPendingAction = ref<PositionAgentPendingAction | null>(null)
 const positionAgentReviewRows = ref<PositionAgentReviewRow[]>([])
 const positionAgentConfirming = ref(false)
 const positionAgentDragging = ref(false)
+const positionAgentClientSessionId = ref('')
 let positionAgentDragDepth = 0
 let restoredPositionAgentUserId: number | null = null
 
@@ -202,7 +203,13 @@ function resetPositionAgentSessionMemory() {
   positionAgentPendingAction.value = null
   positionAgentReviewRows.value = []
   positionAgentTargetAccount.value = null
+  positionAgentClientSessionId.value = ''
   positionDrawerOpen.value = false
+}
+
+function createPositionAgentClientSessionId() {
+  return globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 }
 
 watch(
@@ -468,12 +475,10 @@ async function loadPositionModels() {
 }
 
 async function openPositionAgent(accountId: number | null = null) {
-  restorePositionAgentSession()
-  if (accountId !== null) {
-    positionAgentTargetAccount.value = accountId
-  }
+  resetPositionAgentSessionMemory()
+  positionAgentClientSessionId.value = createPositionAgentClientSessionId()
+  positionAgentTargetAccount.value = accountId
   positionDrawerOpen.value = true
-  positionAgentMessage.value = ''
   try {
     await loadPositionModels()
   } catch (err) {
@@ -760,6 +765,7 @@ async function agentAddPositions() {
         mime_type: positionAgentMimeType.value,
         model_config_id: selectedPositionModelId.value,
         account_id: positionAgentTargetAccount.value,
+        client_session_id: positionAgentClientSessionId.value,
         history,
         pending_action: positionAgentPendingAction.value
       },

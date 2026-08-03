@@ -440,6 +440,7 @@ export const api = {
     mime_type?: string
     model_config_id?: number | null
     account_id?: number | null
+    client_session_id?: string
     history?: Array<{ role: 'user' | 'assistant'; content: string }>
     pending_action?: PositionAgentPendingAction | null
   }) =>
@@ -454,6 +455,7 @@ export const api = {
       mime_type?: string
       model_config_id?: number | null
       account_id?: number | null
+      client_session_id?: string
       history?: Array<{ role: 'user' | 'assistant'; content: string }>
       pending_action?: PositionAgentPendingAction | null
     },
