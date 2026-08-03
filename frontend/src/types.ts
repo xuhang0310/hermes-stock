@@ -188,6 +188,7 @@ export type PositionSymbolValidation = {
   valid: boolean
   status: string
   input_symbol: string
+  input_name?: string | null
   normalized_symbol: string
   canonical_name?: string | null
   message: string

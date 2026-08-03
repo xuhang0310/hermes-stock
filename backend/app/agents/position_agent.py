@@ -68,7 +68,14 @@ POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "symbol": {"type": "string", "description": "A股代码，如 600519.SH、000001.SZ，也可传 6 位代码"},
+                                "symbol": {
+                                    "type": "string",
+                                    "description": (
+                                        "A股代码，如 600519.SH、000001.SZ，也可传 6 位代码。"
+                                        "截图没有显示代码时，必须填写截图中的证券名称，由后端反查代码；"
+                                        "严禁凭记忆猜测股票代码。"
+                                    ),
+                                },
                                 "name": {"type": "string", "description": "证券名称"},
                                 "position_quantity": {
                                     "type": "number",
@@ -334,13 +341,65 @@ def _resolve_unique_position_instrument_by_name(*values: str) -> dict[str, Any] 
     return next(iter(matches.values()))
 
 
-def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, Any]:
+def _ocr_name_conflict_result(
+    *,
+    base: dict[str, Any],
+    input_name: str,
+    normalized_symbol: str,
+    canonical_name: str,
+) -> dict[str, Any] | None:
+    """Reject a valid-but-guessed OCR code when it contradicts the visible name."""
+    normalized_input_name = "".join(input_name.split()).casefold()
+    normalized_canonical_name = "".join(canonical_name.split()).casefold()
+    if not normalized_input_name or normalized_input_name == normalized_canonical_name:
+        return None
+
+    resolved = _resolve_unique_position_instrument_by_name(input_name)
+    if resolved:
+        resolved_symbol = normalize_a_share_symbol(
+            str(resolved.get("ts_code") or resolved.get("symbol") or "")
+        )
+        resolved_name = str(resolved.get("name") or input_name).strip()
+        if resolved_symbol == normalized_symbol:
+            return None
+        return {
+            **base,
+            "valid": True,
+            "status": "symbol_corrected_from_name_conflict",
+            "normalized_symbol": resolved_symbol,
+            "canonical_name": resolved_name,
+            "suggested_symbol": resolved_symbol,
+            "suggested_name": resolved_name,
+            "message": (
+                f"OCR 代码 {normalized_symbol} 对应“{canonical_name}”，与截图名称"
+                f"“{input_name}”冲突，已按证券名称校正为 {resolved_symbol}。"
+            ),
+        }
+
+    return {
+        **base,
+        "status": "name_symbol_conflict",
+        "canonical_name": canonical_name,
+        "message": (
+            f"OCR 代码 {normalized_symbol} 对应“{canonical_name}”，与截图名称"
+            f"“{input_name}”冲突，且名称无法唯一反查代码，请人工核对。"
+        ),
+    }
+
+
+def validate_position_symbol(
+    symbol: str,
+    name: str | None = None,
+    *,
+    prefer_name_on_conflict: bool = False,
+) -> dict[str, Any]:
     """Validate one OCR symbol against the authoritative A-share instrument catalog."""
     input_symbol = str(symbol or "").strip()
     input_name = str(name or "").strip()
     normalized = normalize_a_share_symbol(input_symbol)
     base = {
         "input_symbol": input_symbol,
+        "input_name": input_name,
         "normalized_symbol": normalized,
         "valid": False,
     }
@@ -369,6 +428,15 @@ def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, 
     exact = lookup.get("instrument")
     if exact:
         canonical_name = str(exact.get("name") or input_name or normalized)
+        if prefer_name_on_conflict:
+            conflict = _ocr_name_conflict_result(
+                base=base,
+                input_name=input_name,
+                normalized_symbol=normalized,
+                canonical_name=canonical_name,
+            )
+            if conflict:
+                return conflict
         message = "代码校验通过"
         status = "valid"
         if input_name and canonical_name and input_name != canonical_name:
@@ -400,6 +468,15 @@ def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, 
     )
     if local_exact:
         canonical_name = str(local_exact.get("name") or input_name or normalized)
+        if prefer_name_on_conflict:
+            conflict = _ocr_name_conflict_result(
+                base=base,
+                input_name=input_name,
+                normalized_symbol=normalized,
+                canonical_name=canonical_name,
+            )
+            if conflict:
+                return conflict
         status = "valid_local"
         message = "代码已通过本地证券目录校验"
         if input_name and canonical_name and input_name != canonical_name:
@@ -436,12 +513,23 @@ def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, 
     }
 
 
-def validate_position_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def validate_position_rows(
+    rows: list[dict[str, Any]],
+    *,
+    prefer_name_on_conflict: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     normalized_rows: list[dict[str, Any]] = []
     validations: list[dict[str, Any]] = []
     for index, source_row in enumerate(rows):
         row = dict(source_row)
-        validation = {"index": index, **validate_position_symbol(row.get("symbol", ""), row.get("name"))}
+        validation = {
+            "index": index,
+            **validate_position_symbol(
+                row.get("symbol", ""),
+                row.get("name"),
+                prefer_name_on_conflict=prefer_name_on_conflict,
+            ),
+        }
         if validation["valid"]:
             row["symbol"] = validation["normalized_symbol"]
             row["name"] = validation.get("canonical_name") or row.get("name")
@@ -921,16 +1009,21 @@ def extract_position_ocr_arguments(
                 "不得引用历史对话中的持仓。必须调用 save_position_holdings，不能直接回答文本。"
                 "完整持仓截图中的每个可见标的只输出一次，action 使用 replace；"
                 "提取代码、名称、数量、成本价以及截图中明确可见的现价、市值和盈亏。"
+                "截图未显示股票代码是正常情况：此时 symbol 和 name 都填写截图中原样证券名称，"
+                "交给后端证券目录反查代码。绝对禁止根据证券名称、价格或记忆猜测股票代码。"
                 "截图可见券商、账户名称或脱敏账号时写入 account。看不清的字段不要猜。"
             ),
         },
         {"role": "user", "content": user_content},
     ]
+    model_name = str(llm_config.get("model") or "").strip().lower()
+    ocr_temperature = 1.0 if model_name == "k3" or model_name.startswith("k3-") else 0.0
     body = chat_completion(
         messages,
         llm_config,
         tools=[POSITION_AGENT_TOOLS[2]],
         tool_choice="required",
+        temperature=ocr_temperature,
         enable_thinking=False,
     )
     choices = body.get("choices") or []
@@ -1006,7 +1099,8 @@ def _execute_position_tool(
                 "ignored_unchanged_rows": ignored_rows,
             }
         rows, validations = validate_position_rows(
-            [row for row in rows if isinstance(row, dict)]
+            [row for row in rows if isinstance(row, dict)],
+            prefer_name_on_conflict=bool(image_sha256 and not trusted_pending_action),
         )
         args["rows"] = rows
         invalid = [item for item in validations if not item.get("valid")]

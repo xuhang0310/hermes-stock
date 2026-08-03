@@ -102,6 +102,107 @@ class PositionOcrValidationTests(unittest.TestCase):
         self.assertEqual(result["candidates"], local)
         self.assertEqual(result["source"], "local")
 
+    def test_ocr_name_code_conflicts_are_corrected_from_visible_names(self) -> None:
+        wrong_catalog = {
+            "600039.SH": "四川路桥",
+            "300573.SZ": "兴齐眼药",
+            "002080.SZ": "中材科技",
+            "300143.SZ": "盈康生命",
+            "600515.SH": "海南机场",
+            "688126.SH": "沪硅产业",
+            "002605.SZ": "姚记科技",
+        }
+        expected = {
+            "建设机械": "600984.SH",
+            "民德电子": "300656.SZ",
+            "万东医疗": "600055.SH",
+            "盈康生命": "300143.SZ",
+            "海象新材": "003011.SZ",
+            "上海谊众": "688091.SH",
+            "同力天启": "605286.SH",
+        }
+        rows = [
+            {"symbol": "600039.SH", "name": "建设机械", "position_quantity": 1000, "cost_price": 3.305, "latest_price": 4.06},
+            {"symbol": "300573.SZ", "name": "民德电子", "position_quantity": 300, "cost_price": 24.277, "latest_price": 24.19},
+            {"symbol": "002080.SZ", "name": "万东医疗", "position_quantity": 12800, "cost_price": 11.426, "latest_price": 11.34},
+            {"symbol": "300143.SZ", "name": "盈康生命", "position_quantity": 27300, "cost_price": 8.402, "latest_price": 7.41},
+            {"symbol": "600515.SH", "name": "海象新材", "position_quantity": 16000, "cost_price": 20.959, "latest_price": 17.74},
+            {"symbol": "688126.SH", "name": "上海谊众", "position_quantity": 3200, "cost_price": 47.714, "latest_price": 36.31},
+            {"symbol": "002605.SZ", "name": "同力天启", "position_quantity": 9600, "cost_price": 33.283, "latest_price": 22.0},
+        ]
+
+        def fake_lookup(symbol: str) -> dict:
+            return {
+                "available": True,
+                "instrument": {
+                    "ts_code": symbol,
+                    "name": wrong_catalog[symbol],
+                },
+            }
+
+        def fake_resolve(query: str) -> dict:
+            symbol = expected.get(query)
+            return {
+                "candidates": (
+                    [{"ts_code": symbol, "name": query, "source": "local.instruments"}]
+                    if symbol
+                    else []
+                )
+            }
+
+        with (
+            patch.object(position_agent, "lookup_a_share_instrument", side_effect=fake_lookup),
+            patch.object(position_agent, "resolve_stock", side_effect=fake_resolve),
+        ):
+            normalized_rows, validations = position_agent.validate_position_rows(
+                rows,
+                prefer_name_on_conflict=True,
+            )
+
+        self.assertTrue(all(item["valid"] for item in validations))
+        self.assertEqual(
+            [row["symbol"] for row in normalized_rows],
+            list(expected.values()),
+        )
+        self.assertEqual(
+            [row["position_quantity"] for row in normalized_rows],
+            [1000, 300, 12800, 27300, 16000, 3200, 9600],
+        )
+        self.assertEqual(
+            [item["status"] for item in validations],
+            [
+                "symbol_corrected_from_name_conflict",
+                "symbol_corrected_from_name_conflict",
+                "symbol_corrected_from_name_conflict",
+                "valid",
+                "symbol_corrected_from_name_conflict",
+                "symbol_corrected_from_name_conflict",
+                "symbol_corrected_from_name_conflict",
+            ],
+        )
+
+    def test_unresolved_ocr_name_code_conflict_requires_review(self) -> None:
+        with (
+            patch.object(
+                position_agent,
+                "lookup_a_share_instrument",
+                return_value={
+                    "available": True,
+                    "instrument": {"ts_code": "600039.SH", "name": "四川路桥"},
+                },
+            ),
+            patch.object(position_agent, "resolve_stock", return_value={"candidates": []}),
+        ):
+            result = position_agent.validate_position_symbol(
+                "600039.SH",
+                "建设机槭",
+                prefer_name_on_conflict=True,
+            )
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["status"], "name_symbol_conflict")
+        self.assertIn("请人工核对", result["message"])
+
     def test_authoritative_catalog_wins_over_poisoned_local_names(self) -> None:
         local = [
             {
@@ -183,7 +284,12 @@ class PositionOcrValidationTests(unittest.TestCase):
 
         resolve_model.assert_called_once_with(None)
         self.assertEqual(chat.call_args.kwargs["tool_choice"], "required")
+        self.assertEqual(chat.call_args.kwargs["temperature"], 0.0)
         self.assertIs(chat.call_args.kwargs["enable_thinking"], False)
+        self.assertIn(
+            "绝对禁止根据证券名称、价格或记忆猜测股票代码",
+            chat.call_args.args[0][0]["content"],
+        )
         self.assertEqual(result["model"]["model_name"], "qwen3.7-plus")
 
     def test_position_prompt_requires_incremental_rows_only(self) -> None:

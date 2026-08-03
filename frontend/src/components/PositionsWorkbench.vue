@@ -537,6 +537,12 @@ function positionOcrValidationAt(result: PositionOcrRecognizeResult, index: numb
   }
 }
 
+function positionOcrValidationLabel(row: PositionOcrReviewRow) {
+  if (row.validating) return '校验中'
+  if (row.validation.status === 'symbol_corrected_from_name_conflict') return '已纠正'
+  return row.validation.valid ? '已通过' : '需核对'
+}
+
 async function recognizePositionOcr() {
   if (!ocrImageBase64.value || ocrRecognizing.value) {
     if (!ocrImageBase64.value) ocrMessage.value = '请先选择一张券商持仓截图'
@@ -561,9 +567,14 @@ async function recognizePositionOcr() {
       validating: false
     }))
     stopPositionOcrProgress(true)
+    const correctedCount = result.validations.filter(
+      (item) => item.status === 'symbol_corrected_from_name_conflict'
+    ).length
     ocrMessage.value = result.invalid_count
       ? `识别到 ${result.rows.length} 条持仓，其中 ${result.invalid_count} 条代码需要修正。`
-      : `识别到 ${result.rows.length} 条持仓，股票代码已全部通过校验。`
+      : correctedCount
+        ? `识别到 ${result.rows.length} 条持仓，其中 ${correctedCount} 条猜测代码已按截图名称自动纠正，请重点核对。`
+        : `识别到 ${result.rows.length} 条持仓，股票代码已全部通过校验。`
   } catch (error) {
     stopPositionOcrProgress()
     ocrMessage.value = `识别失败：${error instanceof Error ? error.message : String(error)}`
@@ -1200,8 +1211,14 @@ onBeforeUnmount(() => {
                   <td><input v-model.number="row.cost_price" type="number" min="0" step="0.0001" :disabled="ocrSaving" /></td>
                   <td><input v-model.number="row.latest_price" type="number" min="0" step="0.0001" :disabled="ocrSaving" /></td>
                   <td>
-                    <span class="position-ocr-validation-badge" :class="{ valid: row.validation.valid }">
-                      {{ row.validating ? '校验中' : row.validation.valid ? '已通过' : '需核对' }}
+                    <span
+                      class="position-ocr-validation-badge"
+                      :class="{
+                        valid: row.validation.valid,
+                        corrected: row.validation.status === 'symbol_corrected_from_name_conflict'
+                      }"
+                    >
+                      {{ positionOcrValidationLabel(row) }}
                     </span>
                     <small>{{ row.validation.message }}</small>
                   </td>
@@ -1737,6 +1754,10 @@ onBeforeUnmount(() => {
 .position-ocr-validation-badge.valid {
   border-color: rgba(39, 197, 138, 0.35);
   color: var(--ok);
+}
+.position-ocr-validation-badge.corrected {
+  border-color: rgba(227, 183, 92, 0.45);
+  color: var(--gold);
 }
 .danger-text {
   padding: 4px 0;
