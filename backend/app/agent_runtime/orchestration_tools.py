@@ -126,11 +126,19 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
     ),
     _tool(
         "create_agent_schedule",
-        "创建持久化定时 Agent 任务，支持一次、每日、每周、月末和间隔执行；可让情报官定时查新闻，也可授权工作区沙箱代码任务。",
+        "创建持久化定时 Agent 任务，支持一次、每日、每周、月末和间隔执行；"
+        "可让情报官定时查新闻，也可授权工作区沙箱代码任务。只有工具返回 verified=true "
+        "才代表创建成功，最终任务编号必须逐字使用工具返回的 job.job_key。",
         {
             "properties": {
                 "name": {"type": "string", "description": "任务名称。"},
-                "target_agent_code": {"type": "string", "description": "执行该任务的数字人 code。"},
+                "target_agent_code": {
+                    "type": "string",
+                    "description": (
+                        "执行该任务的数字人 code。总调度必须使用 stock-pm；"
+                        "兼容 orchestrator、pm 和中文名，但应优先使用真实 code。"
+                    ),
+                },
                 "instruction": {"type": "string", "description": "每次触发时交给数字人的完整指令。"},
                 "schedule": {
                     "type": "object",
@@ -334,6 +342,7 @@ Swarm 工作流规则：
 7. 用户询问“有多少定时任务、有哪些任务、是否启用、最近是否成功”时，必须调用 list_agent_schedules 查询真实数据，禁止用会话记忆推断，更不能把未查询解释成 0。
 8. 修改、暂停、恢复和删除任务时，先用 list_agent_schedules 找到准确 job_key，再用 get_agent_schedule 核对当前配置；update_agent_schedule 只提交需要变化的字段。
 9. 当报告或分析产生需要其他数字人继续完成的动作时，禁止只在正文中输出"待完成"。必须调用 create_agent_task_batch，以结构化参数提交任务批次。每个任务必须有唯一的 action_key、明确的 agent_code 和可独立完成的 instruction。
+10. 定时任务写操作只有在工具返回 verified=true 时才算成功。任务编号只能逐字引用工具返回的 job.job_key 或 job_key；工具报错、结果不确定或未返回核验标记时，严禁声称“已创建”“已生效”或自行生成任务编号。
 """
 
 

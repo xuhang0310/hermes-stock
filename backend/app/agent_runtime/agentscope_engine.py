@@ -272,6 +272,95 @@ def _tool_preview(name: str, result: dict[str, Any]) -> str:
     return preview if preview != "工具调用完成。" else digital_human_observation_preview(name, result)
 
 
+def _verified_schedule_receipt(
+    tool_name: str,
+    result: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Accept only schedule mutations whose database postcondition was verified."""
+
+    if tool_name not in SCHEDULE_MUTATION_TOOL_NAMES:
+        return None, "不是定时任务写操作。"
+    if result.get("error"):
+        return None, str(result["error"])
+    if result.get("verified") is not True:
+        return None, "工具没有返回数据库核验标记 verified=true。"
+
+    job = result.get("job") if isinstance(result.get("job"), dict) else None
+    if tool_name == "create_agent_schedule":
+        if result.get("created") is not True and result.get("already_exists") is not True:
+            return None, "创建工具没有返回 created=true 或 already_exists=true。"
+        if not job or not str(job.get("job_key") or "").strip():
+            return None, "创建工具没有返回数据库中的任务编号。"
+    elif tool_name in {"update_agent_schedule", "pause_agent_schedule"}:
+        if result.get("updated") is not True or not job or not str(job.get("job_key") or "").strip():
+            return None, "修改工具没有返回已核验的任务记录。"
+    elif tool_name == "delete_agent_schedule":
+        if result.get("deleted") is not True or not str(result.get("job_key") or "").strip():
+            return None, "删除工具没有返回已核验的任务编号。"
+
+    return {
+        "tool": tool_name,
+        "created": result.get("created") is True,
+        "already_exists": result.get("already_exists") is True,
+        "job": dict(job or {}),
+        "job_key": str((job or {}).get("job_key") or result.get("job_key") or ""),
+    }, None
+
+
+def _schedule_description(job: dict[str, Any]) -> str:
+    schedule_type = str(job.get("schedule_type") or "")
+    if schedule_type == "once":
+        return f"一次性执行：{job.get('run_once_at') or '-'}"
+    if schedule_type == "daily":
+        return f"每日 {job.get('run_time') or '-'}"
+    if schedule_type == "weekly":
+        return f"每周 {job.get('weekday_mask') or '-'} 的 {job.get('run_time') or '-'}"
+    if schedule_type == "monthly_last":
+        return f"每月最后一天 {job.get('run_time') or '-'}"
+    if schedule_type == "interval":
+        return (
+            f"每 {job.get('interval_minutes') or '-'} 分钟，"
+            f"窗口 {job.get('window_start') or '-'}–{job.get('window_end') or '-'}"
+        )
+    return schedule_type or "-"
+
+
+def _schedule_receipt_answer(receipts: list[dict[str, Any]]) -> str:
+    """Build the final schedule answer only from verified tool results."""
+
+    sections: list[str] = []
+    labels = {
+        "update_agent_schedule": "定时任务已修改并通过数据库核验。",
+        "pause_agent_schedule": "定时任务启停状态已修改并通过数据库核验。",
+        "delete_agent_schedule": "定时任务已删除并通过数据库核验。",
+    }
+    for receipt in receipts:
+        tool_name = str(receipt.get("tool") or "")
+        job = receipt.get("job") if isinstance(receipt.get("job"), dict) else {}
+        if tool_name == "create_agent_schedule":
+            heading = (
+                "同名定时任务已存在且配置一致，数据库核验通过；未重复创建。"
+                if receipt.get("already_exists")
+                else "定时任务已创建并通过数据库核验。"
+            )
+        else:
+            heading = labels.get(tool_name, "定时任务操作已通过数据库核验。")
+        lines = [heading, f"- 任务编号：{receipt.get('job_key') or '-'}"]
+        if job:
+            lines.extend(
+                [
+                    f"- 任务名称：{job.get('name') or '-'}",
+                    f"- 执行者：{job.get('target_agent_code') or '-'}",
+                    f"- 执行时间：{_schedule_description(job)}",
+                    f"- 交易日限定：{'是' if job.get('trading_day_only') else '否'}",
+                    f"- 飞书推送：{'是' if job.get('push_to_feishu') else '否'}",
+                    f"- 状态：{'已启用' if job.get('enabled') else '已停用'}",
+                ]
+            )
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
 def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict], set[str]]:
     from backend.app.agents.stock_agent import TOOLS, _knowledge_system_prompt, _system_prompt
 
@@ -523,7 +612,17 @@ def _execute_tool(
     }:
         from backend.app.scheduler.schedule_service import agent_schedule_service
 
-        return agent_schedule_service.execute(name, args, request_payload)
+        try:
+            return agent_schedule_service.execute(name, args, request_payload)
+        except (PermissionError, ValueError) as exc:
+            # These failures happen before a schedule mutation is committed.
+            # Return the concrete business error so the durable worker does not
+            # misclassify a deterministic rejection as an unknown side effect.
+            return {
+                "error": str(exc),
+                "error_code": "schedule_validation_error",
+                "verified": False,
+            }
     if name in write_names:
         return _execute_position_write_tool(
             name,
@@ -1113,6 +1212,8 @@ async def run_agentscope(
     tool_args: dict[str, list[str]] = {}
     tool_results: dict[str, list[str]] = {}
     waiting: list[dict[str, Any]] = []
+    verified_schedule_receipts: list[dict[str, Any]] = []
+    schedule_receipt_emitted = False
     transaction_agent = str(request_payload.get("digital_human_code") or "") in {
         "position-entry-agent",
         "watchlist-entry-agent",
@@ -1129,13 +1230,28 @@ async def run_agentscope(
             tool_names[pending_call.id] = pending_call.name
             tool_args[pending_call.id] = [pending_call.input or "{}"]
 
+    async def emit_schedule_receipt() -> None:
+        nonlocal schedule_receipt_emitted
+        if schedule_receipt_emitted or not verified_schedule_receipts:
+            return
+        answer = _schedule_receipt_answer(verified_schedule_receipts)
+        await emit({"type": "content_delta", "content": answer})
+        await emit({"type": "content_end", "role": "answer"})
+        outcome.final_answer = answer
+        schedule_receipt_emitted = True
+
     async def close_text(role: str) -> None:
         nonlocal text_block_open
         if not text_block_open:
             return
-        await emit({"type": "content_end", "role": role})
         if role == "answer":
-            outcome.final_answer = "".join(text_buffer).strip()
+            if verified_schedule_receipts:
+                await emit_schedule_receipt()
+            else:
+                await emit({"type": "content_end", "role": role})
+                outcome.final_answer = "".join(text_buffer).strip()
+        else:
+            await emit({"type": "content_end", "role": role})
         text_buffer.clear()
         text_block_open = False
 
@@ -1148,7 +1264,8 @@ async def run_agentscope(
         elif isinstance(event, TextBlockDeltaEvent):
             text_block_open = True
             text_buffer.append(event.delta)
-            await emit({"type": "content_delta", "content": event.delta})
+            if not verified_schedule_receipts:
+                await emit({"type": "content_delta", "content": event.delta})
         elif isinstance(event, TextBlockEndEvent):
             # The next event tells us whether this text precedes a tool call
             # (thought) or terminates the reply (answer).
@@ -1222,9 +1339,10 @@ async def run_agentscope(
                     raw_result = json.loads(text_result)
                 except (TypeError, json.JSONDecodeError):
                     raw_result = {"result": text_result}
+            tool_succeeded = str(event.state) == "success" and not raw_result.get("error")
             if (
                 name in write_names
-                and str(event.state) == "success"
+                and tool_succeeded
                 and int(raw_result.get("saved_count") or raw_result.get("changed_count") or 0) > 0
             ):
                 completed_business_write = True
@@ -1237,7 +1355,7 @@ async def run_agentscope(
                 "tool_call_id": event.tool_call_id,
                 "tool": name,
                 "display_name": _tool_display_name(name),
-                "success": str(event.state) == "success",
+                "success": tool_succeeded,
                 "execution_id": execution_id,
             }
             if name in {"run_macd_backtest", "run_portfolio_backtest", "run_signal_backtest", "run_factor_backtest"} and raw_result.get("run_id"):
@@ -1247,6 +1365,29 @@ async def run_agentscope(
                 )
             await emit(tool_done_event)
             await save_checkpoint(agent.state.model_dump_json(), None)
+            if name in SCHEDULE_MUTATION_TOOL_NAMES:
+                receipt, receipt_error = _verified_schedule_receipt(name, raw_result)
+                if receipt_error:
+                    outcome.status = "failed"
+                    outcome.error = (
+                        f"{_tool_display_name(name)}未成功，系统已禁止生成成功回执："
+                        f"{receipt_error}"
+                    )
+                    await emit(
+                        {
+                            "type": "schedule_mutation_rejected",
+                            "tool": name,
+                            "execution_id": execution_id,
+                            "reason": receipt_error,
+                        }
+                    )
+                    break
+                verified_schedule_receipts.append(receipt)
+                completed_business_write = True
+                # A verified schedule mutation has a complete server-owned
+                # receipt. End the loop here so model prose can neither replace
+                # the real job key nor turn a failed follow-up into ambiguity.
+                break
             if raw_result.get("duplicate_tool_call_blocked"):
                 outcome.status = "failed"
                 outcome.error = (
@@ -1476,6 +1617,8 @@ async def run_agentscope(
 
     if text_block_open:
         await close_text("thought" if waiting else "answer")
+    if outcome.status == "completed" and verified_schedule_receipts:
+        await emit_schedule_receipt()
     outcome.checkpoint_json = agent.state.model_dump_json()
     await save_checkpoint(outcome.checkpoint_json, waiting or None)
     if outcome.status == "completed":

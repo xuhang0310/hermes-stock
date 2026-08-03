@@ -660,7 +660,17 @@ class AgentScheduleServiceTests(unittest.TestCase):
                 quick_prompts_json="[]",
                 status="enabled",
             )
-            db.add_all([user, profile])
+            pm = DigitalHumanProfile(
+                code="stock-pm",
+                name="总调度",
+                avatar_tone="calm",
+                target_roles="*",
+                description="拆解和统稿",
+                system_prompt="你是总调度",
+                quick_prompts_json="[]",
+                status="enabled",
+            )
+            db.add_all([user, profile, pm])
             db.commit()
             self.user_id = user.id
         self.service = AgentScheduleService(self.SessionFactory)
@@ -776,6 +786,57 @@ class AgentScheduleServiceTests(unittest.TestCase):
         self.assertEqual(updated["job"]["weekday_mask"], "1,3,5")
         self.assertTrue(self.service.delete_job(user_id=self.user_id, job_key=job_key)["deleted"])
         self.assertEqual(self.service.list_jobs(self.user_id), [])
+
+    def test_create_alias_is_verified_and_idempotent(self) -> None:
+        args = {
+            "name": "午间持仓全员分析",
+            "target_agent_code": "orchestrator",
+            "instruction": "协调 7 个数字人分析持仓并统稿。",
+            "schedule": {"type": "daily", "run_time": "12:00"},
+            "trading_day_only": True,
+            "push_to_feishu": True,
+        }
+        created = self.service.create_job(
+            user_id=self.user_id,
+            run_id="leader-create",
+            args=args,
+        )
+        repeated = self.service.create_job(
+            user_id=self.user_id,
+            run_id="leader-retry",
+            args=args,
+        )
+
+        self.assertTrue(created["created"])
+        self.assertTrue(created["verified"])
+        self.assertEqual(created["job"]["target_agent_code"], "stock-pm")
+        self.assertFalse(repeated["created"])
+        self.assertTrue(repeated["already_exists"])
+        self.assertTrue(repeated["verified"])
+        self.assertEqual(repeated["job"]["job_key"], created["job"]["job_key"])
+        with self.SessionFactory() as db:
+            count = db.scalar(
+                select(func.count()).select_from(ScheduledJob).where(
+                    ScheduledJob.owner_user_id == self.user_id,
+                    ScheduledJob.name == args["name"],
+                )
+            )
+        self.assertEqual(count, 1)
+
+    def test_same_name_with_different_configuration_is_rejected(self) -> None:
+        args = {
+            "name": "午间持仓全员分析",
+            "target_agent_code": "总调度",
+            "instruction": "分析持仓。",
+            "schedule": {"type": "daily", "run_time": "12:00"},
+        }
+        created = self.service.create_job(user_id=self.user_id, run_id="first", args=args)
+        with self.assertRaisesRegex(ValueError, created["job"]["job_key"]):
+            self.service.create_job(
+                user_id=self.user_id,
+                run_id="second",
+                args={**args, "schedule": {"type": "daily", "run_time": "13:00"}},
+            )
 
     def test_code_schedule_requires_explicit_session_code_permission(self) -> None:
         run_at = (datetime.now() + timedelta(minutes=10)).replace(microsecond=0)

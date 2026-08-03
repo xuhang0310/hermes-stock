@@ -74,10 +74,12 @@ class ExternalToolExecutor:
     def _error_result(execution: dict[str, Any]) -> dict[str, Any]:
         status = str(execution.get("status") or "failed")
         if status == "unknown":
-            message = (
-                "The worker lease expired after a side-effecting tool started. "
-                "The system refused to replay it automatically; verify the business result before retrying."
+            concrete_error = str(execution.get("error") or "").strip()
+            uncertainty = (
+                "The side-effecting tool ended without a verified terminal result; "
+                "the system refused to replay it automatically. Verify the business result before retrying."
             )
+            message = f"{concrete_error} {uncertainty}".strip()
         else:
             message = str(execution.get("error") or f"External tool ended with status {status}.")
         return {

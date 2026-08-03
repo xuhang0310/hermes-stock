@@ -647,6 +647,182 @@ class AgentRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(checkpoints)
         self.assertIsNone(checkpoints[-1][1])
 
+    async def _run_schedule_mutation_stream(self, result, state):
+        from agentscope.event import (
+            TextBlockDeltaEvent,
+            TextBlockEndEvent,
+            TextBlockStartEvent,
+            ToolCallDeltaEvent,
+            ToolCallEndEvent,
+            ToolCallStartEvent,
+            ToolResultEndEvent,
+        )
+
+        class FakeModel:
+            class Parameters:
+                def __init__(self, **kwargs) -> None:
+                    self.values = kwargs
+
+            def __init__(self, **kwargs) -> None:
+                self.values = kwargs
+
+        class FakeAgent:
+            def __init__(self, *, state, **kwargs) -> None:
+                self.state = state
+
+            async def reply_stream(self, _inputs):
+                yield ToolCallStartEvent(
+                    reply_id="reply-schedule",
+                    tool_call_id="call-schedule",
+                    tool_call_name="create_agent_schedule",
+                )
+                yield ToolCallDeltaEvent(
+                    reply_id="reply-schedule",
+                    tool_call_id="call-schedule",
+                    delta="{}",
+                )
+                yield ToolCallEndEvent(
+                    reply_id="reply-schedule",
+                    tool_call_id="call-schedule",
+                )
+                yield ToolResultEndEvent(
+                    reply_id="reply-schedule",
+                    tool_call_id="call-schedule",
+                    state=state,
+                    metadata={"result": result, "execution_id": "exec-schedule"},
+                )
+                yield TextBlockStartEvent(reply_id="reply-schedule", block_id="fake-answer")
+                yield TextBlockDeltaEvent(
+                    reply_id="reply-schedule",
+                    block_id="fake-answer",
+                    delta="创建成功，任务编号 agent-invented。",
+                )
+                yield TextBlockEndEvent(reply_id="reply-schedule", block_id="fake-answer")
+
+        emitted = []
+        checkpoints = []
+
+        async def emit(event):
+            emitted.append(event)
+
+        async def save_checkpoint(state_json, waiting):
+            checkpoints.append((state_json, waiting))
+
+        async def is_cancelled():
+            return False
+
+        llm = {
+            "id": 1,
+            "display_name": "test",
+            "provider_name": "test",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "test-key",
+            "model": "test-model",
+            "temperature": 0.2,
+            "max_steps": 3,
+        }
+        with (
+            patch(
+                "backend.app.agent_runtime.agentscope_engine.active_llm_config",
+                return_value=llm,
+            ),
+            patch(
+                "backend.app.agent_runtime.agentscope_engine._build_definition",
+                return_value=("system", [], {"create_agent_schedule"}),
+            ),
+            patch(
+                "backend.app.agent_runtime.agentscope_engine._build_tools",
+                return_value=[],
+            ),
+            patch("agentscope.model.OpenAIChatModel", FakeModel),
+            patch("agentscope.agent.Agent", FakeAgent),
+        ):
+            outcome = await run_agentscope(
+                run_id="run-schedule-contract",
+                request_payload={
+                    "session_id": 1,
+                    "user_id": 1,
+                    "question": "创建午间定时任务",
+                    "user_text": "创建午间定时任务",
+                    "history": [],
+                    "chat_mode": "research",
+                    "digital_human_code": "stock-pm",
+                },
+                checkpoint_json=None,
+                emit=emit,
+                save_checkpoint=save_checkpoint,
+                is_cancelled=is_cancelled,
+            )
+        return outcome, emitted
+
+    async def test_failed_schedule_mutation_cannot_stream_fake_success(self) -> None:
+        from agentscope.message import ToolResultState
+
+        outcome, emitted = await self._run_schedule_mutation_stream(
+            {
+                "error": "数字人 invalid-agent 不可用于定时任务。",
+                "verified": False,
+            },
+            ToolResultState.ERROR,
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("禁止生成成功回执", outcome.error)
+        self.assertIn("invalid-agent", outcome.error)
+        self.assertIn("schedule_mutation_rejected", [event["type"] for event in emitted])
+        self.assertNotIn(
+            "agent-invented",
+            "".join(str(event.get("content") or "") for event in emitted),
+        )
+
+    async def test_verified_schedule_mutation_uses_server_receipt_and_real_job_key(self) -> None:
+        from agentscope.message import ToolResultState
+
+        outcome, emitted = await self._run_schedule_mutation_stream(
+            {
+                "created": True,
+                "already_exists": False,
+                "verified": True,
+                "job": {
+                    "job_key": "agent-1-real123456789",
+                    "name": "午间持仓全员分析",
+                    "target_agent_code": "stock-pm",
+                    "schedule_type": "daily",
+                    "run_time": "12:00",
+                    "trading_day_only": True,
+                    "push_to_feishu": True,
+                    "enabled": True,
+                },
+            },
+            ToolResultState.SUCCESS,
+        )
+
+        self.assertEqual(outcome.status, "completed")
+        self.assertIn("数据库核验", outcome.final_answer)
+        self.assertIn("agent-1-real123456789", outcome.final_answer)
+        self.assertNotIn("agent-invented", outcome.final_answer)
+        streamed = "".join(
+            str(event.get("content") or "")
+            for event in emitted
+            if event["type"] == "content_delta"
+        )
+        self.assertEqual(streamed, outcome.final_answer)
+
+    def test_unknown_external_tool_error_keeps_the_concrete_cause(self) -> None:
+        from backend.app.agent_runtime.external_tools import ExternalToolExecutor
+
+        result = ExternalToolExecutor._error_result(
+            {
+                "status": "unknown",
+                "execution_id": "exec-unknown",
+                "error": "数字人 orchestrator 不可用于定时任务。",
+            }
+        )
+
+        self.assertIn("orchestrator", result["error"])
+        self.assertIn("Verify the business result", result["error"])
+        self.assertEqual(result["execution_status"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

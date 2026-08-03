@@ -22,6 +22,13 @@ _SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "monthly_last", "interva
 _FORBIDDEN_TARGETS = frozenset(
     {"ask_stock", "position-entry-agent", "watchlist-entry-agent"}
 )
+_SCHEDULE_AGENT_ALIASES = {
+    "orchestrator": "stock-pm",
+    "pm": "stock-pm",
+    "stock_pm": "stock-pm",
+    "总调度": "stock-pm",
+    "总调度官": "stock-pm",
+}
 
 
 class AgentScheduleService:
@@ -97,6 +104,38 @@ class AgentScheduleService:
         with self.session_factory() as db:
             actor = self._actor(db, user_id)
             profile = self._target_profile(db, target_code, user_id)
+            expected = {
+                "name": name,
+                "instruction": instruction,
+                "target_agent_code": profile.code,
+                "trading_day_only": bool(args.get("trading_day_only", False)),
+                "push_to_feishu": bool(args.get("push_to_feishu", False)),
+                "allow_code_execution": bool(args.get("allow_code_execution", False)),
+                "enabled": True,
+                **schedule,
+            }
+            existing = db.scalar(
+                select(ScheduledJob)
+                .where(
+                    ScheduledJob.owner_user_id == user_id,
+                    ScheduledJob.created_via == "agent",
+                    ScheduledJob.name == name,
+                )
+                .order_by(ScheduledJob.id.desc())
+                .limit(1)
+            )
+            if existing is not None:
+                if not self._matches_create(existing, expected):
+                    raise ValueError(
+                        f"已存在同名定时任务 {existing.job_key}，但配置不同。"
+                        "请先查询并修改该任务，或使用不同的任务名称。"
+                    )
+                return {
+                    "created": False,
+                    "already_exists": True,
+                    "verified": True,
+                    "job": self._out(existing, actor=actor),
+                }
             job = ScheduledJob(
                 job_key=f"agent-{user_id}-{uuid.uuid4().hex[:12]}",
                 name=name,
@@ -119,23 +158,33 @@ class AgentScheduleService:
             db.add(job)
             db.commit()
             db.refresh(job)
-            return {"created": True, "job": self._out(job, actor=actor)}
+            if not self._matches_create(job, expected):
+                raise RuntimeError("定时任务已写入，但数据库回读校验未通过，请按任务名称核查。")
+            return {
+                "created": True,
+                "already_exists": False,
+                "verified": True,
+                "job": self._out(job, actor=actor),
+            }
 
     def update_job(self, *, user_id: int, run_id: str | None, args: dict[str, Any]) -> dict[str, Any]:
         job_key = str(args.get("job_key") or "").strip()
         with self.session_factory() as db:
             actor = self._actor(db, user_id)
             job = self._editable_job(db, actor, job_key)
+            expected: dict[str, Any] = {}
             if "name" in args:
                 value = str(args.get("name") or "").strip()
                 if not value:
                     raise ValueError("任务名称不能为空。")
                 job.name = value[:160]
+                expected["name"] = job.name
             if "instruction" in args:
                 value = str(args.get("instruction") or "").strip()
                 if not value:
                     raise ValueError("任务指令不能为空。")
                 job.prompt_template = value[:16000]
+                expected["prompt_template"] = job.prompt_template
             if "target_agent_code" in args:
                 profile = self._target_profile(
                     db,
@@ -144,22 +193,30 @@ class AgentScheduleService:
                 )
                 job.digital_human_code = profile.code
                 job.agent_name = DH_TO_AGENT.get(profile.code)
+                expected["digital_human_code"] = profile.code
             if "schedule" in args:
                 schedule = self._normalize_schedule(args.get("schedule"))
                 for key, value in schedule.items():
                     setattr(job, key, value)
+                    expected[key] = value
             if "trading_day_only" in args:
                 job.trading_day_only = bool(args.get("trading_day_only"))
+                expected["trading_day_only"] = job.trading_day_only
             if "push_to_feishu" in args:
                 job.push_channel_key = SCHEDULE_CHANNEL_KEY if args.get("push_to_feishu") else None
+                expected["push_channel_key"] = job.push_channel_key
             if "allow_code_execution" in args:
                 job.allow_code_execution = bool(args.get("allow_code_execution"))
+                expected["allow_code_execution"] = job.allow_code_execution
             if "enabled" in args:
                 job.enabled = bool(args.get("enabled"))
+                expected["enabled"] = job.enabled
             job.created_by_run_id = run_id or job.created_by_run_id
             db.commit()
             db.refresh(job)
-            return {"updated": True, "job": self._out(job, actor=actor)}
+            if any(getattr(job, key) != value for key, value in expected.items()):
+                raise RuntimeError("定时任务修改后的数据库回读校验未通过。")
+            return {"updated": True, "verified": True, "job": self._out(job, actor=actor)}
 
     def set_enabled(self, *, user_id: int, job_key: str, enabled: bool) -> dict[str, Any]:
         with self.session_factory() as db:
@@ -168,7 +225,9 @@ class AgentScheduleService:
             job.enabled = enabled
             db.commit()
             db.refresh(job)
-            return {"updated": True, "job": self._out(job, actor=actor)}
+            if bool(job.enabled) != enabled:
+                raise RuntimeError("定时任务启停状态的数据库回读校验未通过。")
+            return {"updated": True, "verified": True, "job": self._out(job, actor=actor)}
 
     def delete_job(self, *, user_id: int, job_key: str) -> dict[str, Any]:
         with self.session_factory() as db:
@@ -176,7 +235,12 @@ class AgentScheduleService:
             job = self._editable_job(db, actor, job_key)
             db.delete(job)
             db.commit()
-            return {"deleted": True, "job_key": job_key}
+            remaining = db.scalar(
+                select(ScheduledJob.id).where(ScheduledJob.job_key == job_key).limit(1)
+            )
+            if remaining is not None:
+                raise RuntimeError("定时任务删除后的数据库回读校验未通过。")
+            return {"deleted": True, "verified": True, "job_key": job_key}
 
     @staticmethod
     def _actor(db: Session, user_id: int) -> User:
@@ -214,13 +278,23 @@ class AgentScheduleService:
 
     @staticmethod
     def _target_profile(db: Session, code: str, user_id: int) -> DigitalHumanProfile:
-        normalized = code.strip()
+        requested = code.strip()
+        normalized = _SCHEDULE_AGENT_ALIASES.get(requested.casefold(), requested)
         profile = db.scalar(
             select(DigitalHumanProfile).where(
                 DigitalHumanProfile.code == normalized,
                 DigitalHumanProfile.status == "enabled",
             ).limit(1)
         )
+        if profile is None and requested:
+            profile = db.scalar(
+                select(DigitalHumanProfile).where(
+                    DigitalHumanProfile.name == requested,
+                    DigitalHumanProfile.status == "enabled",
+                ).limit(1)
+            )
+            if profile is not None:
+                normalized = profile.code
         if profile is None or normalized in _FORBIDDEN_TARGETS:
             raise ValueError(f"数字人 {normalized or '-'} 不可用于定时任务。")
         owner = db.get(User, user_id)
@@ -229,6 +303,26 @@ class AgentScheduleService:
         if not target_roles_allow(profile.target_roles, owner.role):
             raise PermissionError(f"当前用户角色无权调用数字人 {normalized}。")
         return profile
+
+    @staticmethod
+    def _matches_create(job: ScheduledJob, expected: dict[str, Any]) -> bool:
+        actual = {
+            "name": job.name,
+            "instruction": job.prompt_template or "",
+            "target_agent_code": job.digital_human_code or "",
+            "trading_day_only": bool(job.trading_day_only),
+            "push_to_feishu": bool(job.push_channel_key),
+            "allow_code_execution": bool(job.allow_code_execution),
+            "enabled": bool(job.enabled),
+            "schedule_type": job.schedule_type,
+            "run_time": job.run_time,
+            "weekday_mask": job.weekday_mask,
+            "interval_minutes": job.interval_minutes,
+            "window_start": job.window_start,
+            "window_end": job.window_end,
+            "run_once_at": job.run_once_at,
+        }
+        return actual == expected
 
     @staticmethod
     def _normalize_schedule(value: Any) -> dict[str, Any]:
