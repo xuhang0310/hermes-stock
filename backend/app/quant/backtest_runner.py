@@ -7,6 +7,7 @@ returns formatted results.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import math
@@ -62,6 +63,21 @@ def list_signal_engines() -> Dict[str, Dict[str, Any]]:
         }
         for descriptor in STRATEGY_DESCRIPTORS
     }
+
+
+def signal_source_code(strategy: str, params: Dict[str, Any] | None = None) -> str:
+    """快照信号引擎"实际执行逻辑"：引擎类源码即单一事实源（DRY，永不与实现漂移）。"""
+    engine_class = SIGNAL_ENGINE_REGISTRY.get(strategy)
+    if engine_class is None:
+        return ""
+    lines = [f"# {report_name(strategy)}（{strategy}）实际执行逻辑"]
+    if params:
+        lines.append("# 参数：" + "，".join(f"{key}={value}" for key, value in params.items()))
+    try:
+        lines.append(inspect.getsource(engine_class).rstrip("\n"))
+    except (OSError, TypeError):
+        lines.append("# 源码快照不可用，请查看 backend/app/quant/signals/ 下对应引擎。")
+    return "\n".join(lines)
 
 
 def run_signal_backtest(
@@ -210,7 +226,20 @@ def run_signal_backtest(
     }
 
     # 保存结果到数据库，生成报告URL
-    result = _enrich_report(result, strategy_code=f"signal_{strategy}")
+    actual_params = {key: value for key, value in vars(signal_engine).items()}
+    result["config"] = {
+        "strategy": strategy,
+        **actual_params,
+        "symbols": symbols,
+        "initial_cash": initial_cash,
+        "commission_rate": commission_rate,
+        "slippage": slippage,
+    }
+    result = _enrich_report(
+        result,
+        strategy_code=f"signal_{strategy}",
+        source_code=signal_source_code(strategy, actual_params),
+    )
     result = _save_backtest_result(
         result,
         strategy_code=f"signal_{strategy}",
@@ -297,9 +326,13 @@ def _save_backtest_result(
                 timeframe="1D",
                 start_date=result["period"]["start"],
                 end_date=result["period"]["end"],
-                config_json=json.dumps({"strategy": result.get("strategy")}, ensure_ascii=False),
+                config_json=json.dumps(
+                    result.get("config") or {"strategy": result.get("strategy")},
+                    ensure_ascii=False,
+                ),
                 metrics_json=json.dumps(metrics, ensure_ascii=False),
                 result_json=json.dumps(result, ensure_ascii=False),
+                source_code=result.get("source_code"),
                 summary_markdown=summary,
                 finished_at=datetime.now(),
             )
@@ -316,7 +349,12 @@ def _save_backtest_result(
     return result
 
 
-def _enrich_report(result: Dict[str, Any], *, strategy_code: str) -> Dict[str, Any]:
+def _enrich_report(
+    result: Dict[str, Any],
+    *,
+    strategy_code: str,
+    source_code: str | None = None,
+) -> Dict[str, Any]:
     """补全报告所需字段，匹配前端 BacktestReportView 的数据结构
 
     前端期望的字段：
@@ -451,8 +489,8 @@ def _enrich_report(result: Dict[str, Any], *, strategy_code: str) -> Dict[str, A
     # 基准标签
     result["benchmark_label"] = "沪深300"
 
-    # 源码
-    result["source_code"] = f"# {strategy_code}\n# 策略代码未保存，请查看回测配置"
+    # 源码（调用方传入引擎源码快照；未传时保留占位说明）
+    result["source_code"] = source_code or f"# {strategy_code}\n# 策略代码未保存，请查看回测配置"
 
     # 数据指纹
     result["data_fingerprint"] = f"signal-{strategy_code}-{'-'.join(symbols)}-{result['period']['start']}-{result['period']['end']}"

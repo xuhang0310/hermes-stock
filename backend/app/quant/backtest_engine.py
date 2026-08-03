@@ -555,7 +555,22 @@ def get_backtest(run_id: str, *, owner_user_id: int | None = None, db: Session |
             raise KeyError(f"回测记录不存在：{run_id}")
         result = json.loads(row.result_json)
         result["summary_markdown"] = row.summary_markdown
-        result["source_code"] = row.source_code
+        result["source_code"] = row.source_code or result.get("source_code") or ""
+        strategy_code = str(row.strategy_code or "")
+        if not str(result["source_code"]).strip() or "策略代码未保存" in result["source_code"]:
+            # 旧信号回测未快照源码：读时按登记重建（因子类同走读时取源码的先例）
+            from backend.app.quant.backtest_runner import signal_source_code
+
+            base = strategy_code.replace("signal_", "", 1)
+            result["source_code"] = signal_source_code(base) or result["source_code"]
+        if not result.get("config"):
+            # 旧记录未存 config：用行内事实字段兜底，保证 RUN MANIFEST 不为空
+            result["config"] = {
+                "strategy": strategy_code,
+                "symbol": row.symbol,
+                "start_date": row.start_date,
+                "end_date": row.end_date,
+            }
         return result
     finally:
         if owns_session:
