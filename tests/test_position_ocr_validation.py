@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.app.agents import position_agent
+from backend.app.market import stock_tools
 
 
 class _NoWriteRepository:
@@ -29,6 +30,116 @@ class _CaptureWriteRepository:
 
 
 class PositionOcrValidationTests(unittest.TestCase):
+    def test_names_misplaced_in_symbol_column_are_resolved_for_full_ocr_batch(self) -> None:
+        expected = {
+            "民德电子": "300656.SZ",
+            "建设机械": "600984.SH",
+            "澜起科技": "688008.SH",
+            "友阿股份": "002277.SZ",
+            "海象新材": "003011.SZ",
+            "万东医疗": "600055.SH",
+            "普莱柯": "603566.SH",
+            "盈康生命": "300143.SZ",
+            "同力天启": "605286.SH",
+            "上海谊众": "688091.SH",
+        }
+        rows = [
+            {
+                "symbol": name,
+                "name": name,
+                "position_quantity": index * 100,
+                "cost_price": float(index),
+            }
+            for index, name in enumerate(expected, start=1)
+        ]
+
+        def fake_resolve(query: str) -> dict:
+            symbol = expected.get(query)
+            return {
+                "candidates": (
+                    [{"ts_code": symbol, "name": query, "source": "local.instruments"}]
+                    if symbol
+                    else []
+                )
+            }
+
+        with patch.object(position_agent, "resolve_stock", side_effect=fake_resolve):
+            normalized_rows, validations = position_agent.validate_position_rows(rows)
+
+        self.assertTrue(all(item["valid"] for item in validations))
+        self.assertEqual(
+            [item["status"] for item in validations],
+            ["symbol_resolved_from_name"] * len(expected),
+        )
+        self.assertEqual(
+            [row["symbol"] for row in normalized_rows],
+            list(expected.values()),
+        )
+        self.assertEqual(
+            [row["position_quantity"] for row in normalized_rows],
+            [index * 100 for index in range(1, len(expected) + 1)],
+        )
+
+    def test_unique_local_name_is_used_when_remote_catalog_is_unavailable(self) -> None:
+        local = [
+            {
+                "ts_code": "300656.SZ",
+                "symbol": "300656",
+                "name": "民德电子",
+                "source": "local.instruments",
+            }
+        ]
+        with (
+            patch.object(stock_tools, "_resolve_stock_from_local", return_value=local),
+            patch.object(
+                stock_tools,
+                "_stock_basic_rows",
+                return_value=[],
+            ),
+        ):
+            result = stock_tools.resolve_stock("民德电子")
+
+        self.assertEqual(result["candidates"], local)
+        self.assertEqual(result["source"], "local")
+
+    def test_authoritative_catalog_wins_over_poisoned_local_names(self) -> None:
+        local = [
+            {
+                "ts_code": "300579.SZ",
+                "symbol": "300579",
+                "name": "民德电子",
+                "source": "local.instruments",
+            },
+            {
+                "ts_code": "300656.SZ",
+                "symbol": "300656",
+                "name": "民德电子",
+                "source": "local.instruments",
+            },
+        ]
+        remote = [
+            {
+                "ts_code": "300656.SZ",
+                "symbol": "300656",
+                "name": "民德电子",
+                "fullname": "深圳市民德电子科技股份有限公司",
+                "market": "创业板",
+                "exchange": "SZSE",
+                "list_date": "20170519",
+            }
+        ]
+        with (
+            patch.object(stock_tools, "_resolve_stock_from_local", return_value=local),
+            patch.object(stock_tools, "_stock_basic_rows", return_value=remote),
+        ):
+            result = stock_tools.resolve_stock("民德电子")
+
+        self.assertEqual(
+            [item["ts_code"] for item in result["candidates"]],
+            ["300656.SZ"],
+        )
+        self.assertEqual(result["source"], "tushare")
+
     def test_ocr_disables_thinking_and_requires_structured_tool_output(self) -> None:
         response = {
             "choices": [

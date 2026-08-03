@@ -90,8 +90,6 @@ class PositionWriteMixin:
                 status="active",
             )
             self.db.add(instrument)
-        elif instrument.name != name:
-            instrument.name = name
 
         snapshots = self.db.scalars(
             select(PositionHoldingSnapshot)
@@ -854,7 +852,11 @@ class PositionWriteMixin:
         else:
             # 只在 payload 明确传了名字且与现有不同时才更新 instrument.name；
             # 空名字不再覆盖已有的中文名（防止卖出/减仓不带 name 时把名称清成代码 "?"）。
-            if symbol_name and symbol_name != symbol and symbol_name != instrument.name:
+            if (
+                symbol_name
+                and symbol_name != symbol
+                and (not instrument.name or instrument.name == symbol)
+            ):
                 instrument.name = symbol_name
             if exchange:
                 instrument.market = exchange

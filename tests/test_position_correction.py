@@ -148,6 +148,20 @@ class PositionCorrectionTests(unittest.TestCase):
         self.assertEqual(refreshed["name"], "招商银行（纠正）")
         self.assertEqual(refreshed["position_quantity"], 125)
         self.assertEqual(refreshed["cost_price"], 34.5)
+        self.assertEqual(self.db.get(Instrument, "600036.SH").name, "招商银行")
+
+    def test_position_payload_cannot_overwrite_instrument_master_name(self) -> None:
+        self.repo.save_position_holding(
+            {
+                "symbol": "600036.SH",
+                "name": "民德电子",
+                "account_id": self.account["id"],
+                "position_quantity": 100,
+                "cost_price": 35,
+            }
+        )
+
+        self.assertEqual(self.db.get(Instrument, "600036.SH").name, "招商银行")
 
     def test_correct_quantity_scales_day_pnl(self) -> None:
         saved = self.repo.save_position_holding(

@@ -302,6 +302,38 @@ def _pending_from_tool_result(name: str, args: dict[str, Any], result: dict[str,
     return None
 
 
+def _resolve_unique_position_instrument_by_name(*values: str) -> dict[str, Any] | None:
+    """Resolve one exact security name without guessing on partial/ambiguous matches."""
+    matches: dict[str, dict[str, Any]] = {}
+    seen_queries: set[str] = set()
+    for value in values:
+        query = str(value or "").strip()
+        query_key = query.casefold()
+        if not query or query_key in seen_queries:
+            continue
+        seen_queries.add(query_key)
+        try:
+            resolution = resolve_stock(query)
+        except Exception:  # noqa: BLE001
+            continue
+        candidates = resolution.get("candidates") if isinstance(resolution, dict) else []
+        for candidate in candidates or []:
+            candidate_name = str(candidate.get("name") or "").strip()
+            if not candidate_name or candidate_name.casefold() != query_key:
+                continue
+            candidate_symbol = normalize_a_share_symbol(
+                str(candidate.get("ts_code") or candidate.get("symbol") or "")
+            )
+            if (
+                len(candidate_symbol) == 9
+                and candidate_symbol.endswith((".SH", ".SZ", ".BJ"))
+            ):
+                matches[candidate_symbol] = candidate
+    if len(matches) != 1:
+        return None
+    return next(iter(matches.values()))
+
+
 def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, Any]:
     """Validate one OCR symbol against the authoritative A-share instrument catalog."""
     input_symbol = str(symbol or "").strip()
@@ -313,6 +345,20 @@ def validate_position_symbol(symbol: str, name: str | None = None) -> dict[str, 
         "valid": False,
     }
     if not normalized or not normalized.endswith((".SH", ".SZ", ".BJ")) or len(normalized) != 9:
+        resolved = _resolve_unique_position_instrument_by_name(input_name, input_symbol)
+        if resolved:
+            resolved_symbol = normalize_a_share_symbol(
+                str(resolved.get("ts_code") or resolved.get("symbol") or "")
+            )
+            canonical_name = str(resolved.get("name") or input_name or input_symbol)
+            return {
+                **base,
+                "valid": True,
+                "status": "symbol_resolved_from_name",
+                "normalized_symbol": resolved_symbol,
+                "canonical_name": canonical_name,
+                "message": f"已根据证券名称自动识别代码 {resolved_symbol}。",
+            }
         return {
             **base,
             "status": "invalid_format",

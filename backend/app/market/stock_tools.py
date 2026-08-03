@@ -952,33 +952,60 @@ def resolve_stock(query: str) -> dict:
 
     normalized = normalize_a_share_symbol(key)
     candidates: list[dict[str, Any]] = []
-    candidates.extend(_resolve_stock_from_local(key, normalized))
+    local_candidates = _resolve_stock_from_local(key, normalized)
+    key_lower = key.lower()
+    exact_local = [
+        item
+        for item in local_candidates
+        if (
+            str(item.get("ts_code") or "") == normalized
+            or str(item.get("symbol") or "") == key
+            or str(item.get("name") or "").strip().lower() == key_lower
+        )
+    ]
+    remote_candidates: list[dict[str, Any]] = []
+    for row in _stock_basic_rows():
+        ts_code = str(row.get("ts_code") or "")
+        symbol = str(row.get("symbol") or "")
+        name = str(row.get("name") or "")
+        fullname = str(row.get("fullname") or "")
+        if (
+            normalized == ts_code
+            or key == symbol
+            or key_lower in name.lower()
+            or (fullname and key_lower in fullname.lower())
+        ):
+            remote_candidates.append(
+                {
+                    "ts_code": ts_code,
+                    "symbol": symbol,
+                    "name": name,
+                    "market": row.get("market"),
+                    "exchange": row.get("exchange"),
+                    "list_date": row.get("list_date"),
+                    "source": "tushare",
+                }
+            )
 
-    if len(candidates) < 8:
-        remote = _stock_basic_rows()
-        key_lower = key.lower()
-        for row in remote:
-            ts_code = str(row.get("ts_code") or "")
-            symbol = str(row.get("symbol") or "")
-            name = str(row.get("name") or "")
-            fullname = str(row.get("fullname") or "")
-            if (
-                normalized == ts_code
-                or key == symbol
-                or key_lower in name.lower()
-                or (fullname and key_lower in fullname.lower())
-            ):
-                candidates.append(
-                    {
-                        "ts_code": ts_code,
-                        "symbol": symbol,
-                        "name": name,
-                        "market": row.get("market"),
-                        "exchange": row.get("exchange"),
-                        "list_date": row.get("list_date"),
-                        "source": "tushare",
-                    }
-                )
+    exact_remote = [
+        item
+        for item in remote_candidates
+        if (
+            str(item.get("ts_code") or "") == normalized
+            or str(item.get("symbol") or "") == key
+            or str(item.get("name") or "").strip().lower() == key_lower
+        )
+    ]
+    if exact_remote:
+        # Position payloads used to be able to overwrite instruments.name, so
+        # an exact local name can be stale or poisoned.  The listed-security
+        # catalog is authoritative whenever it has an exact match.
+        candidates.extend(exact_remote)
+    elif exact_local:
+        candidates.extend(exact_local)
+    else:
+        candidates.extend(local_candidates)
+        candidates.extend(remote_candidates)
 
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -987,7 +1014,12 @@ def resolve_stock(query: str) -> dict:
         if ts_code and ts_code not in seen:
             seen.add(ts_code)
             deduped.append(item)
-    return {"query": key, "normalized": normalized, "candidates": deduped[:8], "source": "local+tushare"}
+    return {
+        "query": key,
+        "normalized": normalized,
+        "candidates": deduped[:8],
+        "source": "tushare" if exact_remote else ("local" if exact_local else "local+tushare"),
+    }
 
 
 def get_tushare_daily(
