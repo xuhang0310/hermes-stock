@@ -8,7 +8,10 @@ from typing import Any
 
 from backend.app.agents.stock_agent import _stream_chat
 from backend.app.core.llm_config import active_llm_config
+from backend.app.core.models import Instrument
+from backend.app.data._helpers import exchange_from_symbol, normalize_a_share_symbol
 from backend.app.data.repository import StockRepository
+from backend.app.market import stock_tools
 
 
 WATCHLIST_AGENT_PROFILE_CODE = "watchlist-entry-agent"
@@ -445,7 +448,7 @@ def _execute_watchlist_tool(
         rows = repository.watchlist()
         return {"watchlist": rows, "count": len(rows)}
     if name == "search_instruments":
-        rows = repository.find_instruments(str(args.get("query") or ""), int(args.get("limit") or 10))
+        rows = _find_instruments(repository, str(args.get("query") or ""), int(args.get("limit") or 10))
         return {"instruments": rows, "count": len(rows)}
     if name not in {"add_watchlist_items", "remove_watchlist_items"}:
         return {"error": f"未知自选工具: {name}"}
@@ -466,6 +469,7 @@ def _execute_watchlist_tool(
             continue
         try:
             if name == "add_watchlist_items":
+                _materialize_instrument(repository, instrument)
                 reason = _bounded_text(raw.get("reason"), max_length=500) or WATCHLIST_AGENT_DEFAULT_REASON
                 changed.append(
                     repository.add_watchlist_item(
@@ -497,10 +501,76 @@ def _execute_watchlist_tool(
     }
 
 
+def _find_instruments(
+    repository: StockRepository,
+    query: str,
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    bounded_limit = max(1, min(limit, 20))
+    local_matches = repository.find_instruments(query, limit=bounded_limit)
+    if local_matches:
+        return local_matches
+
+    try:
+        resolution = stock_tools.resolve_stock(query)
+    except Exception:  # noqa: BLE001
+        return []
+    candidates = resolution.get("candidates") if isinstance(resolution, dict) else []
+    resolved: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        try:
+            symbol = normalize_a_share_symbol(
+                str(candidate.get("ts_code") or candidate.get("symbol") or "")
+            )
+        except ValueError:
+            continue
+        if (
+            len(symbol) != 9
+            or symbol[6] != "."
+            or not symbol[:6].isdigit()
+            or not symbol.endswith((".SH", ".SZ", ".BJ"))
+            or symbol in seen
+        ):
+            continue
+        name = str(candidate.get("name") or "").strip()
+        if not name:
+            continue
+        seen.add(symbol)
+        resolved.append(
+            {
+                "symbol": symbol,
+                "name": name,
+                "market": str(candidate.get("exchange") or exchange_from_symbol(symbol)),
+            }
+        )
+        if len(resolved) >= bounded_limit:
+            break
+    return resolved
+
+
+def _materialize_instrument(repository: StockRepository, instrument: dict[str, str]) -> None:
+    symbol = normalize_a_share_symbol(instrument["symbol"])
+    if repository.db.get(Instrument, symbol) is not None:
+        return
+    repository.db.add(
+        Instrument(
+            symbol=symbol,
+            name=instrument["name"],
+            market=instrument.get("market") or exchange_from_symbol(symbol),
+            type="stock",
+            status="active",
+        )
+    )
+    repository.db.flush()
+
+
 def _resolve_instrument(repository: StockRepository, query: str) -> tuple[dict[str, str] | None, str | None]:
     if not query:
         return None, "缺少股票代码或名称"
-    matches = repository.find_instruments(query, limit=10)
+    matches = _find_instruments(repository, query, limit=10)
     if not matches:
         return None, f"未找到 A 股标的：{query}"
     exact_names = [row for row in matches if row["name"].casefold() == query.casefold()]

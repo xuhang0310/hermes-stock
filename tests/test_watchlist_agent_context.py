@@ -5,9 +5,36 @@ import unittest
 from unittest.mock import patch
 
 from backend.app.agents import watchlist_agent
+from backend.app.core.models import Instrument
+
+
+_SCREENSHOT_CATALOG = {
+    "聚和材料": "688503.SH",
+    "柘中股份": "002346.SZ",
+    "欧陆通": "300870.SZ",
+    "比音勒芬": "002832.SZ",
+    "天禄科技": "301045.SZ",
+    "鼎际得": "603255.SH",
+    "全新好": "000007.SZ",
+    "硕贝德": "300322.SZ",
+    "常润股份": "603201.SH",
+    "朗坤科技": "301305.SZ",
+}
 
 
 class _DbStub:
+    def __init__(self) -> None:
+        self.instruments: dict[str, Instrument] = {}
+
+    def get(self, _model, symbol: str) -> Instrument | None:
+        return self.instruments.get(symbol)
+
+    def add(self, instrument: Instrument) -> None:
+        self.instruments[instrument.symbol] = instrument
+
+    def flush(self) -> None:
+        pass
+
     def commit(self) -> None:
         pass
 
@@ -28,6 +55,59 @@ class _RepositoryStub:
         return []
 
 
+class _RemoteOnlyRepositoryStub:
+    def __init__(self) -> None:
+        self.db = _DbStub()
+        self.added: list[dict[str, str]] = []
+
+    def find_instruments(self, _query: str, limit: int = 10) -> list[dict[str, str]]:
+        del limit
+        return []
+
+    def add_watchlist_item(
+        self,
+        symbol: str,
+        group_name: str,
+        reason: str,
+        *,
+        added_by: str,
+        commit: bool,
+    ) -> dict[str, str]:
+        del added_by, commit
+        instrument = self.db.get(Instrument, symbol)
+        if instrument is None:
+            raise ValueError(f"unknown instrument: {symbol}")
+        row = {
+            "symbol": symbol,
+            "name": instrument.name,
+            "group_name": group_name,
+            "reason": reason,
+        }
+        self.added.append(row)
+        return row
+
+    def watchlist(self) -> list[dict[str, str]]:
+        return list(self.added)
+
+
+def _resolve_from_screenshot_catalog(query: str) -> dict:
+    symbol = _SCREENSHOT_CATALOG.get(query)
+    if not symbol:
+        return {"query": query, "candidates": []}
+    return {
+        "query": query,
+        "candidates": [
+            {
+                "ts_code": symbol,
+                "symbol": symbol.split(".")[0],
+                "name": query,
+                "exchange": {"SH": "SSE", "SZ": "SZSE", "BJ": "BSE"}[symbol[-2:]],
+                "source": "tushare",
+            }
+        ],
+    }
+
+
 def _llm_config() -> dict:
     return {
         "id": 1,
@@ -40,6 +120,43 @@ def _llm_config() -> dict:
 
 
 class WatchlistAgentContextTests(unittest.TestCase):
+    def test_search_instruments_falls_back_to_full_a_share_catalog(self) -> None:
+        repository = _RemoteOnlyRepositoryStub()
+
+        with patch(
+            "backend.app.market.stock_tools.resolve_stock",
+            side_effect=_resolve_from_screenshot_catalog,
+        ):
+            resolved = {
+                name: watchlist_agent._execute_watchlist_tool(
+                    repository,
+                    "search_instruments",
+                    {"query": name},
+                    created_by="tester",
+                )["instruments"][0]["symbol"]
+                for name in _SCREENSHOT_CATALOG
+            }
+
+        self.assertEqual(resolved, _SCREENSHOT_CATALOG)
+
+    def test_add_watchlist_item_materializes_remote_catalog_instrument(self) -> None:
+        repository = _RemoteOnlyRepositoryStub()
+
+        with patch(
+            "backend.app.market.stock_tools.resolve_stock",
+            side_effect=_resolve_from_screenshot_catalog,
+        ):
+            result = watchlist_agent._execute_watchlist_tool(
+                repository,
+                "add_watchlist_items",
+                {"rows": [{"name": "聚和材料"}]},
+                created_by="tester",
+            )
+
+        self.assertEqual(result["changed_count"], 1)
+        self.assertEqual(result["changed"][0]["symbol"], "688503.SH")
+        self.assertEqual(repository.db.instruments["688503.SH"].name, "聚和材料")
+
     def test_ambiguous_search_keeps_write_intent_and_candidates(self) -> None:
         calls = 0
 
