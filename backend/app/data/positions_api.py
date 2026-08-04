@@ -1,27 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from backend.app.agents.position_agent import (
-    _execute_position_tool,
-    extract_position_ocr_arguments,
-    run_position_agent,
-    validate_position_rows,
-    validate_position_symbol,
-)
-from backend.app.agents.position_import import decode_image_payload, parse_position_screenshot
 from backend.app.agent_runtime.transaction_channels import (
     create_transaction_run,
     stream_transaction_run,
 )
 from backend.app.agent_runtime.transaction_state import transaction_state_service
+from backend.app.agents.position_agent import validate_position_symbol
 from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.data import positions_service
 from backend.app.data.deps import get_repo
 from backend.app.data.repository import StockRepository
 from backend.app.data.sse import sse_event
@@ -295,25 +288,17 @@ def correct_position(
     repository: StockRepository = Depends(get_repo),
     context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
-    user_repository = repository.for_user(context.user.id)
-    current = next(
-        (item for item in user_repository.positions() if int(item.get("id") or 0) == position_id),
-        None,
-    )
-    if current is None:
-        raise HTTPException(status_code=404, detail="持仓不存在或不属于当前用户")
-    validation = validate_position_symbol(payload.symbol, payload.name)
-    same_existing_symbol = (
-        validation.get("normalized_symbol") == current.get("symbol")
-        and validation.get("status") == "catalog_unavailable"
-    )
-    if not validation.get("valid") and not same_existing_symbol:
-        raise HTTPException(status_code=400, detail=validation.get("message") or "股票代码校验失败")
-    data = payload.model_dump()
-    data["symbol"] = validation.get("normalized_symbol") or current["symbol"]
-    data["name"] = payload.name.strip()
     try:
-        return user_repository.correct_position_holding(position_id, data)
+        return positions_service.correct_position(
+            repository=repository.for_user(context.user.id),
+            position_id=position_id,
+            symbol=payload.symbol,
+            name=payload.name,
+            position_quantity=payload.position_quantity,
+            cost_price=payload.cost_price,
+        )
+    except positions_service.PositionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -345,35 +330,14 @@ def import_positions_from_image(
     context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
     try:
-        parsed = parse_position_screenshot(
+        return positions_service.import_position_rows_from_image(
+            repository=repository.for_user(context.user.id),
             image_base64=payload.image_base64,
             mime_type=payload.mime_type,
             model_config_id=payload.model_config_id,
-        )
-        repository = repository.for_user(context.user.id)
-        batch = repository.create_position_import_batch(
-            source_name=parsed["model"].get("display_name") or parsed["model"].get("model_name") or "vision_model",
-            image_mime_type=payload.mime_type,
-            image_sha256=parsed.get("image_sha256"),
-            raw_text=parsed.get("raw_text"),
-            parsed_json=json.dumps(parsed.get("parsed"), ensure_ascii=False),
+            account_id=payload.account_id,
             created_by=context.user.username,
         )
-        account_ctx = dict(parsed.get("account") or {})
-        if payload.account_id:
-            account_ctx["account_id"] = payload.account_id
-        saved_rows = repository.import_position_rows(parsed.get("rows") or [], batch, account_ctx)
-        repository.finish_position_import_batch(batch, saved_rows)
-        return {
-            "batch": {
-                "id": batch.id,
-                "status": batch.status,
-                "image_sha256": batch.image_sha256,
-                "created_at": batch.created_at.isoformat() if batch.created_at else None,
-            },
-            "model": parsed.get("model"),
-            "rows": saved_rows,
-        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -386,56 +350,12 @@ def recognize_position_ocr(
     _context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
     """Recognize one current screenshot and return a fixed JSON draft without writing data."""
-
-    if not payload.mime_type.lower().startswith("image/"):
-        raise HTTPException(status_code=400, detail="仅支持图片文件")
     try:
-        _, clean_base64, image_sha256 = decode_image_payload(payload.image_base64)
-        extracted = extract_position_ocr_arguments(
-            user_content=[
-                {
-                    "type": "text",
-                    "text": (
-                        "识别这张 A 股券商持仓截图。只提取持仓明细行，不要提取资产汇总、"
-                        "按钮或广告；返回完整持仓快照，每个标的只出现一次。截图没有显示股票"
-                        "代码时，symbol 和 name 都填写截图中的证券名称，严禁凭记忆猜代码。"
-                    ),
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{payload.mime_type};base64,{clean_base64}",
-                    },
-                },
-            ],
+        return positions_service.recognize_position_ocr(
+            image_base64=payload.image_base64,
+            mime_type=payload.mime_type,
             model_config_id=payload.model_config_id,
         )
-        arguments = extracted.get("arguments") or {}
-        source_rows = arguments.get("rows")
-        if not isinstance(source_rows, list) or not source_rows:
-            raise ValueError("图片中没有识别到持仓明细")
-        rows, validations = validate_position_rows(
-            [dict(row) for row in source_rows if isinstance(row, dict)],
-            prefer_name_on_conflict=True,
-        )
-        for row in rows:
-            row["action"] = "replace"
-        invalid_count = sum(1 for item in validations if not item.get("valid"))
-        return {
-            "schema_version": "position_ocr.v1",
-            "image_sha256": image_sha256,
-            "model": extracted.get("model") or {},
-            "account": (
-                arguments.get("account")
-                if isinstance(arguments.get("account"), dict)
-                else {}
-            ),
-            "as_of_date": arguments.get("as_of_date"),
-            "rows": rows,
-            "validations": validations,
-            "valid_count": len(rows) - invalid_count,
-            "invalid_count": invalid_count,
-        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -449,52 +369,20 @@ def confirm_position_ocr(
     context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
     """Persist a user-reviewed OCR draft; all symbols are validated again server-side."""
-
-    user_repository = repository.for_user(context.user.id)
-    account_ids = {
-        int(account["id"])
-        for account in user_repository.list_position_accounts()
-        if account.get("id") is not None
-    }
-    if payload.account_id not in account_ids:
-        raise HTTPException(status_code=404, detail="持仓账户不存在或无权访问")
-    arguments: dict = {
-        "rows": [
-            {**row, "action": "replace"}
-            for row in payload.rows
-            if isinstance(row, dict)
-        ]
-    }
-    if payload.as_of_date:
-        arguments["as_of_date"] = payload.as_of_date
-    result = _execute_position_tool(
-        repository=user_repository,
-        name="save_position_holdings",
-        args=arguments,
-        created_by=context.user.username,
-        source_name="持仓 OCR 人工确认",
-        image_mime_type=payload.mime_type,
-        image_sha256=payload.image_sha256,
-        account_id=payload.account_id,
-        instruction=None,
-        trusted_pending_action=True,
-    )
-    if result.get("need_account"):
-        raise HTTPException(status_code=400, detail=result.get("message"))
-    if result.get("need_review"):
-        raise HTTPException(status_code=400, detail="OCR 结果尚未完成人工确认")
-    if result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
-    saved_count = int(result.get("saved_count") or 0)
-    return {
-        "schema_version": "position_ocr.v1",
-        "batch_id": result.get("batch_id"),
-        "status": result.get("status"),
-        "saved_count": saved_count,
-        "error_count": int(result.get("error_count") or 0),
-        "rows": result.get("rows") or [],
-        "summary": f"OCR 复核完成，已保存 {saved_count} 条持仓。",
-    }
+    try:
+        return positions_service.confirm_position_ocr(
+            repository=repository.for_user(context.user.id),
+            rows=payload.rows,
+            account_id=payload.account_id,
+            as_of_date=payload.as_of_date,
+            image_sha256=payload.image_sha256,
+            mime_type=payload.mime_type,
+            created_by=context.user.username,
+        )
+    except positions_service.PositionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/api/positions/agent-add")
@@ -504,7 +392,7 @@ def agent_add_positions(
     context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
     try:
-        result = run_position_agent(
+        return positions_service.agent_add_positions(
             repository=repository.for_user(context.user.id),
             instruction=payload.instruction,
             image_base64=payload.image_base64,
@@ -515,17 +403,6 @@ def agent_add_positions(
             history=payload.history,
             pending_action=payload.pending_action,
         )
-        return {
-            "batch": None,
-            "model": result.get("model"),
-            "intent": result.get("intent"),
-            "should_save": result.get("should_save"),
-            "reply": result.get("reply"),
-            "rows": result.get("rows") or [],
-            "steps": result.get("steps") or [],
-            "summary": result.get("summary") or result.get("reply"),
-            "pending_action": result.get("pending_action"),
-        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -546,36 +423,18 @@ def confirm_agent_positions(
     repository: StockRepository = Depends(get_repo),
     context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
-    arguments: dict = {"rows": payload.rows}
-    if payload.account:
-        arguments["account"] = payload.account
-    if payload.as_of_date:
-        arguments["as_of_date"] = payload.as_of_date
-    result = _execute_position_tool(
-        repository=repository.for_user(context.user.id),
-        name="save_position_holdings",
-        args=arguments,
-        created_by=context.user.username,
-        source_name="AgentScope OCR 人工复核",
-        image_mime_type="image/ocr-reviewed",
-        image_sha256=None,
-        account_id=payload.account_id,
-    )
-    if result.get("need_account"):
-        raise HTTPException(status_code=400, detail=result.get("message"))
-    if result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
-    saved_count = int(result.get("saved_count") or 0)
-    if saved_count:
-        transaction_state_service.clear_pending_for_user(
-            context.user.id,
-            "position-entry-agent",
+    try:
+        return positions_service.confirm_agent_positions(
+            repository=repository.for_user(context.user.id),
+            rows=payload.rows,
+            account=payload.account,
+            as_of_date=payload.as_of_date,
+            account_id=payload.account_id,
+            user_id=context.user.id,
+            created_by=context.user.username,
         )
-    return {
-        "rows": result.get("rows") or [],
-        "should_save": saved_count > 0,
-        "summary": f"复核完成，已保存 {saved_count} 条持仓。",
-    }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/api/positions/agent-draft")
