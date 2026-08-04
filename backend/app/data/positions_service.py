@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from backend.app.agents.position_agent import (
     _execute_position_tool,
@@ -21,8 +20,12 @@ from backend.app.agent_runtime.transaction_state import transaction_state_servic
 from backend.app.data.repository import StockRepository
 
 
-class PositionNotFoundError(ValueError):
-    """业务记录不存在，路由层映射为 404。"""
+class PositionNotFoundError(Exception):
+    """业务记录不存在，路由层映射为 404。
+
+    直接继承 Exception（而非 ValueError），使 404/400 的映射由类型结构保证，
+    不依赖调用方 except 子句的书写顺序。
+    """
 
 
 def import_position_rows_from_image(
@@ -288,4 +291,11 @@ def correct_position(
         "position_quantity": position_quantity,
         "cost_price": cost_price,
     }
-    return repository.correct_position_holding(position_id, data)
+    try:
+        return repository.correct_position_holding(position_id, data)
+    except ValueError as exc:
+        # DAO 在预检与落库之间竞态删除时抛"持仓不存在"（TOCTOU），统一成 404；
+        # 数量/成本/重复持仓等校验错误保持 400。
+        if "持仓不存在" in str(exc):
+            raise PositionNotFoundError(str(exc)) from exc
+        raise
