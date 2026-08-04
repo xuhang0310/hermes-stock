@@ -56,13 +56,13 @@ backend/app/
   main.py  scripts_init_db.py      # 入口，勿移动（systemd/uvicorn/命令依赖）
   core/       settings  database  applog  models
   auth/       auth  auth_api
-  data/       repository  broker_presets
-  market/     stock_tools  digital_human_tools
+  data/       repository(按域 mixin)  deps  sse  positions_api  watchlist_api  dashboard_api  logs_api  broker_presets
+  market/     stock_tools  digital_human_tools  tushare_api
   agents/     stock_agent  position_agent  position_import
   ai/         ai_api  prompt_recommendations  memory(向量记忆)
   feishu/     feishu(推送)  feishu_bot  feishu_bot_api
   scheduler/  rhythm_scheduler  rhythm_api
-  seed/       seed
+  seed/       seed  seed_api
 ```
 
 Note: a `__file__`-relative path in a package module resolves via `parents[N]` counted from its **package depth** — e.g. `core/settings.py` uses `parents[2]` to reach `backend/`, `core/applog.py` uses `parents[3]` for the repo root. Adjust N if you move a file between depths.
@@ -70,8 +70,8 @@ Note: a `__file__`-relative path in a package module resolves via `parents[N]` c
 - `core/settings.py` — frozen dataclass, builds `database_url`.
 - `core/database.py` — engine/session/`Base`. Schema is created with `Base.metadata.create_all`; there is **no Alembic**. Additive migrations are hand-coded in `_ensure_schema_upgrades()` (raw `information_schema` checks + `ALTER TABLE`). Add new column/index migrations there.
 - `core/models.py` — all SQLAlchemy models (~35 tables). Groups: instruments/watchlist/positions, market data (`daily_bars`, `documents`), rules/`events`/evidence, agents/reports/risk/reviews, and AI config (`llm_model_platforms`, `llm_model_configs`, `digital_human_profiles`, `ai_chat_sessions`/`messages`). `events` is the central traceability hub. See `docs/database.md`.
-- `data/repository.py` — `StockRepository`, the single place for read queries and output-dict shaping (dashboard, events, positions, charts, watchlist, reports, risk, logs).
-- `main.py` — `create_app(init_db=True)` factory; the module-level `app` is what uvicorn serves. CRUD/read endpoints live here; AI/auth/scheduler/feishu-bot endpoints are mounted from the routers in `ai/`, `auth/`, `scheduler/`, `feishu/`.
+- `data/repository.py` — `StockRepository`, the single place for read/write queries and output-dict shaping (dashboard, events, positions, charts, watchlist, reports, risk, logs). It composes per-domain mixins (`position_query_mixin`, `position_write_mixin`, `watchlist_mixin`, `system_mixin`, ...).
+- `main.py` — `create_app(init_db=True)` factory; the module-level `app` is what uvicorn serves. **It no longer holds CRUD endpoints** — routes are mounted from per-domain routers (`include_router`), each domain owns its controller/service/DAO. `data/` holds the data-domain routers (`positions_api`/`watchlist_api`/`dashboard_api`/`logs_api`, shared deps in `data/deps.py::get_repo`, SSE formatting in `data/sse.py`); `market/tushare_api.py`, `seed/seed_api.py` hold their own. New endpoints go into the owning domain's router, not `main.py`.
 - `auth/auth.py` / `auth/auth_api.py` — custom HMAC-signed JWT-style tokens (not PyJWT), PBKDF2 password hashing. A static `ROLE_PERMISSIONS` map (`super_admin`/`admin`/`researcher`/`viewer`) plus per-user `permission_scope`. **Every** protected endpoint uses `Depends(require_permission("..."))` — follow this pattern for new endpoints rather than checking roles inline.
 
 ### The ReAct agent (core feature)
