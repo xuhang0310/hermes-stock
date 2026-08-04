@@ -18,6 +18,7 @@ from backend.app.core.models import (
     SystemLog,
 )
 from backend.app.data._helpers import _account_eq, dt, exchange_from_symbol, normalize_a_share_symbol, number_or_none
+from backend.app.data.errors import PositionNotFoundError
 
 
 class PositionWriteMixin:
@@ -34,7 +35,7 @@ class PositionWriteMixin:
             )
         )
         if position is None:
-            raise ValueError("持仓不存在或不属于当前用户")
+            raise PositionNotFoundError("持仓不存在或不属于当前用户")
 
         old_symbol = position.symbol
         old_name = next(

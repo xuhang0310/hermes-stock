@@ -13,19 +13,12 @@ from backend.app.agents.position_agent import (
     extract_position_ocr_arguments,
     run_position_agent,
     validate_position_rows,
-    validate_position_symbol,
+    validate_position_symbol as _validate_position_symbol,
 )
 from backend.app.agents.position_import import decode_image_payload, parse_position_screenshot
 from backend.app.agent_runtime.transaction_state import transaction_state_service
+from backend.app.data.errors import PositionNotFoundError
 from backend.app.data.repository import StockRepository
-
-
-class PositionNotFoundError(Exception):
-    """业务记录不存在，路由层映射为 404。
-
-    直接继承 Exception（而非 ValueError），使 404/400 的映射由类型结构保证，
-    不依赖调用方 except 子句的书写顺序。
-    """
 
 
 def import_position_rows_from_image(
@@ -135,14 +128,21 @@ def confirm_position_ocr(
     mime_type: str,
     created_by: str,
 ) -> dict:
-    """落库用户复核过的 OCR 草稿；所有 symbol 再次服务端校验。"""
-    account_ids = {
-        int(account["id"])
-        for account in repository.list_position_accounts()
-        if account.get("id") is not None
-    }
-    if account_id not in account_ids:
+    """落库用户复核过的 OCR 草稿；所有 symbol 再次服务端校验（含名称-代码冲突）。"""
+    if not repository.position_account_exists(account_id):
         raise PositionNotFoundError("持仓账户不存在或无权访问")
+    # 与 recognize 同口径复验：拒绝仍带名称-代码冲突的行，防止误码被静默覆盖为规范名
+    rows, validations = validate_position_rows(
+        [dict(row) for row in rows if isinstance(row, dict)],
+        prefer_name_on_conflict=True,
+    )
+    invalid = [item for item in validations if not item.get("valid")]
+    if invalid:
+        details = "；".join(
+            f"第 {int(item['index']) + 1} 行 {item.get('input_symbol') or '-'}：{item.get('message')}"
+            for item in invalid
+        )
+        raise ValueError(f"OCR 结果存在未通过校验的行：{details}")
     arguments: dict = {
         "rows": [
             {**row, "action": "replace"}
@@ -291,11 +291,16 @@ def correct_position(
         "position_quantity": position_quantity,
         "cost_price": cost_price,
     }
-    try:
-        return repository.correct_position_holding(position_id, data)
-    except ValueError as exc:
-        # DAO 在预检与落库之间竞态删除时抛"持仓不存在"（TOCTOU），统一成 404；
-        # 数量/成本/重复持仓等校验错误保持 400。
-        if "持仓不存在" in str(exc):
-            raise PositionNotFoundError(str(exc)) from exc
-        raise
+    # DAO 直接抛 PositionNotFoundError（预检与落库间竞态删除时同样 404），
+    # 数量/成本/重复持仓等校验错误保持 ValueError → 400。
+    return repository.correct_position_holding(position_id, data)
+
+
+def validate_position_symbol(symbol: str, name: str | None = None) -> dict:
+    """校验单个股票代码/名称（供路由透传，与 correct_position 同源）。"""
+    return _validate_position_symbol(symbol, name)
+
+
+def discard_agent_position_draft(user_id: int) -> bool:
+    """清空持仓 Agent 的待办草稿。"""
+    return transaction_state_service.clear_pending_for_user(user_id, "position-entry-agent")

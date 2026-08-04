@@ -11,8 +11,6 @@ from backend.app.agent_runtime.transaction_channels import (
     create_transaction_run,
     stream_transaction_run,
 )
-from backend.app.agent_runtime.transaction_state import transaction_state_service
-from backend.app.agents.position_agent import validate_position_symbol
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.data import positions_service
 from backend.app.data.deps import get_repo
@@ -184,8 +182,10 @@ def update_position_account(
             account_id,
             payload.model_dump(exclude_none=True),
         )
-    except ValueError as exc:
+    except positions_service.PositionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/api/positions/accounts/{account_id}/funds")
@@ -200,8 +200,10 @@ def update_account_funds(
             account_id,
             payload.available_cash,
         )
-    except ValueError as exc:
+    except positions_service.PositionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/api/positions/summary")
@@ -418,7 +420,7 @@ def validate_agent_position_symbol(
     payload: PositionSymbolValidateIn,
     _context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
-    return validate_position_symbol(payload.symbol, payload.name)
+    return positions_service.validate_position_symbol(payload.symbol, payload.name)
 
 
 @router.post("/api/positions/agent-confirm")
@@ -439,16 +441,15 @@ def confirm_agent_positions(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.delete("/api/positions/agent-draft")
 def discard_agent_position_draft(
     context: AuthContext = Depends(require_permission("data:write")),
 ) -> dict:
-    cleared = transaction_state_service.clear_pending_for_user(
-        context.user.id,
-        "position-entry-agent",
-    )
+    cleared = positions_service.discard_agent_position_draft(context.user.id)
     return {"cleared": cleared}
 
 

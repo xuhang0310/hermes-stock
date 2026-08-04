@@ -10,6 +10,7 @@ from sqlalchemy import desc, func, select, update
 from backend.app.data.broker_presets import broker_code_for_name, broker_name_for
 from backend.app.core.models import DailyBar, Position, PositionAccount, PositionHoldingSnapshot, SystemLog
 from backend.app.data._helpers import dt
+from backend.app.data.errors import PositionNotFoundError
 
 
 class PositionAccountMixin:
@@ -203,6 +204,11 @@ class PositionAccountMixin:
         self.db.commit()
         return [self._account_out(account) for account in accounts]
 
+    def position_account_exists(self, account_id: int) -> bool:
+        """只读判定账户是否存在且属于当前用户，不触发资金重算/事务提交。"""
+        account = self.db.get(PositionAccount, account_id)
+        return account is not None and self._owns(account)
+
     def create_position_account(self, payload: dict[str, Any]) -> dict[str, Any]:
         broker_code = str(payload.get("broker_code") or "manual").strip() or "manual"
         broker_name = str(payload.get("broker_name") or broker_name_for(broker_code) or "其他券商").strip()
@@ -248,7 +254,7 @@ class PositionAccountMixin:
     def update_position_account(self, account_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         account = self.db.get(PositionAccount, account_id)
         if account is None or not self._owns(account):
-            raise ValueError("账户不存在")
+            raise PositionNotFoundError("账户不存在")
         for field in ("account_name", "account_no_masked", "account_type", "status", "remark", "sort_order"):
             if payload.get(field) is not None:
                 setattr(account, field, payload[field])
@@ -269,7 +275,7 @@ class PositionAccountMixin:
         """维护"可用现金"（券商 App 现金数）。总资产由 _recompute 按 现金+市值 推算。"""
         account = self.db.get(PositionAccount, account_id)
         if account is None or not self._owns(account):
-            raise ValueError("账户不存在")
+            raise PositionNotFoundError("账户不存在")
         account.available_cash = float(available_cash) if available_cash is not None else None
         self._recompute_account_funds(account)
         account.fund_updated_at = datetime.now()
