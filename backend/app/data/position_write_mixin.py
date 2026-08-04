@@ -571,7 +571,7 @@ class PositionWriteMixin:
             merged = {**(default_account or {}), **row}
             try:
                 saved_rows.append(self._save_position_holding(merged, source_type="ai_ocr", import_batch=batch, commit=False))
-            except ValueError as exc:
+            except (ValueError, PositionNotFoundError) as exc:
                 saved_rows.append({"error": str(exc), "raw": row})
         return saved_rows
 

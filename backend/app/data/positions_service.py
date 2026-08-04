@@ -166,8 +166,6 @@ def confirm_position_ocr(
     )
     if result.get("need_account"):
         raise ValueError(result.get("message"))
-    if result.get("need_review"):
-        raise ValueError("OCR 结果尚未完成人工确认")
     if result.get("error"):
         raise ValueError(result["error"])
     saved_count = int(result.get("saved_count") or 0)

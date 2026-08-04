@@ -279,6 +279,8 @@ def add_position(
             source_type="manual",
             commit=True,
         )
+    except positions_service.PositionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

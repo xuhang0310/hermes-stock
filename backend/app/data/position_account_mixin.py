@@ -34,7 +34,7 @@ class PositionAccountMixin:
             existing = self.db.get(PositionAccount, int(acc_id))
             if existing is not None and self._owns(existing):
                 return existing
-            raise ValueError(f"position account not found: {acc_id}")
+            raise PositionNotFoundError(f"position account not found: {acc_id}")
         # 2) 未给任何账户信息时，自动匹配该标的现有 open 持仓的账户——清仓/卖出/调仓必须命中
         #    原持仓，否则会在默认/manual 账户下另起一条记录，真实持仓纹丝不动（数据"没更新"）。
         has_explicit_account = any(
@@ -258,16 +258,17 @@ class PositionAccountMixin:
         for field in ("account_name", "account_no_masked", "account_type", "status", "remark", "sort_order"):
             if payload.get(field) is not None:
                 setattr(account, field, payload[field])
-        if payload.get("is_default"):
-            self.db.execute(
-                update(PositionAccount)
-                .where(
-                    PositionAccount.id != account_id,
-                    self._owner_clause(PositionAccount),
+        if payload.get("is_default") is not None:
+            if payload["is_default"]:
+                self.db.execute(
+                    update(PositionAccount)
+                    .where(
+                        PositionAccount.id != account_id,
+                        self._owner_clause(PositionAccount),
+                    )
+                    .values(is_default=False)
                 )
-                .values(is_default=False)
-            )
-            account.is_default = True
+            account.is_default = bool(payload["is_default"])
         self.db.commit()
         return self._account_out(account)
 
