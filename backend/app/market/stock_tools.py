@@ -1956,19 +1956,37 @@ def search_stock_news(query: str, symbol: str | None = None, max_results: int = 
     if not keyword:
         return {"error": "query is empty"}
     resolved = _resolve_search_source()
-    if not resolved:
-        return {"error": "未配置联网搜索源（Tavily 或 Brave），无法搜索。请在数据源配置页填写 API Key 并启用。"}
-    provider, api_key, url = resolved
-
+    provider: str | None = None
+    results: list[dict] = []
+    primary_error: str | None = None
     started = time.monotonic()
-    try:
-        if provider == "brave":
-            results = _brave_search(url, api_key, keyword, max_results)
+    if resolved:
+        provider, api_key, url = resolved
+        try:
+            if provider == "brave":
+                results = _brave_search(url, api_key, keyword, max_results)
+            else:
+                results = _tavily_search(url, api_key, keyword, max_results)
+        except Exception as exc:  # noqa: BLE001
+            label = "Brave Search" if provider == "brave" else "Tavily Search"
+            primary_error = f"{label} 调用失败: {str(exc)[:500]}"
+
+    # 降级：主源未配置/调用失败/无结果时，走免密钥国内源 akshare
+    if not results:
+        try:
+            results = _akshare_search(keyword, symbol, max_results)
+        except Exception as exc:  # noqa: BLE001
+            if primary_error is None:
+                primary_error = f"akshare 降级失败: {str(exc)[:300]}"
         else:
-            results = _tavily_search(url, api_key, keyword, max_results)
-    except Exception as exc:  # noqa: BLE001
-        label = "Brave Search" if provider == "brave" else "Tavily Search"
-        return {"error": f"{label} 调用失败: {str(exc)[:500]}"}
+            if results:
+                provider = "akshare"
+
+    if not results:
+        return {
+            "error": primary_error
+            or "未配置联网搜索源（Tavily 或 Brave），且 akshare 降级无结果。请在数据源配置页填写 API Key 并启用。"
+        }
 
     saved = _cache_documents(results, symbol=normalize_a_share_symbol(symbol) if symbol else None)
     return {
@@ -2053,6 +2071,68 @@ def _brave_search(url: str, api_key: str, keyword: str, max_results: int) -> lis
 
 def _strip_html_tags(value: str) -> str:
     return re.sub(r"<[^>]+>", "", value).strip()
+
+
+_AKSHARE_STOP_TOKENS = {
+    "A股", "行业", "板块", "政策", "公告", "研报", "风险", "股票",
+    "今日", "重要", "新闻", "市场", "动态", "消息",
+}
+
+
+def _akshare_filter_tokens(keyword: str) -> list[str]:
+    tokens = []
+    for token in re.split(r"[\s,，、;；()（）]+", keyword or ""):
+        token = token.strip()
+        if len(token) < 2 or token in _AKSHARE_STOP_TOKENS:
+            continue
+        if re.fullmatch(r"\d{6}(\.(SH|SZ|BJ))?", token):
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _akshare_row_to_item(row: dict, title_key: str, content_key: str, url_key: str) -> dict:
+    published = str(row.get("发布时间") or "").strip()
+    content = str(row.get(content_key) or "").strip()
+    return {
+        "title": str(row.get(title_key) or "").strip(),
+        "url": str(row.get(url_key) or ""),
+        "content": f"[{published}] {content}" if published else content,
+        "score": None,
+    }
+
+
+def _akshare_search(keyword: str, symbol: str | None, max_results: int) -> list[dict]:
+    """降级搜索源（免密钥、国内直连）：Brave/Tavily 不可用或无结果时启用。
+
+    带股票代码走东方财富个股新闻；否则取财联社电报流按关键词过滤
+    （过滤无命中时返回最新电报，保证降级仍有国内财经新闻）。
+    """
+    import akshare as ak
+
+    count = max(1, min(int(max_results), 20))
+    code_match = re.search(r"\d{6}", symbol or keyword or "")
+    if code_match:
+        frame = ak.stock_news_em(symbol=code_match.group(0))
+        records = frame.to_dict("records") if frame is not None else []
+        items = [
+            _akshare_row_to_item(row, "新闻标题", "新闻内容", "新闻链接")
+            for row in records
+        ]
+    else:
+        frame = ak.stock_info_global_cls(symbol="全部")
+        records = frame.to_dict("records") if frame is not None else []
+        items = [
+            _akshare_row_to_item(row, "标题", "内容", "链接")
+            for row in records
+        ]
+    tokens = _akshare_filter_tokens(keyword)
+    if tokens:
+        filtered = [i for i in items if any(t in i["title"] + i["content"] for t in tokens)]
+        if filtered:
+            items = filtered
+    items = [i for i in items if i["title"] or i["content"]]
+    return items[:count]
 
 
 def _tushare_request(api_name: str, params: dict[str, Any], fields: str) -> dict:

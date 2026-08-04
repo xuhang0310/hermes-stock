@@ -34,8 +34,10 @@ dependencies = [
 
 # 可选：position_import v2 试点（STOCK_POSITION_AGENT_V2=true 时才用）。
 # 默认不装，env 关时 position_import 走旧 httpx 路径，零影响。装：pip install -e ".[ai]"
+# 可选：akshare 降级新闻搜索源（Tavily/Brave 不可用时启用；生产 requirements.txt 已含）。装：pip install -e ".[news]"
 [project.optional-dependencies]
 ai = ["pydantic-ai>=2.0"]
+news = ["akshare>=1.18.0"]
 
 [project.scripts]
 hermes-api = "backend.app.main:main"
