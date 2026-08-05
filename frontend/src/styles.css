@@ -6239,6 +6239,32 @@ body.rhythm-modal-open {
   line-height: 1;
 }
 
+.position-sort-toolbar .position-search {
+  margin-left: auto;
+  width: 220px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #151516;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.position-sort-toolbar .position-search::placeholder {
+  color: var(--muted-2);
+}
+
+.position-sort-toolbar .position-search:focus {
+  outline: none;
+  border-color: rgba(213, 180, 106, 0.62);
+}
+
+.position-sort-toolbar .position-search-empty {
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
 .wb-modal-backdrop {
   position: fixed;
   inset: 0;

@@ -111,9 +111,17 @@ const tradeEstimate = computed(() => {
 })
 
 const selectedAccount = computed(() => accounts.value.find((a) => a.id === selectedAccountId.value) || null)
-const filteredPositions = computed(() =>
-  selectedAccountId.value === null ? props.positions : props.positions.filter((p) => p.account_id === selectedAccountId.value)
-)
+const searchQuery = ref('')
+const filteredPositions = computed(() => {
+  const base =
+    selectedAccountId.value === null ? props.positions : props.positions.filter((p) => p.account_id === selectedAccountId.value)
+  const needle = searchQuery.value.trim().toLowerCase()
+  if (!needle) return base
+  return base.filter((p) =>
+    [p.symbol, p.name, p.broker_name, p.account_name].some((v) => String(v || '').toLowerCase().includes(needle))
+  )
+})
+const searchEmpty = computed(() => Boolean(searchQuery.value.trim()) && displayedPositions.value.length === 0)
 type PositionSortKey = 'market_value' | 'position_quantity' | 'floating_pnl' | 'floating_pnl_pct'
 type PositionSortDirection = 'asc' | 'desc'
 
@@ -1091,7 +1099,7 @@ onBeforeUnmount(() => {
         <button type="button" :class="{ active: activeTab === 'positions' }" @click="switchTab('positions')">持仓</button>
         <button type="button" :class="{ active: activeTab === 'trades' }" @click="switchTab('trades')">交易记录</button>
       </div>
-      <div v-if="activeTab === 'positions'" class="position-sort-toolbar" aria-label="持仓排序">
+      <div v-if="activeTab === 'positions'" class="position-sort-toolbar" aria-label="持仓排序与搜索">
         <span>排序</span>
         <button
           v-for="option in positionSortOptions"
@@ -1107,6 +1115,14 @@ onBeforeUnmount(() => {
             {{ positionSortDirection === 'desc' ? '↓' : '↑' }}
           </span>
         </button>
+        <input
+          v-model.trim="searchQuery"
+          type="search"
+          class="position-search"
+          placeholder="搜索代码 / 名称 / 账户"
+          aria-label="搜索持仓"
+        />
+        <span v-if="searchEmpty" class="position-search-empty">无匹配持仓</span>
       </div>
       <DataTable
         v-if="activeTab === 'positions'"
