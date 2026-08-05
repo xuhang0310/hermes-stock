@@ -6440,6 +6440,17 @@ body.rhythm-modal-open {
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
+.wb-trade-btn.chart {
+  color: var(--cyan);
+  border-color: rgba(43, 212, 212, 0.3);
+  background: rgba(43, 212, 212, 0.06);
+}
+
+.wb-trade-btn.chart:hover {
+  border-color: var(--cyan);
+  background: rgba(43, 212, 212, 0.15);
+}
+
 .wb-trade-btn.edit {
   color: var(--gold-2);
   border-color: rgba(213, 180, 106, 0.34);

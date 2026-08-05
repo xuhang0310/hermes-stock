@@ -382,7 +382,7 @@ function reorderPositionColumns(fromIndex: number, toIndex: number) {
 
 const tableRows = computed(() =>
   displayedPositions.value.map((position) => {
-    const actions = `<button class="wb-trade-btn edit" data-action="edit">编辑</button><button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button>`
+    const actions = `<button class="wb-trade-btn chart" data-action="chart">K线</button><button class="wb-trade-btn edit" data-action="edit">编辑</button><button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button>`
     return [
       ...tableColumnDefinitions.value.map((column) => positionColumnValue(position, column.key)),
       actions
@@ -790,18 +790,15 @@ async function saveFund() {
   }
 }
 
-function onRowClick(index: number) {
-  const position = displayedPositions.value[index]
-  if (position) emit('openChart', position)
-}
-
 function onCellClick(rowIndex: number, cellIndex: number, target: HTMLElement) {
   const actionCol = tableColumns.value.length - 1
   if (cellIndex !== actionCol) return
   const pos = displayedPositions.value[rowIndex]
   if (!pos) return
   const action = target.getAttribute('data-action')
-  if (action === 'edit') {
+  if (action === 'chart') {
+    emit('openChart', pos)
+  } else if (action === 'edit') {
     openCorrectionModal(pos)
   } else if (action === 'buy') {
     openTradeModal(pos, 'buy')
@@ -1074,7 +1071,7 @@ onBeforeUnmount(() => {
       <header class="section-header">
         <div>
           <h2>{{ selectedAccount ? selectedAccount.broker_name + ' 持仓' : '全部持仓' }}</h2>
-          <p>点击持仓行查看 K 线图表；录入有误时可使用“编辑”纠正。</p>
+          <p>点击操作列”K线”查看 K 线图表；录入有误时可使用”编辑”纠正。</p>
         </div>
         <div class="wb-actions">
           <button v-if="selectedAccount" type="button" @click="openFund(selectedAccount)">维护资金</button>
@@ -1129,10 +1126,8 @@ onBeforeUnmount(() => {
         :columns="tableColumns"
         :rows="tableRows"
         :fixed-column-indexes="[tableColumns.length - 1]"
-        clickable
         reorderable
         @column-reorder="reorderPositionColumns"
-        @row-click="onRowClick"
         @cell-click="onCellClick"
       />
       <div v-else-if="tradesLoading" class="trade-empty">加载中…</div>
