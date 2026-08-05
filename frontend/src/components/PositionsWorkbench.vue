@@ -356,10 +356,16 @@ const tableColumns = computed(() => [
   '操作'
 ])
 
+function xueqiuAnchor(position: PositionItem, text: string) {
+  const [code, exch] = position.symbol.split('.')
+  if (!code || !exch) return text
+  return `<a class="wb-symbol-link" href="https://xueqiu.com/S/${exch}${code}" target="_blank" rel="noopener" title="进入雪球社区核对价格">${text}</a>`
+}
+
 function positionColumnValue(position: PositionItem, key: PositionColumnKey) {
   if (key === 'broker_name') return position.broker_name || '—'
-  if (key === 'symbol') return position.symbol
-  if (key === 'name') return position.name || '—'
+  if (key === 'symbol') return xueqiuAnchor(position, position.symbol)
+  if (key === 'name') return position.name ? xueqiuAnchor(position, position.name) : '—'
   if (key === 'position_quantity') return fmtNum(position.position_quantity ?? position.quantity)
   if (key === 'available_quantity') return fmtNum(position.available_quantity)
   if (key === 'latest_price') return fmtNum(position.latest_price, 2)
@@ -386,7 +392,7 @@ function reorderPositionColumns(fromIndex: number, toIndex: number) {
 
 const tableRows = computed(() =>
   displayedPositions.value.map((position) => {
-    const actions = `<button class="wb-trade-btn chart" data-action="chart">K线</button><button class="wb-trade-btn edit" data-action="edit">编辑</button><button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button><button class="wb-trade-btn xq" data-action="xq" title="进入雪球社区核对价格">雪球</button>`
+    const actions = `<button class="wb-trade-btn chart" data-action="chart">K线</button><button class="wb-trade-btn edit" data-action="edit">编辑</button><button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button>`
     return [
       ...tableColumnDefinitions.value.map((column) => positionColumnValue(position, column.key)),
       actions
@@ -810,9 +816,6 @@ function onCellClick(rowIndex: number, cellIndex: number, target: HTMLElement) {
     openTradeModal(pos, 'sell')
   } else if (action === 'delete') {
     void confirmDelete(pos)
-  } else if (action === 'xq') {
-    const [code, exch] = pos.symbol.split('.')
-    window.open(`https://xueqiu.com/S/${exch}${code}`, '_blank', 'noopener')
   }
 }
 
@@ -1078,7 +1081,7 @@ onBeforeUnmount(() => {
       <header class="section-header">
         <div>
           <h2>{{ selectedAccount ? selectedAccount.broker_name + ' 持仓' : '全部持仓' }}</h2>
-          <p>点击操作列”K线”查看 K 线图表；录入有误时可使用”编辑”纠正。</p>
+          <p>点击标的代码或名称可跳转雪球社区核对价格；点击操作列”K线”查看 K 线图表；录入有误时可使用”编辑”纠正。</p>
         </div>
         <div class="wb-actions">
           <button v-if="selectedAccount" type="button" @click="openFund(selectedAccount)">维护资金</button>
