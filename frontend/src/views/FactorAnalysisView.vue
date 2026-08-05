@@ -15,16 +15,27 @@ const skipped = ref<Array<{ id: string; reason: string }>>([])
 const dedup = ref<{ threshold: number; kept_ids: string[]; dropped: Array<{ id: string; max_corr_with_kept: number }> } | null>(null)
 const coverage = ref('')
 const methodology = ref('')
-const symbolsInput = ref('600519.SH,000858.SZ,000001.SZ,600036.SH,601318.SH,000333.SZ,000651.SZ,600900.SH,601899.SH,600030.SH')
+const symbolsInput = ref('600519.SH,000858.SZ,000001.SZ,600036.SH,601318.SH,000333.SZ,000651.SZ,600900.SH,601899.SH,600030.SH,600276.SH,600887.SH,601012.SH,300750.SZ,002594.SZ,002415.SZ,600809.SH,000568.SZ,601888.SH,600585.SH,600104.SH,601668.SH,000725.SZ,002475.SZ')
 const startDate = ref('')
 const endDate = ref('')
 const dedupEnabled = ref(true)
 const dedupThreshold = ref(0.7)
 const copied = ref(false)
 const filterQuery = ref('')
+const zooFilter = ref<'all' | 'price' | 'alpha101' | 'qlib158' | 'gtja191' | 'academic' | 'fundamental'>('price')
 
 const categoryLabels: Record<string, string> = { alive: '有效', reversed: '反转', dead: '失效' }
 const categoryTone: Record<string, string> = { alive: 'pos', reversed: 'warn', dead: 'muted' }
+
+const zooOptions = [
+  { value: 'price', label: '量价可算（推荐）', zoos: ['alpha101', 'qlib158', 'gtja191'] },
+  { value: 'alpha101', label: 'alpha101', zoos: ['alpha101'] },
+  { value: 'qlib158', label: 'qlib158', zoos: ['qlib158'] },
+  { value: 'gtja191', label: 'gtja191', zoos: ['gtja191'] },
+  { value: 'all', label: '全部（含需额外数据）', zoos: null },
+  { value: 'academic', label: 'academic（需长历史）', zoos: ['academic'] },
+  { value: 'fundamental', label: 'fundamental（需基本面）', zoos: ['fundamental'] },
+]
 
 const symbols = computed(() =>
   symbolsInput.value
@@ -34,11 +45,13 @@ const symbols = computed(() =>
 )
 
 const filteredCatalog = computed(() => {
+  const option = zooOptions.find((o) => o.value === zooFilter.value)
   const q = filterQuery.value.trim().toLowerCase()
-  if (!q) return catalog.value
-  return catalog.value.filter(
-    (f) => f.id.toLowerCase().includes(q) || (f.nickname || '').toLowerCase().includes(q) || f.zoo.toLowerCase().includes(q)
-  )
+  return catalog.value.filter((f) => {
+    if (option && option.zoos && !option.zoos.includes(f.zoo)) return false
+    if (!q) return true
+    return f.id.toLowerCase().includes(q) || (f.nickname || '').toLowerCase().includes(q) || f.zoo.toLowerCase().includes(q)
+  })
 })
 
 const selectedCount = computed(() => selectedIds.value.size)
@@ -77,6 +90,27 @@ function clearResults() {
   results.value = []
   skipped.value = []
   dedup.value = null
+}
+
+function canRunMsg(): string {
+  if (symbols.value.length < 5) return '至少选 5 只股票（建议 ≥20 只）'
+  if (!selectedIds.value.size) return '请先勾选要评估的因子'
+  if (selectedIds.value.size > 20) return '一次最多选 20 个因子'
+  return ''
+}
+
+function skipReasonText(reason: string): string {
+  if (reason.includes('panel missing required columns')) {
+    const cols = reason.match(/\[([^\]]+)\]/)?.[1] ?? ''
+    return `需基本面数据（${cols}），当前只有 K 线，无法计算`
+  }
+  if (reason.includes('nan_ratio')) {
+    return '在该股票池/区间下几乎全是空值（数据覆盖不足）'
+  }
+  if (reason.includes('IC 序列为空')) {
+    return '样本覆盖不足（股票数太少或区间太短），请加更多股票或扩大区间'
+  }
+  return reason
 }
 
 function percent(value: number | null | undefined, digits = 2): string {
@@ -162,7 +196,7 @@ onMounted(loadCatalog)
           <p>横截面 IC / IR / 秩稳定性评估 + 低相关筛选（AlphaEval 思路）</p>
         </div>
       </div>
-      <button type="button" class="btn-outline" :disabled="running || !canRun" @click="run">
+      <button type="button" class="btn-outline" :disabled="running || !canRun" :title="canRunMsg()" @click="run">
         <span class="btn-spin" :class="{ spin: running }"></span>
         {{ running ? '评估中' : '开始评估' }}
       </button>
@@ -200,8 +234,11 @@ onMounted(loadCatalog)
         </div>
         <div class="fa-picker-actions">
           <label class="fa-search">
-            <input v-model="filterQuery" type="text" class="fa-input" placeholder="搜索因子 ID / 昵称 / 来源" />
+            <input v-model="filterQuery" type="text" class="fa-input" placeholder="搜索因子 ID / 昵称" />
           </label>
+          <select v-model="zooFilter" class="fa-input fa-zoo-select">
+            <option v-for="opt in zooOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+          </select>
           <button type="button" class="btn-outline" :disabled="selectedCount >= 20" @click="selectAllVisible">全选当前</button>
           <button type="button" class="btn-outline" :disabled="!selectedCount" @click="clearSelection">清空</button>
         </div>
@@ -282,6 +319,16 @@ onMounted(loadCatalog)
         </span>
       </div>
 
+      <div v-if="skipped.length" class="fa-skipped">
+        <strong>以下 {{ skipped.length }} 个因子无法评估（不算失败，是数据覆盖问题）：</strong>
+        <ul class="fa-skipped-list">
+          <li v-for="s in skipped" :key="s.id">
+            <code>{{ s.id }}</code> — {{ skipReasonText(s.reason) }}
+          </li>
+        </ul>
+        <p class="fa-skipped-hint">提示：换用左侧"量价可算"来源筛选，并加更多股票（≥20 只）可减少跳过。</p>
+      </div>
+
       <div class="fa-actions">
         <span class="fa-selected">{{ selectedCount }} 个因子已选</span>
         <button type="button" class="btn-outline" :disabled="!selectedCount" @click="copyFactorIds">
@@ -293,7 +340,7 @@ onMounted(loadCatalog)
       <p class="fa-methodology">{{ methodology }}</p>
     </template>
 
-    <div v-else class="fa-state">{{ results.length ? '' : '勾选因子并点击右上角"重新评估"开始' }}</div>
+    <div v-else class="fa-state">{{ results.length ? '' : '勾选因子后点右上角"开始评估"，结果会显示在这里' }}</div>
   </section>
 </template>
 
@@ -499,6 +546,48 @@ onMounted(loadCatalog)
 .fa-state-sm {
   padding: 14px;
   font-size: 12px;
+}
+
+.fa-zoo-select {
+  width: auto;
+  min-width: 150px;
+  cursor: pointer;
+}
+
+.fa-skipped {
+  position: relative;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255, 93, 93, 0.25);
+  border-radius: var(--radius);
+  background: rgba(255, 93, 93, 0.04);
+  font-size: 12.5px;
+}
+
+.fa-skipped strong {
+  color: var(--warning);
+}
+
+.fa-skipped-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.fa-skipped-list code {
+  color: var(--danger);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11.5px;
+}
+
+.fa-skipped-hint {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
 }
 
 .fa-summary {
