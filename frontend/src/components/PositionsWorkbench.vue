@@ -382,7 +382,7 @@ function reorderPositionColumns(fromIndex: number, toIndex: number) {
 
 const tableRows = computed(() =>
   displayedPositions.value.map((position) => {
-    const actions = `<button class="wb-trade-btn chart" data-action="chart">K线</button><button class="wb-trade-btn edit" data-action="edit">编辑</button><button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button>`
+    const actions = `<button class="wb-trade-btn chart" data-action="chart">K线</button><button class="wb-trade-btn edit" data-action="edit">编辑</button><button class="wb-trade-btn buy" data-action="buy">买入</button><button class="wb-trade-btn sell" data-action="sell">卖出</button><button class="wb-trade-btn delete" data-action="delete">删除</button><button class="wb-trade-btn xq" data-action="xq" title="进入雪球社区核对价格">雪球</button>`
     return [
       ...tableColumnDefinitions.value.map((column) => positionColumnValue(position, column.key)),
       actions
@@ -806,6 +806,9 @@ function onCellClick(rowIndex: number, cellIndex: number, target: HTMLElement) {
     openTradeModal(pos, 'sell')
   } else if (action === 'delete') {
     void confirmDelete(pos)
+  } else if (action === 'xq') {
+    const [code, exch] = pos.symbol.split('.')
+    window.open(`https://xueqiu.com/S/${exch}${code}`, '_blank', 'noopener')
   }
 }
 
