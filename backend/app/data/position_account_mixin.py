@@ -124,8 +124,7 @@ class PositionAccountMixin:
             )
             .order_by(
                 PositionHoldingSnapshot.symbol,
-                desc(PositionHoldingSnapshot.as_of_date),
-                desc(PositionHoldingSnapshot.captured_at),
+                # 最新快照 = max(id)，与价格同步口径一致（勿按 as_of_date 排序，见 position_query_mixin 注释）
                 desc(PositionHoldingSnapshot.id),
             )
         ).all()

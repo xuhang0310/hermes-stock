@@ -19,11 +19,9 @@ class PositionQueryMixin:
             PositionHoldingSnapshot.symbol.label("symbol"),
             func.row_number().over(
                 partition_by=(PositionHoldingSnapshot.account_id, PositionHoldingSnapshot.symbol),
-                order_by=(
-                    desc(PositionHoldingSnapshot.as_of_date),
-                    desc(PositionHoldingSnapshot.captured_at),
-                    desc(PositionHoldingSnapshot.id),
-                ),
+                # 快照只追加，max(id) 即当前态——与价格同步任务选快照的口径一致。
+                # 勿按 as_of_date 排序：DESC 时 NULL 排最后，带日期的旧快照会压过更新的新快照。
+                order_by=desc(PositionHoldingSnapshot.id),
             ).label("rank"),
             )
             .where(self._owner_clause(PositionHoldingSnapshot))

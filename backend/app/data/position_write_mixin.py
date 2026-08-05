@@ -48,11 +48,7 @@ class PositionWriteMixin:
                         _account_eq(position.account_id, PositionHoldingSnapshot),
                         self._owner_clause(PositionHoldingSnapshot),
                     )
-                    .order_by(
-                        desc(PositionHoldingSnapshot.as_of_date),
-                        desc(PositionHoldingSnapshot.captured_at),
-                        desc(PositionHoldingSnapshot.id),
-                    )
+                    .order_by(desc(PositionHoldingSnapshot.id))
                     .limit(1)
                 ).all()
                 if item.symbol_name
@@ -99,11 +95,7 @@ class PositionWriteMixin:
                 _account_eq(account_id, PositionHoldingSnapshot),
                 self._owner_clause(PositionHoldingSnapshot),
             )
-            .order_by(
-                desc(PositionHoldingSnapshot.as_of_date),
-                desc(PositionHoldingSnapshot.captured_at),
-                desc(PositionHoldingSnapshot.id),
-            )
+            .order_by(desc(PositionHoldingSnapshot.id))
         ).all()
         if not snapshots:
             raise ValueError("持仓缺少可编辑的快照记录")
@@ -653,7 +645,7 @@ class PositionWriteMixin:
                 _account_eq(effective_id, PositionHoldingSnapshot),
                 self._owner_clause(PositionHoldingSnapshot),
             )
-            .order_by(desc(PositionHoldingSnapshot.as_of_date), desc(PositionHoldingSnapshot.captured_at), desc(PositionHoldingSnapshot.id))
+            .order_by(desc(PositionHoldingSnapshot.id))
             .limit(1)
         )
         if snap is None:
@@ -717,7 +709,7 @@ class PositionWriteMixin:
                     PositionHoldingSnapshot.account_id == account_id,
                     self._owner_clause(PositionHoldingSnapshot),
                 )
-                .order_by(desc(PositionHoldingSnapshot.as_of_date), desc(PositionHoldingSnapshot.captured_at), desc(PositionHoldingSnapshot.id))
+                .order_by(desc(PositionHoldingSnapshot.id))
                 .limit(1)
             )
             positions = self.db.scalars(
@@ -934,9 +926,8 @@ class PositionWriteMixin:
             status=status,
         )
         self.db.add(snapshot)
-        # Flush before choosing the authoritative snapshot. Imports can arrive
-        # out of chronological order, so the just-created row is not
-        # necessarily the position state that should drive later trades.
+        # Flush 后再选权威快照：快照只追加，max(id) 即当前态（与价格同步任务口径一致，
+        # 见 position_query_mixin 注释）。此处新行 flush 后就是 max(id)。
         self.db.flush()
 
         acc_id = account.id if account else None
@@ -968,11 +959,7 @@ class PositionWriteMixin:
                 _account_eq(acc_id, PositionHoldingSnapshot),
                 self._owner_clause(PositionHoldingSnapshot),
             )
-            .order_by(
-                desc(PositionHoldingSnapshot.as_of_date),
-                desc(PositionHoldingSnapshot.captured_at),
-                desc(PositionHoldingSnapshot.id),
-            )
+            .order_by(desc(PositionHoldingSnapshot.id))
             .limit(1)
         ) or snapshot
         if position is None:
