@@ -315,6 +315,10 @@ function pnlClass(v: number | null | undefined) {
   if (v === null || v === undefined) return ''
   return v > 0 ? 'pnl-up' : v < 0 ? 'pnl-down' : ''
 }
+function pnlSpan(v: number | null | undefined, text: string) {
+  const cls = pnlClass(v)
+  return cls ? `<span class="${cls}">${text}</span>` : text
+}
 
 const fundCards = computed(() => {
   const a = selectedAccount.value
@@ -361,8 +365,8 @@ function positionColumnValue(position: PositionItem, key: PositionColumnKey) {
   if (key === 'latest_price') return fmtNum(position.latest_price, 2)
   if (key === 'cost_price') return fmtNum(position.cost_price, 2)
   if (key === 'market_value') return fmtNum(position.market_value, 2)
-  if (key === 'floating_pnl') return fmtNum(position.floating_pnl, 2)
-  if (key === 'floating_pnl_pct') return fmtPct(position.floating_pnl_pct)
+  if (key === 'floating_pnl') return pnlSpan(position.floating_pnl, fmtNum(position.floating_pnl, 2))
+  if (key === 'floating_pnl_pct') return pnlSpan(position.floating_pnl_pct, fmtPct(position.floating_pnl_pct))
   if (key === 'stop_price') return fmtNum(position.stop_price, 2)
   return position.status
 }

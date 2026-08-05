@@ -216,12 +216,12 @@ function renderChart() {
   })
 
   const candleSeries = chart.addSeries(CandlestickSeries, {
-    upColor: '#27c58a',
-    downColor: '#ff5d5d',
-    borderUpColor: '#27c58a',
-    borderDownColor: '#ff5d5d',
-    wickUpColor: '#27c58a',
-    wickDownColor: '#ff5d5d'
+    upColor: '#ff5d5d',
+    downColor: '#27c58a',
+    borderUpColor: '#ff5d5d',
+    borderDownColor: '#27c58a',
+    wickUpColor: '#ff5d5d',
+    wickDownColor: '#27c58a'
   })
   candleSeries.setData(data.bars.map(toCandle))
 
@@ -238,7 +238,7 @@ function renderChart() {
     data.bars.map((bar) => ({
       time: bar.time as Time,
       value: bar.volume || 0,
-      color: bar.close >= bar.open ? 'rgba(39, 197, 138, 0.34)' : 'rgba(255, 93, 93, 0.34)'
+      color: bar.close >= bar.open ? 'rgba(255, 93, 93, 0.34)' : 'rgba(39, 197, 138, 0.34)'
     }))
   )
 
@@ -248,8 +248,8 @@ function renderChart() {
   addMaLine('ma60', '#9d9a8f')
 
   addPositionLine(candleSeries, data.position?.cost_price, '成本', '#f1d48a')
-  addPositionLine(candleSeries, data.position?.stop_price, '止损', '#ff5d5d')
-  addPositionLine(candleSeries, data.position?.take_profit_price, '止盈', '#27c58a')
+  addPositionLine(candleSeries, data.position?.stop_price, '止损', '#27c58a')
+  addPositionLine(candleSeries, data.position?.take_profit_price, '止盈', '#ff5d5d')
 
   chart.timeScale().fitContent()
   resizeObserver = new ResizeObserver(([entry]) => {
