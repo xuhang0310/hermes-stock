@@ -385,6 +385,7 @@ def benchmark_factors(
     end_date: str | None = None,
     refresh: bool = False,
     dedup_threshold: float | None = None,
+    include_ic_series: bool = False,
 ) -> dict[str, Any]:
     ids = list(dict.fromkeys(str(value or "").strip() for value in alpha_ids if str(value or "").strip()))
     if not ids:
@@ -424,20 +425,25 @@ def benchmark_factors(
             ic_std = float(ic.std())
             ir = ic_mean / ic_std if ic_std > 0 else 0.0
             positive_ratio = float((ic > 0).mean())
-            results.append(
-                {
-                    "id": alpha_id,
-                    "zoo": registry.get(alpha_id).zoo,
-                    "ic_mean": round(ic_mean, 6),
-                    "ic_std": round(ic_std, 6),
-                    "ir": round(ir, 4),
-                    "ic_positive_ratio": round(positive_ratio, 4),
-                    "ic_count": int(len(ic)),
-                    "rank_stability": round(_rank_stability(factor), 4),
-                    **_split_ic_stats(ic),
-                    "category": _category(ic_mean, ic_std, len(ic), positive_ratio),
-                }
-            )
+            result: dict[str, Any] = {
+                "id": alpha_id,
+                "zoo": registry.get(alpha_id).zoo,
+                "ic_mean": round(ic_mean, 6),
+                "ic_std": round(ic_std, 6),
+                "ir": round(ir, 4),
+                "ic_positive_ratio": round(positive_ratio, 4),
+                "ic_count": int(len(ic)),
+                "rank_stability": round(_rank_stability(factor), 4),
+                **_split_ic_stats(ic),
+                "category": _category(ic_mean, ic_std, len(ic), positive_ratio),
+            }
+            if include_ic_series:
+                result["ic_series"] = [
+                    {"time": stamp.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
+                    for stamp, v in ic.items()
+                    if math.isfinite(v)
+                ]
+            results.append(result)
         except (SkipAlpha, RegistryError, ValueError) as exc:
             skipped.append({"id": alpha_id, "reason": str(exc)[:300]})
     results.sort(key=lambda item: item["ir"], reverse=True)

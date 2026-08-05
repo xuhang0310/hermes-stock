@@ -1398,6 +1398,7 @@ export type FactorBenchmarkItem = {
   train_ic_count: number
   test_ic_count: number
   category: 'alive' | 'reversed' | 'dead'
+  ic_series?: Array<{ time: string; value: number }>
 }
 
 export type FactorDedupResult = {

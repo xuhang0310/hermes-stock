@@ -100,6 +100,7 @@ def post_factor_benchmark(
             end_date=payload.end_date,
             refresh=payload.refresh,
             dedup_threshold=payload.dedup_threshold,
+            include_ic_series=True,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ColorType, HistogramSeries, LineSeries, createChart } from 'lightweight-charts'
+import type { Time } from 'lightweight-charts'
 import { api } from '../api'
 import type { FactorBenchmarkItem, FactorSymbolCoverage } from '../types'
 
@@ -22,6 +24,19 @@ const dedupEnabled = ref(true)
 const dedupThreshold = ref(0.7)
 const refreshEnabled = ref(false)
 const symbolCoverage = ref<FactorSymbolCoverage | null>(null)
+const icCompareHost = ref<HTMLElement | null>(null)
+const icDetailHost = ref<HTMLElement | null>(null)
+const selectedDetail = ref<string | null>(null)
+
+const icPalette = [
+  '#42dfad', '#eabf63', '#49b8d1', '#c78cff', '#f25f64', '#9cd36a', '#70a5ff',
+  '#ff9f66', '#4dd0be', '#e8a0b8', '#d0d36a', '#5fd3c0', '#b48cff', '#ff8a5c',
+  '#8fd0ff', '#a8e05f'
+]
+
+let icChart: ReturnType<typeof createChart> | null = null
+let icDetailChart: ReturnType<typeof createChart> | null = null
+let icResizeObserver: ResizeObserver | null = null
 const copied = ref(false)
 const filterQuery = ref('')
 const zooFilter = ref<'all' | 'price' | 'alpha101' | 'qlib158' | 'gtja191' | 'academic' | 'fundamental'>('price')
@@ -100,6 +115,138 @@ function clearResults() {
   dedup.value = null
   symbolCoverage.value = null
 }
+
+const detailRow = computed(
+  () => results.value.find((r) => r.id === selectedDetail.value) ?? null
+)
+
+function makeIcChart(host: HTMLElement, height: number) {
+  return createChart(host, {
+    width: host.clientWidth || 800,
+    height,
+    layout: {
+      background: { type: ColorType.Solid, color: '#101315' },
+      textColor: '#8f979d',
+      fontFamily: '"Cascadia Mono", "SFMono-Regular", Consolas, monospace',
+      fontSize: 11
+    },
+    grid: {
+      vertLines: { color: 'rgba(112, 123, 130, 0.08)' },
+      horzLines: { color: 'rgba(112, 123, 130, 0.10)' }
+    },
+    rightPriceScale: { borderColor: '#2a3034' },
+    timeScale: { borderColor: '#2a3034', timeVisible: false },
+    localization: { locale: 'zh-CN' }
+  })
+}
+
+function cumulative(points: Array<{ time: string; value: number }>): Array<{ time: Time; value: number }> {
+  let acc = 0
+  return points.map((p) => {
+    acc += p.value
+    return { time: p.time as Time, value: Math.round(acc * 10000) / 10000 }
+  })
+}
+
+function destroyIcCharts() {
+  icChart?.remove()
+  icChart = null
+  icDetailChart?.remove()
+  icDetailChart = null
+}
+
+function disconnectIcResize() {
+  icResizeObserver?.disconnect()
+  icResizeObserver = null
+}
+
+function observeIcCharts() {
+  disconnectIcResize()
+  const hosts = [icCompareHost.value, icDetailHost.value].filter(Boolean) as HTMLElement[]
+  if (!hosts.length) return
+  icResizeObserver = new ResizeObserver(() => {
+    icChart?.applyOptions({ width: icCompareHost.value?.clientWidth || 800 })
+    icDetailChart?.applyOptions({ width: icDetailHost.value?.clientWidth || 800 })
+  })
+  hosts.forEach((h) => icResizeObserver!.observe(h))
+}
+
+function renderIcDetail() {
+  if (!icDetailChart) return
+  const f = detailRow.value
+  if (!f) return
+  const points = f.ic_series || []
+  const hist = icDetailChart.addSeries(HistogramSeries, {
+    priceLineVisible: false,
+    lastValueVisible: false
+  })
+  hist.setData(
+    points.map((p) => ({
+      time: p.time as Time,
+      value: p.value,
+      color: p.value >= 0 ? 'rgba(39, 197, 138, 0.55)' : 'rgba(255, 93, 93, 0.55)'
+    }))
+  )
+  icDetailChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
+  const cum = icDetailChart.addSeries(LineSeries, {
+    priceScaleId: 'ic-cum',
+    color: '#eabf63',
+    lineWidth: 2,
+    priceLineVisible: false,
+    lastValueVisible: false
+  })
+  cum.setData(cumulative(points))
+  icDetailChart.priceScale('ic-cum').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.25 } })
+}
+
+function renderIcCharts() {
+  destroyIcCharts()
+  if (!results.value.length) return
+  if (icCompareHost.value) {
+    icChart = makeIcChart(icCompareHost.value, 240)
+    keptRows.value.forEach((f, i) => {
+      const line = icChart!.addSeries(LineSeries, {
+        color: icPalette[i % icPalette.length],
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false
+      })
+      line.setData(cumulative(f.ic_series || []))
+    })
+  }
+  if (icDetailHost.value) {
+    icDetailChart = makeIcChart(icDetailHost.value, 200)
+    renderIcDetail()
+  }
+}
+
+function selectDetail(id: string) {
+  selectedDetail.value = id
+  nextTick(() => {
+    if (!icDetailChart) return
+    icDetailChart.remove()
+    if (icDetailHost.value) {
+      icDetailChart = makeIcChart(icDetailHost.value, 200)
+      renderIcDetail()
+    }
+  })
+}
+
+watch(
+  () => results.value,
+  () => {
+    selectedDetail.value = results.value[0]?.id ?? null
+    nextTick(() => {
+      renderIcCharts()
+      observeIcCharts()
+    })
+  }
+)
+
+onBeforeUnmount(() => {
+  destroyIcCharts()
+  disconnectIcResize()
+})
 
 function canRunMsg(): string {
   if (symbols.value.length < 5) return '至少选 5 只股票（建议 ≥20 只）'
@@ -317,7 +464,12 @@ onMounted(loadCatalog)
             </tr>
           </thead>
           <tbody>
-            <tr v-for="it in results" :key="it.id" :class="{ dropped: dedup && !dedup.kept_ids.includes(it.id) }">
+            <tr
+              v-for="it in results"
+              :key="it.id"
+              :class="{ dropped: dedup && !dedup.kept_ids.includes(it.id), selected: it.id === selectedDetail }"
+              @click="selectDetail(it.id)"
+            >
               <td class="fa-id">{{ it.id }}</td>
               <td>{{ it.zoo }}</td>
               <td class="num" :class="tone(it.ic_mean)">{{ percent(it.ic_mean) }}</td>
@@ -349,6 +501,21 @@ onMounted(loadCatalog)
           </li>
         </ul>
         <p class="fa-skipped-hint">提示：换用左侧"量价可算"来源筛选，并加更多股票（≥20 只）可减少跳过。</p>
+      </div>
+
+      <div class="fa-ic">
+        <div class="fa-ic-head">
+          <strong>IC 序列曲线</strong>
+          <span class="fa-hint">上图：去重后保留因子的累计 IC 对比；点击表格行切换下方单因子明细</span>
+        </div>
+        <div ref="icCompareHost" class="fa-ic-chart"></div>
+        <div v-if="keptRows.length" class="fa-ic-legend">
+          <span v-for="(f, i) in keptRows" :key="f.id" class="fa-ic-chip">
+            <i class="fa-ic-dot" :style="{ background: icPalette[i % icPalette.length] }"></i>{{ f.id }}
+          </span>
+        </div>
+        <div v-if="detailRow" class="fa-ic-detail-title">{{ detailRow.id }} · 日度 IC（柱，上绿下红）+ 累计 IC（金色线）</div>
+        <div ref="icDetailHost" class="fa-ic-chart"></div>
       </div>
 
       <div class="fa-actions">
@@ -763,6 +930,69 @@ onMounted(loadCatalog)
   border: 1px solid var(--line-strong);
   color: var(--text);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.fa-ic {
+  position: relative;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.fa-ic-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.fa-ic-head strong {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.fa-ic-chart {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.fa-ic-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 8px 0;
+}
+
+.fa-ic-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
+.fa-ic-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+}
+
+.fa-ic-detail-title {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin: 4px 0 6px;
+}
+
+.fa-table tbody tr {
+  cursor: pointer;
 }
 
 .fa-actions {
