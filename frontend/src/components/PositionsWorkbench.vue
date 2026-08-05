@@ -31,6 +31,7 @@ const message = ref('')
 const activeTab = ref<'positions' | 'trades'>('positions')
 const trades = ref<PositionTrade[]>([])
 const tradesLoading = ref(false)
+const priceSyncing = ref(false)
 
 const accountModalOpen = ref(false)
 const fundModalOpen = ref(false)
@@ -414,6 +415,30 @@ function selectAccount(id: number | null) {
   selectedAccountId.value = id
   void api.positionsSummary(id).then((s) => (summary.value = s))
   if (activeTab.value === 'trades') void loadTrades()
+}
+
+async function syncPositionPrices() {
+  if (priceSyncing.value) return
+  priceSyncing.value = true
+  message.value = ''
+  try {
+    const result = await api.syncPositionPrices()
+    message.value = result.message
+    if (result.skipped) {
+      // 已有同步在跑，结果几秒后落库，延迟刷新一次即可
+      window.setTimeout(() => {
+        emit('refreshPositions')
+        void loadAccounts()
+      }, 3000)
+    } else {
+      emit('refreshPositions')
+      await loadAccounts()
+    }
+  } catch (error) {
+    message.value = `价格更新失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    priceSyncing.value = false
+  }
 }
 
 function resetPositionOcr() {
@@ -1046,6 +1071,14 @@ onBeforeUnmount(() => {
         <div class="wb-actions">
           <button v-if="selectedAccount" type="button" @click="openFund(selectedAccount)">维护资金</button>
           <button v-if="selectedAccount" type="button" @click="editAccount(selectedAccount)">账户设置</button>
+          <button
+            type="button"
+            :disabled="priceSyncing"
+            title="拉取实时行情，刷新全部持仓的最新价/市值/浮盈并重算账户资金"
+            @click="syncPositionPrices"
+          >
+            {{ priceSyncing ? '更新中…' : '更新价格' }}
+          </button>
           <button type="button" class="primary" @click="openTradeModal(null, 'buy', 'add')">买入</button>
           <button type="button" class="ocr-action" @click="openPositionOcr">OCR 识别</button>
           <button type="button" @click="emit('openAgent', selectedAccountId)">Agent 录入</button>

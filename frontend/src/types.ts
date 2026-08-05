@@ -95,6 +95,12 @@ export type PositionSummary = {
   holding_count: number
 }
 
+export type PositionPriceSyncResult = {
+  skipped: boolean
+  status: 'success' | 'failed'
+  message: string
+}
+
 export type PositionTrade = {
   id: number
   symbol: string

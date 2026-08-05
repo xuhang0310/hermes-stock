@@ -16,6 +16,7 @@ import type {
   PositionAccount,
   BrokerPreset,
   PositionSummary,
+  PositionPriceSyncResult,
   PositionTrade,
   PromptRecommendation,
   DigitalHumanCapabilities,
@@ -389,6 +390,8 @@ export const api = {
   positionAccounts: () => request<PositionAccount[]>('/api/positions/accounts'),
   positionsSummary: (accountId?: number | null) =>
     request<PositionSummary>(`/api/positions/summary${accountId ? `?account_id=${accountId}` : ''}`),
+  syncPositionPrices: () =>
+    request<PositionPriceSyncResult>('/api/positions/price-sync', { method: 'POST' }),
   positionTrades: (params: { symbol?: string | null; account_id?: number | null; limit?: number } = {}) => {
     const qs = new URLSearchParams()
     if (params.symbol) qs.set('symbol', params.symbol)

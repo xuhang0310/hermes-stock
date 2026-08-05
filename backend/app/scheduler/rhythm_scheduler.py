@@ -15,6 +15,7 @@ import json
 import threading
 import time
 from datetime import date, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,7 @@ from backend.app.core.settings import settings
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 HEARTBEAT_COMPONENT = "rhythm_scheduler"
+POSITION_PRICE_SYNC_JOB_KEY = "position-price-sync-1505"
 
 # 数字人 code -> agent_profiles.agent_name（AgentReport.agent_name 外键指向后者）
 DH_TO_AGENT = {
@@ -536,6 +538,66 @@ def _run_position_price_sync(now: datetime) -> str:
         return _run_position_price_sync_locked(now)
     finally:
         _position_price_sync_lock.release()
+
+
+def sync_position_prices(now: datetime | None = None) -> dict[str, Any]:
+    """「更新价格」按钮与定时任务共享的同步入口。
+
+    线程锁防同进程并发；_claim_manual_run 占用 job_runs 运行记录，与定时任务
+    的认领检查互为互斥（跨进程/跨副本也不会双跑）。任务行被删除时降级为
+    不落运行记录直接同步。返回 {"skipped", "status", "message"}。
+    """
+    ran_at = now or now_sh()
+    if not _position_price_sync_lock.acquire(blocking=False):
+        return {
+            "skipped": True,
+            "status": "skipped",
+            "message": "上一轮持仓价格同步仍在执行，请稍后再试",
+        }
+    try:
+        run_id = _claim_manual_run(POSITION_PRICE_SYNC_JOB_KEY)
+        if run_id is None:
+            with SessionLocal() as session:
+                busy = session.scalar(
+                    select(JobRun.id)
+                    .where(
+                        JobRun.job_key == POSITION_PRICE_SYNC_JOB_KEY,
+                        JobRun.status == "running",
+                        JobRun.started_at >= ran_at - timedelta(minutes=10),
+                    )
+                    .limit(1)
+                )
+            if busy is not None:
+                return {
+                    "skipped": True,
+                    "status": "skipped",
+                    "message": "定时任务正在同步持仓价格，请稍候刷新页面",
+                }
+        return _sync_prices_and_finalize(ran_at, run_id=run_id)
+    finally:
+        _position_price_sync_lock.release()
+
+
+def _sync_prices_and_finalize(ran_at: datetime, *, run_id: str | None) -> dict[str, Any]:
+    started = time.monotonic()
+    status = "success"
+    error: str | None = None
+    message: str | None = None
+    try:
+        message = _run_position_price_sync_locked(ran_at)
+    except Exception as exc:  # noqa: BLE001
+        status = "failed"
+        error = str(exc)[:1000]
+        _log("ERROR", "手动持仓价格同步失败", {"error": error})
+    duration_ms = int((time.monotonic() - started) * 1000)
+    if run_id is not None:
+        _finalize_run(run_id, status, output_content=message, error=error, duration_ms=duration_ms)
+        _update_job_status(POSITION_PRICE_SYNC_JOB_KEY, status, error, ran_at)
+    return {
+        "skipped": False,
+        "status": status,
+        "message": message if status == "success" else (error or "持仓价格同步失败"),
+    }
 
 
 def _run_position_price_sync_locked(now: datetime) -> str:
@@ -1074,7 +1136,7 @@ DEFAULT_JOBS = [
         "enabled": True,
     },
     {
-        "job_key": "position-price-sync-1505",
+        "job_key": POSITION_PRICE_SYNC_JOB_KEY,
         "name": "持仓价格分钟同步",
         "description": "交易时段每分钟批量拉取实时行情，刷新全部持仓的最新价/市值/浮盈并重算账户资金（不经 LLM、不推送）。",
         "job_kind": "position_price_sync",

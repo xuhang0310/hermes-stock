@@ -329,6 +329,23 @@ def delete_position(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/api/positions/price-sync")
+def sync_positions_price(
+    _context: AuthContext = Depends(require_permission("data:write")),
+) -> dict:
+    """一键刷新全部 open 持仓的最新价/市值/浮盈并重算账户资金。
+
+    复用定时任务「持仓价格分钟同步」的同步实现；已有同步在执行时原样返回
+    skipped 提示（200），行情源失败返回 502。
+    """
+    from backend.app.scheduler.rhythm_scheduler import sync_position_prices
+
+    result = sync_position_prices()
+    if result["status"] == "failed":
+        raise HTTPException(status_code=502, detail=result["message"])
+    return result
+
+
 @router.post("/api/positions/ai-import")
 def import_positions_from_image(
     payload: PositionAiImportIn,
