@@ -75,8 +75,9 @@ FACTOR_TOOL_SCHEMAS = [
         "function": {
             "name": "benchmark_factor_alphas",
             "description": (
-                "在指定 A 股股票池评估最多 20 个因子的下一日横截面 IC、IR、"
-                "正 IC 比例和 alive/reversed/dead 状态。"
+                "在指定 A 股股票池评估最多 20 个因子的下一日横截面 IC、IR、正 IC 比例、"
+                "秩稳定性(RRE，约高换手越低)、train/test 分窗 IC 与 alive/reversed/dead 状态；"
+                "可传 dedup_threshold 做低相关贪心去重，返回保留/剔除清单。"
             ),
             "parameters": {
                 "type": "object",
@@ -96,6 +97,12 @@ FACTOR_TOOL_SCHEMAS = [
                     "start_date": {"type": "string", "description": "YYYYMMDD"},
                     "end_date": {"type": "string", "description": "YYYYMMDD"},
                     "refresh": {"type": "boolean", "default": False},
+                    "dedup_threshold": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "可选：0~1 的截面相关阈值，传了就按 IR 降序贪心剔除与已选集相关的因子",
+                    },
                 },
                 "required": ["alpha_ids", "symbols"],
             },
@@ -133,10 +140,12 @@ SKILL = {
             start_date=a.get("start_date"),
             end_date=a.get("end_date"),
             refresh=bool(a.get("refresh")),
+            dedup_threshold=a.get("dedup_threshold"),
         ),
     },
     "prompt_instructions": [
         "因子高分不等于买入信号；先在同一股票池做样本外 IC/IR 评估，再解释方向。",
+        "判断因子是否可信：rank_stability 高（换手低）、train_ic 与 test_ic 同号且幅度接近、ic_positive_ratio 明显偏离 0.5。",
         "因子研究至少使用 5 只股票，优先使用 20 只以上横截面，并明确时间窗口和数据覆盖。",
         "报告必须披露交易成本、停牌涨跌停、行业市值中性化尚未纳入当前快速评估。",
     ],

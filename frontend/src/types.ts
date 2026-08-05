@@ -1383,3 +1383,41 @@ export type TaskBatch = {
     created_at: string | null
   }>
 }
+
+export type FactorBenchmarkItem = {
+  id: string
+  zoo: string
+  ic_mean: number
+  ic_std: number
+  ir: number
+  ic_positive_ratio: number
+  ic_count: number
+  rank_stability: number
+  train_ic: number | null
+  test_ic: number | null
+  train_ic_count: number
+  test_ic_count: number
+  category: 'alive' | 'reversed' | 'dead'
+}
+
+export type FactorDedupResult = {
+  threshold: number
+  kept_ids: string[]
+  dropped: Array<{ id: string; max_corr_with_kept: number }>
+  note: string
+}
+
+export type FactorBenchmarkResult = {
+  results: FactorBenchmarkItem[]
+  skipped: Array<{ id: string; reason: string }>
+  dedup: FactorDedupResult | null
+  coverage: {
+    symbols: string[]
+    start_date: string | null
+    end_date: string | null
+    rows: number
+    dates: number
+  }
+  refresh_failures: Array<{ symbol: string; error: string }>
+  methodology: string
+}

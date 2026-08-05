@@ -61,6 +61,7 @@ import type {
   BacktestListItem,
   StrategyDescriptor,
   StockCandidate,
+  FactorBenchmarkResult,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -635,6 +636,28 @@ export const api = {
     return request<{ items: BacktestListItem[] }>(`/api/backtests${suffix}`)
   },
   strategyCatalog: () => request<{ items: StrategyDescriptor[] }>('/api/backtests/strategies'),
+  factorBenchmark: (payload: {
+    alpha_ids: string[]
+    symbols: string[]
+    start_date?: string | null
+    end_date?: string | null
+    refresh?: boolean
+    dedup_threshold?: number | null
+  }) =>
+    request<FactorBenchmarkResult>('/api/factors/benchmark', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  factorList: (params: { query?: string; zoo?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.query) query.set('query', params.query)
+    if (params.zoo) query.set('zoo', params.zoo)
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<{ items: Array<{ id: string; zoo: string; nickname?: string | null }> }>(
+      `/api/factors${suffix}`
+    )
+  },
   searchStocks: (q: string) =>
     request<{ items: StockCandidate[] }>(`/api/stocks/search?q=${encodeURIComponent(q)}`),
   runStrategyBacktest: (payload: {

@@ -296,6 +296,87 @@ def _category(ic_mean: float, ic_std: float, ic_count: int, positive_ratio: floa
     return "dead"
 
 
+def _rank_stability(factor_df: pd.DataFrame) -> float:
+    """RRE 秩稳定性：相邻交易日横截面排名的 Spearman 相关均值（0~1）。
+
+    排序越稳定，调仓换手越低、噪声越小。参考 AlphaEval RRE 角度。
+    """
+    ranks = factor_df.rank(axis=1, method="average")
+    prev = ranks.shift(1)
+    pair = ranks.notna() & prev.notna()
+    daily: list[float] = []
+    for stamp in ranks.index:
+        valid = pair.loc[stamp]
+        if int(valid.sum()) < MIN_CROSS_SECTION:
+            continue
+        value = ranks.loc[stamp, valid].corr(prev.loc[stamp, valid])
+        if value == value:  # 跳过 NaN
+            daily.append(float(value))
+    return float(np.mean(daily)) if daily else 0.0
+
+
+def _split_ic_stats(ic: pd.Series, train_frac: float = 0.7) -> dict[str, Any]:
+    """按时间前 70% / 后 30% 分窗口的 IC 统计，用于样本外一致性判断。"""
+    total = int(len(ic))
+    if total < 2:
+        return {
+            "train_ic": round(float(ic.mean()), 6) if total == 1 else None,
+            "test_ic": None,
+            "train_ic_count": total,
+            "test_ic_count": 0,
+        }
+    split_at = max(1, int(total * train_frac))
+    train = ic.iloc[:split_at]
+    test = ic.iloc[split_at:]
+    return {
+        "train_ic": round(float(train.mean()), 6),
+        "test_ic": round(float(test.mean()), 6) if not test.empty else None,
+        "train_ic_count": int(len(train)),
+        "test_ic_count": int(len(test)),
+    }
+
+
+def _factor_signal(factor: pd.DataFrame) -> pd.Series:
+    """因子横截面排名拉平为 (date, symbol) → rank 的序列，用于跨因子相关性。"""
+    return factor.rank(axis=1, method="average").stack()
+
+
+def _greedy_dedup(
+    results: list[dict[str, Any]],
+    factor_panels: dict[str, pd.DataFrame],
+    *,
+    threshold: float,
+) -> dict[str, Any]:
+    """按 IR 降序贪心去重：因子与已选集的截面排名最大相关 < threshold 才保留。
+
+    参考 AlphaEval 多样性筛选：低相关因子组成的池子信息冗余少、组合增益高。
+    """
+    signals = {item["id"]: _factor_signal(factor_panels[item["id"]]) for item in results}
+    kept: list[str] = []
+    dropped: list[dict[str, Any]] = []
+    for item in results:
+        alpha_id = item["id"]
+        if not kept:
+            kept.append(alpha_id)
+            continue
+        max_corr = 0.0
+        for other_id in kept:
+            corr = signals[alpha_id].reindex(signals[other_id].index).corr(signals[other_id])
+            if corr != corr:  # 样本无交集 → 当作不相关
+                continue
+            max_corr = max(max_corr, float(abs(corr)))
+        if max_corr < threshold:
+            kept.append(alpha_id)
+        else:
+            dropped.append({"id": alpha_id, "max_corr_with_kept": round(max_corr, 4)})
+    return {
+        "threshold": threshold,
+        "kept_ids": kept,
+        "dropped": dropped,
+        "note": "按 IR 降序贪心：与已选集最大截面相关 < 阈值才保留；低相关因子池信息冗余更少。",
+    }
+
+
 def benchmark_factors(
     alpha_ids: Iterable[str],
     symbols: Iterable[str],
@@ -303,6 +384,7 @@ def benchmark_factors(
     start_date: str | None = None,
     end_date: str | None = None,
     refresh: bool = False,
+    dedup_threshold: float | None = None,
 ) -> dict[str, Any]:
     ids = list(dict.fromkeys(str(value or "").strip() for value in alpha_ids if str(value or "").strip()))
     if not ids:
@@ -322,9 +404,11 @@ def benchmark_factors(
     forward_returns = panel["close"].pct_change(fill_method=None).shift(-1)
     results: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
+    factor_panels: dict[str, pd.DataFrame] = {}
     for alpha_id in ids:
         try:
             factor = registry.compute(alpha_id, panel)
+            factor_panels[alpha_id] = factor
             ic = compute_ic_series(factor, forward_returns)
             if ic.empty:
                 raise ValueError("IC 序列为空，样本覆盖不足")
@@ -341,19 +425,27 @@ def benchmark_factors(
                     "ir": round(ir, 4),
                     "ic_positive_ratio": round(positive_ratio, 4),
                     "ic_count": int(len(ic)),
+                    "rank_stability": round(_rank_stability(factor), 4),
+                    **_split_ic_stats(ic),
                     "category": _category(ic_mean, ic_std, len(ic), positive_ratio),
                 }
             )
         except (SkipAlpha, RegistryError, ValueError) as exc:
             skipped.append({"id": alpha_id, "reason": str(exc)[:300]})
     results.sort(key=lambda item: item["ir"], reverse=True)
+    dedup: dict[str, Any] | None = None
+    if dedup_threshold is not None and factor_panels:
+        dedup = _greedy_dedup(results, factor_panels, threshold=dedup_threshold)
     return {
         "results": results,
         "skipped": skipped,
+        "dedup": dedup,
         "coverage": coverage.__dict__,
         "refresh_failures": refresh_failures,
         "methodology": (
             "按交易日计算因子横截面排名与下一交易日收益率的 Spearman IC；"
+            "rank_stability 为相邻交易日横截面排名的 Spearman 相关均值（越接近 1 排序越稳、换手越低）；"
+            "train_ic/test_ic 为按时间前 70%/后 30% 分窗的 IC，两者同向且同号才更可信。"
             "结果未计交易成本、停牌涨跌停、行业和市值中性化，仅用于研究筛选。"
         ),
     }
