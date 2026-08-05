@@ -52,10 +52,17 @@ interface NavItem {
 }
 
 const navItems = computed<NavItem[]>(() => [
-  { key: 'askStock', label: '问股' },
+  {
+    key: 'askStock',
+    label: 'AI Agent',
+    icon: 'askStock.png',
+    children: [
+      { key: 'askStock', label: '问股' },
+      { key: 'digitalHumans', label: '数字人中心' },
+      ...(canViewRhythm.value ? [{ key: 'agentTaskBoard' as PageKey, label: 'Agent 任务' }] : [])
+    ]
+  },
   { key: 'workbench', label: '工作台' },
-  { key: 'digitalHumans', label: '数字人中心' },
-  ...(canViewRhythm.value ? [{ key: 'agentTaskBoard' as PageKey, label: 'Agent 任务', icon: 'agentTaskBoard.svg' }] : []),
   { key: 'positions', label: '持仓' },
   { key: 'watchlist', label: '自选池' },
   {
