@@ -1407,6 +1407,13 @@ export type FactorDedupResult = {
   note: string
 }
 
+export type FactorSymbolCoverage = {
+  total: number
+  with_data: number
+  empty_symbols: string[]
+  usable_dates: number
+}
+
 export type FactorBenchmarkResult = {
   results: FactorBenchmarkItem[]
   skipped: Array<{ id: string; reason: string }>
@@ -1418,6 +1425,7 @@ export type FactorBenchmarkResult = {
     rows: number
     dates: number
   }
+  symbol_coverage: FactorSymbolCoverage
   refresh_failures: Array<{ symbol: string; error: string }>
   methodology: string
 }

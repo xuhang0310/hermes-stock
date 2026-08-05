@@ -402,6 +402,14 @@ def benchmark_factors(
         refresh=refresh,
     )
     forward_returns = panel["close"].pct_change(fill_method=None).shift(-1)
+    bars_per_symbol = panel["close"].notna().sum()
+    pair_counts = (panel["close"].notna() & forward_returns.notna()).sum(axis=1)
+    symbol_coverage = {
+        "total": len(coverage.symbols),
+        "with_data": int((bars_per_symbol > 0).sum()),
+        "empty_symbols": [str(s) for s in coverage.symbols if not bars_per_symbol.get(s, 0)],
+        "usable_dates": int((pair_counts >= MIN_CROSS_SECTION).sum()),
+    }
     results: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     factor_panels: dict[str, pd.DataFrame] = {}
@@ -441,6 +449,7 @@ def benchmark_factors(
         "skipped": skipped,
         "dedup": dedup,
         "coverage": coverage.__dict__,
+        "symbol_coverage": symbol_coverage,
         "refresh_failures": refresh_failures,
         "methodology": (
             "按交易日计算因子横截面排名与下一交易日收益率的 Spearman IC；"

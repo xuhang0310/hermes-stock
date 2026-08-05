@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
-import type { FactorBenchmarkItem } from '../types'
+import type { FactorBenchmarkItem, FactorSymbolCoverage } from '../types'
 
 const loading = ref(false)
 const running = ref(false)
@@ -20,6 +20,8 @@ const startDate = ref('')
 const endDate = ref('')
 const dedupEnabled = ref(true)
 const dedupThreshold = ref(0.7)
+const refreshEnabled = ref(false)
+const symbolCoverage = ref<FactorSymbolCoverage | null>(null)
 const copied = ref(false)
 const filterQuery = ref('')
 const zooFilter = ref<'all' | 'price' | 'alpha101' | 'qlib158' | 'gtja191' | 'academic' | 'fundamental'>('price')
@@ -68,6 +70,12 @@ const keptRows = computed<FactorBenchmarkItem[]>(() => {
 
 const droppedCount = computed(() => dedup.value?.dropped.length ?? 0)
 
+const thinCoverage = computed(() => {
+  const sc = symbolCoverage.value
+  if (!sc || (sc.with_data >= sc.total && sc.usable_dates >= 200)) return null
+  return sc
+})
+
 function toggleFactor(id: string) {
   const next = new Set(selectedIds.value)
   if (next.has(id)) next.delete(id)
@@ -90,6 +98,7 @@ function clearResults() {
   results.value = []
   skipped.value = []
   dedup.value = null
+  symbolCoverage.value = null
 }
 
 function canRunMsg(): string {
@@ -153,12 +162,13 @@ async function run() {
       symbols: symbols.value,
       start_date: startDate.value || null,
       end_date: endDate.value || null,
-      refresh: false,
+      refresh: refreshEnabled.value,
       dedup_threshold: dedupEnabled.value ? dedupThreshold.value : null,
     })
     results.value = res.results
     skipped.value = res.skipped
     dedup.value = res.dedup
+    symbolCoverage.value = res.symbol_coverage ?? null
     methodology.value = res.methodology
     const cov = res.coverage
     coverage.value = `${cov.symbols.length} 只 · ${cov.start_date ?? '?'} - ${cov.end_date ?? '?'} · ${cov.dates} 个交易日`
@@ -219,6 +229,10 @@ onMounted(loadCatalog)
         <input v-model="dedupEnabled" type="checkbox" />
         <span>低相关去重（阈值 {{ dedupThreshold }}）</span>
       </label>
+      <label class="fa-field fa-field-check">
+        <input v-model="refreshEnabled" type="checkbox" />
+        <span>自动拉取缺失日线（首次拉取 TuShare，约数十秒）</span>
+      </label>
     </div>
 
     <div v-if="error" class="notice notice-danger">
@@ -277,6 +291,14 @@ onMounted(loadCatalog)
           <span class="stat-num stat-num-sm">{{ coverage }}</span>
           <span class="stat-label">样本范围</span>
         </div>
+      </div>
+
+      <div v-if="thinCoverage" class="fa-skipped">
+        <strong>
+          样本不足警示：本地行情仅覆盖 {{ thinCoverage.with_data }}/{{ thinCoverage.total }} 只股票，
+          仅 {{ thinCoverage.usable_dates }} 个交易日满足 ≥5 只横截面，判定仅供参考。
+        </strong>
+        <p class="fa-skipped-hint">勾选"自动拉取缺失日线"后重跑，或换用本地已有数据的股票；股票池覆盖越全，判定越可靠。</p>
       </div>
 
       <div class="fa-table-wrap">
