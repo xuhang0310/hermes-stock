@@ -9,6 +9,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from backend.app.core import runtime_overrides
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import LlmModelConfig
 from backend.app.core.settings import settings
@@ -211,7 +212,8 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
         "api_key": settings.llm_api_key,
         "model": settings.llm_model,
         "temperature": 0.2,
-        "max_steps": settings.agent_max_steps,
+        # 运行时覆盖优先于环境变量（白名单机制，见 core.runtime_overrides）
+        "max_steps": runtime_overrides.agent_max_steps(settings.agent_max_steps),
     }
     with SessionLocal() as session:
         query = select(LlmModelConfig).options(selectinload(LlmModelConfig.platform))
@@ -237,5 +239,8 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
             "api_key": (platform.api_key if platform and platform.api_key else row.api_key) or fallback["api_key"],
             "model": row.model_name or fallback["model"],
             "temperature": float(row.temperature if row.temperature is not None else fallback["temperature"]),
-            "max_steps": int(row.max_steps or fallback["max_steps"]),
+            # 运行时覆盖（如已设置）优先于模型配置与环境变量
+            "max_steps": runtime_overrides.agent_max_steps(
+                int(row.max_steps or fallback["max_steps"])
+            ),
         }

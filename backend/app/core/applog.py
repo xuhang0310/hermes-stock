@@ -28,6 +28,7 @@ import logging.handlers
 import threading
 from pathlib import Path
 
+from backend.app.core.request_context import TraceIdFilter
 from backend.app.core.settings import settings
 
 _LOGGER_PREFIX = "hermes"
@@ -68,8 +69,10 @@ def configure_logging() -> None:
         root = logging.getLogger(_LOGGER_PREFIX)
         root.setLevel(level)
         root.propagate = False
+        # trace_id 字段由 TraceIdFilter 注入（无请求上下文时为 "-"）
+        trace_filter = TraceIdFilter()
         fmt = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+            fmt="%(asctime)s | %(levelname)-7s | %(trace_id)s | %(name)s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         try:
@@ -79,6 +82,7 @@ def configure_logging() -> None:
             )
             app_handler.setLevel(level)
             app_handler.setFormatter(fmt)
+            app_handler.addFilter(trace_filter)
             root.addHandler(app_handler)
 
             err_handler = logging.handlers.RotatingFileHandler(
@@ -86,6 +90,7 @@ def configure_logging() -> None:
             )
             err_handler.setLevel(logging.WARNING)
             err_handler.setFormatter(fmt)
+            err_handler.addFilter(trace_filter)
             root.addHandler(err_handler)
         except OSError:
             pass  # 文件不可写时至少保留控制台
@@ -93,6 +98,7 @@ def configure_logging() -> None:
         console = logging.StreamHandler()
         console.setLevel(level)
         console.setFormatter(fmt)
+        console.addFilter(trace_filter)
         root.addHandler(console)
 
         _configured = True

@@ -131,6 +131,8 @@ class Settings:
     scheduler_enabled: bool = os.getenv("STOCK_SCHEDULER_ENABLED", "true").lower() == "true"
     feishu_bot_enabled: bool = os.getenv("STOCK_FEISHU_BOT_ENABLED", "true").lower() == "true"
     background_services_enabled: bool = os.getenv("STOCK_BACKGROUND_SERVICES_ENABLED", "true").lower() == "true"
+    # 操作日志中间件：记录 /api/* 下的写操作；高频场景可关闭
+    operation_log_enabled: bool = os.getenv("STOCK_OPERATION_LOG_ENABLED", "true").lower() == "true"
     log_level: str = os.getenv("STOCK_LOG_LEVEL", "INFO")
     log_dir: str = os.getenv("STOCK_LOG_DIR", "logs")
     log_retention_days: int = int(os.getenv("STOCK_LOG_RETENTION_DAYS", "90"))

@@ -67,6 +67,40 @@ class AgentMixin:
             for item, display_name, symbol_name in rows
         ]
 
+    def report_detail(self, report_id: str) -> dict[str, Any] | None:
+        """按 report_id 取单篇报告全量结构化字段；不存在返回 None。"""
+        row = self.db.execute(
+            select(AgentReport, AgentProfile.display_name, Instrument.name.label("symbol_name"))
+            .outerjoin(AgentProfile, AgentProfile.agent_name == AgentReport.agent_name)
+            .outerjoin(Instrument, Instrument.symbol == AgentReport.symbol)
+            .where(AgentReport.report_id == report_id)
+            .limit(1)
+        ).first()
+        if row is None:
+            return None
+        item, display_name, symbol_name = row
+        return {
+            "report_id": item.report_id,
+            "task_id": item.task_id,
+            "event_id": item.event_id,
+            "agent_name": item.agent_name,
+            "display_name": display_name,
+            "symbol": item.symbol,
+            "symbol_name": symbol_name,
+            "title": item.title,
+            "conclusion": item.conclusion,
+            "reasoning": item.reasoning,
+            "counter_arguments": item.counter_arguments,
+            "risk_points": item.risk_points,
+            "position_limit": item.position_limit,
+            "stop_condition": item.stop_condition,
+            "action_suggestion": item.action_suggestion,
+            "content": item.content,
+            "model_name": item.model_name,
+            "created_at": dt(item.created_at),
+            "updated_at": dt(item.updated_at),
+        }
+
     def risk_checks(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.db.execute(
             select(RiskCheck, Instrument.name.label("symbol_name"))

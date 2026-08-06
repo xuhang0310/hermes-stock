@@ -1506,3 +1506,104 @@ class NotifyChannel(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class OperationLog(Base):
+    """写操作审计：谁在何时对哪个接口做了什么变更。
+
+    user_id 不做外键（日志只增、与用户生命周期解耦，删用户不牵连历史审计）。
+    """
+
+    __tablename__ = "operation_logs"
+    __table_args__ = (Index("ix_operation_logs_created", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    method: Mapped[str] = mapped_column(String(12), nullable=False)
+    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    action: Mapped[str | None] = mapped_column(String(120))
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    trace_id: Mapped[str | None] = mapped_column(String(32))
+    ip: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class InboxNotification(Base):
+    """站内通知（用户收件箱）：系统/智能体/报告等事件推送给指定用户，按用户隔离可见。
+
+    与既有 ``Notification``（外部渠道推送流水：channel/status/sent_at）职责不同：
+    那个记录"对外发了没"，这个记录"用户在站内看到了什么"。
+    user_id 不做外键：通知随用户删除一并清理即可，无需外键约束牵连。
+    """
+
+    __tablename__ = "inbox_notifications"
+    __table_args__ = (Index("ix_inbox_notifications_user_unread", "user_id", "is_read"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    level: Mapped[str] = mapped_column(String(16), nullable=False, default="info")  # info/success/warning/error
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="system")  # system/agent/report/risk/scheduler
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    content: Mapped[str | None] = mapped_column(Text)
+    link: Mapped[str | None] = mapped_column(String(255))  # 前端跳转标识（页面名或 URL）
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PaperAccount(Base):
+    """模拟盘账户：与真实持仓域完全隔离的研究用虚拟账户，每用户一个。"""
+
+    __tablename__ = "paper_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    initial_cash: Mapped[float] = mapped_column(Float, nullable=False)
+    cash: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PaperPosition(Base):
+    """模拟盘持仓：(user_id, symbol) 唯一；卖空即删行，不留零持仓。"""
+
+    __tablename__ = "paper_positions"
+    __table_args__ = (UniqueConstraint("user_id", "symbol", name="uq_paper_position_user_symbol"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_cost: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PaperOrder(Base):
+    """模拟盘成交流水：市价单即时成交（成交价=最新价缓存），只增不改。"""
+
+    __tablename__ = "paper_orders"
+    __table_args__ = (Index("ix_paper_orders_user_created", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)  # buy / sell
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    fee: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    realized_pnl: Mapped[float | None] = mapped_column(Float)  # 仅卖出单有值
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class RuntimeConfigOverride(Base):
+    """运行时配置覆盖：白名单参数的 key/value，免重启生效。"""
+
+    __tablename__ = "runtime_config_overrides"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(500), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
