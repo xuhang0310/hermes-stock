@@ -1436,3 +1436,8 @@ export type FactorBenchmarkResult = {
   refresh_failures: Array<{ symbol: string; error: string }>
   methodology: string
 }
+
+export type FactorBenchmarkInterpretation = {
+  interpretation: string
+  model: string | null
+}

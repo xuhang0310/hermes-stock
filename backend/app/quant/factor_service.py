@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -10,7 +11,9 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import func, select
 
+from backend.app.ai.llm_client import chat_completion
 from backend.app.core.database import SessionLocal
+from backend.app.core.llm_config import active_llm_config
 from backend.app.core.models import DailyBar
 from backend.app.market.stock_tools import get_tushare_daily, normalize_a_share_symbol
 from backend.app.quant.factors.factor_analysis_core import compute_ic_series
@@ -464,4 +467,81 @@ def benchmark_factors(
             "结果未计交易成本、停牌涨跌停、行业和市值中性化，仅用于研究筛选。"
         ),
     }
+
+
+_INTERPRET_SYSTEM_PROMPT = """你是一位擅长把量化研究结果讲给普通人听的助手。用户是完全不懂量化指标的普通投资者。
+你会收到一份 A 股因子评估结果（JSON），请写一份"人话版"解读报告。
+
+要求：
+1. 面向零基础读者：不要堆砌术语。必须提到 IC、ICIR、正值比、秩稳定性、train/test 等词时，各用一句生活化比喻解释它到底在衡量什么。
+2. 结构（用这些二级标题）：
+   ## 一句话结论
+   ## 这些指标都是什么意思
+   ## 这批因子怎么样（逐个或分组点评：哪些像是有效的、哪些没用、为什么；遇到"反转"类因子要说明它反着用才可能有效）
+   ## 为什么有些因子被剔除（仅当存在去重数据时写这一节）
+   ## 要提醒你的话
+3. 只引用给定数据里的数字，严禁编造；引用时保持原精度。
+4. 如果样本覆盖不全（symbol_coverage 显示有股票没数据，或可用交易日很少），必须明确说结论可信度打折。
+5. 语气平实坦率，像懂行的朋友给不懂的朋友讲解；可以通俗，不要油滑。
+6. 必须写清楚：这只是对历史数据的统计研究，不代表未来走势，不构成任何投资建议。
+7. 用 Markdown 输出，全文控制在 900 字以内。"""
+
+
+def _interpretation_facts(benchmark: dict[str, Any]) -> dict[str, Any]:
+    """把 benchmark 结果瘦身成喂给 LLM 的事实：去掉逐日 ic_series 大数组，只留指标数字。"""
+    metric_keys = (
+        "id", "zoo", "ic_mean", "ic_std", "ir", "ic_positive_ratio", "ic_count",
+        "rank_stability", "train_ic", "test_ic", "train_ic_count", "test_ic_count", "category",
+    )
+    results = [
+        {key: item.get(key) for key in metric_keys}
+        for item in (benchmark.get("results") or [])
+        if isinstance(item, dict)
+    ]
+    dedup = benchmark.get("dedup") or None
+    return {
+        "results": results,
+        "skipped": [
+            {"id": item.get("id"), "reason": str(item.get("reason") or "")[:200]}
+            for item in (benchmark.get("skipped") or [])
+            if isinstance(item, dict)
+        ],
+        "dedup": (
+            {
+                "threshold": dedup.get("threshold"),
+                "kept_ids": dedup.get("kept_ids"),
+                "dropped": dedup.get("dropped"),
+            }
+            if isinstance(dedup, dict)
+            else None
+        ),
+        "coverage": benchmark.get("coverage"),
+        "symbol_coverage": benchmark.get("symbol_coverage"),
+        "methodology": benchmark.get("methodology"),
+    }
+
+
+def interpret_benchmark(benchmark: dict[str, Any]) -> dict[str, Any]:
+    """用当前活跃 LLM 把因子评估结果翻译成零基础读者能看懂的大白话报告。"""
+    results = benchmark.get("results")
+    if not isinstance(results, list) or not results:
+        raise ValueError("没有可解读的评估结果，请先运行因子评估")
+    facts = _interpretation_facts(benchmark)
+    config = active_llm_config()
+    messages = [
+        {"role": "system", "content": _INTERPRET_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": f"以下是因子评估结果 JSON：\n{json.dumps(facts, ensure_ascii=False)}",
+        },
+    ]
+    data = chat_completion(messages, config, temperature=0.3, timeout=180.0, log_module="factors")
+    try:
+        content = str((data.get("choices") or [{}])[0]["message"]["content"] or "")
+    except (KeyError, IndexError, TypeError):
+        content = ""
+    content = content.strip()
+    if not content:
+        raise RuntimeError("模型未返回解读内容，请重试或更换模型")
+    return {"interpretation": content, "model": config.get("display_name")}
 

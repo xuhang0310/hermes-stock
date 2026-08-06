@@ -3,7 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ColorType, HistogramSeries, LineSeries, createChart } from 'lightweight-charts'
 import type { Time } from 'lightweight-charts'
 import { api } from '../api'
-import type { FactorBenchmarkItem, FactorSymbolCoverage } from '../types'
+import { renderMarkdown } from '../utils/markdown'
+import type { FactorBenchmarkItem, FactorBenchmarkResult, FactorSymbolCoverage } from '../types'
 
 const loading = ref(false)
 const running = ref(false)
@@ -24,6 +25,11 @@ const dedupEnabled = ref(true)
 const dedupThreshold = ref(0.7)
 const refreshEnabled = ref(false)
 const symbolCoverage = ref<FactorSymbolCoverage | null>(null)
+const benchmarkResult = ref<FactorBenchmarkResult | null>(null)
+const interpretLoading = ref(false)
+const interpretation = ref('')
+const interpretModel = ref('')
+const interpretError = ref('')
 const icCompareHost = ref<HTMLElement | null>(null)
 const icDetailHost = ref<HTMLElement | null>(null)
 const selectedDetail = ref<string | null>(null)
@@ -114,6 +120,10 @@ function clearResults() {
   skipped.value = []
   dedup.value = null
   symbolCoverage.value = null
+  benchmarkResult.value = null
+  interpretation.value = ''
+  interpretModel.value = ''
+  interpretError.value = ''
 }
 
 const detailRow = computed(
@@ -303,6 +313,9 @@ async function run() {
   running.value = true
   error.value = ''
   copied.value = false
+  interpretation.value = ''
+  interpretModel.value = ''
+  interpretError.value = ''
   try {
     const res = await api.factorBenchmark({
       alpha_ids: Array.from(selectedIds.value),
@@ -312,6 +325,7 @@ async function run() {
       refresh: refreshEnabled.value,
       dedup_threshold: dedupEnabled.value ? dedupThreshold.value : null,
     })
+    benchmarkResult.value = res
     results.value = res.results
     skipped.value = res.skipped
     dedup.value = res.dedup
@@ -323,6 +337,28 @@ async function run() {
     error.value = reason instanceof Error ? reason.message : '因子评估失败'
   } finally {
     running.value = false
+  }
+}
+
+async function interpret() {
+  const res = benchmarkResult.value
+  if (!res || interpretLoading.value) return
+  interpretLoading.value = true
+  interpretError.value = ''
+  try {
+    // 逐日 IC 序列对解读无用且体积大，送给 LLM 前剔除
+    const { results: items, ...rest } = res
+    const benchmark = {
+      ...rest,
+      results: items.map(({ ic_series: _omit, ...metrics }) => metrics),
+    }
+    const out = await api.factorBenchmarkInterpret({ benchmark })
+    interpretation.value = out.interpretation
+    interpretModel.value = out.model ?? ''
+  } catch (reason) {
+    interpretError.value = reason instanceof Error ? reason.message : 'AI 解读失败'
+  } finally {
+    interpretLoading.value = false
   }
 }
 
@@ -502,6 +538,28 @@ onMounted(loadCatalog)
         </ul>
         <p class="fa-skipped-hint">提示：换用左侧"量价可算"来源筛选，并加更多股票（≥20 只）可减少跳过。</p>
       </div>
+
+      <section class="fa-interpret">
+        <header class="fa-interpret-head">
+          <div>
+            <strong>AI 报告解读</strong>
+            <span class="fa-hint">让 AI 把上面这些指标翻译成大白话（仅供研究参考，不构成投资建议）</span>
+          </div>
+          <button type="button" class="btn-outline" :disabled="interpretLoading" @click="interpret">
+            <span class="btn-spin" :class="{ spin: interpretLoading }"></span>
+            {{ interpretLoading ? '正在生成解读…' : interpretation ? '重新生成解读' : '生成大白话解读' }}
+          </button>
+        </header>
+        <div v-if="interpretError" class="notice notice-danger">
+          <strong>解读失败</strong>
+          <span>{{ interpretError }}</span>
+        </div>
+        <div v-else-if="interpretation" class="fa-interpret-body">
+          <div v-if="interpretModel" class="fa-interpret-model">由 {{ interpretModel }} 生成</div>
+          <div class="md-body" v-html="renderMarkdown(interpretation)"></div>
+        </div>
+        <p v-else class="fa-hint fa-interpret-empty">评估完成后点击"生成大白话解读"，AI 会用最通俗的语言解释这份结果是什么意思。</p>
+      </section>
 
       <div class="fa-ic">
         <div class="fa-ic-head">
@@ -930,6 +988,45 @@ onMounted(loadCatalog)
   border: 1px solid var(--line-strong);
   color: var(--text);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.fa-interpret {
+  position: relative;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid rgba(213, 180, 106, 0.3);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.fa-interpret-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.fa-interpret-head strong {
+  font-size: 13px;
+  color: var(--gold-2);
+  margin-right: 8px;
+}
+
+.fa-interpret-body {
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+
+.fa-interpret-model {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.fa-interpret-empty {
+  margin: 0;
 }
 
 .fa-ic {

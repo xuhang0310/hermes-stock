@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -10,6 +12,7 @@ from backend.app.quant.factor_service import (
     benchmark_factors,
     factor_health,
     get_factor,
+    interpret_benchmark,
     list_factors,
     score_factor,
 )
@@ -32,6 +35,10 @@ class FactorBenchmarkRequest(BaseModel):
     end_date: str | None = Field(default=None, max_length=10)
     refresh: bool = False
     dedup_threshold: float | None = Field(default=None, gt=0, lt=1, description="可选：按该截面相关阈值对 top 因子贪心去重（如 0.7）")
+
+
+class FactorBenchmarkInterpretRequest(BaseModel):
+    benchmark: dict[str, Any] = Field(description="/api/factors/benchmark 的返回结果（ic_series 可省略）")
 
 
 @router.get("/health")
@@ -106,4 +113,18 @@ def post_factor_benchmark(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/benchmark/interpret")
+def post_factor_benchmark_interpret(
+    payload: FactorBenchmarkInterpretRequest,
+    _context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """把已完成的因子评估结果交给当前活跃 LLM，生成零基础读者可读的大白话解读。"""
+    try:
+        return interpret_benchmark(payload.benchmark)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 

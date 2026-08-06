@@ -62,6 +62,7 @@ import type {
   BacktestListItem,
   StrategyDescriptor,
   StockCandidate,
+  FactorBenchmarkInterpretation,
   FactorBenchmarkResult,
   AgentBoardCounts,
   AgentTask,
@@ -648,6 +649,11 @@ export const api = {
     dedup_threshold?: number | null
   }) =>
     request<FactorBenchmarkResult>('/api/factors/benchmark', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  factorBenchmarkInterpret: (payload: { benchmark: Record<string, unknown> }) =>
+    request<FactorBenchmarkInterpretation>('/api/factors/benchmark/interpret', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
