@@ -3174,6 +3174,7 @@ def _cache_daily_bars(symbol: str, bars: list[dict[str, Any]]) -> int:
 def _ensure_instrument(symbol: str, name: str | None = None) -> None:
     dialect = engine.dialect.name
     exchange = symbol.split(".")[-1] if "." in symbol else "CN"
+    exchange = {"BJ": "BSE"}.get(exchange, exchange)  # 北交所统一记 BSE，与前端过滤一致
     try:
         with engine.begin() as conn:
             if dialect == "mysql":

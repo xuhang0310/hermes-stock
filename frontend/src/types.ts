@@ -1459,6 +1459,12 @@ export type ScreenerQuery = {
   pct_chg_max?: number
   keyword?: string
   volume_ratio_min?: number
+  turnover_rate_min?: number
+  turnover_rate_max?: number
+  total_mv_min?: number
+  total_mv_max?: number
+  pe_min?: number
+  pe_max?: number
   above_ma?: number
   limit?: number
 }
@@ -1471,6 +1477,9 @@ export type ScreenerItem = {
   pct_chg: number | null
   trade_date: string | null
   volume_ratio: number | null
+  turnover_rate: number | null
+  total_mv_yi: number | null
+  pe_ttm: number | null
   ma_value: number | null
 }
 
@@ -1478,4 +1487,36 @@ export type ScreenerResult = {
   universe: number
   total: number
   items: ScreenerItem[]
+}
+
+export type ScreenerSyncStats = {
+  latest_trade_date: string | null
+  target_days: number
+  dates_fetched: number
+  bars_upserted: number
+  basic_upserted: number
+  latest_prices_upserted: number
+  instruments_upserted: number
+  errors: string[]
+  elapsed_seconds: number
+}
+
+export type ScreenerSyncStatus = {
+  latest_bar_date: string
+  bar_symbols: number
+  basic_date: string
+  basic_rows: number
+  price_rows: number
+  instrument_rows: number
+}
+
+export type ScreenerParseResult = {
+  query: ScreenerQuery
+  summary: string
+  fallback: boolean
+}
+
+export type ScreenerInterpretation = {
+  interpretation: string
+  model: string | null
 }
