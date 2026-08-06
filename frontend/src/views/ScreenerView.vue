@@ -48,6 +48,30 @@ function toNumber(value: string | number): number | undefined {
   return Number.isFinite(num) ? num : undefined
 }
 
+interface ScreenerTemplate {
+  name: string
+  desc: string
+  query: ScreenerQuery
+}
+
+// 快速模板：点击即回填条件并立即筛选，一步出结果
+const TEMPLATES: ScreenerTemplate[] = [
+  { name: '放量强势', desc: '量比≥2、换手率5–15%、今日涨幅≥2%', query: { volume_ratio_min: 2, turnover_rate_min: 5, turnover_rate_max: 15, pct_chg_min: 2 } },
+  { name: '温和放量', desc: '量比≥1.5、换手率3–10%、涨幅1–7%（不追涨停）', query: { volume_ratio_min: 1.5, turnover_rate_min: 3, turnover_rate_max: 10, pct_chg_min: 1, pct_chg_max: 7 } },
+  { name: '小盘活跃', desc: '市值≤100亿、换手率≥3%、量比≥1.5', query: { total_mv_max: 100, turnover_rate_min: 3, volume_ratio_min: 1.5 } },
+  { name: '热点题材', desc: '换手率10–30%、涨幅≥5%、市值≤300亿', query: { turnover_rate_min: 10, turnover_rate_max: 30, pct_chg_min: 5, total_mv_max: 300 } },
+  { name: '低估值蓝筹', desc: '市值≥300亿、PE(TTM) 0–25', query: { total_mv_min: 300, pe_min: 0, pe_max: 25 } },
+  { name: '站上20日线', desc: '收盘价站上20日均线且今日上涨', query: { above_ma: 20, pct_chg_min: 0 } },
+]
+
+function runTemplate(tpl: ScreenerTemplate) {
+  if (running.value) return
+  parseSummary.value = ''
+  parseError.value = ''
+  applyQuery(tpl.query)
+  run()
+}
+
 function fmtDate(value: string | null | undefined): string {
   if (!value) return '—'
   const digits = value.replace(/-/g, '')
@@ -134,7 +158,11 @@ async function parseNL() {
   try {
     const parsed = await api.screenerParse(text)
     parseSummary.value = parsed.summary
-    if (!parsed.fallback) applyQuery(parsed.query)
+    if (!parsed.fallback) {
+      applyQuery(parsed.query)
+      // 解析成功后直接自动筛选，一步出结果（不必再手动点「开始筛选」）
+      if (Object.keys(parsed.query).length) run()
+    }
   } catch (err) {
     parseError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -208,7 +236,7 @@ onMounted(loadSyncStatus)
         <span class="sc-title-mark"></span>
         <div>
           <h2>技术选股</h2>
-          <p>全市场筛选：价格 / 涨跌幅 / 量比 / 换手率 / 市值 / PE / 均线，支持一句话条件与 AI 解读</p>
+          <p>全市场筛选：支持快速模板、一句话条件与 AI 大白话解读</p>
         </div>
       </div>
       <div class="sc-actions">
@@ -254,6 +282,21 @@ onMounted(loadSyncStatus)
     <div v-if="parseError" class="notice notice-danger">
       <strong>AI 解析失败</strong>
       <span>{{ parseError }}</span>
+    </div>
+
+    <div class="sc-templates">
+      <span class="sc-templates-label">快速模板</span>
+      <button
+        v-for="tpl in TEMPLATES"
+        :key="tpl.name"
+        type="button"
+        class="sc-chip"
+        :title="tpl.desc"
+        :disabled="running"
+        @click="runTemplate(tpl)"
+      >
+        {{ tpl.name }}
+      </button>
     </div>
 
     <div class="sc-config">
@@ -399,7 +442,7 @@ onMounted(loadSyncStatus)
       </section>
     </template>
     <div v-else-if="!ran && !error" class="sc-state">
-      建议先点「同步全市场」拉取最近交易日行情，再用一句话描述条件或手动填写后「开始筛选」。留空的条件不参与过滤。
+      点击上方「快速模板」一键筛选，或点「同步全市场」更新数据后用一句话描述条件、手动填写后「开始筛选」。留空的条件不参与过滤。
     </div>
   </section>
 </template>
@@ -491,6 +534,41 @@ onMounted(loadSyncStatus)
 
 .sc-parse-warn {
   color: var(--muted);
+}
+
+.sc-templates {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sc-templates-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sc-chip {
+  padding: 5px 12px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.sc-chip:hover:not(:disabled) {
+  border-color: var(--gold);
+  color: var(--gold-2);
+}
+
+.sc-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .sc-config {
