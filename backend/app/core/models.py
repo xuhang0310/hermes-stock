@@ -333,6 +333,30 @@ class StockDailyBasic(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class ScreenerTemplateRecommendation(Base):
+    """每用户一份的智能选股模板推荐：LLM 依据持仓风格生成，「换一批」整行覆盖。
+
+    user_id 不加外键（只增表，与用户生命周期解耦）；templates_json 存
+    [{name, desc, query, universe}]，basis 为一句话持仓风格总结。
+    """
+
+    __tablename__ = "screener_template_recommendations"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_screener_tpl_recommendation_user"),
+        Index("ix_screener_tpl_recommendation_user", "user_id"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    templates_json: Mapped[str] = mapped_column(Text, nullable=False)
+    basis: Mapped[str | None] = mapped_column(Text)
+    position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Document(Base):
     __tablename__ = "documents"
 

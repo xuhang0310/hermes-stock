@@ -130,3 +130,52 @@ def screener_interpret(
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content=fail(str(exc), code="llm_error"))
     return ok(result)
+
+
+@router.get("/templates")
+def screener_templates(
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    """读取该用户最近一次智能模板推荐；从未生成过则返回空列表。"""
+    rec = screener_service.load_template_recommendation(context.user.id)
+    if rec is None:
+        return ok(
+            {"templates": [], "basis": "", "position_count": 0, "model": None, "generated_at": None}
+        )
+    return ok(rec)
+
+
+@router.post("/templates")
+def screener_templates_refresh(
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """分析用户持仓风格，动态生成 5-8 个筛选模板（LLM）。
+
+    每个模板生成后都实跑一次 run_screener(limit=1) 验证命中数并回填 universe，
+    命中为 0 的模板直接丢弃——不让用户点到"选不出来"的模板。
+    """
+    try:
+        facts = screener_service.position_facts(context.user.id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content=fail(str(exc), code="no_positions"))
+    try:
+        rec = screener_ai.recommend_templates(facts)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content=fail(str(exc), code="llm_error"))
+    templates = []
+    for tpl in rec["templates"]:
+        try:
+            hit = screener_service.run_screener(limit=1, **tpl["query"])
+        except ValueError:
+            continue
+        tpl["universe"] = int(hit.get("universe") or 0)
+        if tpl["universe"] > 0:
+            templates.append(tpl)
+    payload = {
+        "templates": (templates or rec["templates"])[:8],
+        "basis": rec["basis"],
+        "position_count": facts["position_count"],
+        "model": rec.get("model"),
+    }
+    generated_at = screener_service.save_template_recommendation(context.user.id, payload)
+    return ok({**payload, "generated_at": generated_at})

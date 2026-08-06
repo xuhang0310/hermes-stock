@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
-import type { ScreenerQuery, ScreenerResult, ScreenerSyncStats, ScreenerSyncStatus } from '../types'
+import type {
+  ScreenerQuery,
+  ScreenerResult,
+  ScreenerSyncStats,
+  ScreenerSyncStatus,
+  ScreenerTemplateItem,
+  ScreenerTemplateRecommendation,
+} from '../types'
 import { renderMarkdown } from '../utils/markdown'
 
 const running = ref(false)
@@ -48,14 +55,8 @@ function toNumber(value: string | number): number | undefined {
   return Number.isFinite(num) ? num : undefined
 }
 
-interface ScreenerTemplate {
-  name: string
-  desc: string
-  query: ScreenerQuery
-}
-
-// 快速模板：点击即回填条件并立即筛选，一步出结果
-const TEMPLATES: ScreenerTemplate[] = [
+// 常用模板：点击即回填条件并立即筛选，一步出结果
+const TEMPLATES: ScreenerTemplateItem[] = [
   { name: '放量强势', desc: '量比≥2、换手率5–15%、今日涨幅≥2%', query: { volume_ratio_min: 2, turnover_rate_min: 5, turnover_rate_max: 15, pct_chg_min: 2 } },
   { name: '温和放量', desc: '量比≥1.5、换手率3–10%、涨幅1–7%（不追涨停）', query: { volume_ratio_min: 1.5, turnover_rate_min: 3, turnover_rate_max: 10, pct_chg_min: 1, pct_chg_max: 7 } },
   { name: '小盘活跃', desc: '市值≤100亿、换手率≥3%、量比≥1.5', query: { total_mv_max: 100, turnover_rate_min: 3, volume_ratio_min: 1.5 } },
@@ -64,7 +65,33 @@ const TEMPLATES: ScreenerTemplate[] = [
   { name: '站上20日线', desc: '收盘价站上20日均线且今日上涨', query: { above_ma: 20, pct_chg_min: 0 } },
 ]
 
-function runTemplate(tpl: ScreenerTemplate) {
+// 智能推荐：AI 依据用户持仓风格动态生成，可整批刷新
+const smartRec = ref<ScreenerTemplateRecommendation | null>(null)
+const recLoading = ref(false)
+const recError = ref('')
+
+async function loadRecommendation() {
+  try {
+    smartRec.value = await api.screenerTemplates()
+  } catch {
+    smartRec.value = null
+  }
+}
+
+async function refreshRecommendation() {
+  if (recLoading.value) return
+  recLoading.value = true
+  recError.value = ''
+  try {
+    smartRec.value = await api.screenerTemplatesRefresh()
+  } catch (err) {
+    recError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    recLoading.value = false
+  }
+}
+
+function runTemplate(tpl: ScreenerTemplateItem) {
   if (running.value) return
   parseSummary.value = ''
   parseError.value = ''
@@ -224,7 +251,10 @@ function formatNum(value: number | null, digits = 2): string {
   return value == null ? '—' : value.toFixed(digits)
 }
 
-onMounted(loadSyncStatus)
+onMounted(() => {
+  loadSyncStatus()
+  loadRecommendation()
+})
 </script>
 
 <template>
@@ -284,8 +314,43 @@ onMounted(loadSyncStatus)
       <span>{{ parseError }}</span>
     </div>
 
+    <div class="sc-rec">
+      <div class="sc-rec-head">
+        <span class="sc-templates-label">智能推荐</span>
+        <span v-if="smartRec && smartRec.templates.length" class="sc-rec-meta">
+          基于你 {{ smartRec.position_count }} 只持仓的风格分析<span v-if="smartRec.generated_at"> · {{ smartRec.generated_at }} 生成</span>
+        </span>
+        <button
+          type="button"
+          class="btn-outline btn-mini"
+          :disabled="recLoading || running"
+          @click="refreshRecommendation"
+        >
+          <span class="btn-spin" :class="{ spin: recLoading }"></span>
+          {{ recLoading ? 'AI 分析持仓中…' : smartRec && smartRec.templates.length ? '换一批' : '基于我的持仓生成' }}
+        </button>
+      </div>
+      <p v-if="smartRec && smartRec.basis" class="sc-rec-basis">
+        持仓风格：{{ smartRec.basis }}<span v-if="smartRec.model">（由 {{ smartRec.model }} 分析，仅供参考，不构成任何投资建议）</span>
+      </p>
+      <div v-if="recError" class="sc-rec-error">{{ recError }}</div>
+      <div v-if="smartRec && smartRec.templates.length" class="sc-chips">
+        <button
+          v-for="tpl in smartRec.templates"
+          :key="'ai-' + tpl.name"
+          type="button"
+          class="sc-chip sc-chip-ai"
+          :title="tpl.desc"
+          :disabled="running"
+          @click="runTemplate(tpl)"
+        >
+          {{ tpl.name }}<span v-if="tpl.universe" class="sc-chip-count">{{ tpl.universe }} 只</span>
+        </button>
+      </div>
+    </div>
+
     <div class="sc-templates">
-      <span class="sc-templates-label">快速模板</span>
+      <span class="sc-templates-label">常用模板</span>
       <button
         v-for="tpl in TEMPLATES"
         :key="tpl.name"
@@ -442,7 +507,7 @@ onMounted(loadSyncStatus)
       </section>
     </template>
     <div v-else-if="!ran && !error" class="sc-state">
-      点击上方「快速模板」一键筛选，或点「同步全市场」更新数据后用一句话描述条件、手动填写后「开始筛选」。留空的条件不参与过滤。
+      点击「智能推荐」或「常用模板」一键筛选，或点「同步全市场」更新数据后用一句话描述条件、手动填写后「开始筛选」。留空的条件不参与过滤。
     </div>
   </section>
 </template>
@@ -569,6 +634,66 @@ onMounted(loadSyncStatus)
 .sc-chip:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.sc-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sc-chip-ai {
+  border-color: rgba(213, 180, 106, 0.35);
+}
+
+.sc-chip-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sc-rec {
+  position: relative;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(213, 180, 106, 0.35);
+  border-radius: var(--radius);
+  background: rgba(213, 180, 106, 0.04);
+}
+
+.sc-rec-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sc-rec-meta {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+}
+
+.sc-rec-basis {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--gold-2);
+}
+
+.sc-rec-error {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.sc-rec .sc-chips {
+  margin-top: 10px;
+}
+
+.btn-mini {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .sc-config {

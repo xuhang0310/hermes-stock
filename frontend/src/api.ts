@@ -69,6 +69,7 @@ import type {
   ScreenerSyncStatus,
   ScreenerParseResult,
   ScreenerInterpretation,
+  ScreenerTemplateRecommendation,
   FactorBenchmarkInterpretation,
   FactorBenchmarkResult,
   AgentBoardCounts,
@@ -694,6 +695,15 @@ export const api = {
     request<ApiEnvelope<ScreenerInterpretation>>('/api/screener/interpret', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }).then((res) => res.data),
+  screenerTemplates: () =>
+    request<ApiEnvelope<ScreenerTemplateRecommendation>>('/api/screener/templates').then(
+      (res) => res.data
+    ),
+  screenerTemplatesRefresh: () =>
+    request<ApiEnvelope<ScreenerTemplateRecommendation>>('/api/screener/templates', {
+      method: 'POST',
+      body: '{}',
     }).then((res) => res.data),
   factorList: (params: { query?: string; zoo?: string; limit?: number } = {}) => {
     const query = new URLSearchParams()
