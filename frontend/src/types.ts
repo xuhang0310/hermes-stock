@@ -1441,3 +1441,41 @@ export type FactorBenchmarkInterpretation = {
   interpretation: string
   model: string | null
 }
+
+// 统一响应信封（core/response.py::ok/fail），新增端点共用
+export type ApiEnvelope<T> = {
+  success: boolean
+  data: T
+  message: string
+  trace_id: string | null
+}
+
+export type ScreenerQuery = {
+  market?: string
+  stock_type?: string
+  price_min?: number
+  price_max?: number
+  pct_chg_min?: number
+  pct_chg_max?: number
+  keyword?: string
+  volume_ratio_min?: number
+  above_ma?: number
+  limit?: number
+}
+
+export type ScreenerItem = {
+  symbol: string
+  name: string
+  market: string | null
+  price: number | null
+  pct_chg: number | null
+  trade_date: string | null
+  volume_ratio: number | null
+  ma_value: number | null
+}
+
+export type ScreenerResult = {
+  universe: number
+  total: number
+  items: ScreenerItem[]
+}

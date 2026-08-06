@@ -18,6 +18,7 @@ export type PageKey =
   | 'skillSquare'
   | 'backtestHistory'
   | 'factorAnalysis'
+  | 'screener'
   | 'settings'
 
 const props = defineProps<{
@@ -71,7 +72,8 @@ const navItems = computed<NavItem[]>(() => [
     icon: 'backtestHistory.svg',
     children: [
       { key: 'factorAnalysis', label: '因子评估' },
-      { key: 'backtestHistory', label: '回测报告' }
+      { key: 'backtestHistory', label: '回测报告' },
+      { key: 'screener', label: '技术选股' }
     ]
   },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),

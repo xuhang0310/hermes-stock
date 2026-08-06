@@ -18,6 +18,7 @@ import SkillSquareView from './views/SkillSquareView.vue'
 import BacktestReportView from './views/BacktestReportView.vue'
 import BacktestHistoryView from './views/BacktestHistoryView.vue'
 import FactorAnalysisView from './views/FactorAnalysisView.vue'
+import ScreenerView from './views/ScreenerView.vue'
 import AgentTaskBoardView from './views/AgentTaskBoardView.vue'
 import { renderMarkdown } from './utils/markdown'
 import type {
@@ -51,6 +52,7 @@ type PageKey =
   | 'backtestHistory'
   | 'backtestReport'
   | 'factorAnalysis'
+  | 'screener'
   | 'settings'
 
 type PositionAgentChat = {
@@ -240,6 +242,7 @@ const pageTitle = computed(() => {
     backtestHistory: '回测报告',
     backtestReport: '策略回测报告',
     factorAnalysis: '因子评估',
+    screener: '技术选股',
     settings: '设置'
   }
   return labels[activePage.value]
@@ -1046,6 +1049,7 @@ onBeforeUnmount(() => {
         @back="closeBacktest"
       />
       <FactorAnalysisView v-else-if="activePage === 'factorAnalysis'" />
+      <ScreenerView v-else-if="activePage === 'screener'" />
       <DigitalHumanCenter
         v-else-if="activePage === 'digitalHumans'"
         :initial-tab="digitalHumanInitialTab"

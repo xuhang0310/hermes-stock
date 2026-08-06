@@ -62,6 +62,9 @@ import type {
   BacktestListItem,
   StrategyDescriptor,
   StockCandidate,
+  ApiEnvelope,
+  ScreenerQuery,
+  ScreenerResult,
   FactorBenchmarkInterpretation,
   FactorBenchmarkResult,
   AgentBoardCounts,
@@ -111,8 +114,10 @@ async function responseErrorMessage(response: Response) {
   const text = await response.text()
   if (!text) return `Request failed: ${response.status}`
   try {
-    const payload = JSON.parse(text) as { detail?: unknown }
+    const payload = JSON.parse(text) as { detail?: unknown; message?: unknown }
     if (typeof payload.detail === 'string') return payload.detail
+    // 统一信封端点（core/response::fail）用 message 键携带业务错误
+    if (typeof payload.message === 'string' && payload.message) return payload.message
   } catch {
     // Non-JSON errors are returned as plain text by some upstream services.
   }
@@ -657,6 +662,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  runScreener: (payload: ScreenerQuery) =>
+    request<ApiEnvelope<ScreenerResult>>('/api/screener/run', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
   factorList: (params: { query?: string; zoo?: string; limit?: number } = {}) => {
     const query = new URLSearchParams()
     if (params.query) query.set('query', params.query)
