@@ -1520,3 +1520,18 @@ export type ScreenerInterpretation = {
   interpretation: string
   model: string | null
 }
+
+export type ScreenerTemplateItem = {
+  name: string
+  desc: string
+  query: ScreenerQuery
+  universe?: number
+}
+
+export type ScreenerTemplateRecommendation = {
+  templates: ScreenerTemplateItem[]
+  basis: string
+  position_count: number
+  model: string | null
+  generated_at: string | null
+}

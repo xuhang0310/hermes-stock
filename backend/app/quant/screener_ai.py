@@ -10,6 +10,8 @@ import json
 import re
 from typing import Any
 
+import httpx
+
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.llm_config import active_llm_config
 
@@ -72,6 +74,23 @@ items（含最新价/涨跌幅/量比/换手率/总市值亿/PE(TTM)，可能为
 6. 用 Markdown 输出，全文控制在 900 字以内。"""
 
 _FALLBACK_SUMMARY = "未能从描述中解析出条件，请手动填写"
+
+_TEMPLATES_SYSTEM_PROMPT = """你是 A 股选股器模板设计师。根据用户当前持仓的风格特征，设计能快速发现"同类但尚未持有"股票的筛选模板。
+你会收到持仓事实 JSON：positions（每只含 name/position_pct/price/pct_chg/turnover_rate/volume_ratio/total_mv_yi（亿元）/pe_ttm/above_ma20，字段可能为 null）与 stats（市值/换手率/PE/涨跌幅的 min/median/max 分布及站上 20 日线的只数）。
+
+只输出一个 JSON 对象，不要解释、不要 markdown 包裹：
+{"basis": "一句话概括用户持仓风格（40字以内）", "templates": [{"name": "4-6字模板名", "desc": "一句话说明条件（30字以内）", "query": {...}}]}
+
+要求：
+1. templates 给 5-8 个，每个 query 只能包含以下字段（没提到的字段直接省略，数值一律用 JSON 数字）：
+   - market：SH / SZ / BSE 三选一
+   - price_min / price_max（元）；pct_chg_min / pct_chg_max（%）
+   - volume_ratio_min；turnover_rate_min / turnover_rate_max（%）
+   - total_mv_min / total_mv_max（亿元）；pe_min / pe_max；above_ma：5 / 10 / 20
+2. 条件必须贴合持仓的真实分布（参照 stats 的 min/median/max），方向是找"与持仓同类"的股票。
+3. 各模板侧重不同风格（如放量异动 / 低估值 / 小盘活跃 / 均线趋势等），条件组合不要雷同。
+4. 严禁编造数据；条件宁可适度放宽也要保证能筛出股票。
+5. basis 只描述给定持仓特征，严禁臆测收益建议。"""
 
 
 def _extract_json(text: str) -> dict:
@@ -186,23 +205,32 @@ def _completion_content(data: dict) -> str:
     return content.strip()
 
 
+def _llm_complete(messages: list[dict], temperature: float, timeout: float) -> dict:
+    """统一 LLM 调用：chat_completion 只包 HTTP≥400，网络/超时异常转 RuntimeError（→502）。"""
+    config = active_llm_config()
+    try:
+        data = chat_completion(
+            messages, config, temperature=temperature, timeout=timeout, log_module="screener"
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError("LLM 服务请求失败（超时或网络异常），请稍后重试") from exc
+    return {"config": config, "data": data}
+
+
 def parse_query(text: str) -> dict:
     """一句话自然语言 → ScreenerQuery 条件；解析不出时 fallback=True 且不抛异常。"""
     raw = (text or "").strip()
     if not raw:
         raise ValueError("请输入自然语言选股条件")
-    config = active_llm_config()
-    data = chat_completion(
+    out = _llm_complete(
         [
             {"role": "system", "content": _PARSE_SYSTEM_PROMPT},
             {"role": "user", "content": raw},
         ],
-        config,
         temperature=0.2,
         timeout=30.0,
-        log_module="screener",
     )
-    query = _sanitize(_extract_json(_completion_content(data)))
+    query = _sanitize(_extract_json(_completion_content(out["data"])))
     if not query:
         return {"query": {}, "summary": _FALLBACK_SUMMARY, "fallback": True}
     return {"query": query, "summary": _summarize(query), "fallback": False}
@@ -218,8 +246,7 @@ def interpret_result(query: dict, universe: int, total: int, items: list[dict]) 
         "total": int(total or 0),
         "items": [dict(item) for item in items[:15] if isinstance(item, dict)],
     }
-    config = active_llm_config()
-    data = chat_completion(
+    out = _llm_complete(
         [
             {"role": "system", "content": _INTERPRET_SYSTEM_PROMPT},
             {
@@ -227,12 +254,51 @@ def interpret_result(query: dict, universe: int, total: int, items: list[dict]) 
                 "content": f"以下是选股结果 JSON：\n{json.dumps(facts, ensure_ascii=False)}",
             },
         ],
-        config,
         temperature=0.3,
         timeout=180.0,
-        log_module="screener",
     )
-    content = _completion_content(data)
+    content = _completion_content(out["data"])
     if not content:
         raise RuntimeError("模型未返回解读内容，请重试或更换模型")
-    return {"interpretation": content, "model": config.get("display_name")}
+    return {"interpretation": content, "model": out["config"].get("display_name")}
+
+
+def recommend_templates(facts: dict) -> dict:
+    """依据持仓风格事实生成 5-8 个筛选模板。
+
+    返回 {basis, templates:[{name, desc, query}], model}；合法模板不足 3 个
+    抛 RuntimeError（API 层转 502）。temperature 略高，让「换一批」有多样性。
+    """
+    if not isinstance(facts, dict) or not facts.get("positions"):
+        raise ValueError("暂无持仓，无法生成智能模板")
+    out = _llm_complete(
+        [
+            {"role": "system", "content": _TEMPLATES_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"以下是持仓事实 JSON：\n{json.dumps(facts, ensure_ascii=False)}",
+            },
+        ],
+        temperature=0.5,
+        timeout=180.0,
+    )
+    parsed = _extract_json(_completion_content(out["data"]))
+    basis = str(parsed.get("basis") or "").strip()[:120]
+    raw_templates = parsed.get("templates")
+    if not isinstance(raw_templates, list):
+        raise RuntimeError("未能生成有效的模板列表，请重试")
+    templates = []
+    for index, item in enumerate(raw_templates):
+        if not isinstance(item, dict):
+            continue
+        query = _sanitize(item.get("query") or {})
+        if not query:
+            continue
+        name = str(item.get("name") or "").strip()[:12] or f"风格模板{index + 1}"
+        desc = str(item.get("desc") or "").strip()[:60] or _summarize(query).removeprefix("已解析：")
+        templates.append({"name": name, "desc": desc, "query": query})
+        if len(templates) >= 8:
+            break
+    if len(templates) < 3:
+        raise RuntimeError("生成的有效模板不足，请重试")
+    return {"basis": basis, "templates": templates, "model": out["config"].get("display_name")}

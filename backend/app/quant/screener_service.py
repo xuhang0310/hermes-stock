@@ -14,10 +14,21 @@
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from statistics import median
+
 from sqlalchemy import and_, desc, func, select
 
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import DailyBar, Instrument, StockDailyBasic, StockLatestPrice
+from backend.app.core.models import (
+    DailyBar,
+    Instrument,
+    Position,
+    ScreenerTemplateRecommendation,
+    StockDailyBasic,
+    StockLatestPrice,
+)
 
 _TECH_POOL_MAX = 300  # 技术条件二次筛选的候选上限，防止全表 K 线扫描
 _LIST_LIMIT_MAX = 100
@@ -244,3 +255,124 @@ def run_screener(
             items = kept[:limit]
 
     return {"universe": int(universe), "total": len(items), "items": items}
+
+
+def _band(values: list) -> dict | None:
+    """min/median/max 分布带，供 LLM 参照持仓实际分布设计条件区间。"""
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return None
+    return {"min": round(min(vals), 2), "median": round(median(vals), 2), "max": round(max(vals), 2)}
+
+
+def position_facts(user_id: int) -> dict:
+    """汇总用户持仓风格事实：逐只特征 + 聚合分布（纯本地读取，不外呼）。
+
+    无持仓抛 ValueError（API 层转 400）。特征尽量复用已有数据：
+    最新价/涨跌幅取 stock_latest_prices，换手率/量比/市值/PE 取最新 daily_basic
+    快照，是否站上 20 日线用本地 K 线计算。
+    """
+    with SessionLocal() as db:
+        pos_rows = db.execute(
+            select(
+                Position.symbol,
+                Instrument.name,
+                func.max(Position.position_pct),
+                func.count(),
+            )
+            .join(Instrument, Instrument.symbol == Position.symbol)
+            .where(Position.owner_user_id == int(user_id), Position.status == "open")
+            .group_by(Position.symbol, Instrument.name)
+        ).all()
+        if not pos_rows:
+            raise ValueError("暂无持仓，请先在持仓页录入持仓后再生成智能模板")
+        symbols = [row[0] for row in pos_rows]
+        name_by_symbol = {row[0]: (row[1] or row[0]) for row in pos_rows}
+        pct_by_symbol = {row[0]: float(row[2] or 0.0) for row in pos_rows}
+
+        latest_basic_date = select(func.max(StockDailyBasic.trade_date)).scalar_subquery()
+        feat_rows = db.execute(
+            select(StockLatestPrice, StockDailyBasic)
+            .outerjoin(
+                StockDailyBasic,
+                and_(
+                    StockDailyBasic.symbol == StockLatestPrice.symbol,
+                    StockDailyBasic.trade_date == latest_basic_date,
+                ),
+            )
+            .where(StockLatestPrice.symbol.in_(symbols))
+        ).all()
+        bars_by_symbol = _fetch_recent_bars(db, symbols, 20)
+
+    feat_by_symbol: dict[str, dict] = {}
+    for price, basic in feat_rows:
+        total_mv = getattr(basic, "total_mv", None) if basic is not None else None
+        bars = bars_by_symbol.get(price.symbol, [])
+        ma20 = _ma_value(bars, 20)
+        latest_close = bars[0]["close"] if bars else price.price
+        feat_by_symbol[price.symbol] = {
+            "symbol": price.symbol,
+            "name": name_by_symbol.get(price.symbol) or price.name or price.symbol,
+            "position_pct": round(pct_by_symbol.get(price.symbol, 0.0), 2),
+            "price": price.price,
+            "pct_chg": price.pct_chg,
+            "turnover_rate": basic.turnover_rate if basic is not None else None,
+            "volume_ratio": basic.volume_ratio if basic is not None else None,
+            "total_mv_yi": round(total_mv / _WAN_PER_YI, 1) if total_mv else None,
+            "pe_ttm": basic.pe_ttm if basic is not None else None,
+            "above_ma20": bool(ma20 is not None and latest_close is not None and latest_close > ma20),
+        }
+
+    positions = [feat_by_symbol[symbol] for symbol in symbols if symbol in feat_by_symbol]
+    above_ma20_count = sum(1 for p in positions if p["above_ma20"])
+    stats = {
+        "total_mv_yi": _band([p["total_mv_yi"] for p in positions]),
+        "turnover_rate": _band([p["turnover_rate"] for p in positions]),
+        "pe_ttm": _band([p["pe_ttm"] for p in positions]),
+        "pct_chg": _band([p["pct_chg"] for p in positions]),
+        "above_ma20_count": above_ma20_count,
+    }
+    return {"position_count": len(positions), "positions": positions, "stats": stats}
+
+
+def load_template_recommendation(user_id: int) -> dict | None:
+    """读取该用户最近一次智能模板推荐；无记录返回 None。"""
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerTemplateRecommendation).where(
+                ScreenerTemplateRecommendation.user_id == int(user_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        try:
+            templates = json.loads(row.templates_json or "[]")
+        except json.JSONDecodeError:
+            templates = []
+        return {
+            "templates": templates if isinstance(templates, list) else [],
+            "basis": row.basis or "",
+            "position_count": row.position_count or 0,
+            "model": row.model,
+            "generated_at": row.updated_at.strftime("%Y-%m-%d %H:%M") if row.updated_at else None,
+        }
+
+
+def save_template_recommendation(user_id: int, payload: dict) -> str:
+    """整行覆盖式保存（每用户一行），返回生成时间显示串。"""
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerTemplateRecommendation).where(
+                ScreenerTemplateRecommendation.user_id == int(user_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = ScreenerTemplateRecommendation(user_id=int(user_id), templates_json="[]")
+            db.add(row)
+        row.templates_json = json.dumps(payload.get("templates") or [], ensure_ascii=False)
+        row.basis = str(payload.get("basis") or "")
+        row.position_count = int(payload.get("position_count") or 0)
+        row.model = payload.get("model")
+        db.commit()
+    return generated_at
