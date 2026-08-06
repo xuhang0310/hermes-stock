@@ -20,19 +20,27 @@ from backend.app.agent_runtime.worker import agent_runtime_worker
 from backend.app.auth.auth_api import router as auth_router
 from backend.app.core.applog import configure_logging, get_logger, log_event, prune_system_logs
 from backend.app.core.database import initialize_default_database, session_scope
+from backend.app.core.operation_log import OperationLogMiddleware
+from backend.app.core.request_id_middleware import RequestIDMiddleware
+from backend.app.core.runtime_overrides_api import router as runtime_overrides_router
 from backend.app.core.settings import settings
+from backend.app.core.startup_validator import validate_startup
 from backend.app.data.dashboard_api import router as dashboard_router
 from backend.app.data.deps import get_repo
 from backend.app.data.logs_api import router as logs_router
 from backend.app.data.positions_api import router as positions_router
+from backend.app.data.report_api import router as report_router
 from backend.app.data.repository import StockRepository
 from backend.app.data.watchlist_api import router as watchlist_router
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
 from backend.app.feishu.feishu_bot_api import router as feishu_bot_router
 from backend.app.market.tushare_api import router as tushare_router
+from backend.app.notify.notification_api import router as notification_router
+from backend.app.paper.paper_api import router as paper_router
 from backend.app.quant.agent_board_api import router as agent_board_router
 from backend.app.quant.backtest_api import router as backtest_router, stocks_router
 from backend.app.quant.factor_api import router as factor_router
+from backend.app.quant.screener_api import router as screener_router
 from backend.app.scheduler.rhythm_api import router as rhythm_router
 from backend.app.scheduler.rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
 from backend.app.seed.seed_api import router as seed_router
@@ -50,6 +58,8 @@ def create_app(init_db: bool = True) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # 启动校验：必需依赖（DB）失败直接 fail-fast，避免带病运行
+        await asyncio.to_thread(validate_startup)
         # 技能系统：启动时自动发现并注册所有技能（Phase 1：仅注册，不接管分发链）
         skill_registry.discover()
         if init_db and settings.background_services_enabled:
@@ -102,6 +112,10 @@ def create_app(init_db: bool = True) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # add_middleware 后加的在外层：RequestID 最外（先置 trace 上下文），
+    # 操作日志次之（写库时可读到 trace_id），再到请求日志与 CORS。
+    app.add_middleware(OperationLogMiddleware)
+    app.add_middleware(RequestIDMiddleware)
     _req_logger = get_logger("api")
 
     @app.middleware("http")
@@ -139,14 +153,19 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(backtest_router)
     app.include_router(stocks_router)
     app.include_router(agent_board_router)
+    app.include_router(screener_router)
     app.include_router(rhythm_router)
     app.include_router(feishu_bot_router)
     app.include_router(positions_router)
     app.include_router(watchlist_router)
     app.include_router(dashboard_router)
+    app.include_router(report_router)
     app.include_router(logs_router)
     app.include_router(tushare_router)
     app.include_router(seed_router)
+    app.include_router(notification_router)
+    app.include_router(paper_router)
+    app.include_router(runtime_overrides_router)
 
     @app.exception_handler(IntegrityError)
     async def db_integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
