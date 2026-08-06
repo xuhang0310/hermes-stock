@@ -306,6 +306,33 @@ class StockLatestPrice(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class StockDailyBasic(Base):
+    """全市场每日指标快照（TuShare daily_basic 落库）：换手率/官方量比/估值/市值。
+
+    唯一写入方是 market/market_sync.py（trade_date 恒为 YYYYMMDD），选股器的
+    换手率/量比/市值/PE 条件在这张表上做 SQL 过滤。市值单位为**万元**。
+    """
+
+    __tablename__ = "stock_daily_basic"
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_stock_daily_basic_symbol_date"),
+        Index("ix_stock_daily_basic_trade_date", "trade_date"),
+        # 既有表全是 utf8mb4_unicode_ci（库默认是 0900_ai_ci），不一致会导致 FK 建不出来
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), ForeignKey("instruments.symbol"), nullable=False, index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    turnover_rate: Mapped[float | None] = mapped_column(Float)
+    volume_ratio: Mapped[float | None] = mapped_column(Float)
+    pe_ttm: Mapped[float | None] = mapped_column(Float)
+    pb: Mapped[float | None] = mapped_column(Float)
+    total_mv: Mapped[float | None] = mapped_column(Float)
+    circ_mv: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class Document(Base):
     __tablename__ = "documents"
 

@@ -65,6 +65,10 @@ import type {
   ApiEnvelope,
   ScreenerQuery,
   ScreenerResult,
+  ScreenerSyncStats,
+  ScreenerSyncStatus,
+  ScreenerParseResult,
+  ScreenerInterpretation,
   FactorBenchmarkInterpretation,
   FactorBenchmarkResult,
   AgentBoardCounts,
@@ -664,6 +668,30 @@ export const api = {
     }),
   runScreener: (payload: ScreenerQuery) =>
     request<ApiEnvelope<ScreenerResult>>('/api/screener/run', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
+  screenerSync: (days = 20) =>
+    request<ApiEnvelope<ScreenerSyncStats>>('/api/screener/sync', {
+      method: 'POST',
+      body: JSON.stringify({ days }),
+    }).then((res) => res.data),
+  screenerSyncStatus: () =>
+    request<ApiEnvelope<ScreenerSyncStatus>>('/api/screener/sync-status').then(
+      (res) => res.data
+    ),
+  screenerParse: (text: string) =>
+    request<ApiEnvelope<ScreenerParseResult>>('/api/screener/parse', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }).then((res) => res.data),
+  screenerInterpret: (payload: {
+    query: ScreenerQuery
+    universe: number
+    total: number
+    items: ScreenerResult['items']
+  }) =>
+    request<ApiEnvelope<ScreenerInterpretation>>('/api/screener/interpret', {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((res) => res.data),
