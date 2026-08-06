@@ -980,7 +980,8 @@ function openTradeModal(pos: PositionItem | null, action: 'buy' | 'sell', mode: 
   tradeForm.mode = mode
   tradeForm.action = action
   tradeForm.quantity = null
-  tradeForm.account_id = selectedAccountId.value
+  // 行内买卖：回显该持仓归属的账户；"全部持仓"页或未挂账户时回退当前选中的账户 tab
+  tradeForm.account_id = pos?.account_id ?? selectedAccountId.value
   message.value = ''
   if (mode === 'add') {
     // 总买入入口：symbol/name 留空由用户填，价格不强预填
