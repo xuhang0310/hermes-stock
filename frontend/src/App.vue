@@ -242,7 +242,7 @@ const pageTitle = computed(() => {
     backtestHistory: '回测报告',
     backtestReport: '策略回测报告',
     factorAnalysis: '因子评估',
-    screener: '技术选股',
+    screener: 'AI 选股',
     settings: '设置'
   }
   return labels[activePage.value]

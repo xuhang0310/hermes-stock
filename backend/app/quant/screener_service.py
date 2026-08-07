@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from statistics import median
@@ -25,6 +26,7 @@ from backend.app.core.models import (
     DailyBar,
     Instrument,
     Position,
+    ScreenerPromptHistory,
     ScreenerTemplateRecommendation,
     StockDailyBasic,
     StockLatestPrice,
@@ -376,3 +378,134 @@ def save_template_recommendation(user_id: int, payload: dict) -> str:
         row.model = payload.get("model")
         db.commit()
     return generated_at
+
+
+def _normalize_prompt(text: str) -> str:
+    """提示词去重口径：去首尾空白并压缩连续空白，保留原始中文标点。"""
+    return " ".join(str(text or "").strip().split())[:500]
+
+
+def _prompt_history_dict(row: ScreenerPromptHistory) -> dict:
+    try:
+        parsed_query = json.loads(row.parsed_query_json or "{}")
+    except json.JSONDecodeError:
+        parsed_query = {}
+    return {
+        "id": row.id,
+        "text": row.prompt_text,
+        "parsed_query": parsed_query if isinstance(parsed_query, dict) else {},
+        "parse_summary": row.parse_summary or "",
+        "last_result_count": row.last_result_count,
+        "use_count": row.use_count or 0,
+        "is_favorite": bool(row.is_favorite),
+        "created_at": row.created_at.isoformat(timespec="minutes") if row.created_at else None,
+        "last_used_at": row.last_used_at.isoformat(timespec="minutes") if row.last_used_at else None,
+    }
+
+
+def record_prompt_history(
+    user_id: int,
+    text: str,
+    *,
+    parsed_query: dict | None = None,
+    parse_summary: str | None = None,
+) -> dict:
+    """自动保存一次提示词使用记录；相同提示词只递增次数并刷新最近使用时间。"""
+    normalized = _normalize_prompt(text)
+    if not normalized:
+        raise ValueError("提示词不能为空")
+    prompt_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    now = datetime.now()
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerPromptHistory).where(
+                ScreenerPromptHistory.user_id == int(user_id),
+                ScreenerPromptHistory.prompt_hash == prompt_hash,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = ScreenerPromptHistory(
+                user_id=int(user_id),
+                prompt_hash=prompt_hash,
+                prompt_text=normalized,
+                use_count=1,
+                last_used_at=now,
+            )
+            db.add(row)
+        else:
+            row.prompt_text = normalized
+            row.use_count = int(row.use_count or 0) + 1
+            row.last_used_at = now
+        if parsed_query is not None:
+            row.parsed_query_json = json.dumps(parsed_query, ensure_ascii=False)
+        if parse_summary is not None:
+            row.parse_summary = str(parse_summary)[:1000]
+        db.commit()
+        db.refresh(row)
+        return _prompt_history_dict(row)
+
+
+def list_prompt_history(
+    user_id: int,
+    *,
+    limit: int = 50,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict:
+    """读取当前用户最近使用的提示词；支持服务端搜索与只看收藏。"""
+    limit = max(1, min(int(limit or 50), 100))
+    with SessionLocal() as db:
+        stmt = select(ScreenerPromptHistory).where(
+            ScreenerPromptHistory.user_id == int(user_id)
+        )
+        keyword = _normalize_prompt(search or "")
+        if keyword:
+            stmt = stmt.where(ScreenerPromptHistory.prompt_text.like(f"%{keyword}%"))
+        if favorite_only:
+            stmt = stmt.where(ScreenerPromptHistory.is_favorite.is_(True))
+        rows = db.execute(
+            stmt.order_by(
+                ScreenerPromptHistory.last_used_at.desc(),
+                ScreenerPromptHistory.id.desc(),
+            ).limit(limit)
+        ).scalars().all()
+        total = db.execute(
+            select(func.count()).select_from(
+                select(ScreenerPromptHistory.id).where(
+                    ScreenerPromptHistory.user_id == int(user_id)
+                ).subquery()
+            )
+        ).scalar() or 0
+    return {"items": [_prompt_history_dict(row) for row in rows], "total": int(total)}
+
+
+def set_prompt_favorite(user_id: int, history_id: int, is_favorite: bool) -> dict:
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerPromptHistory).where(
+                ScreenerPromptHistory.id == int(history_id),
+                ScreenerPromptHistory.user_id == int(user_id),
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ValueError("提示词历史不存在")
+        row.is_favorite = bool(is_favorite)
+        db.commit()
+        db.refresh(row)
+        return _prompt_history_dict(row)
+
+
+def update_prompt_result_count(user_id: int, history_id: int, result_count: int) -> dict:
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerPromptHistory).where(
+                ScreenerPromptHistory.id == int(history_id),
+                ScreenerPromptHistory.user_id == int(user_id),
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ValueError("提示词历史不存在")
+        row.last_result_count = max(0, int(result_count))
+        db.commit()
+        db.refresh(row)
+        return _prompt_history_dict(row)

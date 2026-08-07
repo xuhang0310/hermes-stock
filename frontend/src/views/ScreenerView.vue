@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type {
+  ScreenerPromptHistoryItem,
   ScreenerQuery,
   ScreenerResult,
   ScreenerSyncStats,
@@ -11,6 +12,10 @@ import type {
 } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 
+type TemplateCategory = '热门' | '量价' | '趋势' | '估值' | '质量'
+type QuickTemplate = ScreenerTemplateItem & { category: TemplateCategory; prompt: string }
+
+const DRAFT_KEY = 'hermes_screener_prompt_draft'
 const running = ref(false)
 const error = ref('')
 const result = ref<ScreenerResult | null>(null)
@@ -41,34 +46,157 @@ const nlText = ref('')
 const parseLoading = ref(false)
 const parseSummary = ref('')
 const parseError = ref('')
+const parsedQuery = ref<ScreenerQuery | null>(null)
+const activeHistoryId = ref<number | null>(null)
+const advancedOpen = ref(false)
+const draftSaved = ref(false)
 
 const interpretLoading = ref(false)
 const interpretation = ref('')
 const interpretModel = ref('')
 const interpretError = ref('')
 
-// v-model 在 type=number 输入框上会自动把非空值转成 number（Vue looseToNumber），
-// 空值仍是 ''，因此入参须同时接受 string | number
+const smartRec = ref<ScreenerTemplateRecommendation | null>(null)
+const recLoading = ref(false)
+const recError = ref('')
+
+const promptHistory = ref<ScreenerPromptHistoryItem[]>([])
+const historyTotal = ref(0)
+const historyLoading = ref(false)
+const historyError = ref('')
+const historySearch = ref('')
+const historyTab = ref<'全部' | '已收藏'>('全部')
+const historyExpanded = ref(false)
+const showAllTemplates = ref(false)
+const profileDetailsOpen = ref(false)
+
+const templateCategory = ref<TemplateCategory>('热门')
+const TEMPLATE_CATEGORIES: TemplateCategory[] = ['热门', '量价', '趋势', '估值', '质量']
+const TEMPLATES: QuickTemplate[] = [
+  {
+    name: '温和放量',
+    category: '量价',
+    prompt: '量比1.5以上，换手率3%–10%，涨幅1%–7%',
+    desc: '量比≥1.5、换手率3–10%、涨幅1–7%',
+    query: { volume_ratio_min: 1.5, turnover_rate_min: 3, turnover_rate_max: 10, pct_chg_min: 1, pct_chg_max: 7 },
+  },
+  {
+    name: '小盘活跃',
+    category: '热门',
+    prompt: '总市值100亿以下，换手率3%以上，量比1.5以上',
+    desc: '市值≤100亿、换手率≥3%、量比≥1.5',
+    query: { total_mv_max: 100, turnover_rate_min: 3, volume_ratio_min: 1.5 },
+  },
+  {
+    name: '低估值稳健',
+    category: '估值',
+    prompt: 'PE在0到25之间，总市值300亿以上，排除高估值标的',
+    desc: '市值≥300亿、PE(TTM) 0–25',
+    query: { total_mv_min: 300, pe_min: 0, pe_max: 25 },
+  },
+  {
+    name: '站上20日线',
+    category: '趋势',
+    prompt: '收盘站上20日均线，并且今日上涨',
+    desc: '站上20日均线且今日上涨',
+    query: { above_ma: 20, pct_chg_min: 0 },
+  },
+  {
+    name: '放量强势',
+    category: '量价',
+    prompt: '量比2以上，换手率5%–15%，今日涨幅2%以上',
+    desc: '量比≥2、换手率5–15%、今日涨幅≥2%',
+    query: { volume_ratio_min: 2, turnover_rate_min: 5, turnover_rate_max: 15, pct_chg_min: 2 },
+  },
+  {
+    name: '趋势启动',
+    category: '趋势',
+    prompt: '站上10日均线，今日上涨，量比1.5以上',
+    desc: '站上10日线、今日上涨、量比≥1.5',
+    query: { above_ma: 10, pct_chg_min: 0, volume_ratio_min: 1.5 },
+  },
+  {
+    name: '大盘低估值',
+    category: '质量',
+    prompt: '总市值500亿以上，PE在0到30之间，今日没有大幅上涨',
+    desc: '市值≥500亿、PE 0–30、涨幅≤5%',
+    query: { total_mv_min: 500, pe_min: 0, pe_max: 30, pct_chg_max: 5 },
+  },
+]
+
 function toNumber(value: string | number): number | undefined {
   if (value === '' || value == null) return undefined
   const num = Number(value)
   return Number.isFinite(num) ? num : undefined
 }
 
-// 常用模板：点击即回填条件并立即筛选，一步出结果
-const TEMPLATES: ScreenerTemplateItem[] = [
-  { name: '放量强势', desc: '量比≥2、换手率5–15%、今日涨幅≥2%', query: { volume_ratio_min: 2, turnover_rate_min: 5, turnover_rate_max: 15, pct_chg_min: 2 } },
-  { name: '温和放量', desc: '量比≥1.5、换手率3–10%、涨幅1–7%（不追涨停）', query: { volume_ratio_min: 1.5, turnover_rate_min: 3, turnover_rate_max: 10, pct_chg_min: 1, pct_chg_max: 7 } },
-  { name: '小盘活跃', desc: '市值≤100亿、换手率≥3%、量比≥1.5', query: { total_mv_max: 100, turnover_rate_min: 3, volume_ratio_min: 1.5 } },
-  { name: '热点题材', desc: '换手率10–30%、涨幅≥5%、市值≤300亿', query: { turnover_rate_min: 10, turnover_rate_max: 30, pct_chg_min: 5, total_mv_max: 300 } },
-  { name: '低估值蓝筹', desc: '市值≥300亿、PE(TTM) 0–25', query: { total_mv_min: 300, pe_min: 0, pe_max: 25 } },
-  { name: '站上20日线', desc: '收盘价站上20日均线且今日上涨', query: { above_ma: 20, pct_chg_min: 0 } },
-]
+function fmtDate(value: string | null | undefined): string {
+  if (!value) return '—'
+  const digits = value.replace(/-/g, '')
+  if (digits.length !== 8) return value
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
+}
 
-// 智能推荐：AI 依据用户持仓风格动态生成，可整批刷新
-const smartRec = ref<ScreenerTemplateRecommendation | null>(null)
-const recLoading = ref(false)
-const recError = ref('')
+function fmtValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(value)
+}
+
+function addRangeChip(
+  chips: string[],
+  label: string,
+  low: number | undefined,
+  high: number | undefined,
+  suffix = ''
+) {
+  if (low != null && high != null) chips.push(`${label} ${fmtValue(low)}–${fmtValue(high)}${suffix}`)
+  else if (low != null) chips.push(`${label} ≥ ${fmtValue(low)}${suffix}`)
+  else if (high != null) chips.push(`${label} ≤ ${fmtValue(high)}${suffix}`)
+}
+
+function queryToChips(query: ScreenerQuery): string[] {
+  const chips: string[] = []
+  if (query.market) chips.push({ SH: '沪市', SZ: '深市', BSE: '北交所' }[query.market] || query.market)
+  addRangeChip(chips, '价格', query.price_min, query.price_max, '元')
+  addRangeChip(chips, '涨跌幅', query.pct_chg_min, query.pct_chg_max, '%')
+  if (query.volume_ratio_min != null) chips.push(`量比 ≥ ${fmtValue(query.volume_ratio_min)}`)
+  addRangeChip(chips, '换手率', query.turnover_rate_min, query.turnover_rate_max, '%')
+  addRangeChip(chips, '总市值', query.total_mv_min, query.total_mv_max, '亿')
+  addRangeChip(chips, 'PE', query.pe_min, query.pe_max)
+  if (query.above_ma) chips.push(`站上 MA${query.above_ma}`)
+  if (query.keyword) chips.push(`关键词 ${query.keyword}`)
+  return chips
+}
+
+const parsedChips = computed(() => queryToChips(parsedQuery.value || {}))
+const statusLine = computed(() => {
+  const status = syncStatus.value
+  if (!status) return ''
+  if (!status.latest_bar_date) return '尚未同步全市场数据'
+  return `数据截至 ${fmtDate(status.latest_bar_date)} · 覆盖 ${status.bar_symbols.toLocaleString('zh-CN')} 只`
+})
+const personalizedTemplates = computed(() => (smartRec.value?.templates || []).slice(0, 3))
+const visibleTemplates = computed(() => {
+  if (showAllTemplates.value) return TEMPLATES
+  if (templateCategory.value === '热门') return TEMPLATES.slice(0, 4)
+  return TEMPLATES.filter((item) => item.category === templateCategory.value)
+})
+const profileTags = computed(() => {
+  const basis = smartRec.value?.basis || ''
+  const tags: string[] = []
+  if (/小盘|中小|市值/.test(basis)) tags.push('中小市值')
+  if (/换手|活跃|放量|量能/.test(basis)) tags.push('交易活跃')
+  if (/估值偏高|高估值|PE偏高/.test(basis)) tags.push('估值偏高')
+  else if (/低估|估值偏低/.test(basis)) tags.push('估值偏低')
+  if (/均线|趋势|站上/.test(basis)) tags.push('趋势特征')
+  return tags.slice(0, 4)
+})
+const visibleHistory = computed(() => {
+  const keyword = historySearch.value.trim().toLowerCase()
+  return promptHistory.value
+    .filter((item) => historyTab.value === '全部' || item.is_favorite)
+    .filter((item) => !keyword || item.text.toLowerCase().includes(keyword))
+    .slice(0, historyExpanded.value ? 50 : 3)
+})
 
 async function loadRecommendation() {
   try {
@@ -91,27 +219,69 @@ async function refreshRecommendation() {
   }
 }
 
-function runTemplate(tpl: ScreenerTemplateItem) {
-  if (running.value) return
+async function loadPromptHistory() {
+  if (historyLoading.value) return
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const page = await api.screenerPromptHistory({ limit: 50 })
+    promptHistory.value = page.items
+    historyTotal.value = page.total
+  } catch (err) {
+    historyError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function toggleFavorite(item: ScreenerPromptHistoryItem) {
+  const previous = item.is_favorite
+  item.is_favorite = !previous
+  try {
+    const updated = await api.screenerPromptFavorite(item.id, item.is_favorite)
+    Object.assign(item, updated)
+  } catch {
+    item.is_favorite = previous
+  }
+}
+
+function usePrompt(text: string) {
+  nlText.value = text
+  draftSaved.value = false
+  parsedQuery.value = null
+  activeHistoryId.value = null
   parseSummary.value = ''
   parseError.value = ''
-  applyQuery(tpl.query)
-  run()
+  advancedOpen.value = false
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function fmtDate(value: string | null | undefined): string {
+function templatePrompt(tpl: ScreenerTemplateItem): string {
+  return String(tpl.prompt || tpl.desc || tpl.name).trim()
+}
+
+function templateRationale(tpl: ScreenerTemplateItem): string {
+  if (tpl.rationale) return tpl.rationale
+  return smartRec.value?.basis ? `依据：${smartRec.value.basis}` : '依据：当前持仓风格分析'
+}
+
+function templateCount(tpl: ScreenerTemplateItem): string {
+  return tpl.universe != null ? `候选 ${tpl.universe.toLocaleString('zh-CN')} 只` : '运行后查看命中数'
+}
+
+function historyTime(value: string | null): string {
   if (!value) return '—'
-  const digits = value.replace(/-/g, '')
-  if (digits.length !== 8) return value
-  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value.replace('T', ' ')
+  const now = new Date()
+  const isToday = date.toDateString() === now.toDateString()
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  const hhmm = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+  if (isToday) return `今天 ${hhmm}`
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${hhmm}`
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${hhmm}`
 }
-
-const statusLine = computed(() => {
-  const status = syncStatus.value
-  if (!status) return ''
-  if (!status.latest_bar_date) return '尚未同步全市场数据'
-  return `数据截至 ${fmtDate(status.latest_bar_date)} · ${status.bar_symbols} 只 · 指标快照 ${status.basic_rows} 条`
-})
 
 async function loadSyncStatus() {
   try {
@@ -176,20 +346,47 @@ function buildQuery(): ScreenerQuery {
   }
 }
 
+function saveDraft() {
+  localStorage.setItem(DRAFT_KEY, nlText.value)
+  draftSaved.value = true
+}
+
+function clearPrompt() {
+  nlText.value = ''
+  parsedQuery.value = null
+  activeHistoryId.value = null
+  parseSummary.value = ''
+  parseError.value = ''
+  draftSaved.value = false
+}
+
+function newStrategy() {
+  clearPrompt()
+  applyQuery({})
+  result.value = null
+  ran.value = false
+  interpretation.value = ''
+  advancedOpen.value = false
+}
+
 async function parseNL() {
   const text = String(nlText.value).trim()
   if (!text || parseLoading.value) return
   parseLoading.value = true
   parseError.value = ''
   parseSummary.value = ''
+  parsedQuery.value = null
   try {
     const parsed = await api.screenerParse(text)
     parseSummary.value = parsed.summary
-    if (!parsed.fallback) {
+    activeHistoryId.value = parsed.history_id
+    if (!parsed.fallback && Object.keys(parsed.query).length) {
+      parsedQuery.value = parsed.query
       applyQuery(parsed.query)
-      // 解析成功后直接自动筛选，一步出结果（不必再手动点「开始筛选」）
-      if (Object.keys(parsed.query).length) run()
     }
+    localStorage.removeItem(DRAFT_KEY)
+    draftSaved.value = true
+    void loadPromptHistory()
   } catch (err) {
     parseError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -209,6 +406,9 @@ async function run() {
     result.value = await api.runScreener(query)
     lastQuery.value = query
     ran.value = true
+    if (activeHistoryId.value != null) {
+      void api.screenerPromptResult(activeHistoryId.value, result.value.total).then(() => loadPromptHistory())
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -252,188 +452,285 @@ function formatNum(value: number | null, digits = 2): string {
 }
 
 onMounted(() => {
-  loadSyncStatus()
-  loadRecommendation()
+  const draft = localStorage.getItem(DRAFT_KEY)
+  if (draft) nlText.value = draft
+  void Promise.all([loadSyncStatus(), loadRecommendation(), loadPromptHistory()])
 })
 </script>
 
 <template>
   <section class="sc-wrap">
-    <div class="sc-ambient" aria-hidden="true"></div>
-
-    <header class="sc-toolbar">
-      <div class="sc-title">
-        <span class="sc-title-mark"></span>
-        <div>
-          <h2>技术选股</h2>
-          <p>全市场筛选：支持快速模板、一句话条件与 AI 大白话解读</p>
-        </div>
+    <header class="sc-pagebar">
+      <div class="sc-brand">
+        <h2>AI 选股</h2>
+        <p>用自然语言，把选股想法变成可核对的筛选条件</p>
       </div>
-      <div class="sc-actions">
-        <span class="sc-status">{{ statusLine }}</span>
-        <button type="button" class="btn-outline" :disabled="syncLoading" @click="syncNow">
-          <span class="btn-spin" :class="{ spin: syncLoading }"></span>
-          {{ syncLoading ? '同步中' : '同步全市场' }}
+      <nav class="sc-page-tabs" aria-label="AI 选股工作区">
+        <button type="button" class="is-active">快速选股</button>
+        <button type="button" disabled title="将在策略工作区阶段开放">策略构建</button>
+        <button type="button" disabled title="将在策略工作区阶段开放">我的策略</button>
+      </nav>
+      <div class="sc-page-actions">
+        <div class="sc-data-status">
+          <span class="sc-status-dot"></span>
+          <span>{{ statusLine || '正在读取市场数据状态' }}</span>
+          <button type="button" :disabled="syncLoading" @click="syncNow">
+            {{ syncLoading ? '同步中…' : '同步数据' }}
+          </button>
+        </div>
+        <button type="button" class="sc-btn sc-btn-ghost" @click="saveDraft">
+          {{ draftSaved ? '已保存' : '保存草稿' }}
         </button>
-        <button type="button" class="btn-outline" :disabled="running" @click="run">
-          <span class="btn-spin" :class="{ spin: running }"></span>
-          {{ running ? '筛选中' : '开始筛选' }}
-        </button>
+        <button type="button" class="sc-btn sc-btn-primary" @click="newStrategy">新建选股</button>
       </div>
     </header>
 
-    <div v-if="syncError" class="notice notice-danger">
+    <div v-if="syncError" class="notice notice-danger sc-top-notice">
       <strong>同步失败</strong>
       <span>{{ syncError }}</span>
     </div>
-    <p v-else-if="syncStats" class="sc-note">
-      同步完成：新增 {{ syncStats.dates_fetched }} 个交易日 K 线（{{ syncStats.bars_upserted }} 行）、
-      指标快照 {{ syncStats.basic_upserted }} 条、最新价 {{ syncStats.latest_prices_upserted }} 条，
-      耗时 {{ syncStats.elapsed_seconds }}s。
-      <template v-if="syncStats.errors.length"> 部分失败：{{ syncStats.errors.join('；') }}</template>
+    <p v-else-if="syncStats" class="sc-sync-note">
+      同步完成：新增 {{ syncStats.dates_fetched }} 个交易日 K 线，更新 {{ syncStats.latest_prices_upserted }} 条最新行情，耗时
+      {{ syncStats.elapsed_seconds }} 秒。
+      <template v-if="syncStats.errors.length">部分失败：{{ syncStats.errors.join('；') }}</template>
     </p>
 
-    <div class="sc-nl">
-      <input
-        v-model="nlText"
-        type="text"
-        class="sc-input sc-nl-input"
-        placeholder="一句话选股，如：量比大于2，换手率5%到15%，市值200亿以下，站上20日均线"
-        @keyup.enter="parseNL"
-      />
-      <button type="button" class="btn-outline" :disabled="parseLoading || !nlText.trim()" @click="parseNL">
-        <span class="btn-spin" :class="{ spin: parseLoading }"></span>
-        {{ parseLoading ? '解析中' : 'AI 解析' }}
-      </button>
-    </div>
-    <p v-if="parseSummary" class="sc-parse-line" :class="{ 'sc-parse-warn': parseSummary.startsWith('未能') }">
-      {{ parseSummary }}
-    </p>
-    <div v-if="parseError" class="notice notice-danger">
-      <strong>AI 解析失败</strong>
-      <span>{{ parseError }}</span>
-    </div>
+    <main class="sc-workspace">
+      <section class="sc-start-grid">
+        <article class="sc-panel sc-composer">
+          <header class="sc-panel-head">
+            <div>
+              <span class="sc-eyebrow">快速选股</span>
+              <h3>描述你想找什么样的股票</h3>
+              <p>可以写市值、估值、量价、趋势等条件，AI 只负责翻译，执行前由你确认。</p>
+            </div>
+            <span v-if="draftSaved" class="sc-saved-state">已保存</span>
+          </header>
+          <div class="sc-prompt-box" :class="{ 'has-error': parseError }">
+            <textarea
+              v-model="nlText"
+              rows="5"
+              placeholder="例如：找市值 200 亿以下、量比大于 1.5、换手率 3% 到 10%，并且站上 20 日均线的股票"
+              @input="draftSaved = false"
+              @keydown.ctrl.enter.prevent="parseNL"
+              @keydown.meta.enter.prevent="parseNL"
+            ></textarea>
+            <div class="sc-prompt-footer">
+              <span>支持自然语言 · Ctrl / ⌘ + Enter 生成</span>
+              <button v-if="nlText" type="button" class="sc-text-btn" @click="clearPrompt">清空</button>
+            </div>
+          </div>
+          <div v-if="parseError" class="sc-inline-error">{{ parseError }}</div>
+          <div class="sc-composer-actions">
+            <button type="button" class="sc-text-btn" @click="advancedOpen = !advancedOpen">
+              {{ advancedOpen ? '收起高级条件' : '手动设置高级条件' }}
+            </button>
+            <button type="button" class="sc-btn sc-btn-primary sc-generate" :disabled="parseLoading || !nlText.trim()" @click="parseNL">
+              <span v-if="parseLoading" class="btn-spin spin"></span>
+              {{ parseLoading ? '正在理解条件…' : '生成选股方案' }}
+            </button>
+          </div>
+        </article>
 
-    <div class="sc-rec">
-      <div class="sc-rec-head">
-        <span class="sc-templates-label">智能推荐</span>
-        <span v-if="smartRec && smartRec.templates.length" class="sc-rec-meta">
-          基于你 {{ smartRec.position_count }} 只持仓的风格分析<span v-if="smartRec.generated_at"> · {{ smartRec.generated_at }} 生成</span>
-        </span>
-        <button
-          type="button"
-          class="btn-outline btn-mini"
-          :disabled="recLoading || running"
-          @click="refreshRecommendation"
-        >
-          <span class="btn-spin" :class="{ spin: recLoading }"></span>
-          {{ recLoading ? 'AI 分析持仓中…' : smartRec && smartRec.templates.length ? '换一批' : '基于我的持仓生成' }}
-        </button>
-      </div>
-      <p v-if="smartRec && smartRec.basis" class="sc-rec-basis">
-        持仓风格：{{ smartRec.basis }}<span v-if="smartRec.model">（由 {{ smartRec.model }} 分析，仅供参考，不构成任何投资建议）</span>
-      </p>
-      <div v-if="recError" class="sc-rec-error">{{ recError }}</div>
-      <div v-if="smartRec && smartRec.templates.length" class="sc-chips">
-        <button
-          v-for="tpl in smartRec.templates"
-          :key="'ai-' + tpl.name"
-          type="button"
-          class="sc-chip sc-chip-ai"
-          :title="tpl.desc"
-          :disabled="running"
-          @click="runTemplate(tpl)"
-        >
-          {{ tpl.name }}<span v-if="tpl.universe" class="sc-chip-count">{{ tpl.universe }} 只</span>
-        </button>
-      </div>
-    </div>
+        <article class="sc-panel sc-profile">
+          <header class="sc-panel-head sc-profile-head">
+            <div>
+              <span class="sc-eyebrow">我的持仓风格</span>
+              <h3>先看懂你，再推荐模板</h3>
+            </div>
+            <span class="sc-count-badge">已分析 {{ smartRec?.position_count || 0 }} 只</span>
+          </header>
+          <template v-if="smartRec?.position_count">
+            <p class="sc-profile-summary">{{ smartRec.basis || '已根据当前持仓完成风格归纳。' }}</p>
+            <div v-if="profileTags.length" class="sc-tag-row">
+              <span v-for="tag in profileTags" :key="tag">{{ tag }}</span>
+            </div>
+            <div class="sc-profile-facts">
+              <div><span>分析来源</span><strong>当前持仓</strong></div>
+              <div><span>推荐用途</span><strong>发现相似机会</strong></div>
+            </div>
+            <p v-if="profileDetailsOpen" class="sc-profile-detail">
+              风格标签来自持仓结构和当前可用行情，仅用于组织筛选条件，不代表收益判断。
+            </p>
+            <button type="button" class="sc-text-btn" @click="profileDetailsOpen = !profileDetailsOpen">
+              {{ profileDetailsOpen ? '收起分析说明' : '查看分析说明' }}
+            </button>
+          </template>
+          <div v-else class="sc-profile-empty">
+            <strong>还没有可分析的持仓</strong>
+            <p>录入持仓后，可生成与你当前风格更贴近的快捷模板。</p>
+          </div>
+          <button type="button" class="sc-btn sc-btn-ghost sc-profile-refresh" :disabled="recLoading" @click="refreshRecommendation">
+            <span class="btn-spin" :class="{ spin: recLoading }"></span>
+            {{ recLoading ? '正在分析持仓…' : '重新分析并推荐' }}
+          </button>
+        </article>
+      </section>
 
-    <div class="sc-templates">
-      <span class="sc-templates-label">常用模板</span>
-      <button
-        v-for="tpl in TEMPLATES"
-        :key="tpl.name"
-        type="button"
-        class="sc-chip"
-        :title="tpl.desc"
-        :disabled="running"
-        @click="runTemplate(tpl)"
-      >
-        {{ tpl.name }}
-      </button>
-    </div>
+      <section class="sc-panel sc-personalized">
+        <header class="sc-section-head">
+          <div>
+            <span class="sc-eyebrow">为我推荐</span>
+            <h3>结合持仓风格生成的快速模板</h3>
+          </div>
+          <span>推荐只组织筛选条件，不构成投资建议</span>
+        </header>
+        <div v-if="recError" class="sc-inline-error">{{ recError }}</div>
+        <div v-if="personalizedTemplates.length" class="sc-recommend-grid">
+          <article v-for="tpl in personalizedTemplates" :key="tpl.name" class="sc-recommend-card">
+            <div class="sc-card-title">
+              <h4>{{ tpl.name }}</h4>
+              <span>基于持仓</span>
+            </div>
+            <p class="sc-template-prompt">“{{ templatePrompt(tpl) }}”</p>
+            <p class="sc-rationale">{{ templateRationale(tpl) }}</p>
+            <footer>
+              <span>{{ templateCount(tpl) }}</span>
+              <button type="button" class="sc-btn sc-btn-soft" @click="usePrompt(templatePrompt(tpl))">使用此模板</button>
+            </footer>
+          </article>
+        </div>
+        <div v-else-if="recLoading" class="sc-loading-state">正在分析持仓并生成模板…</div>
+        <div v-else class="sc-empty-line">
+          <span>暂无个性化模板，可先使用下方通用模板。</span>
+          <button type="button" class="sc-text-btn" @click="refreshRecommendation">立即生成</button>
+        </div>
+      </section>
 
-    <div class="sc-config">
-      <label class="sc-field">
-        <span>市场</span>
-        <select v-model="market" class="sc-input">
-          <option value="">不限</option>
-          <option value="SH">沪市</option>
-          <option value="SZ">深市</option>
-          <option value="BSE">北交所</option>
-        </select>
-      </label>
-      <label class="sc-field">
-        <span>价格下限</span>
-        <input v-model="priceMin" type="number" min="0" step="0.01" class="sc-input" placeholder="可空" />
-      </label>
-      <label class="sc-field">
-        <span>价格上限</span>
-        <input v-model="priceMax" type="number" min="0" step="0.01" class="sc-input" placeholder="可空" />
-      </label>
-      <label class="sc-field">
-        <span>涨跌幅下限 %</span>
-        <input v-model="pctChgMin" type="number" step="0.01" class="sc-input" placeholder="如 0" />
-      </label>
-      <label class="sc-field">
-        <span>涨跌幅上限 %</span>
-        <input v-model="pctChgMax" type="number" step="0.01" class="sc-input" placeholder="可空" />
-      </label>
-      <label class="sc-field">
-        <span>量比下限</span>
-        <input v-model="volumeRatioMin" type="number" min="0" step="0.1" class="sc-input" placeholder="如 1.5" />
-      </label>
-      <label class="sc-field">
-        <span>换手率下限 %</span>
-        <input v-model="turnoverMin" type="number" min="0" step="0.1" class="sc-input" placeholder="如 5" />
-      </label>
-      <label class="sc-field">
-        <span>换手率上限 %</span>
-        <input v-model="turnoverMax" type="number" min="0" step="0.1" class="sc-input" placeholder="如 15" />
-      </label>
-      <label class="sc-field">
-        <span>总市值下限（亿）</span>
-        <input v-model="mvMin" type="number" min="0" step="1" class="sc-input" placeholder="可空" />
-      </label>
-      <label class="sc-field">
-        <span>总市值上限（亿）</span>
-        <input v-model="mvMax" type="number" min="0" step="1" class="sc-input" placeholder="如 200" />
-      </label>
-      <label class="sc-field">
-        <span>PE(TTM) 下限</span>
-        <input v-model="peMin" type="number" step="0.1" class="sc-input" placeholder="可空" />
-      </label>
-      <label class="sc-field">
-        <span>PE(TTM) 上限</span>
-        <input v-model="peMax" type="number" step="0.1" class="sc-input" placeholder="如 50" />
-      </label>
-      <label class="sc-field">
-        <span>站上均线</span>
-        <select v-model="aboveMa" class="sc-input">
-          <option value="">不限</option>
-          <option value="5">5 日均线</option>
-          <option value="10">10 日均线</option>
-          <option value="20">20 日均线</option>
-        </select>
-      </label>
-      <label class="sc-field sc-field-wide">
-        <span>关键词（代码/名称）</span>
-        <input v-model="keyword" type="text" class="sc-input" placeholder="可空" />
-      </label>
-    </div>
+      <section class="sc-library-grid">
+        <article class="sc-panel sc-template-library">
+          <header class="sc-section-head">
+            <div>
+              <span class="sc-eyebrow">快速模板</span>
+              <h3>从成熟条件组合开始</h3>
+            </div>
+            <button type="button" class="sc-text-btn" @click="showAllTemplates = !showAllTemplates">
+              {{ showAllTemplates ? '按分类查看' : '查看全部模板' }}
+            </button>
+          </header>
+          <div class="sc-filter-tabs" role="tablist" aria-label="模板分类">
+            <button
+              v-for="category in TEMPLATE_CATEGORIES"
+              :key="category"
+              type="button"
+              :class="{ 'is-active': !showAllTemplates && templateCategory === category }"
+              @click="templateCategory = category; showAllTemplates = false"
+            >
+              {{ category }}
+            </button>
+          </div>
+          <div class="sc-template-list">
+            <button v-for="item in visibleTemplates" :key="item.name" type="button" class="sc-template-row" @click="usePrompt(item.prompt)">
+              <span class="sc-template-icon">{{ item.name.slice(0, 1) }}</span>
+              <span class="sc-template-copy">
+                <strong>{{ item.name }}</strong>
+                <small>{{ item.prompt }}</small>
+              </span>
+              <span class="sc-template-meta">{{ queryToChips(item.query).length }} 项条件</span>
+              <span class="sc-row-arrow">›</span>
+            </button>
+          </div>
+        </article>
 
-    <div v-if="error" class="notice notice-danger">
+        <article class="sc-panel sc-history">
+          <header class="sc-section-head">
+            <div>
+              <span class="sc-eyebrow">历史提示词</span>
+              <h3>用过的想法，都可以再次调用</h3>
+            </div>
+            <span>已保留 {{ historyTotal }} 条</span>
+          </header>
+          <label class="sc-history-search">
+            <span>⌕</span>
+            <input v-model="historySearch" type="search" placeholder="搜索历史提示词" />
+          </label>
+          <div class="sc-filter-tabs" role="tablist" aria-label="历史提示词筛选">
+            <button type="button" :class="{ 'is-active': historyTab === '全部' }" @click="historyTab = '全部'">全部</button>
+            <button type="button" :class="{ 'is-active': historyTab === '已收藏' }" @click="historyTab = '已收藏'">已收藏</button>
+          </div>
+          <div v-if="historyError" class="sc-inline-error">{{ historyError }}</div>
+          <div v-else-if="historyLoading" class="sc-loading-state">正在读取历史提示词…</div>
+          <div v-else-if="visibleHistory.length" class="sc-history-list">
+            <article v-for="item in visibleHistory" :key="item.id" class="sc-history-row">
+              <button
+                type="button"
+                class="sc-star"
+                :class="{ 'is-active': item.is_favorite }"
+                :aria-label="item.is_favorite ? '取消收藏' : '收藏提示词'"
+                @click="toggleFavorite(item)"
+              >
+                {{ item.is_favorite ? '★' : '☆' }}
+              </button>
+              <div class="sc-history-copy">
+                <p>{{ item.text }}</p>
+                <span>{{ historyTime(item.last_used_at) }} · 使用 {{ item.use_count }} 次 · {{ item.last_result_count == null ? '未运行' : `命中 ${item.last_result_count} 只` }}</span>
+              </div>
+              <button type="button" class="sc-btn sc-btn-soft" @click="usePrompt(item.text)">再次使用</button>
+            </article>
+          </div>
+          <div v-else class="sc-empty-line">{{ historySearch ? '没有找到匹配的提示词' : '生成过的选股方案会自动保存在这里' }}</div>
+          <button v-if="visibleHistory.length >= 3 || historyExpanded" type="button" class="sc-history-more" @click="historyExpanded = !historyExpanded">
+            {{ historyExpanded ? '收起历史' : '查看全部历史' }}
+          </button>
+        </article>
+      </section>
+
+      <section v-if="parsedQuery" class="sc-panel sc-plan-confirm">
+        <header class="sc-section-head">
+          <div>
+            <span class="sc-eyebrow">执行前确认</span>
+            <h3>AI 已理解为以下选股方案</h3>
+          </div>
+          <span>每个条件都将按确定规则执行</span>
+        </header>
+        <p class="sc-plan-summary">{{ parseSummary }}</p>
+        <div class="sc-plan-chips">
+          <span v-for="chip in parsedChips" :key="chip">{{ chip }}</span>
+        </div>
+        <footer class="sc-plan-actions">
+          <button type="button" class="sc-btn sc-btn-ghost" @click="advancedOpen = !advancedOpen">
+            {{ advancedOpen ? '收起条件' : '调整条件' }}
+          </button>
+          <button type="button" class="sc-btn sc-btn-primary" :disabled="running" @click="run">
+            <span class="btn-spin" :class="{ spin: running }"></span>
+            {{ running ? '正在筛选…' : '确认并开始筛选' }}
+          </button>
+        </footer>
+      </section>
+
+      <section v-show="advancedOpen" class="sc-panel sc-advanced">
+        <header class="sc-section-head">
+          <div>
+            <span class="sc-eyebrow">高级条件</span>
+            <h3>逐项检查或手动调整</h3>
+          </div>
+          <button v-if="!parsedQuery" type="button" class="sc-btn sc-btn-primary" :disabled="running" @click="run">
+            {{ running ? '正在筛选…' : '按当前条件筛选' }}
+          </button>
+        </header>
+        <div class="sc-config sc-config-v2">
+          <label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">不限</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label>
+          <label class="sc-field"><span>价格下限</span><input v-model="priceMin" type="number" min="0" step="0.01" class="sc-input" placeholder="可空" /></label>
+          <label class="sc-field"><span>价格上限</span><input v-model="priceMax" type="number" min="0" step="0.01" class="sc-input" placeholder="可空" /></label>
+          <label class="sc-field"><span>涨跌幅下限 %</span><input v-model="pctChgMin" type="number" step="0.01" class="sc-input" placeholder="如 0" /></label>
+          <label class="sc-field"><span>涨跌幅上限 %</span><input v-model="pctChgMax" type="number" step="0.01" class="sc-input" placeholder="可空" /></label>
+          <label class="sc-field"><span>量比下限</span><input v-model="volumeRatioMin" type="number" min="0" step="0.1" class="sc-input" placeholder="如 1.5" /></label>
+          <label class="sc-field"><span>换手率下限 %</span><input v-model="turnoverMin" type="number" min="0" step="0.1" class="sc-input" placeholder="如 5" /></label>
+          <label class="sc-field"><span>换手率上限 %</span><input v-model="turnoverMax" type="number" min="0" step="0.1" class="sc-input" placeholder="如 15" /></label>
+          <label class="sc-field"><span>总市值下限（亿）</span><input v-model="mvMin" type="number" min="0" step="1" class="sc-input" placeholder="可空" /></label>
+          <label class="sc-field"><span>总市值上限（亿）</span><input v-model="mvMax" type="number" min="0" step="1" class="sc-input" placeholder="如 200" /></label>
+          <label class="sc-field"><span>PE(TTM) 下限</span><input v-model="peMin" type="number" step="0.1" class="sc-input" placeholder="可空" /></label>
+          <label class="sc-field"><span>PE(TTM) 上限</span><input v-model="peMax" type="number" step="0.1" class="sc-input" placeholder="如 50" /></label>
+          <label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label>
+          <label class="sc-field sc-field-wide"><span>关键词（代码/名称）</span><input v-model="keyword" type="text" class="sc-input" placeholder="可空" /></label>
+        </div>
+      </section>
+
+      <p v-if="parseSummary && !parsedQuery" class="sc-parse-warning">{{ parseSummary }}</p>
+    </main>
+
+
+    <div v-if="error" class="notice notice-danger sc-result-error">
       <strong>筛选失败</strong>
       <span>{{ error }}</span>
     </div>
@@ -506,7 +803,7 @@ onMounted(() => {
         <p v-else class="sc-note">点击「生成大白话解读」，AI 会解释这组条件在选什么样的股票，并逐只点评命中结果。</p>
       </section>
     </template>
-    <div v-else-if="!ran && !error" class="sc-state">
+    <div v-else-if="!ran && !error" class="sc-state sc-legacy-empty">
       点击「智能推荐」或「常用模板」一键筛选，或点「同步全市场」更新数据后用一句话描述条件、手动填写后「开始筛选」。留空的条件不参与过滤。
     </div>
   </section>
@@ -857,5 +1154,878 @@ select.sc-input {
   font-size: 11.5px;
   color: var(--muted);
   margin-bottom: 6px;
+}
+
+/* 快速选股 V2：信息密度优先，视觉层级与现有深色终端保持一致。 */
+.sc-wrap {
+  --sc-accent: #d7b76f;
+  --sc-accent-strong: #ead08f;
+  --sc-accent-soft: rgba(215, 183, 111, 0.1);
+  --sc-panel: #121518;
+  --sc-panel-raised: #171b1f;
+  --sc-line: rgba(255, 255, 255, 0.1);
+  --sc-line-strong: rgba(215, 183, 111, 0.32);
+  --sc-text: #f1eee7;
+  --sc-text-2: #b9b5ab;
+  --sc-text-3: #777b7d;
+  padding: 0 24px 36px;
+  color: var(--sc-text);
+}
+
+.sc-legacy-empty {
+  display: none !important;
+}
+
+.sc-pagebar {
+  display: grid;
+  grid-template-columns: minmax(190px, 1fr) auto minmax(300px, 1fr);
+  align-items: center;
+  gap: 24px;
+  min-height: 76px;
+  margin: 0 -24px 22px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--sc-line);
+  background: rgba(10, 12, 14, 0.96);
+}
+
+.sc-brand h2,
+.sc-brand p,
+.sc-panel h3,
+.sc-panel h4,
+.sc-panel p {
+  margin: 0;
+}
+
+.sc-brand h2 {
+  font-size: 18px;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+}
+
+.sc-brand p {
+  margin-top: 5px;
+  color: var(--sc-text-3);
+  font-size: 11.5px;
+}
+
+.sc-page-tabs {
+  display: flex;
+  align-self: stretch;
+}
+
+.sc-page-tabs button {
+  position: relative;
+  min-width: 88px;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  color: var(--sc-text-3);
+  font: inherit;
+  font-size: 13px;
+}
+
+.sc-page-tabs button.is-active {
+  color: var(--sc-text);
+  font-weight: 650;
+}
+
+.sc-page-tabs button.is-active::after {
+  position: absolute;
+  right: 16px;
+  bottom: 0;
+  left: 16px;
+  height: 2px;
+  background: var(--sc-accent);
+  content: '';
+}
+
+.sc-page-tabs button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sc-page-actions,
+.sc-data-status {
+  display: flex;
+  align-items: center;
+}
+
+.sc-page-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.sc-data-status {
+  gap: 7px;
+  margin-right: 4px;
+  color: var(--sc-text-3);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.sc-data-status button,
+.sc-text-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sc-accent-strong);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sc-data-status button:disabled,
+.sc-text-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.sc-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #5ea978;
+  box-shadow: 0 0 0 3px rgba(94, 169, 120, 0.12);
+}
+
+.sc-btn {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--sc-text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.sc-btn:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.sc-btn-primary {
+  border-color: var(--sc-accent);
+  background: var(--sc-accent);
+  color: #17140e;
+  font-weight: 700;
+}
+
+.sc-btn-primary:hover:not(:disabled) {
+  border-color: var(--sc-accent-strong);
+  background: var(--sc-accent-strong);
+}
+
+.sc-btn-ghost {
+  border-color: var(--sc-line);
+  background: transparent;
+  color: var(--sc-text-2);
+}
+
+.sc-btn-ghost:hover:not(:disabled) {
+  border-color: var(--sc-line-strong);
+  color: var(--sc-text);
+}
+
+.sc-btn-soft {
+  min-height: 30px;
+  padding: 6px 11px;
+  border-color: var(--sc-line-strong);
+  background: var(--sc-accent-soft);
+  color: var(--sc-accent-strong);
+}
+
+.sc-workspace {
+  display: grid;
+  gap: 16px;
+}
+
+.sc-panel {
+  border: 1px solid var(--sc-line);
+  border-radius: 8px;
+  background: var(--sc-panel);
+}
+
+.sc-start-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(300px, 0.8fr);
+  gap: 16px;
+}
+
+.sc-composer,
+.sc-profile,
+.sc-personalized,
+.sc-template-library,
+.sc-history,
+.sc-plan-confirm,
+.sc-advanced {
+  padding: 18px;
+}
+
+.sc-panel-head,
+.sc-section-head,
+.sc-card-title,
+.sc-recommend-card footer,
+.sc-plan-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sc-eyebrow {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--sc-accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.sc-panel h3 {
+  color: var(--sc-text);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.sc-panel-head > div > p {
+  margin-top: 7px;
+  color: var(--sc-text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sc-saved-state,
+.sc-count-badge {
+  flex: none;
+  padding: 4px 8px;
+  border: 1px solid var(--sc-line);
+  border-radius: 999px;
+  color: var(--sc-text-3);
+  font-size: 10.5px;
+}
+
+.sc-prompt-box {
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: 7px;
+  background: #0c0f11;
+}
+
+.sc-prompt-box:focus-within {
+  border-color: var(--sc-accent);
+  box-shadow: 0 0 0 2px rgba(215, 183, 111, 0.08);
+}
+
+.sc-prompt-box.has-error {
+  border-color: rgba(221, 96, 96, 0.65);
+}
+
+.sc-prompt-box textarea {
+  display: block;
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+  padding: 15px 16px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--sc-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  box-sizing: border-box;
+}
+
+.sc-prompt-box textarea::placeholder {
+  color: #5f6467;
+}
+
+.sc-prompt-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 0 14px;
+  border-top: 1px solid var(--sc-line);
+  color: var(--sc-text-3);
+  font-size: 11px;
+}
+
+.sc-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.sc-text-btn {
+  font-size: 12px;
+}
+
+.sc-generate {
+  min-width: 146px;
+}
+
+.sc-inline-error,
+.sc-parse-warning {
+  margin-top: 10px;
+  color: #df7b75;
+  font-size: 12px;
+}
+
+.sc-profile {
+  display: flex;
+  min-height: 248px;
+  flex-direction: column;
+}
+
+.sc-profile-summary {
+  display: -webkit-box;
+  margin-top: 17px !important;
+  overflow: hidden;
+  color: var(--sc-text-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.sc-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.sc-tag-row span,
+.sc-plan-chips span {
+  padding: 5px 9px;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: 999px;
+  background: var(--sc-accent-soft);
+  color: var(--sc-accent-strong);
+  font-size: 11px;
+}
+
+.sc-profile-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+  margin: 15px 0 12px;
+}
+
+.sc-profile-facts div {
+  padding: 9px 10px;
+  border: 1px solid var(--sc-line);
+  border-radius: 6px;
+  background: #0f1214;
+}
+
+.sc-profile-facts span,
+.sc-profile-facts strong {
+  display: block;
+}
+
+.sc-profile-facts span {
+  color: var(--sc-text-3);
+  font-size: 10.5px;
+}
+
+.sc-profile-facts strong {
+  margin-top: 4px;
+  color: var(--sc-text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.sc-profile-detail {
+  margin: 0 0 8px !important;
+  color: var(--sc-text-3);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.sc-profile-empty {
+  margin-top: 22px;
+  padding: 16px;
+  border: 1px dashed var(--sc-line);
+  border-radius: 7px;
+  color: var(--sc-text-2);
+}
+
+.sc-profile-empty p {
+  margin-top: 7px;
+  color: var(--sc-text-3);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.sc-profile-refresh {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+.sc-section-head {
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+
+.sc-section-head > span {
+  color: var(--sc-text-3);
+  font-size: 11px;
+}
+
+.sc-recommend-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sc-recommend-card {
+  padding: 15px;
+  border: 1px solid var(--sc-line);
+  border-radius: 7px;
+  background: var(--sc-panel-raised);
+}
+
+.sc-card-title h4 {
+  font-size: 13.5px;
+}
+
+.sc-card-title span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--sc-accent-soft);
+  color: var(--sc-accent-strong);
+  font-size: 10px;
+}
+
+.sc-template-prompt {
+  min-height: 42px;
+  margin-top: 14px !important;
+  color: var(--sc-text-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.sc-rationale {
+  display: -webkit-box;
+  min-height: 34px;
+  margin-top: 8px !important;
+  overflow: hidden;
+  color: var(--sc-text-3);
+  font-size: 11px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.sc-recommend-card footer {
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--sc-line);
+}
+
+.sc-recommend-card footer > span {
+  color: var(--sc-text-3);
+  font-size: 10.5px;
+}
+
+.sc-library-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.sc-filter-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 11px;
+  padding-bottom: 9px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--sc-line);
+}
+
+.sc-filter-tabs button {
+  flex: none;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--sc-text-3);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.sc-filter-tabs button.is-active {
+  border-color: var(--sc-line-strong);
+  background: var(--sc-accent-soft);
+  color: var(--sc-accent-strong);
+}
+
+.sc-template-list,
+.sc-history-list {
+  display: grid;
+}
+
+.sc-template-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto 14px;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 8px 3px;
+  border: 0;
+  border-bottom: 1px solid var(--sc-line);
+  background: transparent;
+  color: var(--sc-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sc-template-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.sc-template-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: 6px;
+  color: var(--sc-accent-strong);
+  font-size: 12px;
+}
+
+.sc-template-copy,
+.sc-history-copy {
+  min-width: 0;
+}
+
+.sc-template-copy strong,
+.sc-template-copy small {
+  display: block;
+}
+
+.sc-template-copy strong {
+  font-size: 12.5px;
+}
+
+.sc-template-copy small {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--sc-text-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-template-meta,
+.sc-row-arrow {
+  color: var(--sc-text-3);
+  font-size: 10.5px;
+}
+
+.sc-row-arrow {
+  font-size: 18px;
+}
+
+.sc-history-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 0 10px;
+  border: 1px solid var(--sc-line);
+  border-radius: 6px;
+  background: #0d1012;
+  color: var(--sc-text-3);
+}
+
+.sc-history-search:focus-within {
+  border-color: var(--sc-line-strong);
+}
+
+.sc-history-search input {
+  width: 100%;
+  height: 34px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--sc-text);
+  font: inherit;
+  font-size: 11.5px;
+}
+
+.sc-history-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 62px;
+  border-bottom: 1px solid var(--sc-line);
+}
+
+.sc-star {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sc-text-3);
+  font-size: 17px;
+  cursor: pointer;
+}
+
+.sc-star.is-active {
+  color: var(--sc-accent-strong);
+}
+
+.sc-history-copy p {
+  overflow: hidden;
+  color: var(--sc-text-2);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-history-copy span {
+  display: block;
+  margin-top: 5px;
+  color: var(--sc-text-3);
+  font-size: 10px;
+}
+
+.sc-history-more {
+  width: 100%;
+  margin-top: 10px;
+  padding: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--sc-accent-strong);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.sc-loading-state,
+.sc-empty-line {
+  padding: 22px 10px;
+  color: var(--sc-text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.sc-empty-line .sc-text-btn {
+  margin-left: 8px;
+}
+
+.sc-plan-confirm {
+  border-color: var(--sc-line-strong);
+}
+
+.sc-plan-summary {
+  color: var(--sc-text-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.sc-plan-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 13px;
+}
+
+.sc-plan-actions {
+  align-items: center;
+  margin-top: 17px;
+  padding-top: 14px;
+  border-top: 1px solid var(--sc-line);
+}
+
+.sc-advanced .sc-config-v2 {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.sc-advanced .sc-field-wide {
+  grid-column: span 2;
+}
+
+.sc-advanced .sc-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.sc-top-notice,
+.sc-sync-note {
+  margin: -10px 0 16px;
+}
+
+.sc-sync-note {
+  padding: 9px 11px;
+  border: 1px solid rgba(94, 169, 120, 0.22);
+  border-radius: 6px;
+  background: rgba(94, 169, 120, 0.06);
+  color: #8fb99e;
+  font-size: 11.5px;
+}
+
+.sc-result-error,
+.sc-summary,
+.sc-wrap > .sc-note,
+.sc-table-wrap,
+.sc-interpret,
+.sc-wrap > template + .sc-state {
+  margin-top: 16px;
+}
+
+@media (max-width: 1280px) {
+  .sc-pagebar {
+    grid-template-columns: 1fr auto;
+  }
+
+  .sc-page-tabs {
+    order: 3;
+    grid-column: 1 / -1;
+    min-height: 42px;
+    border-top: 1px solid var(--sc-line);
+  }
+
+  .sc-pagebar {
+    padding-top: 13px;
+  }
+
+  .sc-advanced .sc-config-v2 {
+    grid-template-columns: repeat(4, minmax(110px, 1fr));
+  }
+}
+
+@media (max-width: 960px) {
+  .sc-start-grid,
+  .sc-library-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sc-recommend-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sc-profile {
+    min-height: 0;
+  }
+
+  .sc-profile-refresh {
+    margin-top: 16px;
+  }
+
+  .sc-advanced .sc-config-v2 {
+    grid-template-columns: repeat(2, minmax(110px, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .sc-wrap {
+    padding: 0 12px 24px;
+  }
+
+  .sc-pagebar {
+    grid-template-columns: 1fr;
+    gap: 12px;
+    margin: 0 -12px 14px;
+    padding: 14px 12px 0;
+  }
+
+  .sc-page-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .sc-data-status {
+    width: 100%;
+    white-space: normal;
+  }
+
+  .sc-page-tabs {
+    order: 4;
+    grid-column: auto;
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .sc-page-tabs button {
+    flex: 1;
+    min-width: 92px;
+  }
+
+  .sc-composer,
+  .sc-profile,
+  .sc-personalized,
+  .sc-template-library,
+  .sc-history,
+  .sc-plan-confirm,
+  .sc-advanced {
+    padding: 14px;
+  }
+
+  .sc-panel-head,
+  .sc-section-head {
+    align-items: flex-start;
+  }
+
+  .sc-section-head > span {
+    display: none;
+  }
+
+  .sc-composer-actions,
+  .sc-plan-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sc-generate,
+  .sc-plan-actions .sc-btn {
+    width: 100%;
+  }
+
+  .sc-template-row {
+    grid-template-columns: 32px minmax(0, 1fr) 12px;
+  }
+
+  .sc-template-meta {
+    display: none;
+  }
+
+  .sc-history-row {
+    grid-template-columns: 22px minmax(0, 1fr);
+    padding: 9px 0;
+  }
+
+  .sc-history-row .sc-btn {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .sc-advanced .sc-config-v2 {
+    grid-template-columns: 1fr;
+  }
+
+  .sc-advanced .sc-field-wide {
+    grid-column: span 1;
+  }
 }
 </style>

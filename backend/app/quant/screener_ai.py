@@ -79,7 +79,7 @@ _TEMPLATES_SYSTEM_PROMPT = """你是 A 股选股器模板设计师。根据用�
 你会收到持仓事实 JSON：positions（每只含 name/position_pct/price/pct_chg/turnover_rate/volume_ratio/total_mv_yi（亿元）/pe_ttm/above_ma20，字段可能为 null）与 stats（市值/换手率/PE/涨跌幅的 min/median/max 分布及站上 20 日线的只数）。
 
 只输出一个 JSON 对象，不要解释、不要 markdown 包裹：
-{"basis": "一句话概括用户持仓风格（40字以内）", "templates": [{"name": "4-6字模板名", "desc": "一句话说明条件（30字以内）", "query": {...}}]}
+{"basis": "一句话概括用户持仓风格（40字以内）", "templates": [{"name": "4-6字模板名", "prompt": "用户可直接使用的完整中文选股提示词（60字以内）", "rationale": "为什么适合当前持仓风格（30字以内）", "desc": "一句话说明条件（30字以内）", "query": {...}}]}
 
 要求：
 1. templates 给 5-8 个，每个 query 只能包含以下字段（没提到的字段直接省略，数值一律用 JSON 数字）：
@@ -90,7 +90,8 @@ _TEMPLATES_SYSTEM_PROMPT = """你是 A 股选股器模板设计师。根据用�
 2. 条件必须贴合持仓的真实分布（参照 stats 的 min/median/max），方向是找"与持仓同类"的股票。
 3. 各模板侧重不同风格（如放量异动 / 低估值 / 小盘活跃 / 均线趋势等），条件组合不要雷同。
 4. 严禁编造数据；条件宁可适度放宽也要保证能筛出股票。
-5. basis 只描述给定持仓特征，严禁臆测收益建议。"""
+5. prompt 必须与 query 完全一致，不得包含 query 无法表达的条件；rationale 只能引用持仓事实。
+6. basis 只描述给定持仓特征，严禁臆测收益建议。"""
 
 
 def _extract_json(text: str) -> dict:
@@ -296,7 +297,17 @@ def recommend_templates(facts: dict) -> dict:
             continue
         name = str(item.get("name") or "").strip()[:12] or f"风格模板{index + 1}"
         desc = str(item.get("desc") or "").strip()[:60] or _summarize(query).removeprefix("已解析：")
-        templates.append({"name": name, "desc": desc, "query": query})
+        prompt = str(item.get("prompt") or "").strip()[:120] or desc
+        rationale = str(item.get("rationale") or "").strip()[:80]
+        templates.append(
+            {
+                "name": name,
+                "desc": desc,
+                "prompt": prompt,
+                "rationale": rationale,
+                "query": query,
+            }
+        )
         if len(templates) >= 8:
             break
     if len(templates) < 3:

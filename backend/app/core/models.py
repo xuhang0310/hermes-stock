@@ -357,6 +357,34 @@ class ScreenerTemplateRecommendation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class ScreenerPromptHistory(Base):
+    """用户级选股提示词历史：自动保存、收藏并记录最近一次命中数。
+
+    user_id 不加外键，与用户生命周期解耦；prompt_hash 用于同一用户下去重，
+    重复使用相同提示词时只更新最近使用时间和使用次数。
+    """
+
+    __tablename__ = "screener_prompt_history"
+    __table_args__ = (
+        UniqueConstraint("user_id", "prompt_hash", name="uq_screener_prompt_history_user_hash"),
+        Index("ix_screener_prompt_history_user_last_used", "user_id", "last_used_at"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    parsed_query_json: Mapped[str | None] = mapped_column(Text)
+    parse_summary: Mapped[str | None] = mapped_column(Text)
+    last_result_count: Mapped[int | None] = mapped_column(Integer)
+    use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    last_used_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Document(Base):
     __tablename__ = "documents"
 

@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -106,7 +106,68 @@ def screener_parse(
         return JSONResponse(status_code=400, content=fail(str(exc), code="bad_request"))
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content=fail(str(exc), code="llm_error"))
-    return ok(result)
+    history = screener_service.record_prompt_history(
+        context.user.id,
+        payload.text,
+        parsed_query=result.get("query") or {},
+        parse_summary=result.get("summary") or "",
+    )
+    return ok({**result, "history_id": history["id"]})
+
+
+@router.get("/prompt-history")
+def screener_prompt_history(
+    limit: int = Query(default=50, ge=1, le=100),
+    search: str | None = Query(default=None, max_length=120),
+    favorite_only: bool = Query(default=False),
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    return ok(
+        screener_service.list_prompt_history(
+            context.user.id,
+            limit=limit,
+            search=search,
+            favorite_only=favorite_only,
+        )
+    )
+
+
+class PromptFavoriteIn(BaseModel):
+    is_favorite: bool
+
+
+@router.patch("/prompt-history/{history_id}/favorite")
+def screener_prompt_favorite(
+    history_id: int,
+    payload: PromptFavoriteIn,
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    try:
+        item = screener_service.set_prompt_favorite(
+            context.user.id, history_id, payload.is_favorite
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
+    return ok(item)
+
+
+class PromptResultIn(BaseModel):
+    result_count: int = Field(ge=0)
+
+
+@router.patch("/prompt-history/{history_id}/result")
+def screener_prompt_result(
+    history_id: int,
+    payload: PromptResultIn,
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    try:
+        item = screener_service.update_prompt_result_count(
+            context.user.id, history_id, payload.result_count
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
+    return ok(item)
 
 
 class InterpretIn(BaseModel):

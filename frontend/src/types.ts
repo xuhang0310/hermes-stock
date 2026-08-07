@@ -1514,6 +1514,7 @@ export type ScreenerParseResult = {
   query: ScreenerQuery
   summary: string
   fallback: boolean
+  history_id: number | null
 }
 
 export type ScreenerInterpretation = {
@@ -1524,6 +1525,8 @@ export type ScreenerInterpretation = {
 export type ScreenerTemplateItem = {
   name: string
   desc: string
+  prompt?: string
+  rationale?: string
   query: ScreenerQuery
   universe?: number
 }
@@ -1534,4 +1537,21 @@ export type ScreenerTemplateRecommendation = {
   position_count: number
   model: string | null
   generated_at: string | null
+}
+
+export type ScreenerPromptHistoryItem = {
+  id: number
+  text: string
+  parsed_query: ScreenerQuery
+  parse_summary: string
+  last_result_count: number | null
+  use_count: number
+  is_favorite: boolean
+  created_at: string | null
+  last_used_at: string | null
+}
+
+export type ScreenerPromptHistoryPage = {
+  items: ScreenerPromptHistoryItem[]
+  total: number
 }

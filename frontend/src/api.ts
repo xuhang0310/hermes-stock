@@ -69,6 +69,8 @@ import type {
   ScreenerSyncStatus,
   ScreenerParseResult,
   ScreenerInterpretation,
+  ScreenerPromptHistoryItem,
+  ScreenerPromptHistoryPage,
   ScreenerTemplateRecommendation,
   FactorBenchmarkInterpretation,
   FactorBenchmarkResult,
@@ -705,6 +707,32 @@ export const api = {
       method: 'POST',
       body: '{}',
     }).then((res) => res.data),
+  screenerPromptHistory: (params: { limit?: number; search?: string; favoriteOnly?: boolean } = {}) => {
+    const query = new URLSearchParams()
+    if (params.limit) query.set('limit', String(params.limit))
+    if (params.search) query.set('search', params.search)
+    if (params.favoriteOnly) query.set('favorite_only', 'true')
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<ScreenerPromptHistoryPage>>(
+      `/api/screener/prompt-history${suffix}`
+    ).then((res) => res.data)
+  },
+  screenerPromptFavorite: (historyId: number, isFavorite: boolean) =>
+    request<ApiEnvelope<ScreenerPromptHistoryItem>>(
+      `/api/screener/prompt-history/${historyId}/favorite`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ is_favorite: isFavorite }),
+      }
+    ).then((res) => res.data),
+  screenerPromptResult: (historyId: number, resultCount: number) =>
+    request<ApiEnvelope<ScreenerPromptHistoryItem>>(
+      `/api/screener/prompt-history/${historyId}/result`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ result_count: resultCount }),
+      }
+    ).then((res) => res.data),
   factorList: (params: { query?: string; zoo?: string; limit?: number } = {}) => {
     const query = new URLSearchParams()
     if (params.query) query.set('query', params.query)
