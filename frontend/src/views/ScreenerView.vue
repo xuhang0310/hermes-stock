@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type {
   ScreenerPromptHistoryItem,
@@ -14,6 +14,7 @@ import { renderMarkdown } from '../utils/markdown'
 
 type TemplateCategory = '热门' | '量价' | '趋势' | '估值' | '质量'
 type QuickTemplate = ScreenerTemplateItem & { category: TemplateCategory; prompt: string }
+type ScreenerWorkspace = 'quick' | 'builder'
 
 const DRAFT_KEY = 'hermes_screener_prompt_draft'
 const running = ref(false)
@@ -50,6 +51,8 @@ const parsedQuery = ref<ScreenerQuery | null>(null)
 const activeHistoryId = ref<number | null>(null)
 const advancedOpen = ref(false)
 const draftSaved = ref(false)
+const activeWorkspace = ref<ScreenerWorkspace>('quick')
+const resultSection = ref<HTMLElement | null>(null)
 
 const interpretLoading = ref(false)
 const interpretation = ref('')
@@ -167,7 +170,6 @@ function queryToChips(query: ScreenerQuery): string[] {
   return chips
 }
 
-const parsedChips = computed(() => queryToChips(parsedQuery.value || {}))
 const statusLine = computed(() => {
   const status = syncStatus.value
   if (!status) return ''
@@ -197,6 +199,8 @@ const visibleHistory = computed(() => {
     .filter((item) => !keyword || item.text.toLowerCase().includes(keyword))
     .slice(0, historyExpanded.value ? 50 : 3)
 })
+const builderChips = computed(() => queryToChips(buildQuery()))
+const hasBuilderConditions = computed(() => builderChips.value.length > 0)
 
 async function loadRecommendation() {
   try {
@@ -245,7 +249,7 @@ async function toggleFavorite(item: ScreenerPromptHistoryItem) {
   }
 }
 
-function usePrompt(text: string) {
+async function usePrompt(text: string) {
   nlText.value = text
   draftSaved.value = false
   parsedQuery.value = null
@@ -253,7 +257,10 @@ function usePrompt(text: string) {
   parseSummary.value = ''
   parseError.value = ''
   advancedOpen.value = false
+  activeWorkspace.value = 'quick'
   window.scrollTo({ top: 0, behavior: 'smooth' })
+  await nextTick()
+  await parseNL()
 }
 
 function templatePrompt(tpl: ScreenerTemplateItem): string {
@@ -367,6 +374,19 @@ function newStrategy() {
   ran.value = false
   interpretation.value = ''
   advancedOpen.value = false
+  activeWorkspace.value = 'quick'
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function openBuilder() {
+  activeWorkspace.value = 'builder'
+  advancedOpen.value = true
+  void nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
+}
+
+function openQuick() {
+  activeWorkspace.value = 'quick'
+  void nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
 }
 
 async function parseNL() {
@@ -383,6 +403,10 @@ async function parseNL() {
     if (!parsed.fallback && Object.keys(parsed.query).length) {
       parsedQuery.value = parsed.query
       applyQuery(parsed.query)
+      activeWorkspace.value = 'builder'
+      advancedOpen.value = true
+      await nextTick()
+      window.scrollTo({ top: 0, behavior: 'smooth' })
     }
     localStorage.removeItem(DRAFT_KEY)
     draftSaved.value = true
@@ -396,6 +420,12 @@ async function parseNL() {
 
 async function run() {
   if (running.value) return
+  if (!hasBuilderConditions.value) {
+    activeWorkspace.value = 'builder'
+    advancedOpen.value = true
+    error.value = '请至少设置一项筛选条件后再运行。'
+    return
+  }
   running.value = true
   error.value = ''
   interpretation.value = ''
@@ -406,6 +436,8 @@ async function run() {
     result.value = await api.runScreener(query)
     lastQuery.value = query
     ran.value = true
+    await nextTick()
+    resultSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     if (activeHistoryId.value != null) {
       void api.screenerPromptResult(activeHistoryId.value, result.value.total).then(() => loadPromptHistory())
     }
@@ -466,8 +498,15 @@ onMounted(() => {
         <p>用自然语言，把选股想法变成可核对的筛选条件</p>
       </div>
       <nav class="sc-page-tabs" aria-label="AI 选股工作区">
-        <button type="button" class="is-active">快速选股</button>
-        <button type="button" disabled title="将在策略工作区阶段开放">策略构建</button>
+        <button type="button" :class="{ 'is-active': activeWorkspace === 'quick' }" @click="openQuick">快速选股</button>
+        <button
+          type="button"
+          data-testid="screener-strategy-tab"
+          :class="{ 'is-active': activeWorkspace === 'builder' }"
+          @click="openBuilder"
+        >
+          策略构建
+        </button>
         <button type="button" disabled title="将在策略工作区阶段开放">我的策略</button>
       </nav>
       <div class="sc-page-actions">
@@ -478,8 +517,8 @@ onMounted(() => {
             {{ syncLoading ? '同步中…' : '同步数据' }}
           </button>
         </div>
-        <button type="button" class="sc-btn sc-btn-ghost" @click="saveDraft">
-          {{ draftSaved ? '已保存' : '保存草稿' }}
+        <button type="button" class="sc-btn sc-btn-ghost" @click="activeWorkspace === 'quick' ? saveDraft() : openQuick()">
+          {{ activeWorkspace === 'quick' ? (draftSaved ? '已保存' : '保存草稿') : '返回快速选股' }}
         </button>
         <button type="button" class="sc-btn sc-btn-primary" @click="newStrategy">新建选股</button>
       </div>
@@ -496,6 +535,7 @@ onMounted(() => {
     </p>
 
     <main class="sc-workspace">
+      <template v-if="activeWorkspace === 'quick'">
       <section class="sc-start-grid">
         <article class="sc-panel sc-composer">
           <header class="sc-panel-head">
@@ -522,8 +562,8 @@ onMounted(() => {
           </div>
           <div v-if="parseError" class="sc-inline-error">{{ parseError }}</div>
           <div class="sc-composer-actions">
-            <button type="button" class="sc-text-btn" @click="advancedOpen = !advancedOpen">
-              {{ advancedOpen ? '收起高级条件' : '手动设置高级条件' }}
+            <button type="button" class="sc-text-btn" @click="openBuilder">
+              手动设置高级条件
             </button>
             <button type="button" class="sc-btn sc-btn-primary sc-generate" :disabled="parseLoading || !nlText.trim()" @click="parseNL">
               <span v-if="parseLoading" class="btn-spin spin"></span>
@@ -674,26 +714,41 @@ onMounted(() => {
           </button>
         </article>
       </section>
+      </template>
 
-      <section v-if="parsedQuery" class="sc-panel sc-plan-confirm">
+      <section
+        v-else
+        data-testid="screener-builder"
+        class="sc-builder-shell"
+      >
+      <section class="sc-panel sc-plan-confirm">
         <header class="sc-section-head">
           <div>
-            <span class="sc-eyebrow">执行前确认</span>
-            <h3>AI 已理解为以下选股方案</h3>
+            <span class="sc-eyebrow">策略构建</span>
+            <h3>{{ parsedQuery ? '确认并运行当前策略' : '组合可执行的筛选条件' }}</h3>
           </div>
-          <span>每个条件都将按确定规则执行</span>
+          <span>{{ builderChips.length }} 项规则 · 每个条件均按确定规则执行</span>
         </header>
-        <p class="sc-plan-summary">{{ parseSummary }}</p>
-        <div class="sc-plan-chips">
-          <span v-for="chip in parsedChips" :key="chip">{{ chip }}</span>
+        <p class="sc-plan-summary">
+          {{ parseSummary || '逐项设置市场、估值、量价和趋势条件，确认后直接运行筛选。' }}
+        </p>
+        <div v-if="builderChips.length" class="sc-plan-chips">
+          <span v-for="chip in builderChips" :key="chip">{{ chip }}</span>
         </div>
+        <p v-else class="sc-plan-empty">还没有筛选条件，请在下方至少设置一项。</p>
         <footer class="sc-plan-actions">
           <button type="button" class="sc-btn sc-btn-ghost" @click="advancedOpen = !advancedOpen">
             {{ advancedOpen ? '收起条件' : '调整条件' }}
           </button>
-          <button type="button" class="sc-btn sc-btn-primary" :disabled="running" @click="run">
+          <button
+            type="button"
+            data-testid="screener-run"
+            class="sc-btn sc-btn-primary"
+            :disabled="running || !hasBuilderConditions"
+            @click="run"
+          >
             <span class="btn-spin" :class="{ spin: running }"></span>
-            {{ running ? '正在筛选…' : '确认并开始筛选' }}
+            {{ running ? '正在筛选…' : '运行当前策略' }}
           </button>
         </footer>
       </section>
@@ -701,11 +756,11 @@ onMounted(() => {
       <section v-show="advancedOpen" class="sc-panel sc-advanced">
         <header class="sc-section-head">
           <div>
-            <span class="sc-eyebrow">高级条件</span>
+            <span class="sc-eyebrow">策略规则</span>
             <h3>逐项检查或手动调整</h3>
           </div>
-          <button v-if="!parsedQuery" type="button" class="sc-btn sc-btn-primary" :disabled="running" @click="run">
-            {{ running ? '正在筛选…' : '按当前条件筛选' }}
+          <button type="button" class="sc-btn sc-btn-primary" :disabled="running || !hasBuilderConditions" @click="run">
+            {{ running ? '正在筛选…' : '运行当前条件' }}
           </button>
         </header>
         <div class="sc-config sc-config-v2">
@@ -725,11 +780,12 @@ onMounted(() => {
           <label class="sc-field sc-field-wide"><span>关键词（代码/名称）</span><input v-model="keyword" type="text" class="sc-input" placeholder="可空" /></label>
         </div>
       </section>
+      </section>
 
       <p v-if="parseSummary && !parsedQuery" class="sc-parse-warning">{{ parseSummary }}</p>
     </main>
 
-
+    <section v-if="activeWorkspace === 'builder'" ref="resultSection" class="sc-builder-results">
     <div v-if="error" class="notice notice-danger sc-result-error">
       <strong>筛选失败</strong>
       <span>{{ error }}</span>
@@ -803,9 +859,10 @@ onMounted(() => {
         <p v-else class="sc-note">点击「生成大白话解读」，AI 会解释这组条件在选什么样的股票，并逐只点评命中结果。</p>
       </section>
     </template>
-    <div v-else-if="!ran && !error" class="sc-state sc-legacy-empty">
-      点击「智能推荐」或「常用模板」一键筛选，或点「同步全市场」更新数据后用一句话描述条件、手动填写后「开始筛选」。留空的条件不参与过滤。
+    <div v-else-if="!ran && !error" class="sc-state sc-builder-empty">
+      策略尚未运行。确认上方条件后点击「运行当前策略」，筛选结果将显示在这里。
     </div>
+    </section>
   </section>
 </template>
 
@@ -1172,8 +1229,24 @@ select.sc-input {
   color: var(--sc-text);
 }
 
-.sc-legacy-empty {
-  display: none !important;
+.sc-builder-shell,
+.sc-builder-results {
+  display: grid;
+  gap: 16px;
+}
+
+.sc-builder-results {
+  scroll-margin-top: 88px;
+}
+
+.sc-plan-empty {
+  margin-top: 13px !important;
+  color: var(--sc-text-3);
+  font-size: 12px;
+}
+
+.sc-builder-empty {
+  background: var(--sc-panel);
 }
 
 .sc-pagebar {
@@ -1222,6 +1295,10 @@ select.sc-input {
   color: var(--sc-text-3);
   font: inherit;
   font-size: 13px;
+}
+
+.sc-page-tabs button:not(:disabled) {
+  cursor: pointer;
 }
 
 .sc-page-tabs button.is-active {
