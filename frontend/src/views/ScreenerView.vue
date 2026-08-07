@@ -53,6 +53,7 @@ const advancedOpen = ref(false)
 const draftSaved = ref(false)
 const activeWorkspace = ref<ScreenerWorkspace>('quick')
 const resultSection = ref<HTMLElement | null>(null)
+const ruleEditor = ref<HTMLElement | null>(null)
 
 const interpretLoading = ref(false)
 const interpretation = ref('')
@@ -389,6 +390,22 @@ function openQuick() {
   void nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
 }
 
+function clearBuilderConditions() {
+  applyQuery({})
+  parsedQuery.value = null
+  parseSummary.value = ''
+  result.value = null
+  ran.value = false
+  error.value = ''
+  interpretation.value = ''
+  interpretError.value = ''
+  void nextTick(() => ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+
+function focusRuleEditor() {
+  ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 async function parseNL() {
   const text = String(nlText.value).trim()
   if (!text || parseLoading.value) return
@@ -442,7 +459,9 @@ async function run() {
     lastQuery.value = query
     ran.value = true
     await nextTick()
-    resultSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if (window.innerWidth < 1180) {
+      resultSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
     if (activeHistoryId.value != null) {
       void api.screenerPromptResult(activeHistoryId.value, result.value.total).then(() => loadPromptHistory())
     }
@@ -721,153 +740,161 @@ onMounted(() => {
       </section>
       </template>
 
-      <section
-        v-else
-        data-testid="screener-builder"
-        class="sc-builder-shell"
-      >
-      <section class="sc-panel sc-plan-confirm">
-        <header class="sc-section-head">
-          <div>
+      <section v-else data-testid="screener-builder" class="sc-builder-workbench">
+        <header class="sc-panel sc-builder-commandbar">
+          <div class="sc-builder-intro">
             <span class="sc-eyebrow">策略构建</span>
-            <h3>{{ parsedQuery ? '确认并运行当前策略' : '组合可执行的筛选条件' }}</h3>
+            <h3>{{ parsedQuery ? '检查条件并开始筛选' : '建立你的选股条件' }}</h3>
+            <p>{{ parseSummary || '按范围、估值、交易特征和趋势分组设置条件。所有规则同时满足才会进入结果。' }}</p>
           </div>
-          <span>{{ builderChips.length }} 项规则 · 每个条件均按确定规则执行</span>
+          <div class="sc-builder-command-actions">
+            <button type="button" class="sc-btn sc-btn-ghost" :disabled="!hasBuilderConditions" @click="clearBuilderConditions">清空条件</button>
+            <button
+              type="button"
+              data-testid="screener-run"
+              class="sc-btn sc-btn-primary sc-run-main"
+              :disabled="running || !hasBuilderConditions"
+              @click="run"
+            >
+              <span class="btn-spin" :class="{ spin: running }"></span>
+              {{ running ? '正在筛选…' : '运行筛选' }}
+            </button>
+          </div>
+          <div class="sc-builder-rule-summary">
+            <strong>{{ builderChips.length }} 项生效条件</strong>
+            <div v-if="builderChips.length" class="sc-plan-chips">
+              <span v-for="chip in builderChips" :key="chip">{{ chip }}</span>
+            </div>
+            <span v-else>先在下方设置至少一项条件</span>
+          </div>
         </header>
-        <p class="sc-plan-summary">
-          {{ parseSummary || '逐项设置市场、估值、量价和趋势条件，确认后直接运行筛选。' }}
-        </p>
-        <div v-if="builderChips.length" class="sc-plan-chips">
-          <span v-for="chip in builderChips" :key="chip">{{ chip }}</span>
-        </div>
-        <p v-else class="sc-plan-empty">还没有筛选条件，请在下方至少设置一项。</p>
-        <footer class="sc-plan-actions">
-          <button type="button" class="sc-btn sc-btn-ghost" @click="advancedOpen = !advancedOpen">
-            {{ advancedOpen ? '收起条件' : '调整条件' }}
-          </button>
-          <button
-            type="button"
-            data-testid="screener-run"
-            class="sc-btn sc-btn-primary"
-            :disabled="running || !hasBuilderConditions"
-            @click="run"
-          >
-            <span class="btn-spin" :class="{ spin: running }"></span>
-            {{ running ? '正在筛选…' : '运行当前策略' }}
-          </button>
-        </footer>
-      </section>
 
-      <section v-show="advancedOpen" class="sc-panel sc-advanced">
-        <header class="sc-section-head">
-          <div>
-            <span class="sc-eyebrow">策略规则</span>
-            <h3>逐项检查或手动调整</h3>
-          </div>
-          <button type="button" class="sc-btn sc-btn-primary" :disabled="running || !hasBuilderConditions" @click="run">
-            {{ running ? '正在筛选…' : '运行当前条件' }}
-          </button>
-        </header>
-        <div class="sc-config sc-config-v2">
-          <label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">不限</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label>
-          <label class="sc-field"><span>价格下限</span><input v-model="priceMin" type="number" min="0" step="0.01" class="sc-input" placeholder="可空" /></label>
-          <label class="sc-field"><span>价格上限</span><input v-model="priceMax" type="number" min="0" step="0.01" class="sc-input" placeholder="可空" /></label>
-          <label class="sc-field"><span>涨跌幅下限 %</span><input v-model="pctChgMin" type="number" step="0.01" class="sc-input" placeholder="如 0" /></label>
-          <label class="sc-field"><span>涨跌幅上限 %</span><input v-model="pctChgMax" type="number" step="0.01" class="sc-input" placeholder="可空" /></label>
-          <label class="sc-field"><span>量比下限</span><input v-model="volumeRatioMin" type="number" min="0" step="0.1" class="sc-input" placeholder="如 1.5" /></label>
-          <label class="sc-field"><span>换手率下限 %</span><input v-model="turnoverMin" type="number" min="0" step="0.1" class="sc-input" placeholder="如 5" /></label>
-          <label class="sc-field"><span>换手率上限 %</span><input v-model="turnoverMax" type="number" min="0" step="0.1" class="sc-input" placeholder="如 15" /></label>
-          <label class="sc-field"><span>总市值下限（亿）</span><input v-model="mvMin" type="number" min="0" step="1" class="sc-input" placeholder="可空" /></label>
-          <label class="sc-field"><span>总市值上限（亿）</span><input v-model="mvMax" type="number" min="0" step="1" class="sc-input" placeholder="如 200" /></label>
-          <label class="sc-field"><span>PE(TTM) 下限</span><input v-model="peMin" type="number" step="0.1" class="sc-input" placeholder="可空" /></label>
-          <label class="sc-field"><span>PE(TTM) 上限</span><input v-model="peMax" type="number" step="0.1" class="sc-input" placeholder="如 50" /></label>
-          <label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label>
-          <label class="sc-field sc-field-wide"><span>关键词（代码/名称）</span><input v-model="keyword" type="text" class="sc-input" placeholder="可空" /></label>
+        <div class="sc-builder-layout">
+          <aside ref="ruleEditor" class="sc-panel sc-rule-editor">
+            <header class="sc-rule-editor-head">
+              <div>
+                <span class="sc-eyebrow">筛选规则</span>
+                <h3>逐组设置条件</h3>
+              </div>
+              <span>留空表示不限</span>
+            </header>
+
+            <section class="sc-rule-group">
+              <header><strong>股票范围</strong><span>先确定在哪些股票里找</span></header>
+              <div class="sc-rule-grid sc-rule-grid-scope">
+                <label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">全部市场</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label>
+                <label class="sc-field"><span>代码或名称</span><input v-model="keyword" type="text" class="sc-input" placeholder="例如 600519 或 贵州茅台" /></label>
+              </div>
+            </section>
+
+            <section class="sc-rule-group">
+              <header><strong>价格与规模</strong><span>控制股价和公司体量</span></header>
+              <div class="sc-rule-grid">
+                <div class="sc-range-field"><span>最新价（元）</span><div><input v-model="priceMin" type="number" min="0" step="0.01" class="sc-input" placeholder="最低" /><em>至</em><input v-model="priceMax" type="number" min="0" step="0.01" class="sc-input" placeholder="最高" /></div></div>
+                <div class="sc-range-field"><span>总市值（亿元）</span><div><input v-model="mvMin" type="number" min="0" step="1" class="sc-input" placeholder="最低" /><em>至</em><input v-model="mvMax" type="number" min="0" step="1" class="sc-input" placeholder="最高" /></div></div>
+              </div>
+            </section>
+
+            <section class="sc-rule-group">
+              <header><strong>估值</strong><span>用市盈率排除过高或异常估值</span></header>
+              <div class="sc-rule-grid">
+                <div class="sc-range-field"><span>PE（TTM）</span><div><input v-model="peMin" type="number" step="0.1" class="sc-input" placeholder="最低" /><em>至</em><input v-model="peMax" type="number" step="0.1" class="sc-input" placeholder="最高" /></div></div>
+              </div>
+            </section>
+
+            <section class="sc-rule-group">
+              <header><strong>今日交易特征</strong><span>观察强弱、活跃度和放量程度</span></header>
+              <div class="sc-rule-grid">
+                <div class="sc-range-field"><span>今日涨跌幅（%）</span><div><input v-model="pctChgMin" type="number" step="0.01" class="sc-input" placeholder="最低" /><em>至</em><input v-model="pctChgMax" type="number" step="0.01" class="sc-input" placeholder="最高" /></div></div>
+                <div class="sc-range-field"><span>换手率（%）</span><div><input v-model="turnoverMin" type="number" min="0" step="0.1" class="sc-input" placeholder="最低" /><em>至</em><input v-model="turnoverMax" type="number" min="0" step="0.1" class="sc-input" placeholder="最高" /></div></div>
+                <label class="sc-field"><span>量比不低于</span><input v-model="volumeRatioMin" type="number" min="0" step="0.1" class="sc-input" placeholder="例如 1.5" /></label>
+              </div>
+            </section>
+
+            <section class="sc-rule-group">
+              <header><strong>趋势</strong><span>只保留收盘价站上指定均线的股票</span></header>
+              <div class="sc-rule-grid">
+                <label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label>
+              </div>
+            </section>
+          </aside>
+
+          <section ref="resultSection" class="sc-panel sc-results-workspace">
+            <header class="sc-results-head">
+              <div>
+                <span class="sc-eyebrow">筛选结果</span>
+                <h3>{{ result ? `找到 ${result.total} 只股票` : '等待运行' }}</h3>
+              </div>
+              <span v-if="result">基础条件命中 {{ result.universe.toLocaleString('zh-CN') }} 只 · 最多展示 50 只</span>
+              <span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span>
+            </header>
+
+            <div v-if="error" class="notice notice-danger sc-result-error">
+              <strong>筛选失败</strong>
+              <span>{{ error }}</span>
+            </div>
+
+            <template v-if="result">
+              <div v-if="result.items.length" class="sc-table-wrap">
+                <table class="sc-table">
+                  <thead>
+                    <tr>
+                      <th>标的</th>
+                      <th class="num">最新价</th>
+                      <th class="num">涨跌幅</th>
+                      <th class="num">量比</th>
+                      <th class="num">换手率</th>
+                      <th class="num">市值(亿)</th>
+                      <th class="num">PE</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in result.items" :key="item.symbol">
+                      <td><strong>{{ item.name }}</strong><span class="sc-symbol">{{ item.symbol }}</span></td>
+                      <td class="num">{{ formatNum(item.price) }}</td>
+                      <td class="num" :class="pctTone(item.pct_chg)">{{ formatPct(item.pct_chg) }}</td>
+                      <td class="num">{{ formatNum(item.volume_ratio) }}</td>
+                      <td class="num">{{ formatNum(item.turnover_rate) }}%</td>
+                      <td class="num">{{ formatNum(item.total_mv_yi, 1) }}</td>
+                      <td class="num">{{ formatNum(item.pe_ttm, 1) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="sc-result-empty">
+                <strong>当前条件没有找到股票</strong>
+                <p>这不是系统报错。通常是条件组合过严，或量比、均线等指标在最新数据中缺失。</p>
+                <div class="sc-empty-rules"><span v-for="chip in builderChips" :key="chip">{{ chip }}</span></div>
+                <button type="button" class="sc-btn sc-btn-soft" @click="focusRuleEditor">返回调整条件</button>
+              </div>
+
+              <section v-if="result.items.length" class="sc-interpret">
+                <header class="sc-interpret-head">
+                  <div><strong>结果解读</strong><span>解释条件含义和命中股票特征</span></div>
+                  <button type="button" class="sc-btn sc-btn-ghost" :disabled="interpretLoading" @click="interpret">
+                    <span class="btn-spin" :class="{ spin: interpretLoading }"></span>
+                    {{ interpretLoading ? '正在生成…' : interpretation ? '重新生成' : '生成解读' }}
+                  </button>
+                </header>
+                <div v-if="interpretError" class="notice notice-danger"><strong>解读失败</strong><span>{{ interpretError }}</span></div>
+                <div v-else-if="interpretation" class="sc-interpret-body">
+                  <div v-if="interpretModel" class="sc-interpret-model">由 {{ interpretModel }} 生成</div>
+                  <div class="md-body" v-html="renderMarkdown(interpretation)"></div>
+                </div>
+              </section>
+            </template>
+
+            <div v-else-if="running" class="sc-result-loading"><span class="btn-spin spin"></span><strong>正在按 {{ builderChips.length }} 项条件筛选</strong><p>通常几秒内完成。</p></div>
+            <div v-else-if="!error" class="sc-result-ready">
+              <strong>设置条件后运行筛选</strong>
+              <p>结果会留在右侧，方便边看边调整。所有条件按“并且”关系执行。</p>
+            </div>
+          </section>
         </div>
-      </section>
       </section>
 
       <p v-if="parseSummary && !parsedQuery" class="sc-parse-warning">{{ parseSummary }}</p>
     </main>
-
-    <section v-if="activeWorkspace === 'builder'" ref="resultSection" class="sc-builder-results">
-    <div v-if="error" class="notice notice-danger sc-result-error">
-      <strong>筛选失败</strong>
-      <span>{{ error }}</span>
-    </div>
-
-    <template v-if="result">
-      <div class="sc-summary">
-        <div class="stat">
-          <span class="stat-num">{{ result.universe }}</span>
-          <span class="stat-label">候选池（最近同步交易日）</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num">{{ result.total }}</span>
-          <span class="stat-label">命中</span>
-        </div>
-      </div>
-      <p class="sc-note">候选池为最近同步交易日的全市场股票（点「同步全市场」更新）；均线条件需本地 K 线足够，不足则剔除。</p>
-
-      <div v-if="result.items.length" class="sc-table-wrap">
-        <table class="sc-table">
-          <thead>
-            <tr>
-              <th>代码</th>
-              <th>名称</th>
-              <th>市场</th>
-              <th class="num">最新价</th>
-              <th class="num">涨跌幅</th>
-              <th class="num">量比</th>
-              <th class="num">换手率%</th>
-              <th class="num">总市值(亿)</th>
-              <th class="num">PE(TTM)</th>
-              <th class="num">参考均线</th>
-              <th>数据日期</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in result.items" :key="item.symbol">
-              <td class="sc-symbol">{{ item.symbol }}</td>
-              <td>{{ item.name }}</td>
-              <td>{{ item.market || '—' }}</td>
-              <td class="num">{{ formatNum(item.price) }}</td>
-              <td class="num" :class="pctTone(item.pct_chg)">{{ formatPct(item.pct_chg) }}</td>
-              <td class="num">{{ formatNum(item.volume_ratio) }}</td>
-              <td class="num">{{ formatNum(item.turnover_rate) }}</td>
-              <td class="num">{{ formatNum(item.total_mv_yi, 1) }}</td>
-              <td class="num">{{ formatNum(item.pe_ttm, 1) }}</td>
-              <td class="num">{{ formatNum(item.ma_value) }}</td>
-              <td>{{ fmtDate(item.trade_date) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-else class="sc-state">没有符合条件的股票，可放宽条件或点「同步全市场」更新数据后重试。</div>
-
-      <section v-if="result.items.length" class="sc-interpret">
-        <header class="sc-interpret-head">
-          <strong>AI 解读</strong>
-          <button type="button" class="btn-outline" :disabled="interpretLoading" @click="interpret">
-            <span class="btn-spin" :class="{ spin: interpretLoading }"></span>
-            {{ interpretLoading ? '正在生成解读…' : interpretation ? '重新生成解读' : '生成大白话解读' }}
-          </button>
-        </header>
-        <div v-if="interpretError" class="notice notice-danger">
-          <strong>解读失败</strong>
-          <span>{{ interpretError }}</span>
-        </div>
-        <div v-else-if="interpretation" class="sc-interpret-body">
-          <div v-if="interpretModel" class="sc-interpret-model">由 {{ interpretModel }} 生成</div>
-          <div class="md-body" v-html="renderMarkdown(interpretation)"></div>
-        </div>
-        <p v-else class="sc-note">点击「生成大白话解读」，AI 会解释这组条件在选什么样的股票，并逐只点评命中结果。</p>
-      </section>
-    </template>
-    <div v-else-if="!ran && !error" class="sc-state sc-builder-empty">
-      策略尚未运行。确认上方条件后点击「运行当前策略」，筛选结果将显示在这里。
-    </div>
-    </section>
   </section>
 </template>
 
@@ -1234,24 +1261,249 @@ select.sc-input {
   color: var(--sc-text);
 }
 
-.sc-builder-shell,
-.sc-builder-results {
+.sc-builder-workbench {
   display: grid;
-  gap: 16px;
+  gap: 14px;
 }
 
-.sc-builder-results {
-  scroll-margin-top: 88px;
+.sc-builder-commandbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px 24px;
+  padding: 18px 20px;
 }
 
-.sc-plan-empty {
-  margin-top: 13px !important;
+.sc-builder-intro p {
+  max-width: 760px;
+  margin-top: 7px !important;
+  color: var(--sc-text-3);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.sc-builder-command-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.sc-run-main {
+  min-width: 112px;
+}
+
+.sc-builder-rule-summary {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--sc-line);
   color: var(--sc-text-3);
   font-size: 12px;
 }
 
-.sc-builder-empty {
-  background: var(--sc-panel);
+.sc-builder-rule-summary > strong {
+  flex: none;
+  padding-top: 4px;
+  color: var(--sc-text-2);
+  font-size: 12px;
+}
+
+.sc-builder-rule-summary .sc-plan-chips {
+  margin-top: 0;
+}
+
+.sc-builder-layout {
+  display: grid;
+  grid-template-columns: minmax(390px, 0.72fr) minmax(560px, 1.35fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.sc-rule-editor,
+.sc-results-workspace {
+  min-width: 0;
+  overflow: hidden;
+  scroll-margin-top: 88px;
+}
+
+.sc-rule-editor-head,
+.sc-results-head {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--sc-line);
+  box-sizing: border-box;
+}
+
+.sc-rule-editor-head > span,
+.sc-results-head > span {
+  color: var(--sc-text-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: right;
+}
+
+.sc-rule-group {
+  padding: 15px 18px 17px;
+  border-bottom: 1px solid var(--sc-line);
+}
+
+.sc-rule-group:last-child {
+  border-bottom: 0;
+}
+
+.sc-rule-group > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+
+.sc-rule-group > header strong {
+  color: var(--sc-text);
+  font-size: 13px;
+}
+
+.sc-rule-group > header span {
+  color: var(--sc-text-3);
+  font-size: 11px;
+  text-align: right;
+}
+
+.sc-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sc-rule-grid-scope {
+  grid-template-columns: minmax(132px, 0.58fr) minmax(0, 1.42fr);
+}
+
+.sc-range-field {
+  display: grid;
+  gap: 6px;
+}
+
+.sc-range-field > span {
+  color: var(--sc-text-2);
+  font-size: 12px;
+}
+
+.sc-range-field > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+
+.sc-range-field em {
+  color: var(--sc-text-3);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.sc-rule-editor .sc-field {
+  gap: 6px;
+  color: var(--sc-text-2);
+}
+
+.sc-rule-editor .sc-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+
+.sc-results-workspace .sc-table-wrap {
+  max-height: 620px;
+  margin: 0;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+}
+
+.sc-results-workspace .sc-table th,
+.sc-results-workspace .sc-table td {
+  padding: 10px 12px;
+}
+
+.sc-results-workspace .sc-table td:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sc-results-workspace .sc-symbol {
+  color: var(--sc-text-3);
+  font-size: 10.5px;
+}
+
+.sc-result-error {
+  margin: 14px 18px 0 !important;
+}
+
+.sc-result-ready,
+.sc-result-loading,
+.sc-result-empty {
+  display: flex;
+  min-height: 320px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 34px;
+  color: var(--sc-text-3);
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.sc-result-ready strong,
+.sc-result-loading strong,
+.sc-result-empty strong {
+  color: var(--sc-text);
+  font-size: 14px;
+}
+
+.sc-result-ready p,
+.sc-result-loading p,
+.sc-result-empty p {
+  max-width: 520px;
+  color: var(--sc-text-3);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.sc-empty-rules {
+  display: flex;
+  max-width: 620px;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+  margin: 4px 0 8px;
+}
+
+.sc-empty-rules span {
+  padding: 5px 8px;
+  border: 1px solid var(--sc-line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--sc-text-2);
+  font-size: 11px;
+}
+
+.sc-results-workspace .sc-interpret {
+  margin: 0;
+  border-width: 1px 0 0;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.012);
 }
 
 .sc-pagebar {
@@ -1995,6 +2247,10 @@ select.sc-input {
   .sc-advanced .sc-config-v2 {
     grid-template-columns: repeat(4, minmax(110px, 1fr));
   }
+
+  .sc-builder-layout {
+    grid-template-columns: 390px minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 960px) {
@@ -2017,6 +2273,10 @@ select.sc-input {
 
   .sc-advanced .sc-config-v2 {
     grid-template-columns: repeat(2, minmax(110px, 1fr));
+  }
+
+  .sc-builder-layout {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -2108,6 +2368,71 @@ select.sc-input {
 
   .sc-advanced .sc-field-wide {
     grid-column: span 1;
+  }
+
+  .sc-builder-commandbar {
+    grid-template-columns: 1fr;
+    padding: 15px;
+  }
+
+  .sc-builder-command-actions {
+    justify-content: stretch;
+  }
+
+  .sc-builder-command-actions .sc-btn {
+    flex: 1;
+    min-height: 42px;
+  }
+
+  .sc-builder-rule-summary {
+    grid-column: auto;
+    flex-direction: column;
+  }
+
+  .sc-rule-editor-head,
+  .sc-results-head {
+    min-height: 0;
+    align-items: flex-start;
+    padding: 14px;
+  }
+
+  .sc-results-head {
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .sc-results-head > span {
+    text-align: left;
+  }
+
+  .sc-rule-group {
+    padding: 14px;
+  }
+
+  .sc-rule-group > header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sc-rule-group > header span {
+    text-align: left;
+  }
+
+  .sc-rule-grid,
+  .sc-rule-grid-scope {
+    grid-template-columns: 1fr;
+  }
+
+  .sc-rule-editor .sc-input {
+    min-height: 44px;
+  }
+
+  .sc-result-ready,
+  .sc-result-loading,
+  .sc-result-empty {
+    min-height: 240px;
+    padding: 26px 18px;
   }
 }
 </style>
