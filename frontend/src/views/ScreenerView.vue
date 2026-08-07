@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type {
+  ScreenerItem,
   ScreenerPromptHistoryItem,
   ScreenerQuery,
   ScreenerResult,
@@ -54,6 +55,9 @@ const draftSaved = ref(false)
 const activeWorkspace = ref<ScreenerWorkspace>('quick')
 const resultSection = ref<HTMLElement | null>(null)
 const ruleEditor = ref<HTMLElement | null>(null)
+type ResultSort = 'pct_desc' | 'turnover_desc' | 'mv_asc' | 'pe_asc'
+const resultSort = ref<ResultSort>('pct_desc')
+const watchlistState = ref<Record<string, 'adding' | 'added' | 'error'>>({})
 
 const interpretLoading = ref(false)
 const interpretation = ref('')
@@ -202,6 +206,17 @@ const visibleHistory = computed(() => {
 })
 const builderChips = computed(() => queryToChips(buildQuery()))
 const hasBuilderConditions = computed(() => builderChips.value.length > 0)
+const sortedResultItems = computed(() => {
+  const items = [...(result.value?.items || [])]
+  const numberOr = (value: number | null | undefined, fallback: number) =>
+    typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  return items.sort((a, b) => {
+    if (resultSort.value === 'turnover_desc') return numberOr(b.turnover_rate, -Infinity) - numberOr(a.turnover_rate, -Infinity)
+    if (resultSort.value === 'mv_asc') return numberOr(a.total_mv_yi, Infinity) - numberOr(b.total_mv_yi, Infinity)
+    if (resultSort.value === 'pe_asc') return numberOr(a.pe_ttm, Infinity) - numberOr(b.pe_ttm, Infinity)
+    return numberOr(b.pct_chg, -Infinity) - numberOr(a.pct_chg, -Infinity)
+  })
+})
 
 async function loadRecommendation() {
   try {
@@ -399,11 +414,37 @@ function clearBuilderConditions() {
   error.value = ''
   interpretation.value = ''
   interpretError.value = ''
+  watchlistState.value = {}
   void nextTick(() => ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
 function focusRuleEditor() {
   ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function relaxDataSensitiveRules() {
+  volumeRatioMin.value = ''
+  aboveMa.value = ''
+  result.value = null
+  ran.value = false
+  error.value = ''
+  interpretation.value = ''
+  void nextTick(() => ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+
+async function addResultToWatchlist(item: ScreenerItem) {
+  if (watchlistState.value[item.symbol] === 'adding' || watchlistState.value[item.symbol] === 'added') return
+  watchlistState.value = { ...watchlistState.value, [item.symbol]: 'adding' }
+  try {
+    await api.addWatchlist({
+      symbol: item.symbol,
+      group_name: 'AI选股',
+      reason: `来自 AI 选股：${builderChips.value.join('、')}`.slice(0, 500),
+    })
+    watchlistState.value = { ...watchlistState.value, [item.symbol]: 'added' }
+  } catch {
+    watchlistState.value = { ...watchlistState.value, [item.symbol]: 'error' }
+  }
 }
 
 async function parseNL() {
@@ -449,6 +490,7 @@ async function run() {
     return
   }
   running.value = true
+  watchlistState.value = {}
   error.value = ''
   interpretation.value = ''
   interpretModel.value = ''
@@ -825,7 +867,11 @@ onMounted(() => {
                 <span class="sc-eyebrow">筛选结果</span>
                 <h3>{{ result ? `找到 ${result.total} 只股票` : '等待运行' }}</h3>
               </div>
-              <span v-if="result">基础条件命中 {{ result.universe.toLocaleString('zh-CN') }} 只 · 最多展示 50 只</span>
+              <div v-if="result?.items.length" class="sc-result-tools">
+                <span>基础条件命中 {{ result.universe.toLocaleString('zh-CN') }} 只 · 最多展示 50 只</span>
+                <label>排序<select v-model="resultSort" class="sc-result-sort"><option value="pct_desc">涨幅从高到低</option><option value="turnover_desc">换手率从高到低</option><option value="mv_asc">市值从小到大</option><option value="pe_asc">PE 从低到高</option></select></label>
+              </div>
+              <span v-else-if="result">基础条件命中 {{ result.universe.toLocaleString('zh-CN') }} 只 · 最多展示 50 只</span>
               <span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span>
             </header>
 
@@ -846,10 +892,11 @@ onMounted(() => {
                       <th class="num">换手率</th>
                       <th class="num">市值(亿)</th>
                       <th class="num">PE</th>
+                      <th class="action">操作</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="item in result.items" :key="item.symbol">
+                    <tr v-for="item in sortedResultItems" :key="item.symbol">
                       <td><strong>{{ item.name }}</strong><span class="sc-symbol">{{ item.symbol }}</span></td>
                       <td class="num">{{ formatNum(item.price) }}</td>
                       <td class="num" :class="pctTone(item.pct_chg)">{{ formatPct(item.pct_chg) }}</td>
@@ -857,6 +904,7 @@ onMounted(() => {
                       <td class="num">{{ formatNum(item.turnover_rate) }}%</td>
                       <td class="num">{{ formatNum(item.total_mv_yi, 1) }}</td>
                       <td class="num">{{ formatNum(item.pe_ttm, 1) }}</td>
+                      <td class="action"><button type="button" class="sc-row-action" :class="{ 'is-added': watchlistState[item.symbol] === 'added', 'has-error': watchlistState[item.symbol] === 'error' }" :disabled="watchlistState[item.symbol] === 'adding' || watchlistState[item.symbol] === 'added'" @click="addResultToWatchlist(item)">{{ watchlistState[item.symbol] === 'adding' ? '添加中…' : watchlistState[item.symbol] === 'added' ? '已加入' : watchlistState[item.symbol] === 'error' ? '重试' : '加入自选' }}</button></td>
                     </tr>
                   </tbody>
                 </table>
@@ -865,7 +913,10 @@ onMounted(() => {
                 <strong>当前条件没有找到股票</strong>
                 <p>这不是系统报错。通常是条件组合过严，或量比、均线等指标在最新数据中缺失。</p>
                 <div class="sc-empty-rules"><span v-for="chip in builderChips" :key="chip">{{ chip }}</span></div>
-                <button type="button" class="sc-btn sc-btn-soft" @click="focusRuleEditor">返回调整条件</button>
+                <div class="sc-empty-actions">
+                  <button v-if="volumeRatioMin || aboveMa" type="button" class="sc-btn sc-btn-soft" @click="relaxDataSensitiveRules">去掉量比与均线条件</button>
+                  <button type="button" class="sc-btn sc-btn-ghost" @click="focusRuleEditor">手动调整条件</button>
+                </div>
               </div>
 
               <section v-if="result.items.length" class="sc-interpret">
@@ -1348,6 +1399,37 @@ select.sc-input {
   text-align: right;
 }
 
+.sc-result-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+}
+
+.sc-result-tools > span,
+.sc-result-tools label {
+  color: var(--sc-text-3);
+  font-size: 11.5px;
+}
+
+.sc-result-tools label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sc-result-sort {
+  min-height: 30px;
+  padding: 4px 26px 4px 8px;
+  border: 1px solid var(--sc-line);
+  border-radius: 5px;
+  outline: 0;
+  background: #0c0f11;
+  color: var(--sc-text-2);
+  font: inherit;
+  font-size: 11.5px;
+}
+
 .sc-rule-group {
   padding: 15px 18px 17px;
   border-bottom: 1px solid var(--sc-line);
@@ -1441,6 +1523,40 @@ select.sc-input {
   gap: 3px;
 }
 
+.sc-results-workspace .sc-table .action {
+  text-align: right;
+}
+
+.sc-row-action {
+  min-width: 68px;
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: 5px;
+  background: var(--sc-accent-soft);
+  color: var(--sc-accent-strong);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.sc-row-action:hover:not(:disabled) {
+  border-color: var(--sc-accent);
+  background: rgba(215, 183, 111, 0.16);
+}
+
+.sc-row-action.is-added {
+  border-color: rgba(94, 169, 120, 0.28);
+  background: rgba(94, 169, 120, 0.08);
+  color: #8fc4a1;
+}
+
+.sc-row-action.has-error {
+  border-color: rgba(221, 96, 96, 0.32);
+  background: rgba(221, 96, 96, 0.08);
+  color: #e59292;
+}
+
 .sc-results-workspace .sc-symbol {
   color: var(--sc-text-3);
   font-size: 10.5px;
@@ -1497,6 +1613,13 @@ select.sc-input {
   background: rgba(255, 255, 255, 0.02);
   color: var(--sc-text-2);
   font-size: 11px;
+}
+
+.sc-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
 }
 
 .sc-results-workspace .sc-interpret {
@@ -2403,6 +2526,11 @@ select.sc-input {
 
   .sc-results-head > span {
     text-align: left;
+  }
+
+  .sc-result-tools {
+    width: 100%;
+    align-items: flex-start;
   }
 
   .sc-rule-group {
