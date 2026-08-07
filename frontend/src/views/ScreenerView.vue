@@ -6,6 +6,7 @@ import type {
   ScreenerPromptHistoryItem,
   ScreenerQuery,
   ScreenerResult,
+  ScreenerSavedStrategy,
   ScreenerSyncStats,
   ScreenerSyncStatus,
   ScreenerTemplateItem,
@@ -15,7 +16,7 @@ import { renderMarkdown } from '../utils/markdown'
 
 type TemplateCategory = '热门' | '量价' | '趋势' | '估值' | '质量'
 type QuickTemplate = ScreenerTemplateItem & { category: TemplateCategory; prompt: string }
-type ScreenerWorkspace = 'quick' | 'builder'
+type ScreenerWorkspace = 'quick' | 'builder' | 'saved'
 
 const DRAFT_KEY = 'hermes_screener_prompt_draft'
 const running = ref(false)
@@ -58,6 +59,13 @@ const ruleEditor = ref<HTMLElement | null>(null)
 type ResultSort = 'pct_desc' | 'turnover_desc' | 'mv_asc' | 'pe_asc'
 const resultSort = ref<ResultSort>('pct_desc')
 const watchlistState = ref<Record<string, 'adding' | 'added' | 'error'>>({})
+const savedStrategies = ref<ScreenerSavedStrategy[]>([])
+const savedLoading = ref(false)
+const savedError = ref('')
+const strategyName = ref('')
+const strategySaving = ref(false)
+const strategySaved = ref(false)
+const activeSavedStrategyId = ref<number | null>(null)
 
 const interpretLoading = ref(false)
 const interpretation = ref('')
@@ -254,6 +262,19 @@ async function loadPromptHistory() {
   }
 }
 
+async function loadSavedStrategies() {
+  if (savedLoading.value) return
+  savedLoading.value = true
+  savedError.value = ''
+  try {
+    savedStrategies.value = await api.screenerStrategies()
+  } catch (err) {
+    savedError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    savedLoading.value = false
+  }
+}
+
 async function toggleFavorite(item: ScreenerPromptHistoryItem) {
   const previous = item.is_favorite
   item.is_favorite = !previous
@@ -391,6 +412,9 @@ function newStrategy() {
   interpretation.value = ''
   advancedOpen.value = false
   activeWorkspace.value = 'quick'
+  strategyName.value = ''
+  strategySaved.value = false
+  activeSavedStrategyId.value = null
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -405,6 +429,68 @@ function openQuick() {
   void nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
 }
 
+function openSavedStrategies() {
+  activeWorkspace.value = 'saved'
+  void loadSavedStrategies()
+  void nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
+}
+
+function useSavedStrategy(item: ScreenerSavedStrategy, runImmediately = false) {
+  applyQuery(item.query)
+  parsedQuery.value = item.query
+  parseSummary.value = ''
+  result.value = null
+  ran.value = false
+  error.value = ''
+  interpretation.value = ''
+  strategyName.value = item.name
+  strategySaved.value = true
+  activeSavedStrategyId.value = item.id
+  activeWorkspace.value = 'builder'
+  advancedOpen.value = true
+  void nextTick(async () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+    if (runImmediately) await run()
+  })
+}
+
+async function saveCurrentStrategy() {
+  const name = strategyName.value.trim()
+  if (!name || !hasBuilderConditions.value || strategySaving.value) return
+  strategySaving.value = true
+  savedError.value = ''
+  try {
+    const saved = await api.screenerStrategySave({
+      name,
+      query: buildQuery(),
+      last_result_count: result.value?.total ?? null,
+    })
+    strategyName.value = saved.name
+    activeSavedStrategyId.value = saved.id
+    strategySaved.value = true
+    await loadSavedStrategies()
+  } catch (err) {
+    savedError.value = err instanceof Error ? err.message : String(err)
+    strategySaved.value = false
+  } finally {
+    strategySaving.value = false
+  }
+}
+
+async function deleteSavedStrategy(item: ScreenerSavedStrategy) {
+  if (!window.confirm(`确定删除策略“${item.name}”吗？`)) return
+  try {
+    await api.screenerStrategyDelete(item.id)
+    savedStrategies.value = savedStrategies.value.filter((strategy) => strategy.id !== item.id)
+    if (activeSavedStrategyId.value === item.id) {
+      activeSavedStrategyId.value = null
+      strategySaved.value = false
+    }
+  } catch (err) {
+    savedError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
 function clearBuilderConditions() {
   applyQuery({})
   parsedQuery.value = null
@@ -415,6 +501,7 @@ function clearBuilderConditions() {
   interpretation.value = ''
   interpretError.value = ''
   watchlistState.value = {}
+  strategySaved.value = false
   void nextTick(() => ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
@@ -507,6 +594,9 @@ async function run() {
     if (activeHistoryId.value != null) {
       void api.screenerPromptResult(activeHistoryId.value, result.value.total).then(() => loadPromptHistory())
     }
+    if (activeSavedStrategyId.value != null) {
+      void api.screenerStrategyResult(activeSavedStrategyId.value, result.value.total).then(() => loadSavedStrategies())
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -552,7 +642,7 @@ function formatNum(value: number | null, digits = 2): string {
 onMounted(() => {
   const draft = localStorage.getItem(DRAFT_KEY)
   if (draft) nlText.value = draft
-  void Promise.all([loadSyncStatus(), loadRecommendation(), loadPromptHistory()])
+  void Promise.all([loadSyncStatus(), loadRecommendation(), loadPromptHistory(), loadSavedStrategies()])
 })
 </script>
 
@@ -573,7 +663,7 @@ onMounted(() => {
         >
           策略构建
         </button>
-        <button type="button" disabled title="将在策略工作区阶段开放">我的策略</button>
+        <button type="button" :class="{ 'is-active': activeWorkspace === 'saved' }" @click="openSavedStrategies">我的策略</button>
       </nav>
       <div class="sc-page-actions">
         <div class="sc-data-status">
@@ -782,7 +872,7 @@ onMounted(() => {
       </section>
       </template>
 
-      <section v-else data-testid="screener-builder" class="sc-builder-workbench">
+      <section v-else-if="activeWorkspace === 'builder'" data-testid="screener-builder" class="sc-builder-workbench">
         <header class="sc-panel sc-builder-commandbar">
           <div class="sc-builder-intro">
             <span class="sc-eyebrow">策略构建</span>
@@ -808,11 +898,17 @@ onMounted(() => {
               <span v-for="chip in builderChips" :key="chip">{{ chip }}</span>
             </div>
             <span v-else>先在下方设置至少一项条件</span>
+            <div class="sc-strategy-save">
+              <input v-model="strategyName" type="text" maxlength="120" placeholder="给策略起个名字" @input="strategySaved = false" @keydown.enter.prevent="saveCurrentStrategy" />
+              <button type="button" class="sc-btn sc-btn-soft" :disabled="strategySaving || !strategyName.trim() || !hasBuilderConditions" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : strategySaved ? '已保存' : '保存策略' }}</button>
+            </div>
           </div>
         </header>
 
+        <div v-if="savedError" class="notice notice-danger sc-builder-notice"><strong>策略保存失败</strong><span>{{ savedError }}</span></div>
+
         <div class="sc-builder-layout">
-          <aside ref="ruleEditor" class="sc-panel sc-rule-editor">
+          <aside ref="ruleEditor" class="sc-panel sc-rule-editor" @input="strategySaved = false">
             <header class="sc-rule-editor-head">
               <div>
                 <span class="sc-eyebrow">筛选规则</span>
@@ -942,6 +1038,23 @@ onMounted(() => {
             </div>
           </section>
         </div>
+      </section>
+
+      <section v-else class="sc-saved-workspace">
+        <header class="sc-panel sc-saved-hero">
+          <div><span class="sc-eyebrow">我的策略</span><h3>保存过的筛选条件</h3><p>可以直接运行，也可以打开后调整并覆盖保存。</p></div>
+          <button type="button" class="sc-btn sc-btn-primary" @click="openBuilder">新建策略</button>
+        </header>
+        <div v-if="savedError" class="notice notice-danger"><strong>读取策略失败</strong><span>{{ savedError }}</span></div>
+        <div v-if="savedLoading" class="sc-panel sc-saved-empty">正在读取策略…</div>
+        <div v-else-if="savedStrategies.length" class="sc-saved-grid">
+          <article v-for="item in savedStrategies" :key="item.id" class="sc-panel sc-saved-card">
+            <header><div><h3>{{ item.name }}</h3><span>{{ item.updated_at ? `更新于 ${item.updated_at.replace('T', ' ')}` : '已保存' }}</span></div><strong>{{ item.last_result_count == null ? '未运行' : `${item.last_result_count} 只` }}</strong></header>
+            <div class="sc-plan-chips"><span v-for="chip in queryToChips(item.query)" :key="chip">{{ chip }}</span></div>
+            <footer><button type="button" class="sc-text-btn sc-danger-text" @click="deleteSavedStrategy(item)">删除</button><div><button type="button" class="sc-btn sc-btn-ghost" @click="useSavedStrategy(item)">编辑条件</button><button type="button" class="sc-btn sc-btn-primary" @click="useSavedStrategy(item, true)">运行策略</button></div></footer>
+          </article>
+        </div>
+        <div v-else class="sc-panel sc-saved-empty"><strong>还没有保存的策略</strong><p>在“策略构建”中设置条件、填写名称并保存，之后可以从这里直接运行。</p><button type="button" class="sc-btn sc-btn-primary" @click="openBuilder">创建第一个策略</button></div>
       </section>
 
       <p v-if="parseSummary && !parsedQuery" class="sc-parse-warning">{{ parseSummary }}</p>
@@ -1365,6 +1478,35 @@ select.sc-input {
   margin-top: 0;
 }
 
+.sc-strategy-save {
+  display: flex;
+  flex: none;
+  gap: 7px;
+  margin-left: auto;
+}
+
+.sc-strategy-save input {
+  width: 180px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--sc-line);
+  border-radius: 6px;
+  outline: 0;
+  background: #0c0f11;
+  color: var(--sc-text);
+  font: inherit;
+  font-size: 12.5px;
+  box-sizing: border-box;
+}
+
+.sc-strategy-save input:focus {
+  border-color: var(--sc-accent);
+}
+
+.sc-builder-notice {
+  margin: 0 !important;
+}
+
 .sc-builder-layout {
   display: grid;
   grid-template-columns: minmax(390px, 0.72fr) minmax(560px, 1.35fr);
@@ -1627,6 +1769,103 @@ select.sc-input {
   border-width: 1px 0 0;
   border-radius: 0;
   background: rgba(255, 255, 255, 0.012);
+}
+
+.sc-saved-workspace {
+  display: grid;
+  gap: 14px;
+}
+
+.sc-saved-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 20px;
+}
+
+.sc-saved-hero p {
+  margin-top: 6px !important;
+  color: var(--sc-text-3);
+  font-size: 12.5px;
+}
+
+.sc-saved-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.sc-saved-card {
+  display: flex;
+  min-height: 210px;
+  flex-direction: column;
+  padding: 17px;
+}
+
+.sc-saved-card > header,
+.sc-saved-card > footer,
+.sc-saved-card > footer > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sc-saved-card > header h3 {
+  font-size: 15px;
+}
+
+.sc-saved-card > header span {
+  display: block;
+  margin-top: 5px;
+  color: var(--sc-text-3);
+  font-size: 10.5px;
+}
+
+.sc-saved-card > header > strong {
+  flex: none;
+  color: var(--sc-accent-strong);
+  font-size: 13px;
+}
+
+.sc-saved-card .sc-plan-chips {
+  align-content: flex-start;
+  flex: 1;
+  margin: 15px 0;
+}
+
+.sc-saved-card > footer {
+  padding-top: 13px;
+  border-top: 1px solid var(--sc-line);
+}
+
+.sc-danger-text {
+  color: #d98282;
+}
+
+.sc-saved-empty {
+  display: flex;
+  min-height: 280px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 30px;
+  color: var(--sc-text-3);
+  text-align: center;
+}
+
+.sc-saved-empty strong {
+  color: var(--sc-text);
+  font-size: 14px;
+}
+
+.sc-saved-empty p {
+  max-width: 480px;
+  color: var(--sc-text-3);
+  font-size: 12.5px;
+  line-height: 1.65;
 }
 
 .sc-pagebar {
@@ -2374,6 +2613,10 @@ select.sc-input {
   .sc-builder-layout {
     grid-template-columns: 390px minmax(0, 1fr);
   }
+
+  .sc-saved-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 960px) {
@@ -2399,6 +2642,10 @@ select.sc-input {
   }
 
   .sc-builder-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sc-saved-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -2510,6 +2757,40 @@ select.sc-input {
   .sc-builder-rule-summary {
     grid-column: auto;
     flex-direction: column;
+  }
+
+  .sc-strategy-save {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .sc-strategy-save input {
+    min-height: 42px;
+    flex: 1;
+    width: auto;
+  }
+
+  .sc-saved-hero {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 15px;
+  }
+
+  .sc-saved-hero .sc-btn {
+    width: 100%;
+  }
+
+  .sc-saved-card > footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sc-saved-card > footer > div {
+    width: 100%;
+  }
+
+  .sc-saved-card > footer > div .sc-btn {
+    flex: 1;
   }
 
   .sc-rule-editor-head,

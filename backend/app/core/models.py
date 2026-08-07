@@ -385,6 +385,25 @@ class ScreenerPromptHistory(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class ScreenerSavedStrategy(Base):
+    """用户保存的选股规则，可跨设备复用并记录最近一次命中数。"""
+
+    __tablename__ = "screener_saved_strategies"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_screener_saved_strategy_user_name"),
+        Index("ix_screener_saved_strategy_user_updated", "user_id", "updated_at"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    query_json: Mapped[str] = mapped_column(Text, nullable=False)
+    last_result_count: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Document(Base):
     __tablename__ = "documents"
 

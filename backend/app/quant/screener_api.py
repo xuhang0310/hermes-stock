@@ -170,6 +170,63 @@ def screener_prompt_result(
     return ok(item)
 
 
+class SavedStrategyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    query: ScreenerQueryIn
+    last_result_count: int | None = Field(default=None, ge=0)
+
+
+@router.get("/strategies")
+def screener_saved_strategies(
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    return ok({"items": screener_service.list_saved_strategies(context.user.id)})
+
+
+@router.post("/strategies")
+def screener_save_strategy(
+    payload: SavedStrategyIn,
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    try:
+        item = screener_service.save_strategy(
+            context.user.id,
+            payload.name,
+            payload.query.model_dump(exclude_none=True),
+            last_result_count=payload.last_result_count,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content=fail(str(exc), code="bad_request"))
+    return ok(item)
+
+
+@router.patch("/strategies/{strategy_id}/result")
+def screener_saved_strategy_result(
+    strategy_id: int,
+    payload: PromptResultIn,
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    try:
+        item = screener_service.update_saved_strategy_result(
+            context.user.id, strategy_id, payload.result_count
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
+    return ok(item)
+
+
+@router.delete("/strategies/{strategy_id}")
+def screener_delete_strategy(
+    strategy_id: int,
+    context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    try:
+        screener_service.delete_saved_strategy(context.user.id, strategy_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
+    return ok({"deleted": True, "id": strategy_id})
+
+
 class InterpretIn(BaseModel):
     query: dict = Field(default_factory=dict, description="本次筛选条件")
     universe: int = Field(default=0, ge=0)

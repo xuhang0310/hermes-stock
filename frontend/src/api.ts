@@ -71,6 +71,7 @@ import type {
   ScreenerInterpretation,
   ScreenerPromptHistoryItem,
   ScreenerPromptHistoryPage,
+  ScreenerSavedStrategy,
   ScreenerTemplateRecommendation,
   FactorBenchmarkInterpretation,
   FactorBenchmarkResult,
@@ -733,6 +734,28 @@ export const api = {
         body: JSON.stringify({ result_count: resultCount }),
       }
     ).then((res) => res.data),
+  screenerStrategies: () =>
+    request<ApiEnvelope<{ items: ScreenerSavedStrategy[] }>>('/api/screener/strategies').then(
+      (res) => res.data.items
+    ),
+  screenerStrategySave: (payload: {
+    name: string
+    query: ScreenerQuery
+    last_result_count?: number | null
+  }) =>
+    request<ApiEnvelope<ScreenerSavedStrategy>>('/api/screener/strategies', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
+  screenerStrategyResult: (strategyId: number, resultCount: number) =>
+    request<ApiEnvelope<ScreenerSavedStrategy>>(`/api/screener/strategies/${strategyId}/result`, {
+      method: 'PATCH',
+      body: JSON.stringify({ result_count: resultCount }),
+    }).then((res) => res.data),
+  screenerStrategyDelete: (strategyId: number) =>
+    request<ApiEnvelope<{ deleted: boolean; id: number }>>(`/api/screener/strategies/${strategyId}`, {
+      method: 'DELETE',
+    }).then((res) => res.data),
   factorList: (params: { query?: string; zoo?: string; limit?: number } = {}) => {
     const query = new URLSearchParams()
     if (params.query) query.set('query', params.query)

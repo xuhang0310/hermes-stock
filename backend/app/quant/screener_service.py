@@ -27,6 +27,7 @@ from backend.app.core.models import (
     Instrument,
     Position,
     ScreenerPromptHistory,
+    ScreenerSavedStrategy,
     ScreenerTemplateRecommendation,
     StockDailyBasic,
     StockLatestPrice,
@@ -509,3 +510,91 @@ def update_prompt_result_count(user_id: int, history_id: int, result_count: int)
         db.commit()
         db.refresh(row)
         return _prompt_history_dict(row)
+
+
+def _saved_strategy_dict(row: ScreenerSavedStrategy) -> dict:
+    try:
+        query = json.loads(row.query_json or "{}")
+    except json.JSONDecodeError:
+        query = {}
+    return {
+        "id": row.id,
+        "name": row.name,
+        "query": query if isinstance(query, dict) else {},
+        "last_result_count": row.last_result_count,
+        "created_at": row.created_at.isoformat(timespec="minutes") if row.created_at else None,
+        "updated_at": row.updated_at.isoformat(timespec="minutes") if row.updated_at else None,
+    }
+
+
+def list_saved_strategies(user_id: int) -> list[dict]:
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(ScreenerSavedStrategy)
+            .where(ScreenerSavedStrategy.user_id == int(user_id))
+            .order_by(ScreenerSavedStrategy.updated_at.desc(), ScreenerSavedStrategy.id.desc())
+        ).scalars().all()
+        return [_saved_strategy_dict(row) for row in rows]
+
+
+def save_strategy(
+    user_id: int,
+    name: str,
+    query: dict,
+    *,
+    last_result_count: int | None = None,
+) -> dict:
+    clean_name = " ".join(str(name or "").strip().split())[:120]
+    if not clean_name:
+        raise ValueError("策略名称不能为空")
+    if not isinstance(query, dict) or not query:
+        raise ValueError("请至少设置一项筛选条件")
+    now = datetime.now()
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerSavedStrategy).where(
+                ScreenerSavedStrategy.user_id == int(user_id),
+                ScreenerSavedStrategy.name == clean_name,
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = ScreenerSavedStrategy(user_id=int(user_id), name=clean_name, query_json="{}")
+            db.add(row)
+        row.query_json = json.dumps(query, ensure_ascii=False, sort_keys=True)
+        row.updated_at = now
+        if last_result_count is not None:
+            row.last_result_count = max(0, int(last_result_count))
+        db.commit()
+        db.refresh(row)
+        return _saved_strategy_dict(row)
+
+
+def update_saved_strategy_result(user_id: int, strategy_id: int, result_count: int) -> dict:
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerSavedStrategy).where(
+                ScreenerSavedStrategy.id == int(strategy_id),
+                ScreenerSavedStrategy.user_id == int(user_id),
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ValueError("保存的策略不存在")
+        row.last_result_count = max(0, int(result_count))
+        row.updated_at = datetime.now()
+        db.commit()
+        db.refresh(row)
+        return _saved_strategy_dict(row)
+
+
+def delete_saved_strategy(user_id: int, strategy_id: int) -> None:
+    with SessionLocal() as db:
+        row = db.execute(
+            select(ScreenerSavedStrategy).where(
+                ScreenerSavedStrategy.id == int(strategy_id),
+                ScreenerSavedStrategy.user_id == int(user_id),
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise ValueError("保存的策略不存在")
+        db.delete(row)
+        db.commit()

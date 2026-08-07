@@ -1555,3 +1555,12 @@ export type ScreenerPromptHistoryPage = {
   items: ScreenerPromptHistoryItem[]
   total: number
 }
+
+export type ScreenerSavedStrategy = {
+  id: number
+  name: string
+  query: ScreenerQuery
+  last_result_count: number | null
+  created_at: string | null
+  updated_at: string | null
+}
