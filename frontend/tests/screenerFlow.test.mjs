@@ -28,6 +28,8 @@ test('generated and template prompts enter the executable builder flow', async (
   assert.ok(usePrompt, 'template prompt handler should exist')
   assert.ok(parseNL, 'natural language parser should exist')
   assert.match(usePrompt, /await parseNL\(\)/)
+  assert.match(parseNL, /result\.value = null/)
+  assert.match(parseNL, /ran\.value = false/)
   assert.match(parseNL, /activeWorkspace\.value = 'builder'/)
   assert.match(source, /ref="resultSection"/)
   assert.match(source, /resultSection\.value\?\.scrollIntoView/)

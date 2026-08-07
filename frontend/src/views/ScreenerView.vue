@@ -396,6 +396,11 @@ async function parseNL() {
   parseError.value = ''
   parseSummary.value = ''
   parsedQuery.value = null
+  result.value = null
+  ran.value = false
+  error.value = ''
+  interpretation.value = ''
+  interpretError.value = ''
   try {
     const parsed = await api.screenerParse(text)
     parseSummary.value = parsed.summary
