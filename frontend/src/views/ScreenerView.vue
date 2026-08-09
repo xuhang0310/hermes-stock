@@ -416,17 +416,27 @@ async function toggleFavorite(item: ScreenerPromptHistoryItem) {
 }
 
 async function usePrompt(text: string) {
+  if (parseLoading.value) return
   nlText.value = text
   draftSaved.value = false
   parsedQuery.value = null
   activeHistoryId.value = null
   parseSummary.value = ''
   parseError.value = ''
-  advancedOpen.value = false
-  activeWorkspace.value = 'quick'
+  applyQuery({})
+  result.value = null
+  ran.value = false
+  interpretation.value = ''
+  interpretError.value = ''
+  advancedOpen.value = true
+  ruleEditorOpen.value = false
+  activeWorkspace.value = 'builder'
   window.scrollTo({ top: 0, behavior: 'smooth' })
   await nextTick()
   await parseNL()
+  if (!parsedQuery.value) {
+    ruleEditorOpen.value = true
+  }
 }
 
 function templatePrompt(tpl: ScreenerTemplateItem): string {
@@ -1052,11 +1062,28 @@ onMounted(() => {
               >
                 {{ item.is_favorite ? '★' : '☆' }}
               </button>
-              <div class="sc-history-copy">
-                <p>{{ item.text }}</p>
-                <span>{{ historyTime(item.last_used_at) }} · 使用 {{ item.use_count }} 次 · {{ item.last_result_count == null ? '未运行' : `命中 ${item.last_result_count} 只` }}</span>
-              </div>
-              <button type="button" class="sc-btn sc-btn-soft" @click="usePrompt(item.text)">再次使用</button>
+              <button
+                type="button"
+                class="sc-history-entry"
+                data-testid="screener-history-entry"
+                :disabled="parseLoading"
+                :aria-label="`使用历史提示词进入策略构建：${item.text}`"
+                @click="usePrompt(item.text)"
+              >
+                <span class="sc-history-copy">
+                  <span class="sc-history-prompt">{{ item.text }}</span>
+                  <span>{{ historyTime(item.last_used_at) }} · 使用 {{ item.use_count }} 次 · {{ item.last_result_count == null ? '未运行' : `命中 ${item.last_result_count} 只` }}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                class="sc-btn sc-btn-soft"
+                data-testid="screener-history-open-builder"
+                :disabled="parseLoading"
+                @click="usePrompt(item.text)"
+              >
+                进入策略构建
+              </button>
             </article>
           </div>
           <div v-else class="sc-empty-line">{{ historySearch ? '没有找到匹配的提示词' : '生成过的选股方案会自动保存在这里' }}</div>
@@ -1068,13 +1095,17 @@ onMounted(() => {
       </template>
 
       <section v-else-if="activeWorkspace === 'builder'" data-testid="screener-builder" class="sc-builder-workbench sc-strategy-workbench">
+        <div v-if="parseError" class="notice notice-danger sc-builder-parse-notice">
+          <strong>提示词解析失败</strong>
+          <span>{{ parseError }}。你仍可在下方手动设置策略条件。</span>
+        </div>
         <header class="sc-strategy-hero">
           <div class="sc-strategy-heading">
             <div>
               <span class="sc-eyebrow">策略构建</span>
               <h2>{{ activeStrategyName }}</h2>
             </div>
-            <span class="sc-run-status" :class="{ 'is-ready': ran }">{{ running ? '运行中' : ran ? '已运行' : '待运行' }}</span>
+            <span class="sc-run-status" :class="{ 'is-ready': ran }">{{ parseLoading ? '解析条件中' : running ? '运行中' : ran ? '已运行' : '待运行' }}</span>
             <span v-if="lastRunAt" class="sc-last-run">最后运行 {{ lastRunAt }}</span>
           </div>
           <div class="sc-hero-actions">
@@ -2593,6 +2624,34 @@ select.sc-input {
   min-width: 0;
 }
 
+.sc-history-entry {
+  display: block;
+  min-width: 0;
+  padding: 10px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sc-history-entry:hover .sc-history-prompt,
+.sc-history-entry:focus-visible .sc-history-prompt {
+  color: var(--sc-accent-strong);
+}
+
+.sc-history-entry:focus-visible {
+  border-radius: 4px;
+  outline: 1px solid var(--sc-line-strong);
+  outline-offset: 3px;
+}
+
+.sc-history-entry:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .sc-template-copy strong,
 .sc-template-copy small {
   display: block;
@@ -2670,11 +2729,13 @@ select.sc-input {
   color: var(--sc-accent-strong);
 }
 
-.sc-history-copy p {
+.sc-history-prompt {
+  display: block;
   overflow: hidden;
   color: var(--sc-text-2);
   font-size: 11.5px;
   text-overflow: ellipsis;
+  transition: color 140ms ease;
   white-space: nowrap;
 }
 
@@ -2683,6 +2744,16 @@ select.sc-input {
   margin-top: 5px;
   color: var(--sc-text-3);
   font-size: 10px;
+}
+
+.sc-history-copy .sc-history-prompt {
+  margin-top: 0;
+  color: var(--sc-text-2);
+  font-size: 11.5px;
+}
+
+.sc-builder-parse-notice {
+  margin: 0 0 4px;
 }
 
 .sc-history-more {

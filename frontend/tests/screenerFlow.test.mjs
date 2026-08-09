@@ -34,3 +34,18 @@ test('generated and template prompts enter the executable builder flow', async (
   assert.match(source, /ref="resultSection"/)
   assert.match(source, /resultSection\.value\?\.scrollIntoView/)
 })
+
+test('history prompts are direct strategy builder shortcuts', async () => {
+  const source = await readScreenerView()
+  const usePrompt = source.match(/async function usePrompt[\s\S]*?\n}/)?.[0]
+
+  assert.ok(usePrompt, 'history prompt handler should exist')
+  assert.match(usePrompt, /activeWorkspace\.value = 'builder'/)
+  assert.ok(
+    usePrompt.indexOf("activeWorkspace.value = 'builder'") < usePrompt.indexOf('await parseNL()'),
+    'the builder should open before the prompt parser finishes'
+  )
+  assert.match(source, /data-testid="screener-history-entry"/)
+  assert.match(source, /data-testid="screener-history-open-builder"/)
+  assert.match(source, /进入策略构建/)
+})
