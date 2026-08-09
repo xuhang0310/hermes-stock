@@ -20,6 +20,7 @@ type ScreenerWorkspace = 'quick' | 'builder' | 'saved'
 
 const emit = defineEmits<{
   watchlistAdded: [item: Awaited<ReturnType<typeof api.addWatchlist>>]
+  askStock: [item: ScreenerItem]
 }>()
 
 const DRAFT_KEY = 'hermes_screener_prompt_draft'
@@ -1005,7 +1006,12 @@ onMounted(() => {
                       <td class="num">{{ formatNum(item.turnover_rate) }}%</td>
                       <td class="num">{{ formatNum(item.total_mv_yi, 1) }}</td>
                       <td class="num">{{ formatNum(item.pe_ttm, 1) }}</td>
-                      <td class="action"><button type="button" class="sc-row-action" :class="{ 'is-added': watchlistState[item.symbol] === 'added', 'has-error': watchlistState[item.symbol] === 'error' }" :disabled="watchlistState[item.symbol] === 'adding' || watchlistState[item.symbol] === 'added'" @click="addResultToWatchlist(item)">{{ watchlistState[item.symbol] === 'adding' ? '添加中…' : watchlistState[item.symbol] === 'added' ? '已加入' : watchlistState[item.symbol] === 'error' ? '重试' : '加入自选' }}</button></td>
+                      <td class="action">
+                        <div class="sc-row-actions">
+                          <button type="button" class="sc-row-action sc-row-action-ask" @click="emit('askStock', item)">问股</button>
+                          <button type="button" class="sc-row-action" :class="{ 'is-added': watchlistState[item.symbol] === 'added', 'has-error': watchlistState[item.symbol] === 'error' }" :disabled="watchlistState[item.symbol] === 'adding' || watchlistState[item.symbol] === 'added'" @click="addResultToWatchlist(item)">{{ watchlistState[item.symbol] === 'adding' ? '添加中…' : watchlistState[item.symbol] === 'added' ? '已加入' : watchlistState[item.symbol] === 'error' ? '重试' : '加入自选' }}</button>
+                        </div>
+                      </td>
                     </tr>
                   </tbody>
                 </table>
@@ -1671,7 +1677,16 @@ select.sc-input {
 }
 
 .sc-results-workspace .sc-table .action {
+  min-width: 150px;
   text-align: right;
+}
+
+.sc-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .sc-row-action {
@@ -1690,6 +1705,19 @@ select.sc-input {
 .sc-row-action:hover:not(:disabled) {
   border-color: var(--sc-accent);
   background: rgba(215, 183, 111, 0.16);
+}
+
+.sc-row-action.sc-row-action-ask {
+  min-width: 52px;
+  border-color: var(--sc-accent);
+  background: var(--sc-accent);
+  color: #17130a;
+  font-weight: 700;
+}
+
+.sc-row-action.sc-row-action-ask:hover:not(:disabled) {
+  border-color: var(--sc-accent-strong);
+  background: var(--sc-accent-strong);
 }
 
 .sc-row-action.is-added {

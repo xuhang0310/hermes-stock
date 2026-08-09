@@ -31,9 +31,11 @@ import { elapsedStreamMilliseconds, formatStreamDuration } from '../utils/stream
 const props = withDefaults(defineProps<{
   initialTab?: 'chat' | 'feishuBots'
   initialSessionId?: number | null
+  initialQuestion?: string
 }>(), {
   initialTab: 'chat',
-  initialSessionId: null
+  initialSessionId: null,
+  initialQuestion: ''
 })
 
 const emit = defineEmits<{
@@ -1015,6 +1017,10 @@ onMounted(async () => {
   if (props.initialSessionId) {
     await openSession(props.initialSessionId)
     await refreshSessions(selectedProfileId.value)
+  } else if (props.initialQuestion.trim()) {
+    newSession(selectedProfileId.value)
+    question.value = props.initialQuestion.trim()
+    await send()
   }
 })
 

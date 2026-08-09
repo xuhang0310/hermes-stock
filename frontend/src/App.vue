@@ -32,6 +32,7 @@ import type {
   PositionAgentStreamEvent,
   PositionItem,
   PositionSymbolValidation,
+  ScreenerItem,
   UserPayload,
   WatchlistItem
 } from './types'
@@ -110,6 +111,7 @@ const selectedChartInstrument = ref<{ symbol: string; name: string } | null>(nul
 const chartReturnPage = ref<'positions' | 'watchlist'>('positions')
 const digitalHumanInitialTab = ref<'chat' | 'feishuBots'>('chat')
 const digitalHumanInitialSession = ref<number | null>(null)
+const digitalHumanInitialQuestion = ref('')
 const askStockInitialQuestion = ref('')
 const backtestRunId = ref('')
 type BacktestReturnPage = 'digitalHumans' | 'backtestHistory'
@@ -984,6 +986,7 @@ function navigate(page: PageKey) {
   if (page === 'digitalHumans') {
     digitalHumanInitialTab.value = 'chat'
     digitalHumanInitialSession.value = null
+    digitalHumanInitialQuestion.value = ''
   }
   if (page === 'askStock') askStockInitialQuestion.value = ''
   if (page === 'workbench') void refreshDashboard()
@@ -1022,6 +1025,8 @@ function closeBacktest() {
 
 function openFeishuBindings() {
   digitalHumanInitialTab.value = 'feishuBots'
+  digitalHumanInitialSession.value = null
+  digitalHumanInitialQuestion.value = ''
   activePage.value = 'digitalHumans'
 }
 
@@ -1029,6 +1034,27 @@ function openBoardSession(sessionId: number) {
   // 任务看板点击卡片 → 进入数字中心对应的对话窗口
   digitalHumanInitialTab.value = 'chat'
   digitalHumanInitialSession.value = sessionId
+  digitalHumanInitialQuestion.value = ''
+  activePage.value = 'digitalHumans'
+}
+
+function openScreenerStockAnalysis(item: ScreenerItem) {
+  const snapshot = [
+    item.price != null ? `最新价 ${formatNumber(item.price)} 元` : '',
+    item.pct_chg != null ? `涨跌幅 ${formatNumber(item.pct_chg)}%` : '',
+    item.volume_ratio != null ? `量比 ${formatNumber(item.volume_ratio)}` : '',
+    item.turnover_rate != null ? `换手率 ${formatNumber(item.turnover_rate)}%` : '',
+    item.total_mv_yi != null ? `总市值 ${formatNumber(item.total_mv_yi, 1)} 亿元` : '',
+    item.pe_ttm != null ? `PE(TTM) ${formatNumber(item.pe_ttm, 1)}` : ''
+  ].filter(Boolean).join('，')
+
+  digitalHumanInitialTab.value = 'chat'
+  digitalHumanInitialSession.value = null
+  digitalHumanInitialQuestion.value = [
+    `请对 ${item.name}（${item.symbol}）进行专项解读。`,
+    snapshot ? `该标的来自 AI 选股结果，当前筛选快照：${snapshot}。` : '',
+    '请先调用可用的行情与研究工具核对最新数据，再从趋势与量价、基本面与估值、近期催化、主要风险、关键观察位五个方面分析，并给出后续跟踪清单。请明确区分事实与推断，不构成投资建议。'
+  ].filter(Boolean).join('\n')
   activePage.value = 'digitalHumans'
 }
 
@@ -1106,11 +1132,13 @@ onBeforeUnmount(() => {
       <ScreenerView
         v-else-if="activePage === 'screener'"
         @watchlist-added="applyWatchlistItem"
+        @ask-stock="openScreenerStockAnalysis"
       />
       <DigitalHumanCenter
         v-else-if="activePage === 'digitalHumans'"
         :initial-tab="digitalHumanInitialTab"
         :initial-session-id="digitalHumanInitialSession"
+        :initial-question="digitalHumanInitialQuestion"
         @open-backtest="openBacktest"
       />
 
