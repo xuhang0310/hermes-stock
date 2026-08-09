@@ -402,6 +402,14 @@ function toggleResultColumn(column: ResultColumn) {
   visibleResultColumns.value = [...visibleResultColumns.value, column]
 }
 
+function toggleResultSearch() {
+  if (resultSearchOpen.value) {
+    resultSearch.value = ''
+    resultPage.value = 1
+  }
+  resultSearchOpen.value = !resultSearchOpen.value
+}
+
 function reasonTag(reason: string): string {
   if (reason.includes('PE')) return '估值合理'
   if (reason.includes('市值')) return '规模符合'
@@ -1280,7 +1288,7 @@ onMounted(() => {
               <div v-if="result?.items.length" class="sc-result-toolbar">
                 <select v-model="resultSort" class="sc-result-sort" aria-label="排序" @change="resultPage = 1"><option value="score_desc">按综合分排序</option><option value="pct_desc">涨幅从高到低</option><option value="turnover_desc">换手率从高到低</option><option value="mv_asc">市值从小到大</option><option value="pe_asc">PE 从低到高</option></select>
                 <div class="sc-column-picker"><button type="button" :aria-expanded="resultColumnsOpen" @click="resultColumnsOpen = !resultColumnsOpen">自定义列</button><div v-if="resultColumnsOpen" class="sc-column-menu"><label v-for="column in resultColumnOptions" :key="column.key"><input type="checkbox" :checked="isResultColumnVisible(column.key)" @change="toggleResultColumn(column.key)" />{{ column.label }}</label></div></div>
-                <div class="sc-result-search" :class="{ open: resultSearchOpen }"><input v-if="resultSearchOpen" v-model="resultSearch" type="search" placeholder="代码或名称" aria-label="搜索筛选结果" @input="resultPage = 1" @keydown.esc="resultSearchOpen = false; resultSearch = ''" /><button type="button" aria-label="搜索结果" @click="resultSearchOpen = !resultSearchOpen">⌕</button></div>
+                <div class="sc-result-search" :class="{ open: resultSearchOpen }"><input v-if="resultSearchOpen" v-model="resultSearch" type="search" placeholder="代码或名称" aria-label="搜索筛选结果" @input="resultPage = 1" @keydown.esc="resultSearchOpen = false; resultSearch = ''" /><button type="button" aria-label="搜索结果" @click="toggleResultSearch">⌕</button></div>
               </div>
             </nav>
 
