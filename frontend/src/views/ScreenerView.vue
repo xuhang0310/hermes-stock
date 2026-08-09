@@ -2937,11 +2937,13 @@ select.sc-input {
 .sc-rule-chip span { margin-left: 5px; color: var(--sc-text-3); }
 .sc-rule-chip.is-empty { border-style: dashed; color: var(--sc-accent); }
 
-.sc-strategy-layout { display: grid; grid-template-columns: minmax(235px, .75fr) minmax(620px, 2.25fr) minmax(270px, .95fr); gap: 12px; align-items: stretch; min-height: calc(100dvh - 340px); }
+.sc-strategy-layout { display: grid; grid-template-columns: minmax(235px, .75fr) minmax(620px, 2.25fr) minmax(270px, .95fr); gap: 12px; height: calc(100dvh - 340px); min-height: 600px; align-items: stretch; }
 .sc-strategy-sidebar,
 .sc-results-center,
 .sc-explain-panel { min-width: 0; overflow: hidden; border-color: rgba(255,255,255,.11); background: linear-gradient(180deg,#14191d,#111518); }
 .sc-results-center { display: flex; flex-direction: column; }
+.sc-strategy-sidebar,
+.sc-explain-panel { overflow-y: auto; }
 .sc-strategy-sidebar > header,
 .sc-explain-panel > header { display: flex; align-items: center; justify-content: space-between; min-height: 55px; padding: 0 14px; border-bottom: 1px solid var(--sc-line); }
 .sc-strategy-sidebar > header h3,
@@ -3322,7 +3324,7 @@ select.sc-input {
 }
 
 @media (max-width: 1380px) {
-  .sc-strategy-layout { grid-template-columns: 240px minmax(0,1fr); min-height: 0; }
+  .sc-strategy-layout { grid-template-columns: 240px minmax(0,1fr); height: auto; min-height: 0; }
   .sc-explain-panel { grid-column: 1 / -1; }
   .sc-explain-panel:not(:has(.sc-explain-empty)) { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); }
   .sc-explain-panel > header,

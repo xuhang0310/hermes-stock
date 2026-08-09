@@ -46,7 +46,8 @@ test('batch result actions are driven by explicit checkbox selections', async ()
   assert.match(view, /data-testid="screener-factor-checkbox"/)
   assert.match(view, /async function addCheckedToWatchlist/)
   assert.match(view, /checkedResultItems\.value\.length < 3/)
-  assert.match(view, /min-height: calc\(100dvh - 340px\)/)
+  assert.match(view, /height: calc\(100dvh - 340px\)/)
+  assert.match(view, /\.sc-strategy-sidebar,\s*\.sc-explain-panel \{ overflow-y: auto; \}/)
 })
 
 test('screener backtests identify the correct return destination', async () => {
