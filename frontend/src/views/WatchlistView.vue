@@ -22,6 +22,7 @@ type AgentMessage = {
 
 const props = defineProps<{
   watchlist: WatchlistItem[]
+  loading: boolean
 }>()
 
 const emit = defineEmits<{
@@ -35,6 +36,8 @@ const reason = ref('')
 const formMessage = ref('')
 const adding = ref(false)
 const deletingId = ref<number | null>(null)
+const pendingDelete = ref<WatchlistItem | null>(null)
+const deleteDialog = ref<HTMLElement | null>(null)
 const agentOpen = ref(false)
 const agentBusy = ref(false)
 const agentInstruction = ref('')
@@ -89,13 +92,26 @@ async function addItem() {
   }
 }
 
-async function removeItem(item: WatchlistItem) {
-  if (!window.confirm(`确定从自选池删除「${item.name}（${item.symbol}）」？`)) return
+async function requestDelete(item: WatchlistItem) {
+  pendingDelete.value = item
+  formMessage.value = ''
+  await nextTick()
+  deleteDialog.value?.focus()
+}
+
+function cancelDelete() {
+  if (deletingId.value === null) pendingDelete.value = null
+}
+
+async function confirmDelete() {
+  const item = pendingDelete.value
+  if (!item || deletingId.value !== null) return
   deletingId.value = item.id
   formMessage.value = ''
   try {
     await api.deleteWatchlist(item.id)
     formMessage.value = `已删除 ${item.name}`
+    pendingDelete.value = null
     emit('refresh')
   } catch (err) {
     formMessage.value = err instanceof Error ? err.message : '删除失败'
@@ -278,7 +294,13 @@ function stepLabel(step: PositionAgentStep) {
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!props.watchlist.length">
+          <tr v-if="props.loading">
+            <td colspan="6" class="empty-cell watchlist-loading-cell">
+              <span class="watchlist-loading-dot" aria-hidden="true"></span>
+              正在读取最新自选...
+            </td>
+          </tr>
+          <tr v-else-if="!props.watchlist.length">
             <td colspan="6" class="empty-cell">暂无自选标的</td>
           </tr>
           <tr
@@ -303,7 +325,7 @@ function stepLabel(step: PositionAgentStep) {
                   class="danger-button"
                   title="删除自选"
                   :disabled="deletingId === item.id"
-                  @click.stop="removeItem(item)"
+                  @click.stop="requestDelete(item)"
                 >
                   {{ deletingId === item.id ? '删除中' : '删除' }}
                 </button>
@@ -314,6 +336,63 @@ function stepLabel(step: PositionAgentStep) {
       </table>
     </div>
   </section>
+
+  <Teleport to="body">
+    <Transition name="watchlist-dialog">
+      <div
+        v-if="pendingDelete"
+        class="watchlist-delete-backdrop"
+        @click.self="cancelDelete"
+      >
+        <section
+          ref="deleteDialog"
+          class="watchlist-delete-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="watchlist-delete-title"
+          aria-describedby="watchlist-delete-description"
+          tabindex="-1"
+          @keydown.esc="cancelDelete"
+        >
+          <div class="watchlist-delete-heading">
+            <span class="watchlist-delete-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" />
+              </svg>
+            </span>
+            <div>
+              <span class="watchlist-delete-eyebrow">删除自选</span>
+              <h3 id="watchlist-delete-title">确认移除 {{ pendingDelete.name }}？</h3>
+            </div>
+          </div>
+
+          <p id="watchlist-delete-description" class="watchlist-delete-description">
+            删除后该标的不再出现在自选池，但不会影响持仓、历史研究报告或 Agent 对话记录。
+          </p>
+
+          <div class="watchlist-delete-target">
+            <div>
+              <strong>{{ pendingDelete.name }}</strong>
+              <span>{{ pendingDelete.symbol }}</span>
+            </div>
+            <span>{{ pendingDelete.group_name || '默认分组' }}</span>
+          </div>
+
+          <div class="watchlist-delete-actions">
+            <button type="button" :disabled="deletingId !== null" @click="cancelDelete">取消</button>
+            <button
+              type="button"
+              class="watchlist-delete-confirm"
+              :disabled="deletingId !== null"
+              @click="confirmDelete"
+            >
+              {{ deletingId !== null ? '删除中...' : '确认删除' }}
+            </button>
+          </div>
+        </section>
+      </div>
+    </Transition>
+  </Teleport>
 
   <div v-if="agentOpen" class="position-agent-backdrop" @click.self="closeAgent">
     <aside class="position-agent-drawer">

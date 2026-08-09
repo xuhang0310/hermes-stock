@@ -876,6 +876,198 @@ tbody tr.clickable-row:focus-visible td {
   background: rgba(255, 93, 93, 0.1);
 }
 
+.watchlist-loading-cell {
+  height: 180px;
+  color: #d7c79f;
+}
+
+.watchlist-loading-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 0 0 rgba(213, 180, 106, 0.45);
+  animation: watchlist-loading-pulse 1.4s ease-out infinite;
+}
+
+.watchlist-delete-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(6px);
+}
+
+.watchlist-delete-dialog {
+  width: min(460px, 100%);
+  border: 1px solid rgba(213, 180, 106, 0.28);
+  border-radius: 16px;
+  background:
+    linear-gradient(145deg, rgba(213, 180, 106, 0.07), transparent 44%),
+    #111214;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58);
+  padding: 24px;
+  outline: none;
+}
+
+.watchlist-delete-heading {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.watchlist-delete-icon {
+  display: grid;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid rgba(255, 105, 105, 0.28);
+  border-radius: 12px;
+  background: rgba(255, 93, 93, 0.09);
+  color: #ff8d8d;
+}
+
+.watchlist-delete-icon svg {
+  width: 22px;
+  height: 22px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.watchlist-delete-eyebrow {
+  color: #e49a9a;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.watchlist-delete-dialog h3 {
+  margin: 4px 0 0;
+  color: #f5f1e8;
+  font-size: 19px;
+  line-height: 1.35;
+}
+
+.watchlist-delete-description {
+  margin: 18px 0 14px;
+  color: #aaa59a;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.watchlist-delete-target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.22);
+  padding: 12px 14px;
+}
+
+.watchlist-delete-target div {
+  display: grid;
+  gap: 3px;
+}
+
+.watchlist-delete-target strong {
+  color: #f3ecdc;
+  font-size: 14px;
+}
+
+.watchlist-delete-target span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.watchlist-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.watchlist-delete-actions button {
+  min-width: 96px;
+  min-height: 38px;
+  border-radius: 9px;
+}
+
+.watchlist-delete-actions .watchlist-delete-confirm {
+  border-color: #df6767;
+  background: #cf5c5c;
+  color: #fff;
+  font-weight: 700;
+}
+
+.watchlist-delete-actions .watchlist-delete-confirm:hover:not(:disabled) {
+  border-color: #ec7777;
+  background: #df6969;
+}
+
+.watchlist-dialog-enter-active,
+.watchlist-dialog-leave-active {
+  transition: opacity 0.16s ease;
+}
+
+.watchlist-dialog-enter-active .watchlist-delete-dialog,
+.watchlist-dialog-leave-active .watchlist-delete-dialog {
+  transition: transform 0.16s ease, opacity 0.16s ease;
+}
+
+.watchlist-dialog-enter-from,
+.watchlist-dialog-leave-to {
+  opacity: 0;
+}
+
+.watchlist-dialog-enter-from .watchlist-delete-dialog,
+.watchlist-dialog-leave-to .watchlist-delete-dialog {
+  opacity: 0;
+  transform: translateY(8px) scale(0.985);
+}
+
+@keyframes watchlist-loading-pulse {
+  70%, 100% {
+    box-shadow: 0 0 0 9px rgba(213, 180, 106, 0);
+  }
+}
+
+@media (max-width: 640px) {
+  .watchlist-delete-backdrop {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .watchlist-delete-dialog {
+    border-radius: 16px 16px 12px 12px;
+    padding: 20px;
+  }
+
+  .watchlist-delete-actions button {
+    flex: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .watchlist-loading-dot,
+  .watchlist-dialog-enter-active,
+  .watchlist-dialog-leave-active,
+  .watchlist-dialog-enter-active .watchlist-delete-dialog,
+  .watchlist-dialog-leave-active .watchlist-delete-dialog {
+    animation: none;
+    transition: none;
+  }
+}
+
 .position-agent-panel {
   display: grid;
   grid-template-columns: minmax(320px, 1fr) minmax(280px, 0.8fr);

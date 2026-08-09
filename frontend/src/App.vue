@@ -85,8 +85,10 @@ const health = ref<HealthPayload | null>(null)
 const dashboard = ref<DashboardPayload | null>(null)
 const positions = ref<PositionItem[]>([])
 const watchlist = ref<WatchlistItem[]>([])
+const watchlistLoading = ref(false)
 const agents = ref<AgentItem[]>([])
 let dashboardRefreshRequest = 0
+let watchlistRefreshRequest = 0
 let dashboardRefreshTimer: number | null = null
 let dashboardRefreshInFlightCount = 0
 const DASHBOARD_REFRESH_INTERVAL_MS = 30_000
@@ -309,6 +311,7 @@ const positionModelGroups = computed(() => {
 async function refreshAll() {
   if (!currentUser.value) return
   const dashboardRequestId = ++dashboardRefreshRequest
+  const watchlistRequestId = ++watchlistRefreshRequest
   dashboardRefreshInFlightCount += 1
   loading.value = true
   error.value = ''
@@ -332,11 +335,16 @@ async function refreshAll() {
       dashboard.value = dashboardPayload
     }
     positions.value = positionPayload
-    watchlist.value = watchlistPayload
+    if (watchlistRequestId === watchlistRefreshRequest) {
+      watchlist.value = watchlistPayload
+    }
     agents.value = agentPayload
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
+    if (watchlistRequestId === watchlistRefreshRequest) {
+      watchlistLoading.value = false
+    }
     loading.value = false
     dashboardRefreshInFlightCount = Math.max(0, dashboardRefreshInFlightCount - 1)
   }
@@ -390,15 +398,44 @@ function stopDashboardAutoRefresh() {
 // 静默刷新持仓+自选：买入/卖出/删除后调用，不显示 loading 遮罩，避免页面闪烁
 async function refreshPositions() {
   if (!currentUser.value) return
+  const watchlistRequestId = ++watchlistRefreshRequest
   try {
     const [positionPayload, watchlistPayload] = await Promise.all([
       api.positions(),
       api.watchlist()
     ])
     positions.value = positionPayload
-    watchlist.value = watchlistPayload
+    if (watchlistRequestId === watchlistRefreshRequest) {
+      watchlist.value = watchlistPayload
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
+  } finally {
+    if (watchlistRequestId === watchlistRefreshRequest) {
+      watchlistLoading.value = false
+    }
+  }
+}
+
+async function refreshWatchlist() {
+  if (!currentUser.value) return
+  const requestId = ++watchlistRefreshRequest
+  watchlist.value = []
+  watchlistLoading.value = true
+  error.value = ''
+  try {
+    const payload = await api.watchlist()
+    if (requestId === watchlistRefreshRequest) {
+      watchlist.value = payload
+    }
+  } catch (err) {
+    if (requestId === watchlistRefreshRequest) {
+      error.value = err instanceof Error ? err.message : '自选池加载失败'
+    }
+  } finally {
+    if (requestId === watchlistRefreshRequest) {
+      watchlistLoading.value = false
+    }
   }
 }
 
@@ -950,6 +987,7 @@ function navigate(page: PageKey) {
   }
   if (page === 'askStock') askStockInitialQuestion.value = ''
   if (page === 'workbench') void refreshDashboard()
+  if (page === 'watchlist') void refreshWatchlist()
   if (page !== 'backtestReport' && window.location.pathname.startsWith('/backtests/')) {
     window.history.pushState({}, '', '/')
   }
@@ -1097,7 +1135,8 @@ onBeforeUnmount(() => {
       <WatchlistView
         v-else-if="activePage === 'watchlist'"
         :watchlist="watchlist"
-        @refresh="refreshAll"
+        :loading="watchlistLoading"
+        @refresh="refreshWatchlist"
         @open-chart="openChartFromWatchlist"
         @manage-feishu="openFeishuBindings"
       />

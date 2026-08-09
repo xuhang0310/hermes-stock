@@ -496,7 +496,7 @@ export const api = {
     }),
   discardPositionAgentDraft: () =>
     request<{ cleared: number }>('/api/positions/agent-draft', { method: 'DELETE' }),
-  watchlist: () => request<WatchlistItem[]>('/api/watchlist'),
+  watchlist: () => request<WatchlistItem[]>('/api/watchlist', { cache: 'no-store' }),
   addWatchlist: (payload: { symbol: string; group_name: string; reason?: string }) =>
     request<WatchlistItem>('/api/watchlist', {
       method: 'POST',
