@@ -114,7 +114,7 @@ const digitalHumanInitialSession = ref<number | null>(null)
 const digitalHumanInitialQuestion = ref('')
 const askStockInitialQuestion = ref('')
 const backtestRunId = ref('')
-type BacktestReturnPage = 'digitalHumans' | 'backtestHistory'
+type BacktestReturnPage = 'digitalHumans' | 'backtestHistory' | 'screener'
 const backtestReturnPage = ref<BacktestReturnPage>('digitalHumans')
 const positionAgentTargetAccount = ref<number | null>(null)
 const positionAgentAccounts = ref<PositionAccount[]>([])
@@ -1018,6 +1018,10 @@ function openBacktestFromHistory(runId: string) {
   openBacktest(runId, 'backtestHistory')
 }
 
+function openScreenerBacktest(runId: string) {
+  openBacktest(runId, 'screener')
+}
+
 function closeBacktest() {
   window.history.pushState({}, '', '/')
   activePage.value = backtestReturnPage.value
@@ -1055,6 +1059,18 @@ function openScreenerStockAnalysis(item: ScreenerItem) {
     snapshot ? `该标的来自 AI 选股结果，当前筛选快照：${snapshot}。` : '',
     '请先调用可用的行情与研究工具核对最新数据，再从趋势与量价、基本面与估值、近期催化、主要风险、关键观察位五个方面分析，并给出后续跟踪清单。请明确区分事实与推断，不构成投资建议。'
   ].filter(Boolean).join('\n')
+  activePage.value = 'digitalHumans'
+}
+
+function createScreenerAgentTask(items: ScreenerItem[]) {
+  const pool = items.slice(0, 20).map((item) => `${item.name}（${item.symbol}）`).join('、')
+  digitalHumanInitialTab.value = 'chat'
+  digitalHumanInitialSession.value = null
+  digitalHumanInitialQuestion.value = [
+    '请为这组选股结果创建一个持续跟踪的 Agent 任务。',
+    `候选池：${pool}。`,
+    '请先确认可用的任务与调度工具，再创建每日收盘后的跟踪任务：核对量价趋势、显著异动、公告与主要风险，只在有实质变化时给出摘要。创建前请展示任务名称、时间、股票池和输出内容供我确认。'
+  ].join('\n')
   activePage.value = 'digitalHumans'
 }
 
@@ -1133,6 +1149,8 @@ onBeforeUnmount(() => {
         v-else-if="activePage === 'screener'"
         @watchlist-added="applyWatchlistItem"
         @ask-stock="openScreenerStockAnalysis"
+        @open-backtest="openScreenerBacktest"
+        @create-agent-task="createScreenerAgentTask"
       />
       <DigitalHumanCenter
         v-else-if="activePage === 'digitalHumans'"
