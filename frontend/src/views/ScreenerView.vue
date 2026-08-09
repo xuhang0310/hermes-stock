@@ -79,6 +79,7 @@ const resultView = ref<ResultView>('ranking')
 const resultPage = ref(1)
 const resultPageSize = 8
 const selectedSymbol = ref('')
+const checkedSymbols = ref<string[]>([])
 const comparisonSymbols = ref<string[]>([])
 const ruleEditorOpen = ref(false)
 const lastRunAt = ref('')
@@ -87,6 +88,7 @@ const scoreMomentumWeight = ref(40)
 const scoreLiquidityWeight = ref(25)
 const backtestLoading = ref(false)
 const backtestError = ref('')
+const bulkWatchlistAdding = ref(false)
 const watchlistState = ref<Record<string, 'adding' | 'added' | 'error'>>({})
 const savedStrategies = ref<ScreenerSavedStrategy[]>([])
 const savedLoading = ref(false)
@@ -337,6 +339,15 @@ const sortedResultItems = computed(() => {
   const safePage = Math.min(resultPage.value, resultPages.value)
   return allSortedResultItems.value.slice((safePage - 1) * resultPageSize, safePage * resultPageSize)
 })
+const checkedResultItems = computed(() =>
+  allSortedResultItems.value.filter((item) => checkedSymbols.value.includes(item.symbol))
+)
+const allPageChecked = computed(() =>
+  sortedResultItems.value.length > 0 && sortedResultItems.value.every((item) => checkedSymbols.value.includes(item.symbol))
+)
+const somePageChecked = computed(() =>
+  sortedResultItems.value.some((item) => checkedSymbols.value.includes(item.symbol))
+)
 const selectedResultItem = computed(() =>
   allSortedResultItems.value.find((item) => item.symbol === selectedSymbol.value) || allSortedResultItems.value[0] || null
 )
@@ -555,6 +566,7 @@ function newStrategy() {
   strategySaved.value = false
   activeSavedStrategyId.value = null
   selectedSymbol.value = ''
+  checkedSymbols.value = []
   comparisonSymbols.value = []
   resultPage.value = 1
   lastRunAt.value = ''
@@ -565,6 +577,8 @@ function newStrategy() {
 function openBuilder() {
   activeWorkspace.value = 'builder'
   advancedOpen.value = true
+  checkedSymbols.value = []
+  comparisonSymbols.value = []
   void nextTick(() => window.scrollTo({ top: 0, behavior: 'smooth' }))
 }
 
@@ -646,6 +660,7 @@ function clearBuilderConditions() {
   interpretError.value = ''
   watchlistState.value = {}
   selectedSymbol.value = ''
+  checkedSymbols.value = []
   comparisonSymbols.value = []
   resultPage.value = 1
   strategySaved.value = false
@@ -686,6 +701,54 @@ function selectResult(item: ScreenerItem) {
   selectedSymbol.value = item.symbol
 }
 
+function toggleResultChecked(item: ScreenerItem) {
+  selectedSymbol.value = item.symbol
+  checkedSymbols.value = checkedSymbols.value.includes(item.symbol)
+    ? checkedSymbols.value.filter((symbol) => symbol !== item.symbol)
+    : [...checkedSymbols.value, item.symbol]
+}
+
+function toggleCurrentPageChecked() {
+  const pageSymbols = sortedResultItems.value.map((item) => item.symbol)
+  if (allPageChecked.value) {
+    checkedSymbols.value = checkedSymbols.value.filter((symbol) => !pageSymbols.includes(symbol))
+    return
+  }
+  checkedSymbols.value = Array.from(new Set([...checkedSymbols.value, ...pageSymbols]))
+}
+
+function clearCheckedResults() {
+  checkedSymbols.value = []
+}
+
+async function addCheckedToWatchlist() {
+  if (!checkedResultItems.value.length || bulkWatchlistAdding.value) return
+  bulkWatchlistAdding.value = true
+  try {
+    for (const item of checkedResultItems.value) {
+      await addResultToWatchlist(item)
+    }
+  } finally {
+    bulkWatchlistAdding.value = false
+  }
+}
+
+function addCheckedToComparison() {
+  if (!checkedResultItems.value.length || checkedResultItems.value.length > 4) return
+  comparisonSymbols.value = checkedResultItems.value.map((item) => item.symbol)
+  resultView.value = 'compare'
+}
+
+function askCheckedStock() {
+  if (checkedResultItems.value.length !== 1) return
+  emit('askStock', checkedResultItems.value[0])
+}
+
+function createCheckedAgentTask() {
+  if (!checkedResultItems.value.length) return
+  emit('createAgentTask', checkedResultItems.value.slice(0, 20))
+}
+
 function toggleComparison(item: ScreenerItem) {
   if (comparisonSymbols.value.includes(item.symbol)) {
     comparisonSymbols.value = comparisonSymbols.value.filter((symbol) => symbol !== item.symbol)
@@ -708,7 +771,7 @@ function isoDate(date: Date): string {
 }
 
 async function runQuickBacktest() {
-  if (backtestLoading.value || allSortedResultItems.value.length < 3) return
+  if (backtestLoading.value || checkedResultItems.value.length < 3 || checkedResultItems.value.length > 20) return
   backtestLoading.value = true
   backtestError.value = ''
   try {
@@ -718,7 +781,7 @@ async function runQuickBacktest() {
     if (Number.isNaN(end.getTime())) end.setTime(Date.now())
     const start = new Date(end)
     start.setFullYear(start.getFullYear() - 2)
-    const symbols = allSortedResultItems.value.slice(0, 20).map((item) => item.symbol)
+    const symbols = checkedResultItems.value.map((item) => item.symbol)
     const out = await api.runStrategyBacktest({
       strategy_code: 'momentum',
       symbols,
@@ -788,6 +851,7 @@ async function run() {
     lastQuery.value = query
     ran.value = true
     resultPage.value = 1
+    checkedSymbols.value = []
     comparisonSymbols.value = []
     selectedSymbol.value = result.value.items[0]?.symbol || ''
     lastRunAt.value = new Date().toLocaleString('zh-CN', { hour12: false })
@@ -1170,22 +1234,23 @@ onMounted(() => {
             <template v-if="result?.items.length">
               <div v-if="resultView === 'ranking'" class="sc-ranking-table-wrap">
                 <table class="sc-ranking-table">
-                  <thead><tr><th>排名</th><th>标的</th><th>综合分</th><th>估值规模</th><th>动量</th><th>活跃度</th><th>入选理由</th><th>主要风险</th><th></th></tr></thead>
+                  <thead><tr><th class="sc-check-cell"><input type="checkbox" data-testid="screener-select-page" aria-label="选择本页股票" :checked="allPageChecked" :indeterminate="somePageChecked && !allPageChecked" @change="toggleCurrentPageChecked" /></th><th>排名</th><th>标的</th><th>综合分</th><th>估值规模</th><th>动量</th><th>活跃度</th><th>入选理由</th><th>主要风险</th><th></th></tr></thead>
                   <tbody>
-                    <tr v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol }" @click="selectResult(item)">
+                    <tr v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }" @click="selectResult(item)">
+                      <td class="sc-check-cell" @click.stop><input type="checkbox" data-testid="screener-result-checkbox" :aria-label="`选择 ${item.name} ${item.symbol}`" :checked="checkedSymbols.includes(item.symbol)" @change="toggleResultChecked(item)" /></td>
                       <td>{{ allSortedResultItems.findIndex((row) => row.symbol === item.symbol) + 1 }}</td>
                       <td><strong>{{ item.symbol }}</strong><span>{{ item.name }}</span></td>
                       <td class="sc-score-cell"><b>{{ item.compositeScore.toFixed(1) }}</b></td>
                       <td>{{ item.valueScore.toFixed(1) }}</td><td>{{ item.momentumScore.toFixed(1) }}</td><td>{{ item.liquidityScore.toFixed(1) }}</td>
                       <td><div class="sc-reason-tags"><span v-for="reason in item.reasons.slice(0, 2)" :key="reason">{{ reason.split('，')[0] }}</span></div></td>
                       <td class="sc-risk-cell">{{ item.risks[0] }}</td>
-                      <td><button type="button" class="sc-mini-ask" @click="emit('askStock', item)">问股</button></td>
+                      <td><button type="button" class="sc-mini-ask" @click.stop="emit('askStock', item)">问股</button></td>
                     </tr>
                   </tbody>
                 </table>
               </div>
               <div v-else-if="resultView === 'factors'" class="sc-factor-board">
-                <article v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol }" @click="selectResult(item)"><header><strong>{{ item.name }}</strong><b>{{ item.compositeScore.toFixed(1) }}</b></header><div><span>估值规模</span><i><em :style="{ width: `${item.valueScore}%` }"></em></i><b>{{ item.valueScore.toFixed(0) }}</b></div><div><span>动量</span><i><em :style="{ width: `${item.momentumScore}%` }"></em></i><b>{{ item.momentumScore.toFixed(0) }}</b></div><div><span>交易活跃</span><i><em :style="{ width: `${item.liquidityScore}%` }"></em></i><b>{{ item.liquidityScore.toFixed(0) }}</b></div></article>
+                <article v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }" @click="selectResult(item)"><input type="checkbox" class="sc-factor-checkbox" data-testid="screener-factor-checkbox" :aria-label="`选择 ${item.name} ${item.symbol}`" :checked="checkedSymbols.includes(item.symbol)" @click.stop @change="toggleResultChecked(item)" /><header><strong>{{ item.name }}</strong><b>{{ item.compositeScore.toFixed(1) }}</b></header><div><span>估值规模</span><i><em :style="{ width: `${item.valueScore}%` }"></em></i><b>{{ item.valueScore.toFixed(0) }}</b></div><div><span>动量</span><i><em :style="{ width: `${item.momentumScore}%` }"></em></i><b>{{ item.momentumScore.toFixed(0) }}</b></div><div><span>交易活跃</span><i><em :style="{ width: `${item.liquidityScore}%` }"></em></i><b>{{ item.liquidityScore.toFixed(0) }}</b></div></article>
               </div>
               <div v-else class="sc-compare-board">
                 <article v-for="item in comparedItems" :key="item.symbol"><header><div><strong>{{ item.name }}</strong><span>{{ item.symbol }}</span></div><b>{{ item.compositeScore.toFixed(1) }}</b></header><dl><div><dt>估值规模</dt><dd>{{ item.valueScore.toFixed(1) }}</dd></div><div><dt>动量</dt><dd>{{ item.momentumScore.toFixed(1) }}</dd></div><div><dt>活跃度</dt><dd>{{ item.liquidityScore.toFixed(1) }}</dd></div><div><dt>PE</dt><dd>{{ formatNum(item.pe_ttm, 1) }}</dd></div></dl><button type="button" @click="toggleComparison(item)">移出对比</button></article>
@@ -1195,11 +1260,12 @@ onMounted(() => {
                 <div><button type="button" :disabled="resultPage <= 1" @click="changeResultPage(resultPage - 1)">‹</button><button v-for="page in resultPages" :key="page" type="button" :class="{ active: resultPage === page }" @click="changeResultPage(page)">{{ page }}</button><button type="button" :disabled="resultPage >= resultPages" @click="changeResultPage(resultPage + 1)">›</button></div>
               </footer>
               <div class="sc-workbench-actions">
-                <button type="button" :disabled="!selectedResultItem" @click="selectedResultItem && addResultToWatchlist(selectedResultItem)">{{ selectedResultItem && watchlistState[selectedResultItem.symbol] === 'added' ? '已加入自选' : '加入自选' }}</button>
-                <button type="button" :disabled="!selectedResultItem" @click="selectedResultItem && toggleComparison(selectedResultItem)">{{ selectedResultItem && comparisonSymbols.includes(selectedResultItem.symbol) ? '移出对比' : '加入对比' }}</button>
-                <button type="button" :disabled="!selectedResultItem" @click="selectedResultItem && emit('askStock', selectedResultItem)">问股</button>
-                <button type="button" class="primary" :disabled="backtestLoading || allSortedResultItems.length < 3" @click="runQuickBacktest">{{ backtestLoading ? '回测运行中…' : '快速回测' }}</button>
-                <button type="button" :disabled="!allSortedResultItems.length" @click="emit('createAgentTask', allSortedResultItems.slice(0, 20))">创建 Agent 任务</button>
+                <div class="sc-selection-summary"><strong>已选 {{ checkedResultItems.length }} 只</strong><button v-if="checkedResultItems.length" type="button" @click="clearCheckedResults">清空</button></div>
+                <button type="button" :disabled="!checkedResultItems.length || bulkWatchlistAdding" @click="addCheckedToWatchlist">{{ bulkWatchlistAdding ? '加入中…' : `加入自选 (${checkedResultItems.length})` }}</button>
+                <button type="button" :disabled="!checkedResultItems.length || checkedResultItems.length > 4" :title="checkedResultItems.length > 4 ? '对比最多选择 4 只股票' : ''" @click="addCheckedToComparison">加入对比 ({{ checkedResultItems.length }})</button>
+                <button type="button" :disabled="checkedResultItems.length !== 1" title="问股一次只能选择 1 只股票" @click="askCheckedStock">问股</button>
+                <button type="button" class="primary" :disabled="backtestLoading || checkedResultItems.length < 3 || checkedResultItems.length > 20" title="快速回测请选择 3–20 只股票" @click="runQuickBacktest">{{ backtestLoading ? '回测运行中…' : `快速回测 (${checkedResultItems.length})` }}</button>
+                <button type="button" :disabled="!checkedResultItems.length" @click="createCheckedAgentTask">创建 Agent 任务</button>
               </div>
               <p v-if="backtestError" class="sc-action-error">快速回测失败：{{ backtestError }}</p>
             </template>
@@ -2871,10 +2937,11 @@ select.sc-input {
 .sc-rule-chip span { margin-left: 5px; color: var(--sc-text-3); }
 .sc-rule-chip.is-empty { border-style: dashed; color: var(--sc-accent); }
 
-.sc-strategy-layout { display: grid; grid-template-columns: minmax(235px, .75fr) minmax(620px, 2.25fr) minmax(270px, .95fr); gap: 12px; align-items: stretch; }
+.sc-strategy-layout { display: grid; grid-template-columns: minmax(235px, .75fr) minmax(620px, 2.25fr) minmax(270px, .95fr); gap: 12px; align-items: stretch; min-height: calc(100dvh - 280px); }
 .sc-strategy-sidebar,
 .sc-results-center,
 .sc-explain-panel { min-width: 0; overflow: hidden; border-color: rgba(255,255,255,.11); background: linear-gradient(180deg,#14191d,#111518); }
+.sc-results-center { display: flex; flex-direction: column; }
 .sc-strategy-sidebar > header,
 .sc-explain-panel > header { display: flex; align-items: center; justify-content: space-between; min-height: 55px; padding: 0 14px; border-bottom: 1px solid var(--sc-line); }
 .sc-strategy-sidebar > header h3,
@@ -2907,17 +2974,21 @@ select.sc-input {
 .sc-result-tabs button.active { color: var(--sc-accent); }
 .sc-result-tabs button.active::after { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: var(--sc-accent); content: ''; }
 .sc-result-tabs em { padding: 1px 4px; border-radius: 999px; background: rgba(215,183,111,.14); font-size: 9px; font-style: normal; }
-.sc-ranking-table-wrap { min-height: 390px; overflow: auto; }
+.sc-ranking-table-wrap { min-height: 390px; flex: 1; overflow: auto; }
 .sc-ranking-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
 .sc-ranking-table th { padding: 9px 8px; border-bottom: 1px solid var(--sc-line); background: rgba(255,255,255,.015); color: var(--sc-text-3); font-weight: 500; text-align: left; white-space: nowrap; }
 .sc-ranking-table td { padding: 9px 8px; border-bottom: 1px solid rgba(255,255,255,.065); color: var(--sc-text-2); vertical-align: middle; }
 .sc-ranking-table tbody tr { cursor: pointer; transition: background .15s; }
 .sc-ranking-table tbody tr:hover { background: rgba(255,255,255,.022); }
 .sc-ranking-table tbody tr.selected { background: linear-gradient(90deg,rgba(215,183,111,.12),rgba(215,183,111,.035)); box-shadow: inset 2px 0 var(--sc-accent); }
-.sc-ranking-table td:nth-child(2) strong,
-.sc-ranking-table td:nth-child(2) span { display: block; white-space: nowrap; }
-.sc-ranking-table td:nth-child(2) strong { color: var(--sc-text); }
-.sc-ranking-table td:nth-child(2) span { margin-top: 3px; color: var(--sc-text-3); font-size: 9.5px; }
+.sc-ranking-table tbody tr.is-checked { background: rgba(215,183,111,.065); }
+.sc-ranking-table td:nth-child(3) strong,
+.sc-ranking-table td:nth-child(3) span { display: block; white-space: nowrap; }
+.sc-ranking-table td:nth-child(3) strong { color: var(--sc-text); }
+.sc-ranking-table td:nth-child(3) span { margin-top: 3px; color: var(--sc-text-3); font-size: 9.5px; }
+.sc-check-cell { width: 34px; box-sizing: border-box; text-align: center !important; }
+.sc-check-cell input,
+.sc-factor-checkbox { width: 15px; height: 15px; margin: 0; accent-color: var(--sc-accent); cursor: pointer; }
 .sc-score-cell b { color: var(--sc-accent-strong); font-size: 13px; }
 .sc-reason-tags { display: flex; gap: 4px; white-space: nowrap; }
 .sc-reason-tags span { padding: 3px 5px; border: 1px solid var(--sc-line); border-radius: 4px; color: var(--sc-text-2); }
@@ -2928,17 +2999,22 @@ select.sc-input {
 .sc-result-footer button { min-width: 26px; height: 26px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--sc-text-3); cursor: pointer; }
 .sc-result-footer button.active { border-color: var(--sc-line-strong); color: var(--sc-accent); }
 .sc-result-footer button:disabled { opacity: .3; }
-.sc-workbench-actions { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 8px; padding: 11px 14px; border-top: 1px solid var(--sc-line); }
+.sc-workbench-actions { display: grid; grid-template-columns: auto repeat(5, minmax(0,1fr)); gap: 8px; margin-top: auto; padding: 11px 14px; border-top: 1px solid var(--sc-line); }
 .sc-workbench-actions button { min-height: 36px; border: 1px solid var(--sc-line); border-radius: 5px; background: transparent; color: var(--sc-text-2); font: inherit; font-size: 11px; cursor: pointer; }
 .sc-workbench-actions button:hover:not(:disabled) { border-color: var(--sc-line-strong); color: var(--sc-accent); }
 .sc-workbench-actions button.primary { border-color: var(--sc-accent); background: var(--sc-accent); color: #17130a; font-weight: 700; }
 .sc-workbench-actions button:disabled { cursor: default; opacity: .35; }
+.sc-selection-summary { display: flex; min-width: 88px; align-items: center; gap: 7px; color: var(--sc-text-2); font-size: 10.5px; white-space: nowrap; }
+.sc-selection-summary button { min-height: 0; padding: 0; border: 0; color: var(--sc-accent); }
 .sc-action-error { margin: 0; padding: 0 14px 10px; color: #e18a8a; font-size: 10.5px; }
 .sc-factor-board,
-.sc-compare-board { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; min-height: 390px; padding: 10px; box-sizing: border-box; align-content: start; }
+.sc-compare-board { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; min-height: 390px; flex: 1; padding: 10px; box-sizing: border-box; align-content: start; }
 .sc-factor-board article,
 .sc-compare-board article { padding: 10px; border: 1px solid var(--sc-line); border-radius: 6px; background: rgba(255,255,255,.012); cursor: pointer; }
+.sc-factor-board article { position: relative; padding-left: 34px; }
 .sc-factor-board article.selected { border-color: var(--sc-line-strong); background: rgba(215,183,111,.05); }
+.sc-factor-board article.is-checked { box-shadow: inset 2px 0 var(--sc-accent); }
+.sc-factor-checkbox { position: absolute; top: 11px; left: 10px; }
 .sc-factor-board header,
 .sc-compare-board header { display: flex; justify-content: space-between; margin-bottom: 9px; }
 .sc-factor-board header b,
@@ -3246,7 +3322,7 @@ select.sc-input {
 }
 
 @media (max-width: 1380px) {
-  .sc-strategy-layout { grid-template-columns: 240px minmax(0,1fr); }
+  .sc-strategy-layout { grid-template-columns: 240px minmax(0,1fr); min-height: 0; }
   .sc-explain-panel { grid-column: 1 / -1; }
   .sc-explain-panel:not(:has(.sc-explain-empty)) { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); }
   .sc-explain-panel > header,
@@ -3281,6 +3357,7 @@ select.sc-input {
   .sc-results-center { order: 1; }
   .sc-explain-panel { order: 3; }
   .sc-workbench-actions { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .sc-selection-summary { grid-column: 1 / -1; min-height: 30px; }
   .sc-workbench-actions .primary { grid-column: span 2; }
   .sc-factor-board,
   .sc-compare-board { grid-template-columns: 1fr; }

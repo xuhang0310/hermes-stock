@@ -15,9 +15,10 @@ test('screener results remain actionable after a successful run', async () => {
   assert.match(source, /const sortedResultItems = computed/)
   assert.match(source, /v-for="item in sortedResultItems"/)
   assert.match(source, /async function addResultToWatchlist/)
+  assert.match(source, /async function addCheckedToWatchlist/)
   assert.match(source, /await api\.addWatchlist/)
   assert.match(source, /group_name: 'AI选股'/)
-  assert.match(source, /'加入自选'/)
+  assert.match(source, /data-testid="screener-result-checkbox"/)
 })
 
 test('empty results offer a concrete way to relax data-sensitive rules', async () => {

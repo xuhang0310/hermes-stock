@@ -11,7 +11,8 @@ const digitalHumanSource = fs.readFileSync(path.resolve(currentDir, '../src/view
 
 test('AI screener results expose a stock-specific digital-human action', () => {
   assert.match(screenerSource, /askStock: \[item: ScreenerItem\]/)
-  assert.match(screenerSource, /@click="emit\('askStock', item\)"[^>]*>问股<\/button>/)
+  assert.match(screenerSource, /@click\.stop="emit\('askStock', item\)"/)
+  assert.match(screenerSource, /function askCheckedStock/)
   assert.match(appSource, /@ask-stock="openScreenerStockAnalysis"/)
 })
 

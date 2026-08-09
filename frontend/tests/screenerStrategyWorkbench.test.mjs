@@ -30,9 +30,23 @@ test('quick backtest uses the real deterministic backtest API', async () => {
 test('strategy workbench actions remain connected to real destinations', async () => {
   const [view, app] = await Promise.all([readFile(viewPath, 'utf8'), readFile(appPath, 'utf8')])
 
-  assert.match(view, /emit\('createAgentTask', allSortedResultItems\.slice\(0, 20\)\)/)
+  assert.match(view, /function createCheckedAgentTask/)
+  assert.match(view, /emit\('createAgentTask', checkedResultItems\.value\.slice\(0, 20\)\)/)
   assert.match(app, /function createScreenerAgentTask/)
   assert.match(app, /@create-agent-task="createScreenerAgentTask"/)
+})
+
+test('batch result actions are driven by explicit checkbox selections', async () => {
+  const view = await readFile(viewPath, 'utf8')
+
+  assert.match(view, /const checkedSymbols = ref<string\[\]>\(\[\]\)/)
+  assert.match(view, /const checkedResultItems = computed/)
+  assert.match(view, /data-testid="screener-select-page"/)
+  assert.match(view, /data-testid="screener-result-checkbox"/)
+  assert.match(view, /data-testid="screener-factor-checkbox"/)
+  assert.match(view, /async function addCheckedToWatchlist/)
+  assert.match(view, /checkedResultItems\.value\.length < 3/)
+  assert.match(view, /min-height: calc\(100dvh - 280px\)/)
 })
 
 test('screener backtests identify the correct return destination', async () => {
