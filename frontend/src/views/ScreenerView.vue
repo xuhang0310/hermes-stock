@@ -65,6 +65,7 @@ const resultSection = ref<HTMLElement | null>(null)
 const ruleEditor = ref<HTMLElement | null>(null)
 type ResultSort = 'score_desc' | 'pct_desc' | 'turnover_desc' | 'mv_asc' | 'pe_asc'
 type ResultView = 'ranking' | 'factors' | 'compare'
+type ResultColumn = 'value' | 'momentum' | 'liquidity' | 'reasons' | 'risks'
 type ScoredScreenerItem = ScreenerItem & {
   compositeScore: number
   valueScore: number
@@ -76,6 +77,10 @@ type ScoredScreenerItem = ScreenerItem & {
 }
 const resultSort = ref<ResultSort>('score_desc')
 const resultView = ref<ResultView>('ranking')
+const resultSearch = ref('')
+const resultSearchOpen = ref(false)
+const resultColumnsOpen = ref(false)
+const visibleResultColumns = ref<ResultColumn[]>(['value', 'momentum', 'liquidity', 'reasons', 'risks'])
 const resultPage = ref(1)
 const resultPageSize = 8
 const resultLimit = ref(20)
@@ -329,13 +334,16 @@ const allSortedResultItems = computed(() => {
   const items = [...scoredResultItems.value]
   const numberOr = (value: number | null | undefined, fallback: number) =>
     typeof value === 'number' && Number.isFinite(value) ? value : fallback
-  return items.sort((a, b) => {
+  const sorted = items.sort((a, b) => {
     if (resultSort.value === 'score_desc') return b.compositeScore - a.compositeScore
     if (resultSort.value === 'turnover_desc') return numberOr(b.turnover_rate, -Infinity) - numberOr(a.turnover_rate, -Infinity)
     if (resultSort.value === 'mv_asc') return numberOr(a.total_mv_yi, Infinity) - numberOr(b.total_mv_yi, Infinity)
     if (resultSort.value === 'pe_asc') return numberOr(a.pe_ttm, Infinity) - numberOr(b.pe_ttm, Infinity)
     return numberOr(b.pct_chg, -Infinity) - numberOr(a.pct_chg, -Infinity)
   })
+  const search = resultSearch.value.trim().toLowerCase()
+  if (!search) return sorted
+  return sorted.filter((item) => `${item.symbol} ${item.name}`.toLowerCase().includes(search))
 })
 const resultPages = computed(() => Math.max(1, Math.ceil(allSortedResultItems.value.length / resultPageSize)))
 const sortedResultItems = computed(() => {
@@ -371,6 +379,37 @@ const resultFeatureDistribution = computed(() => {
 
 function weightedContribution(score: number, weight: number): number {
   return Math.round(score * weight) / 100
+}
+
+const resultColumnOptions: Array<{ key: ResultColumn; label: string }> = [
+  { key: 'value', label: '估值规模' },
+  { key: 'momentum', label: '动量' },
+  { key: 'liquidity', label: '流动性' },
+  { key: 'reasons', label: '入选理由' },
+  { key: 'risks', label: '主要风险' },
+]
+
+function isResultColumnVisible(column: ResultColumn): boolean {
+  return visibleResultColumns.value.includes(column)
+}
+
+function toggleResultColumn(column: ResultColumn) {
+  if (visibleResultColumns.value.includes(column)) {
+    if (visibleResultColumns.value.length === 1) return
+    visibleResultColumns.value = visibleResultColumns.value.filter((item) => item !== column)
+    return
+  }
+  visibleResultColumns.value = [...visibleResultColumns.value, column]
+}
+
+function reasonTag(reason: string): string {
+  if (reason.includes('PE')) return '估值合理'
+  if (reason.includes('市值')) return '规模符合'
+  if (reason.includes('上涨')) return '动量向上'
+  if (reason.includes('量比')) return '成交放大'
+  if (reason.includes('换手率')) return '交易活跃'
+  if (reason.includes('均线')) return '趋势向上'
+  return reason.split('，')[0]
 }
 
 async function loadRecommendation() {
@@ -860,6 +899,9 @@ async function run() {
     lastQuery.value = query
     ran.value = true
     resultPage.value = 1
+    resultSearch.value = ''
+    resultSearchOpen.value = false
+    resultColumnsOpen.value = false
     checkedSymbols.value = []
     comparisonSymbols.value = []
     selectedSymbol.value = result.value.items[0]?.symbol || ''
@@ -1231,28 +1273,30 @@ onMounted(() => {
 
           <section ref="resultSection" class="sc-results-center sc-panel">
             <header class="sc-center-head">
-              <div><h3>筛选结果 <b v-if="result">{{ result.items.length }} / {{ result.total }}</b></h3><span v-if="result">基础条件命中 {{ result.universe.toLocaleString('zh-CN') }} 只 · 当前展示实时结果</span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
-              <div v-if="result?.items.length" class="sc-center-tools"><label>排序<select v-model="resultSort" class="sc-result-sort" @change="resultPage = 1"><option value="score_desc">按综合分排序</option><option value="pct_desc">涨幅从高到低</option><option value="turnover_desc">换手率从高到低</option><option value="mv_asc">市值从小到大</option><option value="pe_asc">PE 从低到高</option></select></label></div>
+              <div><h3>筛选结果 <b v-if="result">{{ allSortedResultItems.length }} / {{ result.universe.toLocaleString('zh-CN') }}</b></h3><span v-if="result">已按当前规则筛选 · 展示 Top {{ resultLimit }} 实时结果</span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
             </header>
             <nav class="sc-result-tabs" aria-label="结果视图">
-              <button type="button" :class="{ active: resultView === 'ranking' }" @click="resultView = 'ranking'">排名表</button>
-              <button type="button" :class="{ active: resultView === 'factors' }" @click="resultView = 'factors'">因子分</button>
-              <button type="button" :class="{ active: resultView === 'compare' }" @click="resultView = 'compare'">对比 <em v-if="comparisonSymbols.length">{{ comparisonSymbols.length }}</em></button>
+              <div class="sc-result-tabset"><button type="button" :class="{ active: resultView === 'ranking' }" @click="resultView = 'ranking'">排名表</button><button type="button" :class="{ active: resultView === 'factors' }" @click="resultView = 'factors'">图表</button><button type="button" :class="{ active: resultView === 'compare' }" @click="resultView = 'compare'">对比 <em v-if="comparisonSymbols.length">{{ comparisonSymbols.length }}</em></button></div>
+              <div v-if="result?.items.length" class="sc-result-toolbar">
+                <select v-model="resultSort" class="sc-result-sort" aria-label="排序" @change="resultPage = 1"><option value="score_desc">按综合分排序</option><option value="pct_desc">涨幅从高到低</option><option value="turnover_desc">换手率从高到低</option><option value="mv_asc">市值从小到大</option><option value="pe_asc">PE 从低到高</option></select>
+                <div class="sc-column-picker"><button type="button" :aria-expanded="resultColumnsOpen" @click="resultColumnsOpen = !resultColumnsOpen">自定义列</button><div v-if="resultColumnsOpen" class="sc-column-menu"><label v-for="column in resultColumnOptions" :key="column.key"><input type="checkbox" :checked="isResultColumnVisible(column.key)" @change="toggleResultColumn(column.key)" />{{ column.label }}</label></div></div>
+                <div class="sc-result-search" :class="{ open: resultSearchOpen }"><input v-if="resultSearchOpen" v-model="resultSearch" type="search" placeholder="代码或名称" aria-label="搜索筛选结果" @input="resultPage = 1" @keydown.esc="resultSearchOpen = false; resultSearch = ''" /><button type="button" aria-label="搜索结果" @click="resultSearchOpen = !resultSearchOpen">⌕</button></div>
+              </div>
             </nav>
 
             <template v-if="result?.items.length">
               <div v-if="resultView === 'ranking'" class="sc-ranking-table-wrap">
                 <table class="sc-ranking-table">
-                  <thead><tr><th class="sc-check-cell"><input type="checkbox" data-testid="screener-select-page" aria-label="选择本页股票" :checked="allPageChecked" :indeterminate="somePageChecked && !allPageChecked" @change="toggleCurrentPageChecked" /></th><th>排名</th><th>标的</th><th>综合分</th><th>估值规模</th><th>动量</th><th>活跃度</th><th>入选理由</th><th>主要风险</th><th></th></tr></thead>
+                  <thead><tr><th class="sc-check-cell"><input type="checkbox" data-testid="screener-select-page" aria-label="选择本页股票" :checked="allPageChecked" :indeterminate="somePageChecked && !allPageChecked" @change="toggleCurrentPageChecked" /></th><th>排名</th><th>标的</th><th>综合分</th><th v-if="isResultColumnVisible('value')">估值规模</th><th v-if="isResultColumnVisible('momentum')">动量</th><th v-if="isResultColumnVisible('liquidity')">流动性</th><th v-if="isResultColumnVisible('reasons')">入选理由</th><th v-if="isResultColumnVisible('risks')">主要风险</th><th></th></tr></thead>
                   <tbody>
                     <tr v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }" @click="selectResult(item)">
                       <td class="sc-check-cell" @click.stop><input type="checkbox" data-testid="screener-result-checkbox" :aria-label="`选择 ${item.name} ${item.symbol}`" :checked="checkedSymbols.includes(item.symbol)" @change="toggleResultChecked(item)" /></td>
                       <td>{{ allSortedResultItems.findIndex((row) => row.symbol === item.symbol) + 1 }}</td>
                       <td><strong>{{ item.symbol }}</strong><span>{{ item.name }}</span></td>
                       <td class="sc-score-cell"><b>{{ item.compositeScore.toFixed(1) }}</b></td>
-                      <td>{{ item.valueScore.toFixed(1) }}</td><td>{{ item.momentumScore.toFixed(1) }}</td><td>{{ item.liquidityScore.toFixed(1) }}</td>
-                      <td><div class="sc-reason-tags"><span v-for="reason in item.reasons.slice(0, 2)" :key="reason">{{ reason.split('，')[0] }}</span></div></td>
-                      <td class="sc-risk-cell">{{ item.risks[0] }}</td>
+                      <td v-if="isResultColumnVisible('value')">{{ item.valueScore.toFixed(1) }}</td><td v-if="isResultColumnVisible('momentum')">{{ item.momentumScore.toFixed(1) }}</td><td v-if="isResultColumnVisible('liquidity')">{{ item.liquidityScore.toFixed(1) }}</td>
+                      <td v-if="isResultColumnVisible('reasons')"><div class="sc-reason-tags"><span v-for="reason in item.reasons.slice(0, 3)" :key="reason">{{ reasonTag(reason) }}</span></div></td>
+                      <td v-if="isResultColumnVisible('risks')" class="sc-risk-cell">{{ item.risks[0] }}</td>
                       <td><button type="button" class="sc-mini-ask" @click.stop="emit('askStock', item)">问股</button></td>
                     </tr>
                   </tbody>
@@ -2968,6 +3012,7 @@ select.sc-input {
 .sc-logic-card li { display: flex; gap: 7px; align-items: flex-start; color: var(--sc-text-2); font-size: 11px; line-height: 1.4; }
 .sc-logic-card li i { min-width: 14px; color: var(--sc-text-3); font-style: normal; }
 .sc-logic-card li i.is-ok { color: #5db987; }
+.sc-logic-card li i.is-rule { width: 10px; min-width: 10px; height: 10px; margin-top: 2px; border: 1px solid var(--sc-line-strong); border-radius: 2px; background: #0c0f11; box-shadow: inset 0 0 0 2px #0c0f11; }
 .sc-no-rule { margin: 0; color: var(--sc-text-3); font-size: 11px; }
 .sc-score-weights label { display: grid; grid-template-columns: 60px minmax(0,1fr) 32px; align-items: center; gap: 6px; margin-top: 8px; color: var(--sc-text-2); font-size: 10.5px; }
 .sc-score-weights input { width: 100%; accent-color: var(--sc-accent); }
@@ -2980,11 +3025,28 @@ select.sc-input {
 .sc-center-head h3 b { margin-left: 5px; color: var(--sc-text-2); font-size: 12px; }
 .sc-center-head span { color: var(--sc-text-3); font-size: 10.5px; }
 .sc-center-tools label { display: flex; align-items: center; gap: 6px; color: var(--sc-text-3); font-size: 10.5px; }
-.sc-result-tabs { display: flex; gap: 28px; min-height: 43px; padding: 0 14px; border-bottom: 1px solid var(--sc-line); }
-.sc-result-tabs button { position: relative; border: 0; background: transparent; color: var(--sc-text-3); font: inherit; font-size: 11.5px; cursor: pointer; }
-.sc-result-tabs button.active { color: var(--sc-accent); }
-.sc-result-tabs button.active::after { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: var(--sc-accent); content: ''; }
+.sc-result-tabs { display: flex; align-items: stretch; justify-content: space-between; gap: 18px; min-height: 43px; padding: 0 14px; border-bottom: 1px solid var(--sc-line); }
+.sc-result-tabset { display: flex; gap: 28px; }
+.sc-result-tabset button { position: relative; border: 0; background: transparent; color: var(--sc-text-3); font: inherit; font-size: 11.5px; cursor: pointer; }
+.sc-result-tabset button.active { color: var(--sc-accent); }
+.sc-result-tabset button.active::after { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: var(--sc-accent); content: ''; }
 .sc-result-tabs em { padding: 1px 4px; border-radius: 999px; background: rgba(215,183,111,.14); font-size: 9px; font-style: normal; }
+.sc-result-toolbar { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+.sc-result-toolbar button,
+.sc-result-toolbar input,
+.sc-result-toolbar .sc-result-sort { height: 30px; box-sizing: border-box; border: 1px solid var(--sc-line); border-radius: 4px; outline: 0; background: #0c0f11; color: var(--sc-text-2); font: inherit; font-size: 10.5px; }
+.sc-result-toolbar button { padding: 0 10px; cursor: pointer; }
+.sc-result-toolbar button:hover,
+.sc-result-toolbar button[aria-expanded="true"] { border-color: var(--sc-line-strong); color: var(--sc-accent); }
+.sc-result-toolbar .sc-result-sort { min-height: 30px; padding: 0 28px 0 9px; }
+.sc-column-picker { position: relative; }
+.sc-column-menu { position: absolute; z-index: 12; top: calc(100% + 7px); right: 0; display: grid; min-width: 150px; padding: 7px; border: 1px solid var(--sc-line-strong); border-radius: 5px; background: #111619; box-shadow: 0 14px 32px rgba(0,0,0,.42); }
+.sc-column-menu label { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 7px; border-radius: 4px; color: var(--sc-text-2); font-size: 10.5px; cursor: pointer; }
+.sc-column-menu label:hover { background: rgba(255,255,255,.035); }
+.sc-column-menu input { width: 14px; height: 14px; accent-color: var(--sc-accent); }
+.sc-result-search { display: flex; align-items: center; }
+.sc-result-search input { width: 132px; margin-right: 5px; padding: 0 8px; }
+.sc-result-search button { width: 32px; padding: 0; font-size: 18px; line-height: 1; }
 .sc-ranking-table-wrap { min-height: 390px; flex: 1; overflow: auto; }
 .sc-ranking-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
 .sc-ranking-table th { padding: 9px 8px; border-bottom: 1px solid var(--sc-line); background: rgba(255,255,255,.015); color: var(--sc-text-3); font-weight: 500; text-align: left; white-space: nowrap; }
@@ -3002,7 +3064,7 @@ select.sc-input {
 .sc-factor-checkbox { width: 15px; height: 15px; margin: 0; accent-color: var(--sc-accent); cursor: pointer; }
 .sc-score-cell b { color: var(--sc-accent-strong); font-size: 13px; }
 .sc-reason-tags { display: flex; gap: 4px; white-space: nowrap; }
-.sc-reason-tags span { padding: 3px 5px; border: 1px solid var(--sc-line); border-radius: 4px; color: var(--sc-text-2); }
+.sc-reason-tags span { padding: 3px 6px; border: 1px solid var(--sc-line); border-radius: 4px; color: var(--sc-text-2); background: rgba(255,255,255,.015); }
 .sc-risk-cell { max-width: 110px; color: #b9aaa0 !important; }
 .sc-mini-ask { padding: 4px 7px; border: 1px solid var(--sc-line-strong); border-radius: 4px; background: rgba(215,183,111,.08); color: var(--sc-accent); font: inherit; font-size: 10px; cursor: pointer; }
 .sc-result-footer { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 14px; border-top: 1px solid var(--sc-line); color: var(--sc-text-3); font-size: 10.5px; }
@@ -3352,6 +3414,9 @@ select.sc-input {
   .sc-explain-panel:not(:has(.sc-explain-empty)) { display: block; }
   .sc-ranking-table-wrap { overflow-x: auto; }
   .sc-ranking-table { min-width: 840px; }
+  .sc-result-tabs { align-items: flex-start; flex-direction: column; gap: 0; padding-top: 4px; }
+  .sc-result-tabset { min-height: 39px; }
+  .sc-result-toolbar { width: 100%; min-height: 42px; margin-left: 0; padding-bottom: 6px; }
   .sc-config-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 
@@ -3370,6 +3435,9 @@ select.sc-input {
   .sc-workbench-actions { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .sc-selection-summary { grid-column: 1 / -1; min-height: 30px; }
   .sc-workbench-actions .primary { grid-column: span 2; }
+  .sc-result-toolbar { flex-wrap: wrap; }
+  .sc-result-search.open { width: 100%; }
+  .sc-result-search input { min-width: 0; flex: 1; }
   .sc-factor-board,
   .sc-compare-board { grid-template-columns: 1fr; }
   .sc-config-grid { grid-template-columns: 1fr; }
