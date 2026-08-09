@@ -2937,7 +2937,7 @@ select.sc-input {
 .sc-rule-chip span { margin-left: 5px; color: var(--sc-text-3); }
 .sc-rule-chip.is-empty { border-style: dashed; color: var(--sc-accent); }
 
-.sc-strategy-layout { display: grid; grid-template-columns: minmax(235px, .75fr) minmax(620px, 2.25fr) minmax(270px, .95fr); gap: 12px; align-items: stretch; min-height: calc(100dvh - 280px); }
+.sc-strategy-layout { display: grid; grid-template-columns: minmax(235px, .75fr) minmax(620px, 2.25fr) minmax(270px, .95fr); gap: 12px; align-items: stretch; min-height: calc(100dvh - 340px); }
 .sc-strategy-sidebar,
 .sc-results-center,
 .sc-explain-panel { min-width: 0; overflow: hidden; border-color: rgba(255,255,255,.11); background: linear-gradient(180deg,#14191d,#111518); }
