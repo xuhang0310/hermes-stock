@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 const viewPath = fileURLToPath(new URL('../src/views/ScreenerView.vue', import.meta.url))
 const appPath = fileURLToPath(new URL('../src/App.vue', import.meta.url))
+const backtestPath = fileURLToPath(new URL('../src/views/BacktestReportView.vue', import.meta.url))
 
 test('strategy builder exposes the three-column decision workspace', async () => {
   const source = await readFile(viewPath, 'utf8')
@@ -32,4 +33,12 @@ test('strategy workbench actions remain connected to real destinations', async (
   assert.match(view, /emit\('createAgentTask', allSortedResultItems\.slice\(0, 20\)\)/)
   assert.match(app, /function createScreenerAgentTask/)
   assert.match(app, /@create-agent-task="createScreenerAgentTask"/)
+})
+
+test('screener backtests identify the correct return destination', async () => {
+  const [app, report] = await Promise.all([readFile(appPath, 'utf8'), readFile(backtestPath, 'utf8')])
+
+  assert.match(app, /backtestReturnPage === 'screener' \? '返回策略构建'/)
+  assert.match(report, /backLabel\?: string/)
+  assert.match(report, /:aria-label="props\.backLabel"/)
 })

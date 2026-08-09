@@ -12,7 +12,9 @@ import type { Time } from 'lightweight-charts'
 import { api } from '../api'
 import type { BacktestRun } from '../types'
 
-const props = defineProps<{ runId: string }>()
+const props = withDefaults(defineProps<{ runId: string; backLabel?: string }>(), {
+  backLabel: '返回数字人中心'
+})
 const emit = defineEmits<{ back: [] }>()
 
 type ReportTab = 'chart' | 'trades' | 'attribution' | 'code'
@@ -395,7 +397,7 @@ onBeforeUnmount(destroyCharts)
 <template>
   <section class="backtest-report">
     <header class="report-toolbar">
-      <button type="button" class="back-button" @click="emit('back')" aria-label="返回数字人中心">←</button>
+      <button type="button" class="back-button" @click="emit('back')" :aria-label="props.backLabel" :title="props.backLabel">←</button>
       <div v-if="run" class="report-identity">
         <div class="report-title-line">
           <span class="strategy-tag">策略回测</span>

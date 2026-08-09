@@ -1142,6 +1142,7 @@ onBeforeUnmount(() => {
       <BacktestReportView
         v-else-if="activePage === 'backtestReport'"
         :run-id="backtestRunId"
+        :back-label="backtestReturnPage === 'screener' ? '返回策略构建' : backtestReturnPage === 'backtestHistory' ? '返回回测报告列表' : '返回数字人中心'"
         @back="closeBacktest"
       />
       <FactorAnalysisView v-else-if="activePage === 'factorAnalysis'" />
