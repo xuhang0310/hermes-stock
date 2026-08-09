@@ -402,6 +402,22 @@ async function refreshPositions() {
   }
 }
 
+function applyWatchlistItem(item: WatchlistItem) {
+  watchlist.value = [
+    item,
+    ...watchlist.value.filter((existing) => existing.id !== item.id)
+  ]
+  if (dashboard.value) {
+    dashboard.value = {
+      ...dashboard.value,
+      counts: {
+        ...dashboard.value.counts,
+        watchlist: watchlist.value.length
+      }
+    }
+  }
+}
+
 async function login(payload: { username: string; password: string; remember_me: boolean }) {
   loginLoading.value = true
   loginError.value = ''
@@ -1049,7 +1065,10 @@ onBeforeUnmount(() => {
         @back="closeBacktest"
       />
       <FactorAnalysisView v-else-if="activePage === 'factorAnalysis'" />
-      <ScreenerView v-else-if="activePage === 'screener'" />
+      <ScreenerView
+        v-else-if="activePage === 'screener'"
+        @watchlist-added="applyWatchlistItem"
+      />
       <DigitalHumanCenter
         v-else-if="activePage === 'digitalHumans'"
         :initial-tab="digitalHumanInitialTab"

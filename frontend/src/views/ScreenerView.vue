@@ -18,6 +18,10 @@ type TemplateCategory = '热门' | '量价' | '趋势' | '估值' | '质量'
 type QuickTemplate = ScreenerTemplateItem & { category: TemplateCategory; prompt: string }
 type ScreenerWorkspace = 'quick' | 'builder' | 'saved'
 
+const emit = defineEmits<{
+  watchlistAdded: [item: Awaited<ReturnType<typeof api.addWatchlist>>]
+}>()
+
 const DRAFT_KEY = 'hermes_screener_prompt_draft'
 const running = ref(false)
 const error = ref('')
@@ -523,11 +527,12 @@ async function addResultToWatchlist(item: ScreenerItem) {
   if (watchlistState.value[item.symbol] === 'adding' || watchlistState.value[item.symbol] === 'added') return
   watchlistState.value = { ...watchlistState.value, [item.symbol]: 'adding' }
   try {
-    await api.addWatchlist({
+    const addedItem = await api.addWatchlist({
       symbol: item.symbol,
       group_name: 'AI选股',
       reason: `来自 AI 选股：${builderChips.value.join('、')}`.slice(0, 500),
     })
+    emit('watchlistAdded', addedItem)
     watchlistState.value = { ...watchlistState.value, [item.symbol]: 'added' }
   } catch {
     watchlistState.value = { ...watchlistState.value, [item.symbol]: 'error' }
