@@ -78,14 +78,15 @@ const resultSort = ref<ResultSort>('score_desc')
 const resultView = ref<ResultView>('ranking')
 const resultPage = ref(1)
 const resultPageSize = 8
+const resultLimit = ref(20)
 const selectedSymbol = ref('')
 const checkedSymbols = ref<string[]>([])
 const comparisonSymbols = ref<string[]>([])
 const ruleEditorOpen = ref(false)
 const lastRunAt = ref('')
-const scoreValueWeight = ref(35)
+const scoreValueWeight = ref(40)
 const scoreMomentumWeight = ref(40)
-const scoreLiquidityWeight = ref(25)
+const scoreLiquidityWeight = ref(20)
 const backtestLoading = ref(false)
 const backtestError = ref('')
 const bulkWatchlistAdding = ref(false)
@@ -211,6 +212,7 @@ function queryToChips(query: ScreenerQuery): string[] {
   addRangeChip(chips, 'PE', query.pe_min, query.pe_max)
   if (query.above_ma) chips.push(`站上 MA${query.above_ma}`)
   if (query.keyword) chips.push(`关键词 ${query.keyword}`)
+  if (query.limit) chips.push(`Top${query.limit}`)
   return chips
 }
 
@@ -244,7 +246,8 @@ const visibleHistory = computed(() => {
     .slice(0, historyExpanded.value ? 50 : 3)
 })
 const builderChips = computed(() => queryToChips(buildQuery()))
-const hasBuilderConditions = computed(() => builderChips.value.length > 0)
+const hardFilterChips = computed(() => builderChips.value.filter((chip) => !chip.startsWith('Top')))
+const hasBuilderConditions = computed(() => hardFilterChips.value.length > 0)
 const activeStrategyName = computed(() => {
   if (strategyName.value.trim()) return strategyName.value.trim()
   const traits: string[] = []
@@ -365,6 +368,10 @@ const resultFeatureDistribution = computed(() => {
     { label: '数据完整', value: Math.round(items.filter((item) => item.completeness >= 85).length / total * 100) },
   ]
 })
+
+function weightedContribution(score: number, weight: number): number {
+  return Math.round(score * weight) / 100
+}
 
 async function loadRecommendation() {
   try {
@@ -519,6 +526,7 @@ function applyQuery(query: ScreenerQuery) {
   peMax.value = query.pe_max != null ? String(query.pe_max) : ''
   aboveMa.value = query.above_ma != null ? String(query.above_ma) : ''
   keyword.value = query.keyword ?? ''
+  resultLimit.value = query.limit ?? 20
 }
 
 function buildQuery(): ScreenerQuery {
@@ -537,6 +545,7 @@ function buildQuery(): ScreenerQuery {
     pe_max: toNumber(peMax.value),
     above_ma: aboveMa.value ? Number(aboveMa.value) : undefined,
     keyword: String(keyword.value).trim() || undefined,
+    limit: resultLimit.value,
   }
 }
 
@@ -1201,21 +1210,21 @@ onMounted(() => {
             </section>
             <section class="sc-logic-card">
               <div class="sc-logic-title"><strong>2. 硬性过滤</strong><button type="button" @click="ruleEditorOpen = true">⌃</button></div>
-              <ul v-if="builderChips.length">
-                <li v-for="chip in builderChips" :key="chip"><i>◆</i>{{ chip }}</li>
+              <ul v-if="hardFilterChips.length">
+                <li v-for="chip in hardFilterChips" :key="chip"><i class="is-rule"></i>{{ chip }}</li>
               </ul>
               <p v-else class="sc-no-rule">尚未设置硬性条件</p>
             </section>
             <section class="sc-logic-card sc-score-weights">
               <div class="sc-logic-title"><strong>3. 综合评分</strong><span>候选集相对分</span></div>
               <label><span>估值规模</span><input v-model.number="scoreValueWeight" type="range" min="0" max="100" /><b>{{ scoreValueWeight }}%</b></label>
-              <label><span>动量强弱</span><input v-model.number="scoreMomentumWeight" type="range" min="0" max="100" /><b>{{ scoreMomentumWeight }}%</b></label>
-              <label><span>交易活跃</span><input v-model.number="scoreLiquidityWeight" type="range" min="0" max="100" /><b>{{ scoreLiquidityWeight }}%</b></label>
+              <label><span>动量</span><input v-model.number="scoreMomentumWeight" type="range" min="0" max="100" /><b>{{ scoreMomentumWeight }}%</b></label>
+              <label><span>流动性</span><input v-model.number="scoreLiquidityWeight" type="range" min="0" max="100" /><b>{{ scoreLiquidityWeight }}%</b></label>
               <small>评分只使用本页真实量价、市值与 PE 数据，不包含未接入的财务字段。</small>
             </section>
             <section class="sc-logic-card">
               <div class="sc-logic-title"><strong>4. 输出设置</strong><span>当前快照</span></div>
-              <ul><li><i>→</i>展示 Top {{ Math.min(result?.items.length || 50, 50) }}</li><li><i>→</i>按综合分优先排序</li></ul>
+              <ul><li><i>→</i>选取 Top {{ resultLimit }}</li><li><i>→</i>按综合分优先排序</li></ul>
             </section>
             <button type="button" class="sc-add-condition" @click="ruleEditorOpen = true">＋ 添加 / 修改条件</button>
           </aside>
@@ -1278,7 +1287,7 @@ onMounted(() => {
             <template v-if="selectedResultItem">
               <header><h3>选中标的解释</h3><span>候选集相对评分</span></header>
               <section class="sc-selected-stock"><div><strong>{{ selectedResultItem.symbol }} {{ selectedResultItem.name }}</strong><span>最新 {{ formatNum(selectedResultItem.price) }} · <em :class="pctTone(selectedResultItem.pct_chg)">{{ formatPct(selectedResultItem.pct_chg) }}</em></span></div><b>{{ selectedResultItem.compositeScore.toFixed(1) }}</b></section>
-              <section class="sc-contribution"><h4>因子贡献（权重）</h4><div><span>估值规模（{{ scoreValueWeight }}%）</span><i><em :style="{ width: `${selectedResultItem.valueScore}%` }"></em></i><b>{{ selectedResultItem.valueScore.toFixed(1) }}</b></div><div><span>动量（{{ scoreMomentumWeight }}%）</span><i><em :style="{ width: `${selectedResultItem.momentumScore}%` }"></em></i><b>{{ selectedResultItem.momentumScore.toFixed(1) }}</b></div><div><span>活跃度（{{ scoreLiquidityWeight }}%）</span><i><em :style="{ width: `${selectedResultItem.liquidityScore}%` }"></em></i><b>{{ selectedResultItem.liquidityScore.toFixed(1) }}</b></div></section>
+              <section class="sc-contribution"><h4>因子贡献（权重）</h4><div><span>估值规模（{{ scoreValueWeight }}%）</span><i><em :style="{ width: `${selectedResultItem.valueScore}%` }"></em></i><b>+{{ weightedContribution(selectedResultItem.valueScore, scoreValueWeight).toFixed(1) }}</b></div><div><span>动量（{{ scoreMomentumWeight }}%）</span><i><em :style="{ width: `${selectedResultItem.momentumScore}%` }"></em></i><b>+{{ weightedContribution(selectedResultItem.momentumScore, scoreMomentumWeight).toFixed(1) }}</b></div><div><span>流动性（{{ scoreLiquidityWeight }}%）</span><i><em :style="{ width: `${selectedResultItem.liquidityScore}%` }"></em></i><b>+{{ weightedContribution(selectedResultItem.liquidityScore, scoreLiquidityWeight).toFixed(1) }}</b></div></section>
               <section class="sc-explain-list"><h4>为什么入选</h4><ul><li v-for="reason in selectedResultItem.reasons" :key="reason">{{ reason }}</li></ul></section>
               <section class="sc-explain-list"><h4>风险提示</h4><ul><li v-for="risk in selectedResultItem.risks" :key="risk">{{ risk }}</li></ul></section>
               <section class="sc-completeness"><span>数据完整度</span><strong>{{ selectedResultItem.completeness }}%</strong></section>
@@ -1295,7 +1304,7 @@ onMounted(() => {
             <section><h4>价格与规模</h4><div class="sc-range-field"><span>最新价（元）</span><div><input v-model="priceMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="priceMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>总市值（亿元）</span><div><input v-model="mvMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="mvMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
             <section><h4>估值</h4><div class="sc-range-field"><span>PE（TTM）</span><div><input v-model="peMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="peMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
             <section><h4>今日交易特征</h4><div class="sc-range-field"><span>涨跌幅（%）</span><div><input v-model="pctChgMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="pctChgMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>换手率（%）</span><div><input v-model="turnoverMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="turnoverMax" type="number" class="sc-input" placeholder="最高" /></div></div><label class="sc-field"><span>量比不低于</span><input v-model="volumeRatioMin" type="number" class="sc-input" placeholder="例如 1.5" /></label></section>
-            <section><h4>趋势</h4><label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label></section>
+            <section><h4>趋势与输出</h4><label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label><label class="sc-field"><span>选取数量</span><select v-model.number="resultLimit" class="sc-input"><option :value="20">Top 20</option><option :value="50">Top 50</option><option :value="100">Top 100</option></select></label></section>
           </div>
         </section>
       </section>
