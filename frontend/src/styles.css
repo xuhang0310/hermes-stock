@@ -6688,18 +6688,58 @@ body.rhythm-modal-open {
   background: rgba(255, 93, 93, 0.18);
 }
 
+.wb-broker-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border-left: 2px solid rgba(213, 180, 106, 0.45);
+  border-radius: 0 4px 4px 0;
+  background: rgba(255, 255, 255, 0.025);
+  color: #aaa392;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .wb-symbol-link {
-  color: var(--pink);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  text-decoration-color: rgba(242, 84, 184, 0.45);
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  color: #c8c2b5;
+  text-decoration: none;
   cursor: pointer;
-  transition: color 0.15s, text-decoration-color 0.15s;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.wb-symbol-link--symbol {
+  padding: 2px 7px;
+  border: 1px solid rgba(167, 178, 188, 0.14);
+  border-radius: 4px;
+  background: rgba(167, 178, 188, 0.035);
+  color: #aeb8c2;
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.015em;
+}
+
+.wb-symbol-link--name {
+  color: #e4ded0;
+  font-weight: 600;
 }
 
 .wb-symbol-link:hover {
-  color: #ff8fd0;
-  text-decoration-color: var(--pink);
+  color: var(--gold-2);
+}
+
+.wb-symbol-link--symbol:hover {
+  border-color: rgba(213, 180, 106, 0.42);
+  background: rgba(213, 180, 106, 0.08);
+}
+
+.wb-symbol-link:focus-visible {
+  outline: 1px solid rgba(241, 212, 138, 0.72);
+  outline-offset: 2px;
 }
 
 .required {

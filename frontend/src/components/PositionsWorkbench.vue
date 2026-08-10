@@ -356,16 +356,28 @@ const tableColumns = computed(() => [
   '操作'
 ])
 
-function xueqiuAnchor(position: PositionItem, text: string) {
+function escapeTableText(text: string) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
+function xueqiuAnchor(position: PositionItem, text: string, kind: 'symbol' | 'name') {
   const [code, exch] = position.symbol.split('.')
-  if (!code || !exch) return text
-  return `<a class="wb-symbol-link" href="https://xueqiu.com/S/${exch}${code}" target="_blank" rel="noopener" title="进入雪球社区核对价格">${text}</a>`
+  const safeText = escapeTableText(text)
+  if (!code || !exch) return safeText
+  return `<a class="wb-symbol-link wb-symbol-link--${kind}" href="https://xueqiu.com/S/${exch}${code}" target="_blank" rel="noopener" title="进入雪球社区核对价格">${safeText}</a>`
 }
 
 function positionColumnValue(position: PositionItem, key: PositionColumnKey) {
-  if (key === 'broker_name') return position.broker_name || '—'
-  if (key === 'symbol') return xueqiuAnchor(position, position.symbol)
-  if (key === 'name') return position.name ? xueqiuAnchor(position, position.name) : '—'
+  if (key === 'broker_name') return position.broker_name
+    ? `<span class="wb-broker-label">${escapeTableText(position.broker_name)}</span>`
+    : '—'
+  if (key === 'symbol') return xueqiuAnchor(position, position.symbol, 'symbol')
+  if (key === 'name') return position.name ? xueqiuAnchor(position, position.name, 'name') : '—'
   if (key === 'position_quantity') return fmtNum(position.position_quantity ?? position.quantity)
   if (key === 'available_quantity') return fmtNum(position.available_quantity)
   if (key === 'latest_price') return fmtNum(position.latest_price, 2)
