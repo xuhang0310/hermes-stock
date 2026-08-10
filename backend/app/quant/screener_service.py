@@ -447,8 +447,15 @@ def build_progression_templates(facts: dict) -> list[dict]:
     return templates
 
 
-def _shrink_query_ranges(query: dict, scale: float) -> dict:
-    narrowed = dict(query)
+def _scale_query_ranges(query: dict, scale: float) -> dict:
+    adjusted = dict(query)
+    lower_floors = {
+        "price_min": 0.01,
+        "turnover_rate_min": 0.0,
+        "total_mv_min": 0.01,
+        "pe_min": 1.0,
+        "pct_chg_min": -20.0,
+    }
     for low_key, high_key in (
         ("total_mv_min", "total_mv_max"),
         ("price_min", "price_max"),
@@ -456,15 +463,15 @@ def _shrink_query_ranges(query: dict, scale: float) -> dict:
         ("pct_chg_min", "pct_chg_max"),
         ("pe_min", "pe_max"),
     ):
-        low = narrowed.get(low_key)
-        high = narrowed.get(high_key)
+        low = adjusted.get(low_key)
+        high = adjusted.get(high_key)
         if low is None or high is None:
             continue
         center = (float(low) + float(high)) / 2
         half = max(0.01, (float(high) - float(low)) * scale / 2)
-        narrowed[low_key] = round(center - half, 2)
-        narrowed[high_key] = round(center + half, 2)
-    return narrowed
+        adjusted[low_key] = round(max(lower_floors[low_key], center - half), 2)
+        adjusted[high_key] = round(center + half, 2)
+    return adjusted
 
 
 def refine_progression_template(
@@ -481,7 +488,11 @@ def refine_progression_template(
     variants.append((base_query, base_count, 1.0))
     if base_count > target_max:
         for scale in (0.85, 0.7, 0.55, 0.4):
-            candidate = _shrink_query_ranges(base_query, scale)
+            candidate = _scale_query_ranges(base_query, scale)
+            variants.append((candidate, max(0, int(count_fn(candidate) or 0)), scale))
+    elif 0 < base_count < target_min:
+        for scale in (1.2, 1.45, 1.75, 2.1):
+            candidate = _scale_query_ranges(base_query, scale)
             variants.append((candidate, max(0, int(count_fn(candidate) or 0)), scale))
 
     preferred = (target_min + target_max) / 2
@@ -505,11 +516,12 @@ def refine_progression_template(
     out["condition_count"] = len(
         [value for key, value in selected_query.items() if key != "limit" and value is not None]
     )
-    out["tightening_notes"] = (
-        ["已根据实时候选数量自动收紧市值、价格、换手、涨跌幅和估值区间"]
-        if scale < 1
-        else []
-    )
+    if scale < 1:
+        out["tightening_notes"] = ["候选过多，已自动收紧市值、价格、换手、涨跌幅和估值区间"]
+    elif scale > 1:
+        out["tightening_notes"] = ["候选过少，已适度放宽数值区间并保留核心方向"]
+    else:
+        out["tightening_notes"] = []
     return out
 
 

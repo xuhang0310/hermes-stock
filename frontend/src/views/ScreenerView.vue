@@ -551,7 +551,7 @@ function templateCount(tpl: ScreenerTemplateItem): string {
   const target = tpl.target_min != null && tpl.target_max != null
     ? ` · 目标 ${tpl.target_min}–${tpl.target_max} 只`
     : ''
-  return `已收紧至 ${tpl.universe.toLocaleString('zh-CN')} 只${target}`
+  return `当前候选 ${tpl.universe.toLocaleString('zh-CN')} 只${target}`
 }
 
 function templateConditionChips(tpl: ScreenerTemplateItem): string[] {
@@ -1185,7 +1185,7 @@ onBeforeUnmount(() => {
             <span class="sc-eyebrow">持仓推进策略</span>
             <h3>从当前持仓继续往前走</h3>
           </div>
-          <span>每套策略按实时行情收紧至 20–120 只，不构成投资建议</span>
+          <span>每套策略按实时行情控制在 20–120 只，不构成投资建议</span>
         </header>
         <div v-if="recError" class="sc-inline-error">{{ recError }}</div>
         <div v-if="personalizedTemplates.length" class="sc-recommend-grid">

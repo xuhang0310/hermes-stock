@@ -59,6 +59,19 @@ class ScreenerProgressionTemplateTests(unittest.TestCase):
         self.assertTrue(refined["tightening_notes"])
         self.assertGreaterEqual(refined["condition_count"], 11)
 
+    def test_refinement_expands_an_undersized_candidate_pool(self) -> None:
+        template = screener_service.build_progression_templates(self.facts)[0]
+
+        def count_by_width(query: dict) -> int:
+            width = float(query["total_mv_max"]) - float(query["total_mv_min"])
+            return max(1, round(width / 4))
+
+        refined = screener_service.refine_progression_template(template, count_by_width)
+
+        self.assertGreaterEqual(refined["universe"], 20)
+        self.assertLessEqual(refined["universe"], 120)
+        self.assertIn("候选过少", refined["tightening_notes"][0])
+
 
 class ScreenerParseLatencyTests(unittest.TestCase):
     @patch.object(screener_ai, "chat_completion")

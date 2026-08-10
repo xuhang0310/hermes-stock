@@ -65,7 +65,7 @@ test('holding recommendations expose bounded progression strategies', async () =
   const source = await readScreenerView()
 
   assert.match(source, /持仓推进策略/)
-  assert.match(source, /每套策略按实时行情收紧至 20–120 只/)
+  assert.match(source, /每套策略按实时行情控制在 20–120 只/)
   assert.match(source, /recommendation\.model !== '持仓画像规则引擎'/)
   assert.match(source, /void refreshRecommendation\(\)/)
   assert.match(source, /templateConditionChips\(tpl\)/)
