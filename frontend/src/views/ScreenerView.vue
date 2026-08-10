@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import type {
   ScreenerItem,
@@ -88,6 +88,7 @@ const selectedSymbol = ref('')
 const checkedSymbols = ref<string[]>([])
 const comparisonSymbols = ref<string[]>([])
 const ruleEditorOpen = ref(false)
+let ruleEditorReturnFocus: HTMLElement | null = null
 const lastRunAt = ref('')
 const scoreValueWeight = ref(40)
 const scoreMomentumWeight = ref(40)
@@ -500,7 +501,7 @@ async function usePrompt(text: string) {
   await nextTick()
   await parseNL()
   if (!parsedQuery.value) {
-    ruleEditorOpen.value = true
+    openRuleEditor()
   }
 }
 
@@ -720,11 +721,49 @@ function clearBuilderConditions() {
   comparisonSymbols.value = []
   resultPage.value = 1
   strategySaved.value = false
-  void nextTick(() => ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
-function focusRuleEditor() {
-  ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+function openRuleEditor(event?: Event) {
+  ruleEditorReturnFocus = event?.currentTarget instanceof HTMLElement
+    ? event.currentTarget
+    : document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+  resultColumnsOpen.value = false
+  ruleEditorOpen.value = true
+  void nextTick(() => {
+    ruleEditor.value?.querySelector<HTMLElement>('.sc-config-grid select, .sc-config-grid input')?.focus()
+  })
+}
+
+function closeRuleEditor() {
+  const returnFocus = ruleEditorReturnFocus
+  ruleEditorReturnFocus = null
+  ruleEditorOpen.value = false
+  void nextTick(() => {
+    if (returnFocus?.isConnected) returnFocus.focus()
+  })
+}
+
+function handleRuleEditorDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && ruleEditorOpen.value) closeRuleEditor()
+}
+
+function handleRuleEditorDialogKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Tab' || !ruleEditor.value) return
+  const focusable = Array.from(
+    ruleEditor.value.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+  ).filter((element) => element.offsetParent !== null)
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 function relaxDataSensitiveRules() {
@@ -734,7 +773,6 @@ function relaxDataSensitiveRules() {
   ran.value = false
   error.value = ''
   interpretation.value = ''
-  void nextTick(() => ruleEditor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
 async function addResultToWatchlist(item: ScreenerItem) {
@@ -970,7 +1008,17 @@ function formatNum(value: number | null, digits = 2): string {
 onMounted(() => {
   const draft = localStorage.getItem(DRAFT_KEY)
   if (draft) nlText.value = draft
+  document.addEventListener('keydown', handleRuleEditorDocumentKeydown)
   void Promise.all([loadSyncStatus(), loadRecommendation(), loadPromptHistory(), loadSavedStrategies()])
+})
+
+watch(ruleEditorOpen, (open) => {
+  document.body.classList.toggle('sc-rule-dialog-open', open)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', handleRuleEditorDocumentKeydown)
+  document.body.classList.remove('sc-rule-dialog-open')
 })
 </script>
 
@@ -1232,15 +1280,15 @@ onMounted(() => {
             <span v-if="lastRunAt" class="sc-last-run">最后运行 {{ lastRunAt }}</span>
           </div>
           <div class="sc-hero-actions">
-            <button type="button" class="sc-btn sc-btn-ghost" @click="ruleEditorOpen = !ruleEditorOpen">{{ ruleEditorOpen ? '收起条件' : '编辑条件' }}</button>
+            <button type="button" class="sc-btn sc-btn-ghost" @click="openRuleEditor">编辑条件</button>
             <input v-model="strategyName" type="text" maxlength="120" placeholder="策略名称" @input="strategySaved = false" @keydown.enter.prevent="saveCurrentStrategy" />
             <button type="button" class="sc-btn sc-btn-ghost" :disabled="strategySaving || !strategyName.trim() || !hasBuilderConditions" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : strategySaved ? '已保存' : '保存版本' }}</button>
             <button type="button" data-testid="screener-run" class="sc-btn sc-btn-primary" :disabled="running || !hasBuilderConditions" @click="run"><span class="btn-spin" :class="{ spin: running }"></span>{{ running ? '正在运行…' : ran ? '重新运行' : '运行筛选' }}</button>
           </div>
           <div class="sc-strategy-chips">
-            <button type="button" class="sc-rule-chip" @click="ruleEditorOpen = true">{{ market ? ({ SH: '沪市', SZ: '深市', BSE: '北交所' }[market] || market) : '全 A 股' }} <span>✎</span></button>
-            <button v-for="chip in builderChips" :key="chip" type="button" class="sc-rule-chip" @click="ruleEditorOpen = true">{{ chip }} <span>✎</span></button>
-            <button v-if="!builderChips.length" type="button" class="sc-rule-chip is-empty" @click="ruleEditorOpen = true">+ 添加筛选条件</button>
+            <button type="button" class="sc-rule-chip" @click="openRuleEditor">{{ market ? ({ SH: '沪市', SZ: '深市', BSE: '北交所' }[market] || market) : '全 A 股' }} <span>✎</span></button>
+            <button v-for="chip in builderChips" :key="chip" type="button" class="sc-rule-chip" @click="openRuleEditor">{{ chip }} <span>✎</span></button>
+            <button v-if="!builderChips.length" type="button" class="sc-rule-chip is-empty" @click="openRuleEditor">+ 添加筛选条件</button>
           </div>
         </header>
 
@@ -1251,7 +1299,7 @@ onMounted(() => {
           <aside class="sc-strategy-sidebar sc-panel">
             <header><h3>策略规则</h3><span>所有规则实时生效</span></header>
             <section class="sc-logic-card">
-              <div class="sc-logic-title"><strong>1. 股票池与范围</strong><button type="button" @click="ruleEditorOpen = true">⌃</button></div>
+              <div class="sc-logic-title"><strong>1. 股票池与范围</strong><button type="button" aria-label="编辑股票池与范围" @click="openRuleEditor">⌃</button></div>
               <ul>
                 <li><i class="is-ok">✓</i>{{ market ? `${market} 市场` : '全 A 股市场' }}</li>
                 <li><i class="is-ok">✓</i>使用最新交易日快照</li>
@@ -1259,7 +1307,7 @@ onMounted(() => {
               </ul>
             </section>
             <section class="sc-logic-card">
-              <div class="sc-logic-title"><strong>2. 硬性过滤</strong><button type="button" @click="ruleEditorOpen = true">⌃</button></div>
+              <div class="sc-logic-title"><strong>2. 硬性过滤</strong><button type="button" aria-label="编辑硬性过滤条件" @click="openRuleEditor">⌃</button></div>
               <ul v-if="hardFilterChips.length">
                 <li v-for="chip in hardFilterChips" :key="chip"><i class="is-rule"></i>{{ chip }}</li>
               </ul>
@@ -1276,7 +1324,7 @@ onMounted(() => {
               <div class="sc-logic-title"><strong>4. 输出设置</strong><span>当前快照</span></div>
               <ul><li><i>→</i>选取 Top {{ resultLimit }}</li><li><i>→</i>按综合分优先排序</li></ul>
             </section>
-            <button type="button" class="sc-add-condition" @click="ruleEditorOpen = true">＋ 添加 / 修改条件</button>
+            <button type="button" class="sc-add-condition" @click="openRuleEditor">＋ 添加 / 修改条件</button>
           </aside>
 
           <section ref="resultSection" class="sc-results-center sc-panel">
@@ -1331,8 +1379,8 @@ onMounted(() => {
               <p v-if="backtestError" class="sc-action-error">快速回测失败：{{ backtestError }}</p>
             </template>
             <div v-else-if="running" class="sc-result-loading"><span class="btn-spin spin"></span><strong>正在按 {{ builderChips.length }} 项条件筛选</strong><p>完成后会生成排名、相对评分和标的解释。</p></div>
-            <div v-else-if="result" class="sc-result-empty"><strong>当前条件没有找到股票</strong><p>通常是条件组合过严，或量比、均线等指标在最新数据中缺失。</p><div class="sc-empty-actions"><button v-if="volumeRatioMin || aboveMa" type="button" class="sc-btn sc-btn-soft" @click="relaxDataSensitiveRules">去掉量比与均线条件</button><button type="button" class="sc-btn sc-btn-ghost" @click="ruleEditorOpen = true">调整条件</button></div></div>
-            <div v-else class="sc-result-ready"><strong>先设置规则并运行筛选</strong><p>左侧配置策略逻辑；运行后，中间展示真实候选集排名，右侧解释选中标的。</p><button type="button" class="sc-btn sc-btn-primary" @click="ruleEditorOpen = true">开始设置条件</button></div>
+            <div v-else-if="result" class="sc-result-empty"><strong>当前条件没有找到股票</strong><p>通常是条件组合过严，或量比、均线等指标在最新数据中缺失。</p><div class="sc-empty-actions"><button v-if="volumeRatioMin || aboveMa" type="button" class="sc-btn sc-btn-soft" @click="relaxDataSensitiveRules">去掉量比与均线条件</button><button type="button" class="sc-btn sc-btn-ghost" @click="openRuleEditor">调整条件</button></div></div>
+            <div v-else class="sc-result-ready"><strong>先设置规则并运行筛选</strong><p>左侧配置策略逻辑；运行后，中间展示真实候选集排名，右侧解释选中标的。</p><button type="button" class="sc-btn sc-btn-primary" @click="openRuleEditor">开始设置条件</button></div>
           </section>
 
           <aside class="sc-explain-panel sc-panel">
@@ -1349,16 +1397,28 @@ onMounted(() => {
           </aside>
         </div>
 
-        <section v-if="ruleEditorOpen" ref="ruleEditor" class="sc-panel sc-rule-config-panel" @input="strategySaved = false">
-          <header><div><span class="sc-eyebrow">编辑筛选条件</span><h3>留空表示不限，所有条件按“并且”执行</h3></div><div><button type="button" class="sc-btn sc-btn-ghost" :disabled="!hasBuilderConditions" @click="clearBuilderConditions">清空条件</button><button type="button" class="sc-btn sc-btn-ghost" @click="ruleEditorOpen = false">完成</button></div></header>
-          <div class="sc-config-grid">
-            <section><h4>股票范围</h4><label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">全部市场</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label><label class="sc-field"><span>代码或名称</span><input v-model="keyword" type="text" class="sc-input" placeholder="例如 600519 或 贵州茅台" /></label></section>
-            <section><h4>价格与规模</h4><div class="sc-range-field"><span>最新价（元）</span><div><input v-model="priceMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="priceMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>总市值（亿元）</span><div><input v-model="mvMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="mvMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
-            <section><h4>估值</h4><div class="sc-range-field"><span>PE（TTM）</span><div><input v-model="peMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="peMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
-            <section><h4>今日交易特征</h4><div class="sc-range-field"><span>涨跌幅（%）</span><div><input v-model="pctChgMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="pctChgMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>换手率（%）</span><div><input v-model="turnoverMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="turnoverMax" type="number" class="sc-input" placeholder="最高" /></div></div><label class="sc-field"><span>量比不低于</span><input v-model="volumeRatioMin" type="number" class="sc-input" placeholder="例如 1.5" /></label></section>
-            <section><h4>趋势与输出</h4><label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label><label class="sc-field"><span>选取数量</span><select v-model.number="resultLimit" class="sc-input"><option :value="20">Top 20</option><option :value="50">Top 50</option><option :value="100">Top 100</option></select></label></section>
-          </div>
-        </section>
+        <Teleport to="body">
+          <Transition name="sc-rule-dialog">
+            <div v-if="ruleEditorOpen" class="sc-rule-dialog-backdrop" @mousedown.self="closeRuleEditor">
+              <section ref="ruleEditor" class="sc-rule-config-dialog" role="dialog" aria-modal="true" aria-labelledby="sc-rule-dialog-title" @input="strategySaved = false" @keydown="handleRuleEditorDialogKeydown">
+                <header class="sc-rule-dialog-header">
+                  <div><span class="sc-eyebrow">编辑筛选条件</span><h3 id="sc-rule-dialog-title">设定策略范围与筛选规则</h3><p>留空表示不限，所有条件按“并且”执行</p></div>
+                  <button type="button" class="sc-rule-dialog-close" aria-label="关闭条件编辑" @click="closeRuleEditor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg></button>
+                </header>
+                <div class="sc-rule-dialog-body">
+                  <div class="sc-config-grid">
+                    <section><h4>股票范围</h4><label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">全部市场</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label><label class="sc-field"><span>代码或名称</span><input v-model="keyword" type="text" class="sc-input" placeholder="例如 600519 或 贵州茅台" /></label></section>
+                    <section><h4>价格与规模</h4><div class="sc-range-field"><span>最新价（元）</span><div><input v-model="priceMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="priceMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>总市值（亿元）</span><div><input v-model="mvMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="mvMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
+                    <section><h4>估值</h4><div class="sc-range-field"><span>PE（TTM）</span><div><input v-model="peMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="peMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
+                    <section><h4>今日交易特征</h4><div class="sc-range-field"><span>涨跌幅（%）</span><div><input v-model="pctChgMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="pctChgMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>换手率（%）</span><div><input v-model="turnoverMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="turnoverMax" type="number" class="sc-input" placeholder="最高" /></div></div><label class="sc-field"><span>量比不低于</span><input v-model="volumeRatioMin" type="number" class="sc-input" placeholder="例如 1.5" /></label></section>
+                    <section><h4>趋势与输出</h4><label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label><label class="sc-field"><span>选取数量</span><select v-model.number="resultLimit" class="sc-input"><option :value="20">Top 20</option><option :value="50">Top 50</option><option :value="100">Top 100</option></select></label></section>
+                  </div>
+                </div>
+                <footer class="sc-rule-dialog-footer"><span>修改即时生效，完成后可重新运行策略。</span><div><button type="button" class="sc-btn sc-btn-ghost" :disabled="!hasBuilderConditions" @click="clearBuilderConditions">清空条件</button><button type="button" class="sc-btn sc-btn-primary" @click="closeRuleEditor">完成</button></div></footer>
+              </section>
+            </div>
+          </Transition>
+        </Teleport>
       </section>
 
       <section v-else class="sc-saved-workspace">
@@ -3137,15 +3197,54 @@ select.sc-input {
 .sc-explain-empty strong { color: var(--sc-text); font-size: 13px; }
 .sc-explain-empty p { font-size: 10.5px; line-height: 1.5; }
 
-.sc-rule-config-panel { scroll-margin-top: 80px; }
-.sc-rule-config-panel > header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--sc-line); }
-.sc-rule-config-panel > header > div:last-child { display: flex; gap: 8px; }
-.sc-rule-config-panel h3 { margin: 3px 0 0; font-size: 14px; }
-.sc-config-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); }
-.sc-config-grid > section { display: grid; align-content: start; gap: 10px; padding: 13px; border-right: 1px solid var(--sc-line); }
-.sc-config-grid > section:last-child { border-right: 0; }
-.sc-config-grid h4 { margin: 0; font-size: 11.5px; }
-.sc-config-grid .sc-input { width: 100%; min-width: 0; min-height: 36px; box-sizing: border-box; }
+:global(body.sc-rule-dialog-open) { overflow: hidden; }
+.sc-rule-dialog-backdrop {
+  --sc-accent: #d7b76f;
+  --sc-accent-strong: #ead08f;
+  --sc-accent-soft: rgba(215, 183, 111, 0.1);
+  --sc-panel: #121518;
+  --sc-panel-raised: #171b1f;
+  --sc-line: rgba(255, 255, 255, 0.1);
+  --sc-line-strong: rgba(215, 183, 111, 0.32);
+  --sc-text: #f1eee7;
+  --sc-text-2: #b9b5ab;
+  --sc-text-3: #777b7d;
+  position: fixed;
+  z-index: 1800;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background: rgba(2, 4, 5, 0.78);
+  backdrop-filter: blur(5px);
+}
+.sc-rule-config-dialog { display: flex; width: min(1180px, calc(100vw - 48px)); max-height: min(86dvh, 800px); flex-direction: column; overflow: hidden; border: 1px solid var(--sc-line-strong); border-radius: 10px; outline: 0; background: linear-gradient(180deg,#151a1e,#101417); color: var(--sc-text); box-shadow: 0 30px 100px rgba(0,0,0,.72), 0 0 0 1px rgba(255,255,255,.025); }
+.sc-rule-dialog-header { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 18px 20px 16px; border-bottom: 1px solid var(--sc-line); }
+.sc-rule-dialog-header h3 { margin: 4px 0 0; font-size: 18px; font-weight: 650; }
+.sc-rule-dialog-header p { margin: 6px 0 0; color: var(--sc-text-3); font-size: 11.5px; }
+.sc-rule-dialog-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border: 1px solid var(--sc-line); border-radius: 6px; background: rgba(255,255,255,.015); color: var(--sc-text-3); cursor: pointer; }
+.sc-rule-dialog-close:hover { border-color: var(--sc-line-strong); color: var(--sc-text); }
+.sc-rule-dialog-close:focus-visible { outline: 2px solid var(--sc-accent); outline-offset: 2px; }
+.sc-rule-dialog-close svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.sc-rule-dialog-body { min-height: 0; flex: 1; overflow-y: auto; padding: 18px; scrollbar-color: rgba(215,183,111,.35) transparent; }
+.sc-config-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
+.sc-config-grid > section { display: grid; align-content: start; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--sc-line); border-radius: 7px; background: rgba(255,255,255,.014); }
+.sc-config-grid > section:nth-child(4) { grid-column: span 2; }
+.sc-config-grid h4 { margin: 0 0 2px; color: var(--sc-accent-strong); font-size: 12.5px; }
+.sc-config-grid .sc-input { width: 100%; min-width: 0; min-height: 39px; box-sizing: border-box; }
+.sc-rule-dialog-footer { display: flex; min-height: 62px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px; border-top: 1px solid var(--sc-line); background: rgba(6,8,9,.38); }
+.sc-rule-dialog-footer > span { color: var(--sc-text-3); font-size: 11px; }
+.sc-rule-dialog-footer > div { display: flex; gap: 8px; }
+.sc-rule-dialog-footer .sc-btn { min-height: 36px; min-width: 88px; }
+.sc-rule-dialog-enter-active,
+.sc-rule-dialog-leave-active { transition: opacity .18s ease; }
+.sc-rule-dialog-enter-active .sc-rule-config-dialog,
+.sc-rule-dialog-leave-active .sc-rule-config-dialog { transition: transform .18s ease, opacity .18s ease; }
+.sc-rule-dialog-enter-from,
+.sc-rule-dialog-leave-to { opacity: 0; }
+.sc-rule-dialog-enter-from .sc-rule-config-dialog,
+.sc-rule-dialog-leave-to .sc-rule-config-dialog { opacity: 0; transform: translateY(10px) scale(.99); }
 
 @media (max-width: 1280px) {
   .sc-pagebar {
@@ -3409,8 +3508,6 @@ select.sc-input {
   .sc-explain-panel > header,
   .sc-selected-stock { grid-column: 1 / -1; }
   .sc-explain-panel .sc-distribution { border-right: 0; }
-  .sc-config-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
-  .sc-config-grid > section { border-bottom: 1px solid var(--sc-line); }
 }
 
 @media (max-width: 980px) {
@@ -3426,6 +3523,7 @@ select.sc-input {
   .sc-result-tabset { min-height: 39px; }
   .sc-result-toolbar { width: 100%; min-height: 42px; margin-left: 0; padding-bottom: 6px; }
   .sc-config-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .sc-config-grid > section:nth-child(4) { grid-column: span 1; }
 }
 
 @media (max-width: 720px) {
@@ -3448,8 +3546,22 @@ select.sc-input {
   .sc-result-search input { min-width: 0; flex: 1; }
   .sc-factor-board,
   .sc-compare-board { grid-template-columns: 1fr; }
+  .sc-rule-dialog-backdrop { align-items: end; padding: 0; }
+  .sc-rule-config-dialog { width: 100%; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; }
+  .sc-rule-dialog-header { padding: 15px 16px 13px; }
+  .sc-rule-dialog-header h3 { font-size: 17px; }
+  .sc-rule-dialog-body { padding: 12px; }
   .sc-config-grid { grid-template-columns: 1fr; }
-  .sc-config-grid > section { border-right: 0; }
-  .sc-rule-config-panel > header { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .sc-config-grid > section { padding: 14px; }
+  .sc-rule-dialog-footer { align-items: stretch; flex-direction: column; gap: 9px; padding: 11px 12px 12px; }
+  .sc-rule-dialog-footer > div { display: grid; grid-template-columns: 1fr 1fr; }
+  .sc-rule-dialog-footer .sc-btn { min-height: 42px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sc-rule-dialog-enter-active,
+  .sc-rule-dialog-leave-active,
+  .sc-rule-dialog-enter-active .sc-rule-config-dialog,
+  .sc-rule-dialog-leave-active .sc-rule-config-dialog { transition: none; }
 }
 </style>
