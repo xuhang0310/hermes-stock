@@ -113,6 +113,7 @@ const interpretError = ref('')
 const smartRec = ref<ScreenerTemplateRecommendation | null>(null)
 const recLoading = ref(false)
 const recError = ref('')
+const recommendationPage = ref(0)
 
 const promptHistory = ref<ScreenerPromptHistoryItem[]>([])
 const historyTotal = ref(0)
@@ -228,7 +229,18 @@ const statusLine = computed(() => {
   if (!status.latest_bar_date) return '尚未同步全市场数据'
   return `数据截至 ${fmtDate(status.latest_bar_date)} · 覆盖 ${status.bar_symbols.toLocaleString('zh-CN')} 只`
 })
-const personalizedTemplates = computed(() => (smartRec.value?.templates || []).slice(0, 5))
+const RECOMMENDATION_PAGE_SIZE = 5
+const RECOMMENDATION_BATCH_LABELS = ['贴近持仓', '扩展视角']
+const recommendationPageCount = computed(() => Math.max(1, Math.ceil((smartRec.value?.templates.length || 0) / RECOMMENDATION_PAGE_SIZE)))
+const normalizedRecommendationPage = computed(() => recommendationPage.value % recommendationPageCount.value)
+const personalizedTemplates = computed(() => {
+  const start = normalizedRecommendationPage.value * RECOMMENDATION_PAGE_SIZE
+  return (smartRec.value?.templates || []).slice(start, start + RECOMMENDATION_PAGE_SIZE)
+})
+const recommendationBatchLabel = computed(() => (
+  RECOMMENDATION_BATCH_LABELS[normalizedRecommendationPage.value]
+  || `第 ${normalizedRecommendationPage.value + 1} 批`
+))
 const visibleTemplates = computed(() => {
   if (showAllTemplates.value) return TEMPLATES
   if (templateCategory.value === '热门') return TEMPLATES.slice(0, 4)
@@ -425,7 +437,8 @@ async function loadRecommendation() {
   try {
     const recommendation = await api.screenerTemplates()
     smartRec.value = recommendation
-    if (recommendation.position_count && recommendation.model !== '持仓画像规则引擎') {
+    recommendationPage.value = 0
+    if (recommendation.position_count && recommendation.model !== '持仓画像规则引擎-v2') {
       void refreshRecommendation()
     }
   } catch {
@@ -439,6 +452,7 @@ async function refreshRecommendation() {
   recError.value = ''
   try {
     smartRec.value = await api.screenerTemplatesRefresh()
+    recommendationPage.value = 0
   } catch (err) {
     recError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -555,7 +569,12 @@ function templateCount(tpl: ScreenerTemplateItem): string {
 }
 
 function templateConditionChips(tpl: ScreenerTemplateItem): string[] {
-  return queryToChips(tpl.query).filter((chip) => !chip.startsWith('Top')).slice(0, 5)
+  return queryToChips(tpl.query).filter((chip) => !chip.startsWith('Top')).slice(0, 6)
+}
+
+function switchRecommendationBatch() {
+  if (recommendationPageCount.value <= 1) return
+  recommendationPage.value = (normalizedRecommendationPage.value + 1) % recommendationPageCount.value
 }
 
 function historyTime(value: string | null): string {
@@ -1185,7 +1204,26 @@ onBeforeUnmount(() => {
             <span class="sc-eyebrow">持仓推进策略</span>
             <h3>从当前持仓继续往前走</h3>
           </div>
-          <span>每套策略按实时行情控制在 20–120 只，不构成投资建议</span>
+          <div class="sc-recommend-controls">
+            <span>每套策略按实时行情控制在 20–120 只，不构成投资建议</span>
+            <div v-if="personalizedTemplates.length" class="sc-recommend-switch-row">
+              <small>{{ recommendationBatchLabel }} · 本批 {{ personalizedTemplates.length }} / 共 {{ smartRec?.templates.length || 0 }}</small>
+              <button
+                v-if="recommendationPageCount > 1"
+                type="button"
+                class="sc-recommend-switch"
+                data-testid="screener-recommendation-switch"
+                :aria-label="`换一批持仓推进策略，当前第 ${normalizedRecommendationPage + 1} 批，共 ${recommendationPageCount} 批`"
+                @click="switchRecommendationBatch"
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none">
+                  <path d="M15.8 6.5A6.5 6.5 0 0 0 4 5.8L2.5 7.3M4.2 13.5A6.5 6.5 0 0 0 16 14.2l1.5-1.5M2.5 3.8v3.5H6M17.5 16.2v-3.5H14" />
+                </svg>
+                换一批
+                <em>{{ normalizedRecommendationPage + 1 }}/{{ recommendationPageCount }}</em>
+              </button>
+            </div>
+          </div>
         </header>
         <div v-if="recError" class="sc-inline-error">{{ recError }}</div>
         <div v-if="personalizedTemplates.length" class="sc-recommend-grid">
@@ -2730,6 +2768,66 @@ select.sc-input {
   font-size: 11px;
 }
 
+.sc-recommend-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--sc-text-3);
+  font-size: 11px;
+}
+
+.sc-recommend-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sc-recommend-switch-row small {
+  color: var(--sc-text-2);
+  font-size: 10.5px;
+}
+
+.sc-recommend-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: 5px;
+  background: var(--sc-accent-soft);
+  color: var(--sc-accent-strong);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sc-recommend-switch:hover {
+  border-color: color-mix(in srgb, var(--sc-accent-strong) 45%, var(--sc-line-strong));
+  background: color-mix(in srgb, var(--sc-accent-soft) 82%, var(--sc-panel-raised));
+}
+
+.sc-recommend-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--sc-accent-strong) 65%, transparent);
+  outline-offset: 2px;
+}
+
+.sc-recommend-switch svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.sc-recommend-switch em {
+  color: var(--sc-text-3);
+  font-size: 9.5px;
+  font-style: normal;
+}
+
 .sc-recommend-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -3426,6 +3524,20 @@ select.sc-input {
 
   .sc-section-head > span {
     display: none;
+  }
+
+  .sc-recommend-controls {
+    width: 100%;
+    align-items: flex-start;
+  }
+
+  .sc-recommend-controls > span {
+    display: none;
+  }
+
+  .sc-recommend-switch-row {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .sc-composer-actions,

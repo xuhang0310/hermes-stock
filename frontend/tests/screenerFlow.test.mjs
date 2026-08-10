@@ -66,9 +66,21 @@ test('holding recommendations expose bounded progression strategies', async () =
 
   assert.match(source, /持仓推进策略/)
   assert.match(source, /每套策略按实时行情控制在 20–120 只/)
-  assert.match(source, /recommendation\.model !== '持仓画像规则引擎'/)
+  assert.match(source, /recommendation\.model !== '持仓画像规则引擎-v2'/)
   assert.match(source, /void refreshRecommendation\(\)/)
   assert.match(source, /templateConditionChips\(tpl\)/)
   assert.match(source, /tpl\.stage \|\| '基于持仓'/)
   assert.match(source, /进入策略构建/)
+})
+
+test('holding recommendations can rotate through multiple batches', async () => {
+  const source = await readScreenerView()
+
+  assert.match(source, /const RECOMMENDATION_PAGE_SIZE = 5/)
+  assert.match(source, /slice\(start, start \+ RECOMMENDATION_PAGE_SIZE\)/)
+  assert.match(source, /function switchRecommendationBatch\(\)/)
+  assert.match(source, /data-testid="screener-recommendation-switch"/)
+  assert.match(source, /@click="switchRecommendationBatch"/)
+  assert.match(source, /换一批/)
+  assert.match(source, /本批 \{\{ personalizedTemplates\.length \}\} \/ 共/)
 })

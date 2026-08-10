@@ -334,12 +334,12 @@ def position_profile_summary(facts: dict) -> str:
         parts.append(f"{above}/{count} 只站上 20 日线")
     facts_line = "、".join(parts) or "已读取当前持仓与可用行情"
     return (
-        f"{facts_line}。下方分别从风格延续、趋势加强、估值优化、风险分散和回调观察给出可执行策略。"
+        f"{facts_line}。下方从风格延续、趋势强化、估值优化、风险平衡、弹性扩展等十个方向给出可切换的执行策略。"
     )
 
 
 def build_progression_templates(facts: dict) -> list[dict]:
-    """Turn holding medians into five distinct, bounded next-step strategies."""
+    """Turn holding medians into ten distinct, bounded next-step strategies."""
     price = _stat_median(facts, "price", 20.0)
     mv = _stat_median(facts, "total_mv_yi", 100.0)
     turnover = _stat_median(facts, "turnover_rate", 2.0)
@@ -353,6 +353,7 @@ def build_progression_templates(facts: dict) -> list[dict]:
         turnover_band: tuple[float, float],
         pct_band: tuple[float, float],
         pe_band: tuple[float, float],
+        above_ma: int = 20,
     ) -> dict:
         return {
             "price_min": price_band[0],
@@ -365,7 +366,7 @@ def build_progression_templates(facts: dict) -> list[dict]:
             "pct_chg_max": pct_band[1],
             "pe_min": pe_band[0],
             "pe_max": pe_band[1],
-            "above_ma": 20,
+            "above_ma": above_ma,
         }
 
     common = {
@@ -441,6 +442,79 @@ def build_progression_templates(facts: dict) -> list[dict]:
                 turnover_band=_range(turnover * 0.5, turnover * 1.43, floor=0.2),
                 pct_band=_range(pct - 1.8, pct - 0.25, floor=-10),
                 pe_band=_range(pe * 0.25, pe * 1.05, floor=1),
+            ),
+        },
+        {
+            **common,
+            "stage": "弹性扩展",
+            "name": "小盘弹性增强",
+            "objective": "把市值带下移，在更小盘的股票中寻找换手充分、涨幅受控的弹性候选。",
+            "rationale": "与核心风格相比更强调小市值和交易弹性，但用涨幅上限与估值区间避免无边界追高。",
+            "query": query(
+                price_band=_range(price * 0.25, price * 1.2, floor=1),
+                mv_band=_range(mv * 0.25, mv * 0.75, floor=10),
+                turnover_band=_range(turnover * 0.8, turnover * 2.5, floor=0.5),
+                pct_band=_range(max(0.5, pct - 2.25), pct + 1.75, floor=-10),
+                pe_band=_range(pe * 0.2, pe * 1.2, floor=1),
+                above_ma=10,
+            ),
+        },
+        {
+            **common,
+            "stage": "规模升级",
+            "name": "中盘趋势接力",
+            "objective": "把市值带上移到中盘区间，寻找趋势仍强、流动性适中且估值没有失控的接力标的。",
+            "rationale": "用于降低组合对小盘风格的单一依赖，同时保留当前持仓偏好的趋势与活跃特征。",
+            "query": query(
+                price_band=_range(price * 0.5, price * 2.2, floor=1),
+                mv_band=_range(mv * 1.2, mv * 4.0, floor=50),
+                turnover_band=_range(turnover * 0.5, turnover * 1.6, floor=0.3),
+                pct_band=_range(max(0.5, pct - 1.75), pct + 1.75, floor=-10),
+                pe_band=_range(pe * 0.2, pe * 0.9, floor=1),
+            ),
+        },
+        {
+            **common,
+            "stage": "波动缓冲",
+            "name": "低波动防守层",
+            "objective": "用更大市值、较低换手和窄幅涨跌的标的，为当前偏活跃组合增加防守层。",
+            "rationale": "该方向主动牺牲部分弹性，换取更低交易热度与更可控估值，适合作为组合平衡候选。",
+            "query": query(
+                price_band=_range(price * 0.4, price * 2.5, floor=1),
+                mv_band=_range(mv * 2.0, mv * 8.0, floor=100),
+                turnover_band=_range(turnover * 0.15, turnover * 0.6, floor=0.2),
+                pct_band=_range(-0.8, 1.2, floor=-10),
+                pe_band=_range(5, min(35, max(20, pe * 0.55)), floor=1),
+            ),
+        },
+        {
+            **common,
+            "stage": "热度回落",
+            "name": "高换手降温观察",
+            "objective": "保留较高换手，但把当日涨幅限制在低位，寻找活跃资金尚在、价格暂未加速的标的。",
+            "rationale": "区别于强势追涨，这一组更关注活跃后的横盘与降温阶段，适合进入观察池继续确认。",
+            "query": query(
+                price_band=_range(price * 0.3, price * 1.7, floor=1),
+                mv_band=_range(mv * 0.5, mv * 2.0, floor=10),
+                turnover_band=_range(turnover, turnover * 2.5, floor=0.5),
+                pct_band=_range(-0.5, 1.5, floor=-10),
+                pe_band=_range(pe * 0.2, pe * 1.2, floor=1),
+                above_ma=10,
+            ),
+        },
+        {
+            **common,
+            "stage": "突破预备",
+            "name": "短线突破预备",
+            "objective": "筛选站上 5 日线、温和上涨且换手开始抬升的标的，作为短线突破前的预备观察池。",
+            "rationale": "比趋势确认更早介入，但仍设置涨幅、估值和市值边界，避免把已大涨标的混入预备池。",
+            "query": query(
+                price_band=_range(price * 0.4, price * 1.8, floor=1),
+                mv_band=_range(mv * 0.4, mv * 1.5, floor=10),
+                turnover_band=_range(turnover * 0.7, turnover * 2.0, floor=0.5),
+                pct_band=_range(0, 2.0, floor=-10),
+                pe_band=_range(pe * 0.2, pe * 1.1, floor=1),
+                above_ma=5,
             ),
         },
     ]

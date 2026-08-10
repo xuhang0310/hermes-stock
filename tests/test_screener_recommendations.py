@@ -21,16 +21,19 @@ class ScreenerProgressionTemplateTests(unittest.TestCase):
             },
         }
 
-    def test_builds_five_distinct_actionable_strategies(self) -> None:
+    def test_builds_ten_distinct_actionable_strategies(self) -> None:
         templates = screener_service.build_progression_templates(self.facts)
 
-        self.assertEqual(len(templates), 5)
-        self.assertEqual(len({item["stage"] for item in templates}), 5)
+        self.assertEqual(len(templates), 10)
+        self.assertEqual(len({item["stage"] for item in templates}), 10)
+        self.assertEqual({item["query"]["above_ma"] for item in templates}, {5, 10, 20})
+        self.assertIn("小盘弹性增强", {item["name"] for item in templates})
+        self.assertIn("低波动防守层", {item["name"] for item in templates})
         for item in templates:
             query = item["query"]
             self.assertEqual(item["target_min"], 20)
             self.assertEqual(item["target_max"], 120)
-            self.assertEqual(query["above_ma"], 20)
+            self.assertIn(query["above_ma"], {5, 10, 20})
             self.assertGreaterEqual(
                 len([value for value in query.values() if value is not None]),
                 11,
@@ -43,7 +46,7 @@ class ScreenerProgressionTemplateTests(unittest.TestCase):
 
         self.assertIn("74.5", summary)
         self.assertIn("7/9", summary)
-        self.assertIn("估值优化", summary)
+        self.assertIn("十个方向", summary)
 
     def test_refinement_tightens_an_oversized_candidate_pool(self) -> None:
         template = screener_service.build_progression_templates(self.facts)[0]

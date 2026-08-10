@@ -289,7 +289,7 @@ def screener_templates(
 def screener_templates_refresh(
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
-    """Generate five factual next-step strategies and bound each candidate pool."""
+    """Generate ten factual next-step strategies and bound each candidate pool."""
     try:
         facts = screener_service.position_facts(context.user.id)
     except ValueError as exc:
@@ -308,10 +308,10 @@ def screener_templates_refresh(
         refined["prompt"] = screener_ai.summarize_query(refined["query"]).removeprefix("已解析：")
         templates.append(refined)
     payload = {
-        "templates": templates[:5],
+        "templates": templates[:10],
         "basis": screener_service.position_profile_summary(facts),
         "position_count": facts["position_count"],
-        "model": "持仓画像规则引擎",
+        "model": "持仓画像规则引擎-v2",
     }
     generated_at = screener_service.save_template_recommendation(context.user.id, payload)
     return ok({**payload, "generated_at": generated_at})
