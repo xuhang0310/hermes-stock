@@ -17,7 +17,11 @@ from backend.app.market.digital_human_tools import (
     digital_human_tool_display_name,
     write_tool_schemas,
 )
-from backend.app.core.llm_config import active_llm_config
+from backend.app.core.llm_config import (
+    active_llm_config,
+    persist_chat_session_model,
+    resolve_chat_model_config_ids,
+)
 from backend.app.data.repository import StockRepository
 from backend.app.skills.registry import skill_registry
 from backend.app.agents.position_intent import (
@@ -46,6 +50,35 @@ from backend.app.market.stock_tools import (
 AUDIT_LOG = Path(__file__).resolve().parents[2] / "agent_audit.log"  # agents/ -> app/ -> backend/
 MAX_ROWS = 100
 OBSERVATION_CHAR_LIMIT = 7000
+
+
+def _model_selected_event(llm_config: dict) -> dict:
+    return {
+        "type": "model_selected",
+        "model": {
+            "id": llm_config.get("id"),
+            "display_name": llm_config.get("display_name"),
+            "model_name": llm_config.get("model"),
+            "provider_name": llm_config.get("provider_name"),
+        },
+    }
+
+
+def _is_permanent_model_access_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "accessdenied.unpurchased",
+            "access to model denied",
+            "model_not_found",
+            "model not found",
+            "invalid model",
+            "authentication failed",
+            "invalid api key",
+            "unauthorized",
+        )
+    )
 
 
 def _registry_display_name(name: str) -> str:
@@ -607,16 +640,12 @@ def run_agent_events(
             messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": user_content if user_content is not None else question})
 
-    llm_config = active_llm_config(model_config_id)
-    yield {
-        "type": "model_selected",
-        "model": {
-            "id": llm_config.get("id"),
-            "display_name": llm_config.get("display_name"),
-            "model_name": llm_config.get("model"),
-            "provider_name": llm_config.get("provider_name"),
-        },
-    }
+    candidate_model_ids = resolve_chat_model_config_ids(model_config_id)
+    if not candidate_model_ids:
+        candidate_model_ids = [model_config_id]
+    candidate_index = 0
+    llm_config = active_llm_config(candidate_model_ids[candidate_index])
+    yield _model_selected_event(llm_config)
     # 向前端推送识别到的交易意图（仅 research 模式 + 写权限开启时）
     if intent and intent.action != PositionAction.UNKNOWN:
         yield {"type": "position_intent", **intent_summary(intent)}
@@ -637,22 +666,69 @@ def run_agent_events(
                 completed_tool_label = None
             else:
                 yield {"type": "thinking", "message": "正在制定分析路径..."}
-        try:
-            for kind, payload in _stream_chat(messages, llm_config, tools):
-                if kind == "reasoning":
-                    yield {"type": "reasoning_delta", "content": payload}
-                elif kind == "content":
-                    yield {"type": "content_delta", "content": payload}
-                elif kind == "tool_args":
-                    progress = args_tracker.feed(payload["index"], payload["name"], payload["delta"])
-                    if progress:
-                        progress["display_name"] = digital_human_tool_display_name(progress["tool"]) if progress["tool"] else ""
-                        yield progress
-                else:
-                    message = payload
-        except Exception as exc:  # noqa: BLE001
-            yield {"type": "error", "content": str(exc)}
-            return
+        while True:
+            received_model_output = False
+            try:
+                for kind, payload in _stream_chat(messages, llm_config, tools):
+                    received_model_output = True
+                    if kind == "reasoning":
+                        yield {"type": "reasoning_delta", "content": payload}
+                    elif kind == "content":
+                        yield {"type": "content_delta", "content": payload}
+                    elif kind == "tool_args":
+                        progress = args_tracker.feed(payload["index"], payload["name"], payload["delta"])
+                        if progress:
+                            progress["display_name"] = digital_human_tool_display_name(progress["tool"]) if progress["tool"] else ""
+                            yield progress
+                    else:
+                        message = payload
+            except Exception as exc:  # noqa: BLE001
+                next_index = candidate_index + 1
+                if (
+                    not received_model_output
+                    and _is_permanent_model_access_error(exc)
+                    and next_index < len(candidate_model_ids)
+                ):
+                    previous_label = str(llm_config.get("display_name") or llm_config.get("model") or "当前模型")
+                    candidate_index = next_index
+                    llm_config = active_llm_config(candidate_model_ids[candidate_index])
+                    fallback_label = str(llm_config.get("display_name") or llm_config.get("model") or "备用模型")
+                    log_event(
+                        "agent",
+                        "WARNING",
+                        "模型访问失败，自动切换共享备用模型",
+                        to_db=False,
+                        failed_model=previous_label,
+                        fallback_model=fallback_label,
+                        error=str(exc)[:300],
+                    )
+                    yield {
+                        "type": "retrying",
+                        "attempt": candidate_index + 1,
+                        "reset_stream": True,
+                        "message": f"{previous_label} 当前不可用，已自动切换到 {fallback_label}。",
+                    }
+                    yield _model_selected_event(llm_config)
+                    continue
+                yield {"type": "error", "content": str(exc)}
+                return
+            break
+
+        fallback_model_id = llm_config.get("id")
+        if (
+            candidate_index > 0
+            and session_id is not None
+            and user_id is not None
+            and fallback_model_id is not None
+        ):
+            persist_chat_session_model(
+                session_id=session_id,
+                user_id=user_id,
+                model_config_id=int(fallback_model_id),
+            )
+            model_config_id = int(fallback_model_id)
+            candidate_index = 0
+            candidate_model_ids = resolve_chat_model_config_ids(model_config_id) or [model_config_id]
 
         if message is None:
             yield {"type": "error", "content": "模型流式响应异常，请重试。"}

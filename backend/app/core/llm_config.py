@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.core import runtime_overrides
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import LlmModelConfig
+from backend.app.core.models import AiChatSession, LlmModelConfig
 from backend.app.core.settings import settings
 
 
@@ -30,6 +30,81 @@ _VISION_MODEL_PREFIXES = (
 )
 
 _POSITION_AGENT_MODEL_PRIORITY = ("qwen3.7-plus", "k3")
+
+
+def resolve_chat_model_config_ids(model_config_id: int | None = None) -> list[int]:
+    """Return enabled chat models in failover order.
+
+    The requested (or active) model stays first.  Models on other platforms
+    are tried before another model on the same platform so a provider-level
+    entitlement or credential failure can recover without repeating the same
+    failing integration.
+    """
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(LlmModelConfig)
+            .options(selectinload(LlmModelConfig.platform))
+            .where(LlmModelConfig.status == "enabled")
+            .order_by(
+                LlmModelConfig.is_active.desc(),
+                LlmModelConfig.updated_at.desc(),
+                LlmModelConfig.id.desc(),
+            )
+        ).all()
+        available = [
+            row
+            for row in rows
+            if row.platform is None or row.platform.status == "enabled"
+        ]
+        if not available:
+            return []
+
+        primary = None
+        if model_config_id:
+            primary = next((row for row in available if row.id == model_config_id), None)
+        if primary is None:
+            primary = next((row for row in available if row.is_active), available[0])
+
+        remaining = [row for row in available if row.id != primary.id]
+        other_platforms = [
+            row for row in remaining if row.platform_id != primary.platform_id
+        ]
+        same_platform = [
+            row for row in remaining if row.platform_id == primary.platform_id
+        ]
+        return [primary.id, *[row.id for row in other_platforms], *[row.id for row in same_platform]]
+
+
+def persist_chat_session_model(*, session_id: int, user_id: int, model_config_id: int) -> bool:
+    """Bind an owned chat session to the model that actually handled it."""
+    with SessionLocal() as session:
+        chat_session = session.scalar(
+            select(AiChatSession)
+            .where(
+                AiChatSession.id == session_id,
+                AiChatSession.user_id == user_id,
+                AiChatSession.status != "deleted",
+            )
+            .limit(1)
+        )
+        model = session.scalar(
+            select(LlmModelConfig)
+            .options(selectinload(LlmModelConfig.platform))
+            .where(
+                LlmModelConfig.id == model_config_id,
+                LlmModelConfig.status == "enabled",
+            )
+            .limit(1)
+        )
+        if (
+            chat_session is None
+            or model is None
+            or (model.platform is not None and model.platform.status != "enabled")
+        ):
+            return False
+        chat_session.model_config_id = model_config_id
+        session.commit()
+        return True
 
 
 def model_supports_vision(model_name: str | None) -> bool:

@@ -10,10 +10,12 @@ from sqlalchemy.pool import StaticPool
 from backend.app.core.database import Base
 from backend.app.core.llm_config import (
     model_supports_vision,
+    persist_chat_session_model,
+    resolve_chat_model_config_ids,
     resolve_model_config_ids_by_priority,
     resolve_vision_model_config_id,
 )
-from backend.app.core.models import LlmModelConfig, LlmModelPlatform
+from backend.app.core.models import AiChatSession, LlmModelConfig, LlmModelPlatform, User
 
 
 class LlmVisionRoutingTests(unittest.TestCase):
@@ -131,6 +133,138 @@ class LlmVisionRoutingTests(unittest.TestCase):
                 ("deepseek-v4-flash-0731", "deepseek-v4-pro")
             )
         self.assertEqual(resolved, [primary.id, fallback.id])
+
+    def test_chat_failover_prefers_another_platform(self) -> None:
+        with self.SessionFactory() as db:
+            primary_platform = LlmModelPlatform(
+                name="Primary provider",
+                provider_type="OpenAI compatible",
+                base_url="https://primary.invalid/v1",
+                status="enabled",
+            )
+            fallback_platform = LlmModelPlatform(
+                name="Fallback provider",
+                provider_type="OpenAI compatible",
+                base_url="https://fallback.invalid/v1",
+                status="enabled",
+            )
+            db.add_all([primary_platform, fallback_platform])
+            db.flush()
+            primary = LlmModelConfig(
+                platform_id=primary_platform.id,
+                display_name="Primary active",
+                provider_name=primary_platform.name,
+                base_url=primary_platform.base_url,
+                model_name="primary-active",
+                is_active=True,
+                status="enabled",
+            )
+            same_platform = LlmModelConfig(
+                platform_id=primary_platform.id,
+                display_name="Primary sibling",
+                provider_name=primary_platform.name,
+                base_url=primary_platform.base_url,
+                model_name="primary-sibling",
+                is_active=False,
+                status="enabled",
+            )
+            cross_platform = LlmModelConfig(
+                platform_id=fallback_platform.id,
+                display_name="Cross-provider fallback",
+                provider_name=fallback_platform.name,
+                base_url=fallback_platform.base_url,
+                model_name="cross-provider",
+                is_active=False,
+                status="enabled",
+            )
+            db.add_all([primary, same_platform, cross_platform])
+            db.commit()
+
+        with patch("backend.app.core.llm_config.SessionLocal", self.SessionFactory):
+            resolved = resolve_chat_model_config_ids(primary.id)
+
+        self.assertEqual(resolved, [primary.id, cross_platform.id, same_platform.id])
+
+    def test_persist_chat_session_model_enforces_session_owner(self) -> None:
+        with self.SessionFactory() as db:
+            owner = User(
+                username="owner",
+                display_name="Owner",
+                role="researcher",
+                permission_scope="agent:use",
+                password_hash="test",
+            )
+            other = User(
+                username="other",
+                display_name="Other",
+                role="researcher",
+                permission_scope="agent:use",
+                password_hash="test",
+            )
+            platform = LlmModelPlatform(
+                name="Session model provider",
+                provider_type="OpenAI compatible",
+                base_url="https://session.invalid/v1",
+                status="enabled",
+            )
+            db.add_all([owner, other, platform])
+            db.flush()
+            primary = LlmModelConfig(
+                platform_id=platform.id,
+                display_name="Session primary",
+                provider_name=platform.name,
+                base_url=platform.base_url,
+                model_name="session-primary",
+                is_active=True,
+                status="enabled",
+            )
+            fallback = LlmModelConfig(
+                platform_id=platform.id,
+                display_name="Session fallback",
+                provider_name=platform.name,
+                base_url=platform.base_url,
+                model_name="session-fallback",
+                is_active=False,
+                status="enabled",
+            )
+            db.add_all([primary, fallback])
+            db.flush()
+            chat_session = AiChatSession(
+                user_id=owner.id,
+                model_config_id=primary.id,
+                title="Owned session",
+                status="active",
+                chat_mode="research",
+                source_type="web",
+            )
+            db.add(chat_session)
+            db.commit()
+            session_id = chat_session.id
+            owner_id = owner.id
+            other_id = other.id
+            primary_id = primary.id
+            fallback_id = fallback.id
+
+        with patch("backend.app.core.llm_config.SessionLocal", self.SessionFactory):
+            self.assertFalse(
+                persist_chat_session_model(
+                    session_id=session_id,
+                    user_id=other_id,
+                    model_config_id=fallback_id,
+                )
+            )
+            with self.SessionFactory() as db:
+                self.assertEqual(db.get(AiChatSession, session_id).model_config_id, primary_id)
+            self.assertTrue(
+                persist_chat_session_model(
+                    session_id=session_id,
+                    user_id=owner_id,
+                    model_config_id=fallback_id,
+                )
+            )
+
+        with self.SessionFactory() as db:
+            self.assertEqual(db.get(AiChatSession, session_id).model_config_id, fallback_id)
 
 
 if __name__ == "__main__":
