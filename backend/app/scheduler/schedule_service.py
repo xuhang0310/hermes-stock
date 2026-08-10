@@ -6,10 +6,9 @@ from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.auth.auth import permissions_for
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import DigitalHumanProfile, ScheduledJob, User
 from backend.app.agent_runtime.profile_access import target_roles_allow
@@ -73,14 +72,7 @@ class AgentScheduleService:
     def list_jobs(self, user_id: int, include_disabled: bool = True) -> list[dict[str, Any]]:
         with self.session_factory() as db:
             actor = self._actor(db, user_id)
-            query = select(ScheduledJob)
-            if not self._can_manage_all(actor):
-                query = query.where(
-                    or_(
-                        ScheduledJob.owner_user_id == user_id,
-                        ScheduledJob.owner_user_id.is_(None),
-                    )
-                )
+            query = select(ScheduledJob).where(ScheduledJob.owner_user_id == user_id)
             if not include_disabled:
                 query = query.where(ScheduledJob.enabled.is_(True))
             rows = db.scalars(query.order_by(ScheduledJob.sort_order, ScheduledJob.id)).all()
@@ -249,24 +241,20 @@ class AgentScheduleService:
             raise PermissionError("当前用户不存在或已停用。")
         return actor
 
-    @staticmethod
-    def _can_manage_all(actor: User) -> bool:
-        permissions = permissions_for(actor)
-        return "all" in permissions or "model:manage" in permissions
-
     @classmethod
     def _can_edit(cls, actor: User, job: ScheduledJob) -> bool:
-        return cls._can_manage_all(actor) or (
-            job.owner_user_id == actor.id and job.created_via == "agent"
-        )
+        return job.owner_user_id == actor.id
 
     @classmethod
     def _visible_job(cls, db: Session, actor: User, job_key: str) -> ScheduledJob:
-        job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
+        job = db.scalar(
+            select(ScheduledJob).where(
+                ScheduledJob.job_key == job_key,
+                ScheduledJob.owner_user_id == actor.id,
+            ).limit(1)
+        )
         if job is None:
             raise ValueError("定时任务不存在。")
-        if not cls._can_manage_all(actor) and job.owner_user_id not in {None, actor.id}:
-            raise PermissionError("当前用户无权查看该定时任务。")
         return job
 
     @classmethod

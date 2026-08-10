@@ -157,6 +157,7 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         ):
             _add_column("position_accounts", column, ddl)
         _add_column("positions", "account_id", "account_id INT NULL")
+        _add_column("job_runs", "owner_user_id", "owner_user_id INT NULL")
         for table in (
             "watchlist_groups",
             "watchlist_items",
@@ -370,6 +371,41 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         ):
             _add_column("scheduled_jobs", column, ddl)
         _add_column("job_runs", "output_content", "output_content LONGTEXT NULL")
+
+        # Legacy user-created Agent tasks predate ownership. Assign those to
+        # the original administrator, while built-in maintenance/report jobs
+        # remain unowned system infrastructure.
+        connection.execute(
+            text(
+                f"UPDATE scheduled_jobs SET owner_user_id = {legacy_owner_sql} "
+                "WHERE owner_user_id IS NULL "
+                "AND (job_kind = 'agent_task' OR created_via = 'agent')"
+            )
+        )
+
+        # Execution records inherit the owner of their scheduled job. Runs for
+        # built-in maintenance jobs remain unowned and are never exposed by the
+        # personal schedule API. This must run after the scheduled-job owner
+        # column has been added for older installations.
+        connection.execute(
+            text(
+                "UPDATE job_runs AS runs "
+                "JOIN scheduled_jobs AS jobs ON jobs.job_key = runs.job_key "
+                "SET runs.owner_user_id = jobs.owner_user_id "
+                "WHERE runs.owner_user_id IS NULL AND jobs.owner_user_id IS NOT NULL"
+            )
+        )
+        has_job_run_owner_index = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = 'job_runs' "
+                "AND index_name = 'ix_job_runs_owner_user_id'"
+            )
+        ).scalar()
+        if not has_job_run_owner_index:
+            connection.execute(
+                text("CREATE INDEX ix_job_runs_owner_user_id ON job_runs (owner_user_id)")
+            )
 
         def _add_index(table: str, index_name: str, columns: str) -> None:
             exists = connection.execute(

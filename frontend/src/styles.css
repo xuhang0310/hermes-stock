@@ -5389,6 +5389,22 @@ body.rhythm-modal-open {
   font-size: 11px;
 }
 
+.rhythm-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rhythm-create-button,
+.rhythm-empty button {
+  border: 1px solid #806a37;
+  border-radius: 7px;
+  background: #201b10;
+  color: #dfc16f;
+  padding: 8px 13px;
+  cursor: pointer;
+}
+
 .rhythm-job-list,
 .rhythm-run-list {
   overflow: hidden;
@@ -5771,6 +5787,10 @@ body.rhythm-modal-open {
 }
 
 .rhythm-empty {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 8px;
   padding: 30px;
   color: #77756e;
   font-size: 11px;
@@ -6699,6 +6719,11 @@ body.rhythm-modal-open {
   color: #aaa392;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.rhythm-empty strong {
+  color: #cbc2ae;
+  font-size: 14px;
 }
 
 .wb-symbol-link {

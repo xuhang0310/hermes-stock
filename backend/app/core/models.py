@@ -1566,6 +1566,7 @@ class JobRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
     job_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     fire_key: Mapped[str] = mapped_column(String(120), nullable=False)
     trigger_type: Mapped[str] = mapped_column(String(24), nullable=False, default="schedule")
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="running")

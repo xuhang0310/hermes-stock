@@ -192,7 +192,10 @@ class SystemMixin:
         scheduled_jobs = list(
             self.db.scalars(
                 select(ScheduledJob)
-                .where(ScheduledJob.enabled.is_(True))
+                .where(
+                    ScheduledJob.owner_user_id == self.owner_user_id,
+                    ScheduledJob.enabled.is_(True),
+                )
                 .order_by(ScheduledJob.sort_order, ScheduledJob.id)
             ).all()
         )
@@ -465,7 +468,7 @@ class SystemMixin:
     def _dashboard_runtime(self) -> dict[str, list[dict[str, Any]]]:
         base = select(JobRun, ScheduledJob.name, ScheduledJob.digital_human_code).outerjoin(
             ScheduledJob, ScheduledJob.job_key == JobRun.job_key
-        )
+        ).where(JobRun.owner_user_id == self.owner_user_id)
         running_rows = self.db.execute(
             base.where(JobRun.status == "running").order_by(desc(JobRun.started_at)).limit(4)
         ).all()

@@ -959,6 +959,7 @@ def _claim_due_jobs(now: datetime, limit: int | None = None) -> list[tuple[str, 
                 JobRun(
                     run_id=run_id,
                     job_key=job.job_key,
+                    owner_user_id=job.owner_user_id,
                     fire_key=f"{job.job_key}@{minute_key}",
                     trigger_type="schedule",
                     status="running",
@@ -991,6 +992,7 @@ def _claim_manual_run(job_key: str) -> str | None:
             JobRun(
                 run_id=run_id,
                 job_key=job_key,
+                owner_user_id=job.owner_user_id,
                 fire_key=f"{job_key}@manual-{run_id[:8]}",
                 trigger_type="manual",
                 status="running",

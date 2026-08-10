@@ -28,6 +28,7 @@ import type {
   RiskCheck,
   SystemLog,
   UserPayload,
+  ManagedUser,
   LoginPayload,
   ModelPlatform,
   ModelConfig,
@@ -592,6 +593,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload)
     }),
+  createScheduleJob: (payload: Record<string, unknown>) =>
+    request<ScheduleJob>('/api/schedule/jobs', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
   deleteScheduleJob: (jobKey: string) =>
     request<{ deleted: boolean; job_key: string }>(`/api/schedule/jobs/${encodeURIComponent(jobKey)}`, {
       method: 'DELETE'
@@ -629,6 +635,23 @@ export const api = {
   scheduleRun: (runId: string) =>
     request<JobRun>(`/api/schedule/runs/${encodeURIComponent(runId)}`),
   scheduleStatus: () => request<ScheduleStatus>('/api/schedule/status'),
+  users: () => request<ManagedUser[]>('/api/users'),
+  createUser: (payload: {
+    username: string
+    display_name: string
+    password: string
+    role: ManagedUser['role']
+  }) => request<ManagedUser>('/api/users', { method: 'POST', body: JSON.stringify(payload) }),
+  updateUser: (userId: number, payload: Partial<Pick<ManagedUser, 'display_name' | 'role' | 'is_enabled'>>) =>
+    request<ManagedUser>(`/api/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    }),
+  resetUserPassword: (userId: number, newPassword: string) =>
+    request<{ ok: boolean; reauth_required: boolean }>(`/api/users/${userId}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ new_password: newPassword })
+    }),
   dataSources: () => request<DataSourceConfig[]>('/api/data-sources'),
   saveDataSource: (provider: string, payload: Record<string, unknown>) =>
     request<DataSourceConfig>(`/api/data-sources/${provider}`, {

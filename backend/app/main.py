@@ -18,6 +18,7 @@ from backend.app.ai.prompt_recommendations import ensure_ask_stock_profile, star
 from backend.app.agent_runtime.redis_broker import redis_broker
 from backend.app.agent_runtime.worker import agent_runtime_worker
 from backend.app.auth.auth_api import router as auth_router
+from backend.app.auth.user_api import router as user_router
 from backend.app.core.applog import configure_logging, get_logger, log_event, prune_system_logs
 from backend.app.core.database import initialize_default_database, session_scope
 from backend.app.core.operation_log import OperationLogMiddleware
@@ -148,6 +149,7 @@ def create_app(init_db: bool = True) -> FastAPI:
         return response
 
     app.include_router(auth_router)
+    app.include_router(user_router)
     app.include_router(ai_router)
     app.include_router(factor_router)
     app.include_router(backtest_router)

@@ -8,7 +8,8 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.core.models import Base, JobRun, NotifyChannel, ScheduledJob
+from backend.app.auth.auth import AuthContext
+from backend.app.core.models import Base, JobRun, NotifyChannel, ScheduledJob, User
 from backend.app.feishu.feishu import (
     BUILTIN_CHANNEL_KEYS,
     SCHEDULE_CHANNEL_KEY,
@@ -152,6 +153,16 @@ class FeishuChannelMigrationTests(unittest.TestCase):
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.db = Session(self.engine)
+        self.user = User(
+            username="schedule-test",
+            display_name="Schedule Test",
+            role="researcher",
+            permission_scope="",
+            password_hash="test",
+        )
+        self.db.add(self.user)
+        self.db.commit()
+        self.context = AuthContext(user=self.user, permissions={"schedule:manage"})
 
     def tearDown(self) -> None:
         self.db.close()
@@ -165,6 +176,7 @@ class FeishuChannelMigrationTests(unittest.TestCase):
                     name=f"任务 {index:02d}",
                     job_kind="agent_task",
                     schedule_type="daily",
+                    owner_user_id=self.user.id,
                     enabled=index % 2 == 0,
                     sort_order=index,
                 )
@@ -174,6 +186,7 @@ class FeishuChannelMigrationTests(unittest.TestCase):
                 JobRun(
                     run_id=f"run-{index:02d}",
                     job_key=f"job-{index % 3:02d}",
+                    owner_user_id=self.user.id,
                     fire_key=f"fire-{index:02d}",
                     trigger_type="schedule",
                     status="success" if index % 2 == 0 else "failed",
@@ -182,7 +195,9 @@ class FeishuChannelMigrationTests(unittest.TestCase):
             )
         self.db.commit()
 
-        jobs_page = schedule_jobs_paged(page=2, page_size=4, enabled=None, keyword=None, db=self.db)
+        jobs_page = schedule_jobs_paged(
+            page=2, page_size=4, enabled=None, keyword=None, db=self.db, context=self.context
+        )
         self.assertEqual(jobs_page["total"], 11)
         self.assertEqual(jobs_page["pages"], 3)
         self.assertEqual(jobs_page["enabled_total"], 6)
@@ -194,13 +209,16 @@ class FeishuChannelMigrationTests(unittest.TestCase):
             job_key="job-00",
             status=None,
             db=self.db,
+            context=self.context,
         )
         self.assertEqual(runs_page["total"], 9)
         self.assertEqual(runs_page["pages"], 2)
         self.assertEqual(len(runs_page["items"]), 4)
         self.assertTrue(all(item["job_name"] == "任务 00" for item in runs_page["items"]))
 
-        cleared = clear_schedule_runs(job_key="job-00", status=None, db=self.db)
+        cleared = clear_schedule_runs(
+            job_key="job-00", status=None, db=self.db, context=self.context
+        )
         self.assertEqual(cleared["deleted"], 9)
         self.assertEqual(cleared["skipped_running"], 0)
 
@@ -208,6 +226,7 @@ class FeishuChannelMigrationTests(unittest.TestCase):
             JobRun(
                 run_id="run-active",
                 job_key="job-01",
+                owner_user_id=self.user.id,
                 fire_key="fire-active",
                 trigger_type="manual",
                 status="running",
@@ -215,7 +234,9 @@ class FeishuChannelMigrationTests(unittest.TestCase):
             )
         )
         self.db.commit()
-        cleared_all = clear_schedule_runs(job_key=None, status=None, db=self.db)
+        cleared_all = clear_schedule_runs(
+            job_key=None, status=None, db=self.db, context=self.context
+        )
         self.assertEqual(cleared_all["deleted"], 16)
         self.assertEqual(cleared_all["skipped_running"], 1)
         self.assertIsNotNone(

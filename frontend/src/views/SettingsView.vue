@@ -6,9 +6,10 @@ import DigitalHumanAdminView from './DigitalHumanAdminView.vue'
 import ModelSettingsView from './ModelSettingsView.vue'
 import NotifyChannelSettingsView from './NotifyChannelSettingsView.vue'
 import LogsView from './LogsView.vue'
+import UserManagementView from './UserManagementView.vue'
 import type { AgentItem, HealthPayload, UserPayload } from '../types'
 
-type SettingsTab = 'models' | 'dataSources' | 'notifyChannels' | 'digitalHumans' | 'logs' | 'system'
+type SettingsTab = 'models' | 'dataSources' | 'notifyChannels' | 'digitalHumans' | 'users' | 'logs' | 'system'
 
 const props = defineProps<{
   health: HealthPayload | null
@@ -27,12 +28,16 @@ const canViewSystem = computed(
 const canManageDigitalHumans = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('digital_human:manage')
 )
+const canManageUsers = computed(
+  () => props.user.permissions.includes('all') || props.user.permissions.includes('user:manage')
+)
 
 const tabs = computed<Array<{ key: SettingsTab; label: string }>>(() => [
   { key: 'models', label: '模型与平台' },
   { key: 'dataSources', label: '数据源' },
   ...(canManageChannels.value ? [{ key: 'notifyChannels' as SettingsTab, label: '通知通道' }] : []),
   ...(canManageDigitalHumans.value ? [{ key: 'digitalHumans' as SettingsTab, label: '数字人管理' }] : []),
+  ...(canManageUsers.value ? [{ key: 'users' as SettingsTab, label: '用户管理' }] : []),
   ...(canViewSystem.value ? [{ key: 'logs' as SettingsTab, label: '运行日志' }] : []),
   { key: 'system', label: '系统状态' }
 ])
@@ -56,6 +61,7 @@ const tabs = computed<Array<{ key: SettingsTab; label: string }>>(() => [
     <DataSourceSettingsView v-else-if="activeTab === 'dataSources'" />
     <NotifyChannelSettingsView v-else-if="activeTab === 'notifyChannels'" />
     <DigitalHumanAdminView v-else-if="activeTab === 'digitalHumans'" />
+    <UserManagementView v-else-if="activeTab === 'users'" :user="user" />
     <LogsView v-else-if="activeTab === 'logs'" />
 
     <section v-else class="page-section settings-grid">

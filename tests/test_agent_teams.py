@@ -678,7 +678,7 @@ class AgentScheduleServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.engine.dispose()
 
-    def test_schedule_tools_query_real_table_and_enforce_edit_scope(self) -> None:
+    def test_schedule_tools_only_expose_the_current_users_tasks(self) -> None:
         with self.SessionFactory() as db:
             viewer = User(
                 username="schedule-viewer",
@@ -721,27 +721,24 @@ class AgentScheduleServiceTests(unittest.TestCase):
             {"include_disabled": True},
             {"user_id": self.user_id},
         )
-        self.assertEqual(admin_result["total"], 2)
-        self.assertEqual(admin_result["enabled_total"], 2)
-        self.assertTrue(all(job["editable"] for job in admin_result["jobs"]))
-
-        updated = self.service.update_job(
-            user_id=self.user_id,
-            run_id=None,
-            args={"job_key": "system-health", "schedule": {"type": "daily", "run_time": "08:30"}},
-        )
-        self.assertEqual(updated["job"]["run_time"], "08:30")
+        self.assertEqual(admin_result["total"], 0)
+        self.assertEqual(admin_result["enabled_total"], 0)
+        with self.assertRaises(ValueError):
+            self.service.update_job(
+                user_id=self.user_id,
+                run_id=None,
+                args={"job_key": "system-health", "schedule": {"type": "daily", "run_time": "08:30"}},
+            )
 
         viewer_result = self.service.execute(
             "list_agent_schedules",
             {"include_disabled": True},
             {"user_id": viewer_id},
         )
-        self.assertEqual(viewer_result["total"], 2)
+        self.assertEqual(viewer_result["total"], 1)
         jobs = {job["job_key"]: job for job in viewer_result["jobs"]}
-        self.assertFalse(jobs["system-health"]["editable"])
         self.assertTrue(jobs["viewer-agent-job"]["editable"])
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(ValueError):
             self.service.update_job(
                 user_id=viewer_id,
                 run_id=None,

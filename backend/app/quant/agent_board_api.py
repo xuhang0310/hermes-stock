@@ -7,11 +7,10 @@ ScheduledJob、JobRun 的关联数据。
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_, select, func, desc, asc
-from sqlalchemy.orm import joinedload
+from sqlalchemy import asc, desc, func, select
 
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.core.database import SessionLocal
@@ -64,6 +63,18 @@ def _get_session():
         session.close()
 
 
+def _owned_run(session, user_id: int, run_id: str) -> AgentRun:
+    run = session.execute(
+        select(AgentRun).where(
+            AgentRun.run_id == run_id,
+            AgentRun.user_id == user_id,
+        )
+    ).scalar()
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
+    return run
+
+
 # 看板状态分类
 BOARD_COLUMNS = {
     "queued": ["queued", "waiting_dependency"],
@@ -85,7 +96,7 @@ def _status_to_column(status: str) -> str:
 def _get_status_counts(session, user_id: int | None = None, skip_user_filter: bool = False, date_from: str | None = None, date_to: str | None = None) -> dict[str, int]:
     """查询各状态数量"""
     query = select(AgentRun.status, func.count(AgentRun.run_id)).where(
-        AgentRun.board_visible == True,
+        AgentRun.board_visible.is_(True),
     )
     if user_id is not None and not skip_user_filter:
         query = query.where(AgentRun.user_id == user_id)
@@ -130,7 +141,7 @@ def _query_tasks(
     query = (
         select(AgentRun)
         .outerjoin(DigitalHumanProfile, AgentRun.assignee_profile_id == DigitalHumanProfile.id)
-        .where(AgentRun.board_visible == True)
+        .where(AgentRun.board_visible.is_(True))
     )
     if user_id is not None and not skip_user_filter:
         query = query.where(AgentRun.user_id == user_id)
@@ -195,19 +206,28 @@ def _query_tasks(
 
         if run.source_ref:
             jr = session.execute(
-                select(JobRun).where(JobRun.run_id == run.source_ref)
+                select(JobRun).where(
+                    JobRun.run_id == run.source_ref,
+                    JobRun.owner_user_id == user_id,
+                )
             ).scalar()
             if jr:
                 job_run_info = {"job_key": jr.job_key, "status": jr.status}
                 sj = session.execute(
-                    select(ScheduledJob).where(ScheduledJob.job_key == jr.job_key)
+                    select(ScheduledJob).where(
+                        ScheduledJob.job_key == jr.job_key,
+                        ScheduledJob.owner_user_id == user_id,
+                    )
                 ).scalar()
                 if sj:
                     scheduled_job_info = {"name": sj.name, "job_key": sj.job_key}
 
         if run.team_id:
             team = session.execute(
-                select(AgentTeamRun).where(AgentTeamRun.team_id == run.team_id)
+                select(AgentTeamRun).where(
+                    AgentTeamRun.team_id == run.team_id,
+                    AgentTeamRun.user_id == user_id,
+                )
             ).scalar()
             if team:
                 team_info = {"team_id": team.team_id, "objective": team.objective[:100] if team.objective else ""}
@@ -261,7 +281,7 @@ def get_board_summary(
 ) -> dict:
     """查询看板各状态数量"""
     counts = _get_status_counts(
-        session, user_id=context.user.id, skip_user_filter=context.user.is_super_admin,
+        session, user_id=context.user.id, skip_user_filter=False,
         date_from=date_from, date_to=date_to,
     )
     return {"counts": counts}
@@ -284,7 +304,7 @@ def get_board_tasks(
     items, total = _query_tasks(
         session,
         user_id=context.user.id,
-        skip_user_filter=context.user.is_super_admin,
+        skip_user_filter=False,
         status=status,
         agent_code=agent_code,
         source_type=source_type,
@@ -304,7 +324,7 @@ def get_task_detail(
     session=Depends(_get_session),
 ) -> dict:
     """查询任务详情"""
-    run = session.get(AgentRun, run_id)
+    run = _owned_run(session, context.user.id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
 
@@ -355,7 +375,12 @@ def get_task_detail(
     # 获取定时任务来源
     job_info = None
     if run.source_ref:
-        jr = session.execute(select(JobRun).where(JobRun.run_id == run.source_ref)).scalar()
+        jr = session.execute(
+            select(JobRun).where(
+                JobRun.run_id == run.source_ref,
+                JobRun.owner_user_id == context.user.id,
+            )
+        ).scalar()
         if jr:
             job_info = {
                 "job_run_id": jr.run_id,
@@ -363,7 +388,12 @@ def get_task_detail(
                 "status": jr.status,
                 "started_at": _fmt(jr.started_at),
             }
-            sj = session.execute(select(ScheduledJob).where(ScheduledJob.job_key == jr.job_key)).scalar()
+            sj = session.execute(
+                select(ScheduledJob).where(
+                    ScheduledJob.job_key == jr.job_key,
+                    ScheduledJob.owner_user_id == context.user.id,
+                )
+            ).scalar()
             if sj:
                 job_info["scheduled_job_name"] = sj.name
 
@@ -399,7 +429,7 @@ def get_task_events(
     session=Depends(_get_session),
 ) -> dict:
     """查询任务执行事件"""
-    run = session.get(AgentRun, run_id)
+    run = _owned_run(session, context.user.id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
 
@@ -432,7 +462,7 @@ def retry_task(
     session=Depends(_get_session),
 ) -> dict:
     """重试失败任务"""
-    run = session.get(AgentRun, run_id)
+    run = _owned_run(session, context.user.id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
 
@@ -461,12 +491,12 @@ def cancel_task(
     session=Depends(_get_session),
 ) -> dict:
     """取消任务"""
-    run = session.get(AgentRun, run_id)
+    run = _owned_run(session, context.user.id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
 
     if run.status in ("completed", "cancelled"):
-        raise HTTPException(status_code=400, detail=f"任务已完成或已取消，无法再取消")
+        raise HTTPException(status_code=400, detail="任务已完成或已取消，无法再取消")
 
     run.cancel_requested = True
     if run.status in ("queued", "waiting_dependency", "waiting_approval"):
@@ -485,7 +515,7 @@ def update_task_priority(
     session=Depends(_get_session),
 ) -> dict:
     """调整任务优先级"""
-    run = session.get(AgentRun, run_id)
+    run = _owned_run(session, context.user.id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"任务不存在：{run_id}")
 
@@ -503,7 +533,12 @@ def get_batch_detail(
     session=Depends(_get_session),
 ) -> dict:
     """查询 Team 或 Workflow 批次"""
-    team = session.get(AgentTeamRun, batch_id)
+    team = session.execute(
+        select(AgentTeamRun).where(
+            AgentTeamRun.team_id == batch_id,
+            AgentTeamRun.user_id == context.user.id,
+        )
+    ).scalar()
     if not team:
         raise HTTPException(status_code=404, detail=f"批次不存在：{batch_id}")
 
@@ -552,7 +587,11 @@ def get_board_agents(
     """查询看板涉及的数字人列表"""
     subquery = (
         select(AgentRun.assignee_profile_id)
-        .where(AgentRun.board_visible == True, AgentRun.assignee_profile_id != None)
+        .where(
+            AgentRun.board_visible.is_(True),
+            AgentRun.assignee_profile_id.is_not(None),
+            AgentRun.user_id == context.user.id,
+        )
         .distinct()
     ).subquery()
 

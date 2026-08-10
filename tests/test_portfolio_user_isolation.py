@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.database import Base
 from backend.app.core.models import Instrument, User
+from backend.app.data.errors import PositionNotFoundError
 from backend.app.data.repository import StockRepository
 
 
@@ -110,7 +111,7 @@ class PortfolioUserIsolationTests(unittest.TestCase):
         self.assertEqual(self.repo_b.positions()[0]["position_quantity"], 200)
         self.assertEqual(len(self.repo_a.position_trades()), 1)
         self.assertEqual(len(self.repo_b.position_trades()), 1)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(PositionNotFoundError):
             self.repo_b.update_account_funds(account_a["id"], 10000)
         foreign_delete = self.repo_b.delete_position_trade(self.repo_a.position_trades()[0]["id"])
         self.assertFalse(foreign_delete["deleted"])

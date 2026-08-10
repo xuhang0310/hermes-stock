@@ -1517,6 +1517,17 @@ export type ScreenerParseResult = {
   history_id: number | null
 }
 
+export type ManagedUser = {
+  id: number
+  username: string
+  display_name: string
+  role: 'super_admin' | 'admin' | 'researcher' | 'viewer'
+  is_enabled: boolean
+  last_login_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
 export type ScreenerInterpretation = {
   interpretation: string
   model: string | null

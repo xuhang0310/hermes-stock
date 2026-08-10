@@ -320,12 +320,32 @@ def _run_output_content(db: Session, run: JobRun) -> str | None:
     return run.output_preview
 
 
+def _owned_job(db: Session, *, user_id: int, job_key: str) -> ScheduledJob:
+    job = db.scalar(
+        select(ScheduledJob)
+        .where(
+            ScheduledJob.job_key == job_key,
+            ScheduledJob.owner_user_id == user_id,
+        )
+        .limit(1)
+    )
+    if job is None:
+        # Hide foreign task identifiers behind the same response as a missing
+        # task. Personal schedules are not an administrator-wide namespace.
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return job
+
+
 @router.get("/schedule/jobs")
 def schedule_jobs(
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("system:view")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> list[dict]:
-    rows = db.scalars(select(ScheduledJob).order_by(ScheduledJob.sort_order, ScheduledJob.id)).all()
+    rows = db.scalars(
+        select(ScheduledJob)
+        .where(ScheduledJob.owner_user_id == context.user.id)
+        .order_by(ScheduledJob.sort_order, ScheduledJob.id)
+    ).all()
     return [_job_out(row) for row in rows]
 
 
@@ -336,9 +356,9 @@ def schedule_jobs_paged(
     enabled: bool | None = Query(default=None),
     keyword: str | None = Query(default=None, max_length=100),
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("system:view")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    filters = []
+    filters = [ScheduledJob.owner_user_id == context.user.id]
     if enabled is not None:
         filters.append(ScheduledJob.enabled.is_(enabled))
     if keyword and keyword.strip():
@@ -352,7 +372,12 @@ def schedule_jobs_paged(
 
     total = int(db.scalar(count_query) or 0)
     enabled_total = int(
-        db.scalar(select(func.count()).select_from(ScheduledJob).where(ScheduledJob.enabled.is_(True))) or 0
+        db.scalar(
+            select(func.count()).select_from(ScheduledJob).where(
+                ScheduledJob.owner_user_id == context.user.id,
+                ScheduledJob.enabled.is_(True),
+            )
+        ) or 0
     )
     rows = db.scalars(
         query.order_by(ScheduledJob.sort_order, ScheduledJob.id)
@@ -372,7 +397,7 @@ def schedule_jobs_paged(
 def create_schedule_job(
     payload: ScheduleJobCreateIn,
     db: Session = Depends(get_db),
-    context: AuthContext = Depends(require_permission("model:manage")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
     if payload.digital_human_code and payload.digital_human_code not in VALID_DIGITAL_HUMAN_CODES:
         raise HTTPException(status_code=400, detail="数字人 code 无效")
@@ -380,7 +405,7 @@ def create_schedule_job(
         raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
     _validate_schedule_text_encoding(payload)
     _validate_schedule_shape(payload)
-    job_key = payload.job_key or f"admin-{uuid4().hex[:16]}"
+    job_key = payload.job_key or f"user-{context.user.id}-{uuid4().hex[:12]}"
     if db.scalar(select(ScheduledJob.id).where(ScheduledJob.job_key == job_key).limit(1)):
         raise HTTPException(status_code=409, detail="任务标识已存在")
     job = ScheduledJob(
@@ -402,7 +427,7 @@ def create_schedule_job(
         prompt_template=payload.prompt_template,
         push_channel_key=payload.push_channel_key,
         owner_user_id=context.user.id,
-        created_via="admin",
+        created_via="user",
         allow_code_execution=payload.allow_code_execution,
         approval_policy="full",
         enabled=payload.enabled,
@@ -419,11 +444,9 @@ def update_schedule_job(
     job_key: str,
     payload: ScheduleJobIn,
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("model:manage")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
-    if job is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    job = _owned_job(db, user_id=context.user.id, job_key=job_key)
     if payload.digital_human_code and payload.digital_human_code not in VALID_DIGITAL_HUMAN_CODES:
         raise HTTPException(status_code=400, detail="数字人 code 无效")
     if payload.push_channel_key and payload.push_channel_key not in BUILTIN_CHANNEL_KEYS:
@@ -457,14 +480,16 @@ def update_schedule_job(
 def delete_schedule_job(
     job_key: str,
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("model:manage")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
-    if job is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    job = _owned_job(db, user_id=context.user.id, job_key=job_key)
     running = db.scalar(
         select(JobRun.id)
-        .where(JobRun.job_key == job_key, JobRun.status == "running")
+        .where(
+            JobRun.job_key == job_key,
+            JobRun.owner_user_id == context.user.id,
+            JobRun.status == "running",
+        )
         .limit(1)
     )
     if running is not None:
@@ -487,11 +512,9 @@ def activate_agent_report_jobs(
 def toggle_schedule_job(
     job_key: str,
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("model:manage")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
-    if job is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    job = _owned_job(db, user_id=context.user.id, job_key=job_key)
     job.enabled = not job.enabled
     db.commit()
     db.refresh(job)
@@ -502,11 +525,9 @@ def toggle_schedule_job(
 async def run_schedule_job(
     job_key: str,
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("data:write")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    job = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
-    if job is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    _owned_job(db, user_id=context.user.id, job_key=job_key)
     run_id = await dispatch_manual_run(job_key)
     if run_id is None:
         raise HTTPException(status_code=409, detail="任务正在运行，请稍后再试")
@@ -519,9 +540,9 @@ def schedule_runs(
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("system:view")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> list[dict]:
-    query = select(JobRun)
+    query = select(JobRun).where(JobRun.owner_user_id == context.user.id)
     if job_key:
         query = query.where(JobRun.job_key == job_key)
     if status:
@@ -537,9 +558,9 @@ def schedule_runs_paged(
     job_key: str | None = Query(default=None),
     status: str | None = Query(default=None),
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("system:view")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    filters = []
+    filters = [JobRun.owner_user_id == context.user.id]
     if job_key:
         filters.append(JobRun.job_key == job_key)
     if status:
@@ -564,7 +585,10 @@ def schedule_runs_paged(
     if job_keys:
         job_names = dict(
             db.execute(
-                select(ScheduledJob.job_key, ScheduledJob.name).where(ScheduledJob.job_key.in_(job_keys))
+                select(ScheduledJob.job_key, ScheduledJob.name).where(
+                    ScheduledJob.job_key.in_(job_keys),
+                    ScheduledJob.owner_user_id == context.user.id,
+                )
             ).all()
         )
     return _page_out(
@@ -580,10 +604,10 @@ def clear_schedule_runs(
     job_key: str | None = Query(default=None),
     status: str | None = Query(default=None),
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("model:manage")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    filters = [JobRun.status != "running"]
-    running_filters = [JobRun.status == "running"]
+    filters = [JobRun.owner_user_id == context.user.id, JobRun.status != "running"]
+    running_filters = [JobRun.owner_user_id == context.user.id, JobRun.status == "running"]
     if job_key:
         filters.append(JobRun.job_key == job_key)
         running_filters.append(JobRun.job_key == job_key)
@@ -608,9 +632,14 @@ def clear_schedule_runs(
 def schedule_run_detail(
     run_id: str,
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("system:view")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    run = db.scalar(select(JobRun).where(JobRun.run_id == run_id).limit(1))
+    run = db.scalar(
+        select(JobRun).where(
+            JobRun.run_id == run_id,
+            JobRun.owner_user_id == context.user.id,
+        ).limit(1)
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="运行记录不存在")
     return _run_out(run, output_content=_run_output_content(db, run) or "")
@@ -619,7 +648,7 @@ def schedule_run_detail(
 @router.get("/schedule/status")
 def schedule_status(
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("system:view")),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
     now = now_sh()
     heartbeat = db.get(Heartbeat, HEARTBEAT_COMPONENT)
@@ -629,7 +658,10 @@ def schedule_status(
     counts = {"success": 0, "failed": 0, "running": 0}
     for status_value, total in db.execute(
         select(JobRun.status, func.count())
-        .where(JobRun.started_at >= today_start)
+        .where(
+            JobRun.owner_user_id == context.user.id,
+            JobRun.started_at >= today_start,
+        )
         .group_by(JobRun.status)
     ).all():
         counts[status_value] = total

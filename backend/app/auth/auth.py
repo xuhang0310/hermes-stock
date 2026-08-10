@@ -30,13 +30,23 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "admin": {
         "dashboard:view",
         "agent:use",
+        "agent:manage",
         "data:read",
         "data:write",
+        "schedule:manage",
+        "user:manage",
         "model:manage",
         "digital_human:manage",
         "system:view",
     },
-    "researcher": {"dashboard:view", "agent:use", "data:read"},
+    "researcher": {
+        "dashboard:view",
+        "agent:use",
+        "agent:manage",
+        "data:read",
+        "data:write",
+        "schedule:manage",
+    },
     "viewer": {"dashboard:view", "agent:use", "data:read"},
 }
 

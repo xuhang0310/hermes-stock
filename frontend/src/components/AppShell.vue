@@ -39,7 +39,7 @@ const expandedMenu = ref<PageKey | null>(null)
 const mobileNavOpen = ref(false)
 
 const canViewRhythm = computed(
-  () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
+  () => props.user.permissions.includes('all') || props.user.permissions.includes('schedule:manage')
 )
 const canViewKnowledge = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')

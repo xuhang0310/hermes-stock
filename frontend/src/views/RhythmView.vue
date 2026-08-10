@@ -81,6 +81,7 @@ const form = reactive({
 })
 
 const editingJob = computed(() => jobs.value.find((item) => item.job_key === editingKey.value) || null)
+const isCreating = computed(() => editorOpen.value && !editingKey.value)
 const todayExecutions = computed(() => {
   if (!status.value) return 0
   return status.value.today.success + status.value.today.failed + status.value.today.running
@@ -358,18 +359,43 @@ function edit(job: ScheduleJob) {
   editorOpen.value = true
 }
 
+function openCreate() {
+  editingKey.value = ''
+  Object.assign(form, {
+    name: '',
+    description: '',
+    schedule_type: 'daily',
+    run_time: '09:00',
+    run_once_at: '',
+    weekday_mask: '1,2,3,4,5',
+    interval_minutes: null,
+    window_start: '',
+    window_end: '',
+    trading_day_only: true,
+    digital_human_code: 'stock-pm',
+    prompt_template: '',
+    push_channel_key: '',
+    enabled: true,
+    allow_code_execution: false,
+    sort_order: 0
+  })
+  editorOpen.value = true
+}
+
 function closeEditor() {
   if (saving.value) return
   editorOpen.value = false
 }
 
 async function save() {
-  if (!editingKey.value || saving.value) return
+  if (saving.value) return
+  const creating = !editingKey.value
   saving.value = true
   try {
-    await api.saveScheduleJob(editingKey.value, {
+    const payload = {
       name: form.name,
       description: form.description || null,
+      job_kind: 'agent_task',
       schedule_type: form.schedule_type,
       run_time: form.run_time || null,
       run_once_at: form.run_once_at || null,
@@ -384,10 +410,12 @@ async function save() {
       enabled: form.enabled,
       allow_code_execution: form.allow_code_execution,
       sort_order: form.sort_order
-    })
+    }
+    if (editingKey.value) await api.saveScheduleJob(editingKey.value, payload)
+    else await api.createScheduleJob(payload)
     await Promise.all([loadJobs(), loadJobOptions()])
     editorOpen.value = false
-    setMessage(`${form.name} 已保存，新的调度配置立即生效。`, 'success')
+    setMessage(`${form.name} 已${creating ? '创建' : '保存'}，新的调度配置立即生效。`, 'success')
   } catch (error) {
     setMessage(`保存失败：${error instanceof Error ? error.message : String(error)}`, 'error')
   } finally {
@@ -520,7 +548,10 @@ onUnmounted(() => {
     <section v-if="activeView === 'settings'" class="hub-section">
       <header class="hub-section-title">
         <div><h2>定时任务设置</h2><p>维护执行计划、数字人、推送方式和安全权限。</p></div>
-        <span class="rhythm-section-count">共 {{ jobTotal }} 项，{{ enabledJobTotal }} 项已启用</span>
+        <div class="rhythm-section-actions">
+          <span class="rhythm-section-count">共 {{ jobTotal }} 项，{{ enabledJobTotal }} 项已启用</span>
+          <button type="button" class="rhythm-create-button" @click="openCreate">＋ 新建任务</button>
+        </div>
       </header>
 
       <div class="rhythm-job-list">
@@ -575,7 +606,11 @@ onUnmounted(() => {
             </button>
           </div>
         </article>
-        <div v-if="!jobs.length" class="rhythm-empty">暂时没有可管理的任务。</div>
+        <div v-if="!jobs.length" class="rhythm-empty">
+          <strong>这个账号还没有定时任务</strong>
+          <span>新用户的任务空间默认留空，可以从这里创建第一项任务。</span>
+          <button type="button" @click="openCreate">新建任务</button>
+        </div>
       </div>
 
       <footer v-if="jobPages > 1" class="rhythm-pagination" aria-label="任务设置分页">
@@ -650,17 +685,17 @@ onUnmounted(() => {
       </footer>
     </section>
 
-    <div v-if="editorOpen && editingJob" class="model-dialog-backdrop rhythm-dialog-backdrop" @mousedown.self="closeEditor">
+    <div v-if="editorOpen" class="model-dialog-backdrop rhythm-dialog-backdrop" @mousedown.self="closeEditor">
       <form class="model-dialog model-dialog--wide rhythm-dialog" role="dialog" aria-modal="true" @submit.prevent="save">
         <header class="dialog-header">
-          <div><small>SCHEDULE SETUP</small><h2>配置 {{ editingJob.name }}</h2></div>
+          <div><small>SCHEDULE SETUP</small><h2>{{ isCreating ? '新建定时任务' : `配置 ${editingJob?.name || ''}` }}</h2></div>
           <button type="button" title="关闭" aria-label="关闭" :disabled="saving" @click="closeEditor">×</button>
         </header>
 
         <div class="dialog-body rhythm-dialog-body">
           <div class="friendly-tip">
-            <b>{{ jobKindLabel(editingJob.job_kind) }} · {{ editingJob.job_key }}</b>
-            <span>保存后立即生效，不需要重启服务。</span>
+            <b>{{ isCreating ? '个人定时任务' : `${jobKindLabel(editingJob?.job_kind || 'agent_task')} · ${editingJob?.job_key}` }}</b>
+            <span>{{ isCreating ? '任务只在当前用户的数据空间中可见。' : '保存后立即生效，不需要重启服务。' }}</span>
           </div>
 
           <section class="rhythm-form-section">
