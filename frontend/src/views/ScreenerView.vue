@@ -228,7 +228,7 @@ const statusLine = computed(() => {
   if (!status.latest_bar_date) return '尚未同步全市场数据'
   return `数据截至 ${fmtDate(status.latest_bar_date)} · 覆盖 ${status.bar_symbols.toLocaleString('zh-CN')} 只`
 })
-const personalizedTemplates = computed(() => (smartRec.value?.templates || []).slice(0, 3))
+const personalizedTemplates = computed(() => (smartRec.value?.templates || []).slice(0, 5))
 const visibleTemplates = computed(() => {
   if (showAllTemplates.value) return TEMPLATES
   if (templateCategory.value === '热门') return TEMPLATES.slice(0, 4)
@@ -423,7 +423,11 @@ function reasonTag(reason: string): string {
 
 async function loadRecommendation() {
   try {
-    smartRec.value = await api.screenerTemplates()
+    const recommendation = await api.screenerTemplates()
+    smartRec.value = recommendation
+    if (recommendation.position_count && recommendation.model !== '持仓画像规则引擎') {
+      void refreshRecommendation()
+    }
   } catch {
     smartRec.value = null
   }
@@ -481,7 +485,12 @@ async function toggleFavorite(item: ScreenerPromptHistoryItem) {
   }
 }
 
-async function usePrompt(text: string) {
+async function usePrompt(
+  text: string,
+  knownQuery?: ScreenerQuery,
+  knownSummary = '',
+  historyId: number | null = null,
+) {
   if (parseLoading.value) return
   nlText.value = text
   draftSaved.value = false
@@ -499,6 +508,29 @@ async function usePrompt(text: string) {
   activeWorkspace.value = 'builder'
   window.scrollTo({ top: 0, behavior: 'smooth' })
   await nextTick()
+
+  if (knownQuery && Object.keys(knownQuery).length) {
+    const query = { ...knownQuery }
+    parsedQuery.value = query
+    parseSummary.value = knownSummary
+    activeHistoryId.value = historyId
+    applyQuery(query)
+    localStorage.removeItem(DRAFT_KEY)
+    draftSaved.value = true
+    try {
+      const recorded = await api.screenerPromptRecord({
+        text,
+        query,
+        parse_summary: knownSummary,
+      })
+      activeHistoryId.value = recorded.id
+      void loadPromptHistory()
+    } catch {
+      // The strategy remains usable even if the history counter cannot be refreshed.
+    }
+    return
+  }
+
   await parseNL()
   if (!parsedQuery.value) {
     openRuleEditor()
@@ -515,7 +547,15 @@ function templateRationale(tpl: ScreenerTemplateItem): string {
 }
 
 function templateCount(tpl: ScreenerTemplateItem): string {
-  return tpl.universe != null ? `候选 ${tpl.universe.toLocaleString('zh-CN')} 只` : '运行后查看命中数'
+  if (tpl.universe == null) return '进入策略后查看候选数'
+  const target = tpl.target_min != null && tpl.target_max != null
+    ? ` · 目标 ${tpl.target_min}–${tpl.target_max} 只`
+    : ''
+  return `已收紧至 ${tpl.universe.toLocaleString('zh-CN')} 只${target}`
+}
+
+function templateConditionChips(tpl: ScreenerTemplateItem): string[] {
+  return queryToChips(tpl.query).filter((chip) => !chip.startsWith('Top')).slice(0, 5)
 }
 
 function historyTime(value: string | null): string {
@@ -1108,7 +1148,7 @@ onBeforeUnmount(() => {
           <header class="sc-panel-head sc-profile-head">
             <div>
               <span class="sc-eyebrow">我的持仓风格</span>
-              <h3>先看懂你，再推荐模板</h3>
+              <h3>先看懂你，再给出推进策略</h3>
             </div>
             <span class="sc-count-badge">已分析 {{ smartRec?.position_count || 0 }} 只</span>
           </header>
@@ -1119,7 +1159,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="sc-profile-facts">
               <div><span>分析来源</span><strong>当前持仓</strong></div>
-              <div><span>推荐用途</span><strong>发现相似机会</strong></div>
+              <div><span>推荐用途</span><strong>生成精选策略</strong></div>
             </div>
             <p v-if="profileDetailsOpen" class="sc-profile-detail">
               风格标签来自持仓结构和当前可用行情，仅用于组织筛选条件，不代表收益判断。
@@ -1134,7 +1174,7 @@ onBeforeUnmount(() => {
           </div>
           <button type="button" class="sc-btn sc-btn-ghost sc-profile-refresh" :disabled="recLoading" @click="refreshRecommendation">
             <span class="btn-spin" :class="{ spin: recLoading }"></span>
-            {{ recLoading ? '正在分析持仓…' : '重新分析并推荐' }}
+            {{ recLoading ? '正在分析持仓…' : '重新分析并生成策略' }}
           </button>
         </article>
       </section>
@@ -1142,23 +1182,32 @@ onBeforeUnmount(() => {
       <section class="sc-panel sc-personalized">
         <header class="sc-section-head">
           <div>
-            <span class="sc-eyebrow">为我推荐</span>
-            <h3>结合持仓风格生成的快速模板</h3>
+            <span class="sc-eyebrow">持仓推进策略</span>
+            <h3>从当前持仓继续往前走</h3>
           </div>
-          <span>推荐只组织筛选条件，不构成投资建议</span>
+          <span>每套策略按实时行情收紧至 20–120 只，不构成投资建议</span>
         </header>
         <div v-if="recError" class="sc-inline-error">{{ recError }}</div>
         <div v-if="personalizedTemplates.length" class="sc-recommend-grid">
           <article v-for="tpl in personalizedTemplates" :key="tpl.name" class="sc-recommend-card">
             <div class="sc-card-title">
               <h4>{{ tpl.name }}</h4>
-              <span>基于持仓</span>
+              <span>{{ tpl.stage || '基于持仓' }}</span>
             </div>
-            <p class="sc-template-prompt">“{{ templatePrompt(tpl) }}”</p>
+            <p class="sc-recommend-objective">{{ tpl.objective || templatePrompt(tpl) }}</p>
+            <div class="sc-recommend-conditions" aria-label="核心筛选条件">
+              <span v-for="chip in templateConditionChips(tpl)" :key="chip">{{ chip }}</span>
+            </div>
             <p class="sc-rationale">{{ templateRationale(tpl) }}</p>
             <footer>
               <span>{{ templateCount(tpl) }}</span>
-              <button type="button" class="sc-btn sc-btn-soft" @click="usePrompt(templatePrompt(tpl))">使用此模板</button>
+              <button
+                type="button"
+                class="sc-btn sc-btn-soft"
+                @click="usePrompt(templatePrompt(tpl), tpl.query, tpl.rationale || tpl.objective || '')"
+              >
+                进入策略构建
+              </button>
             </footer>
           </article>
         </div>
@@ -1192,7 +1241,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <div class="sc-template-list">
-            <button v-for="item in visibleTemplates" :key="item.name" type="button" class="sc-template-row" @click="usePrompt(item.prompt)">
+            <button v-for="item in visibleTemplates" :key="item.name" type="button" class="sc-template-row" @click="usePrompt(item.prompt, item.query)">
               <span class="sc-template-icon">{{ item.name.slice(0, 1) }}</span>
               <span class="sc-template-copy">
                 <strong>{{ item.name }}</strong>
@@ -1239,7 +1288,7 @@ onBeforeUnmount(() => {
                 data-testid="screener-history-entry"
                 :disabled="parseLoading"
                 :aria-label="`使用历史提示词进入策略构建：${item.text}`"
-                @click="usePrompt(item.text)"
+                @click="usePrompt(item.text, item.parsed_query, item.parse_summary, item.id)"
               >
                 <span class="sc-history-copy">
                   <span class="sc-history-prompt">{{ item.text }}</span>
@@ -1251,7 +1300,7 @@ onBeforeUnmount(() => {
                 class="sc-btn sc-btn-soft"
                 data-testid="screener-history-open-builder"
                 :disabled="parseLoading"
-                @click="usePrompt(item.text)"
+                @click="usePrompt(item.text, item.parsed_query, item.parse_summary, item.id)"
               >
                 进入策略构建
               </button>
@@ -2683,11 +2732,14 @@ select.sc-input {
 
 .sc-recommend-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 12px;
 }
 
 .sc-recommend-card {
+  display: flex;
+  min-height: 250px;
+  flex-direction: column;
   padding: 15px;
   border: 1px solid var(--sc-line);
   border-radius: 7px;
@@ -2706,12 +2758,29 @@ select.sc-input {
   font-size: 10px;
 }
 
-.sc-template-prompt {
-  min-height: 42px;
+.sc-recommend-objective {
+  min-height: 41px;
   margin-top: 14px !important;
   color: var(--sc-text-2);
-  font-size: 12.5px;
-  line-height: 1.65;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.sc-recommend-conditions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.sc-recommend-conditions span {
+  padding: 4px 7px;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--sc-accent-soft) 60%, transparent);
+  color: var(--sc-text-2);
+  font-size: 10.5px;
+  line-height: 1.2;
 }
 
 .sc-rationale {
@@ -2728,7 +2797,7 @@ select.sc-input {
 
 .sc-recommend-card footer {
   align-items: center;
-  margin-top: 14px;
+  margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid var(--sc-line);
 }

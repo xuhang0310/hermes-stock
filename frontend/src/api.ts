@@ -718,6 +718,11 @@ export const api = {
       `/api/screener/prompt-history${suffix}`
     ).then((res) => res.data)
   },
+  screenerPromptRecord: (payload: { text: string; query: ScreenerQuery; parse_summary?: string }) =>
+    request<ApiEnvelope<ScreenerPromptHistoryItem>>('/api/screener/prompt-history/record', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
   screenerPromptFavorite: (historyId: number, isFavorite: boolean) =>
     request<ApiEnvelope<ScreenerPromptHistoryItem>>(
       `/api/screener/prompt-history/${historyId}/favorite`,

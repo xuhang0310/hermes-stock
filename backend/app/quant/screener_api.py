@@ -95,6 +95,12 @@ class ParseIn(BaseModel):
     text: str = Field(max_length=500, description="一句话自然语言选股条件")
 
 
+class PromptRecordIn(BaseModel):
+    text: str = Field(max_length=500, description="已知结构化条件对应的提示词")
+    query: ScreenerQueryIn
+    parse_summary: str = Field(default="", max_length=1000)
+
+
 @router.post("/parse")
 def screener_parse(
     payload: ParseIn,
@@ -113,6 +119,22 @@ def screener_parse(
         parse_summary=result.get("summary") or "",
     )
     return ok({**result, "history_id": history["id"]})
+
+
+@router.post("/prompt-history/record")
+def screener_prompt_record(
+    payload: PromptRecordIn,
+    context: AuthContext = Depends(require_permission("agent:use")),
+) -> dict:
+    """Record a template/history reuse without paying for another LLM parse."""
+    query = payload.query.model_dump(exclude_none=True, exclude_unset=True)
+    history = screener_service.record_prompt_history(
+        context.user.id,
+        payload.text,
+        parsed_query=query,
+        parse_summary=payload.parse_summary or screener_ai.summarize_query(query),
+    )
+    return ok(history)
 
 
 @router.get("/prompt-history")
@@ -267,33 +289,29 @@ def screener_templates(
 def screener_templates_refresh(
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
-    """分析用户持仓风格，动态生成 5-8 个筛选模板（LLM）。
-
-    每个模板生成后都实跑一次 run_screener(limit=1) 验证命中数并回填 universe，
-    命中为 0 的模板直接丢弃——不让用户点到"选不出来"的模板。
-    """
+    """Generate five factual next-step strategies and bound each candidate pool."""
     try:
         facts = screener_service.position_facts(context.user.id)
     except ValueError as exc:
         return JSONResponse(status_code=400, content=fail(str(exc), code="no_positions"))
-    try:
-        rec = screener_ai.recommend_templates(facts)
-    except RuntimeError as exc:
-        return JSONResponse(status_code=502, content=fail(str(exc), code="llm_error"))
     templates = []
-    for tpl in rec["templates"]:
+    for tpl in screener_service.build_progression_templates(facts):
         try:
-            hit = screener_service.run_screener(limit=1, **tpl["query"])
+            refined = screener_service.refine_progression_template(
+                tpl,
+                screener_service.count_screener_candidates,
+            )
         except ValueError:
             continue
-        tpl["universe"] = int(hit.get("universe") or 0)
-        if tpl["universe"] > 0:
-            templates.append(tpl)
+        if refined["universe"] <= 0:
+            continue
+        refined["prompt"] = screener_ai.summarize_query(refined["query"]).removeprefix("已解析：")
+        templates.append(refined)
     payload = {
-        "templates": (templates or rec["templates"])[:8],
-        "basis": rec["basis"],
+        "templates": templates[:5],
+        "basis": screener_service.position_profile_summary(facts),
         "position_count": facts["position_count"],
-        "model": rec.get("model"),
+        "model": "持仓画像规则引擎",
     }
     generated_at = screener_service.save_template_recommendation(context.user.id, payload)
     return ok({**payload, "generated_at": generated_at})

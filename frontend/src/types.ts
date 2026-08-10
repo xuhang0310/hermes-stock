@@ -1524,11 +1524,17 @@ export type ScreenerInterpretation = {
 
 export type ScreenerTemplateItem = {
   name: string
-  desc: string
+  desc?: string
   prompt?: string
   rationale?: string
+  stage?: string
+  objective?: string
   query: ScreenerQuery
   universe?: number
+  target_min?: number
+  target_max?: number
+  condition_count?: number
+  tightening_notes?: string[]
 }
 
 export type ScreenerTemplateRecommendation = {

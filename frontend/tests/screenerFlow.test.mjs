@@ -27,10 +27,20 @@ test('generated and template prompts enter the executable builder flow', async (
 
   assert.ok(usePrompt, 'template prompt handler should exist')
   assert.ok(parseNL, 'natural language parser should exist')
+  assert.match(usePrompt, /knownQuery\?: ScreenerQuery/)
+  assert.match(usePrompt, /applyQuery\(query\)/)
+  assert.match(usePrompt, /api\.screenerPromptRecord/)
   assert.match(usePrompt, /await parseNL\(\)/)
+  assert.ok(
+    usePrompt.indexOf('return') < usePrompt.indexOf('await parseNL()'),
+    'known structured queries should return before the LLM parser fallback'
+  )
   assert.match(parseNL, /result\.value = null/)
   assert.match(parseNL, /ran\.value = false/)
   assert.match(parseNL, /activeWorkspace\.value = 'builder'/)
+  assert.match(parseNL, /api\.screenerParse/)
+  assert.match(source, /usePrompt\(templatePrompt\(tpl\), tpl\.query/)
+  assert.match(source, /usePrompt\(item\.prompt, item\.query\)/)
   assert.match(source, /ref="resultSection"/)
   assert.match(source, /resultSection\.value\?\.scrollIntoView/)
 })
@@ -47,5 +57,18 @@ test('history prompts are direct strategy builder shortcuts', async () => {
   )
   assert.match(source, /data-testid="screener-history-entry"/)
   assert.match(source, /data-testid="screener-history-open-builder"/)
+  assert.match(source, /usePrompt\(item\.text, item\.parsed_query, item\.parse_summary, item\.id\)/)
+  assert.match(source, /进入策略构建/)
+})
+
+test('holding recommendations expose bounded progression strategies', async () => {
+  const source = await readScreenerView()
+
+  assert.match(source, /持仓推进策略/)
+  assert.match(source, /每套策略按实时行情收紧至 20–120 只/)
+  assert.match(source, /recommendation\.model !== '持仓画像规则引擎'/)
+  assert.match(source, /void refreshRecommendation\(\)/)
+  assert.match(source, /templateConditionChips\(tpl\)/)
+  assert.match(source, /tpl\.stage \|\| '基于持仓'/)
   assert.match(source, /进入策略构建/)
 })

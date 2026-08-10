@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import datetime
 from statistics import median
 
@@ -38,6 +39,8 @@ _LIST_LIMIT_MAX = 100
 _VOLUME_RATIO_WINDOW = 5  # 量比 = 当日成交量 / 前 5 日均量
 _ALLOWED_MA = (5, 10, 20)
 _WAN_PER_YI = 10000.0  # total_mv 存万元，入参亿元换算
+_TEMPLATE_TARGET_MIN = 20
+_TEMPLATE_TARGET_MAX = 120
 
 
 def _base_query(filters: dict):
@@ -260,12 +263,254 @@ def run_screener(
     return {"universe": int(universe), "total": len(items), "items": items}
 
 
+def count_screener_candidates(query: dict) -> int:
+    """Count the SQL-filtered candidate pool for a template.
+
+    ``above_ma`` is intentionally excluded here. The returned value is an upper
+    bound before the moving-average check, so a template kept below the target
+    can never expand beyond it after technical filtering.
+    """
+    filters = {
+        "market": query.get("market"),
+        "stock_type": query.get("stock_type") or "stock",
+        "price_min": query.get("price_min"),
+        "price_max": query.get("price_max"),
+        "pct_chg_min": query.get("pct_chg_min"),
+        "pct_chg_max": query.get("pct_chg_max"),
+        "keyword": (query.get("keyword") or "").strip() or None,
+        "volume_ratio_min": query.get("volume_ratio_min"),
+        "turnover_rate_min": query.get("turnover_rate_min"),
+        "turnover_rate_max": query.get("turnover_rate_max"),
+        "total_mv_min": query.get("total_mv_min"),
+        "total_mv_max": query.get("total_mv_max"),
+        "pe_min": query.get("pe_min"),
+        "pe_max": query.get("pe_max"),
+    }
+    with SessionLocal() as db:
+        stmt = _base_query(filters)
+        return int(
+            db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
+        )
+
+
 def _band(values: list) -> dict | None:
     """min/median/max 分布带，供 LLM 参照持仓实际分布设计条件区间。"""
     vals = [float(v) for v in values if v is not None]
     if not vals:
         return None
     return {"min": round(min(vals), 2), "median": round(median(vals), 2), "max": round(max(vals), 2)}
+
+
+def _stat_median(facts: dict, key: str, fallback: float) -> float:
+    try:
+        value = float(((facts.get("stats") or {}).get(key) or {}).get("median"))
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _range(low: float, high: float, *, floor: float = 0.0) -> tuple[float, float]:
+    low = max(floor, float(low))
+    high = max(low + 0.01, float(high))
+    return round(low, 2), round(high, 2)
+
+
+def position_profile_summary(facts: dict) -> str:
+    """Build a factual, reproducible holding profile without an LLM."""
+    count = max(0, int(facts.get("position_count") or 0))
+    stats = facts.get("stats") or {}
+    mv = _stat_median(facts, "total_mv_yi", 0)
+    turnover = _stat_median(facts, "turnover_rate", 0)
+    pe = _stat_median(facts, "pe_ttm", 0)
+    above = max(0, int(stats.get("above_ma20_count") or 0))
+    parts = []
+    if mv:
+        parts.append(f"持仓中位市值约 {mv:g} 亿元")
+    if turnover:
+        parts.append(f"中位换手率约 {turnover:g}%")
+    if pe:
+        parts.append(f"可用 PE 中位数约 {pe:g} 倍")
+    if count:
+        parts.append(f"{above}/{count} 只站上 20 日线")
+    facts_line = "、".join(parts) or "已读取当前持仓与可用行情"
+    return (
+        f"{facts_line}。下方分别从风格延续、趋势加强、估值优化、风险分散和回调观察给出可执行策略。"
+    )
+
+
+def build_progression_templates(facts: dict) -> list[dict]:
+    """Turn holding medians into five distinct, bounded next-step strategies."""
+    price = _stat_median(facts, "price", 20.0)
+    mv = _stat_median(facts, "total_mv_yi", 100.0)
+    turnover = _stat_median(facts, "turnover_rate", 2.0)
+    pe = _stat_median(facts, "pe_ttm", 35.0)
+    pct = _stat_median(facts, "pct_chg", 0.5)
+
+    def query(
+        *,
+        price_band: tuple[float, float],
+        mv_band: tuple[float, float],
+        turnover_band: tuple[float, float],
+        pct_band: tuple[float, float],
+        pe_band: tuple[float, float],
+    ) -> dict:
+        return {
+            "price_min": price_band[0],
+            "price_max": price_band[1],
+            "total_mv_min": mv_band[0],
+            "total_mv_max": mv_band[1],
+            "turnover_rate_min": turnover_band[0],
+            "turnover_rate_max": turnover_band[1],
+            "pct_chg_min": pct_band[0],
+            "pct_chg_max": pct_band[1],
+            "pe_min": pe_band[0],
+            "pe_max": pe_band[1],
+            "above_ma": 20,
+        }
+
+    common = {
+        "target_min": _TEMPLATE_TARGET_MIN,
+        "target_max": _TEMPLATE_TARGET_MAX,
+    }
+    templates = [
+        {
+            **common,
+            "stage": "风格延续",
+            "name": "核心风格精选",
+            "objective": "沿用当前持仓的市值、活跃度和趋势特征，只保留更接近核心画像的标的。",
+            "rationale": f"围绕持仓中位市值 {mv:g} 亿和中位换手率 {turnover:g}% 收紧，不再做宽泛相似匹配。",
+            "query": query(
+                price_band=_range(price * 0.4, price * 1.5, floor=1),
+                mv_band=_range(mv * 0.55, mv * 1.35, floor=10),
+                turnover_band=_range(turnover * 0.4, turnover * 1.2, floor=0.2),
+                pct_band=_range(pct - 1.25, pct + 1.75, floor=-10),
+                pe_band=_range(pe * 0.25, pe * 1.05, floor=1),
+            ),
+        },
+        {
+            **common,
+            "stage": "趋势加强",
+            "name": "量价趋势确认",
+            "objective": "在相近盘子里继续提高换手与涨幅要求，寻找趋势和交易活跃度同时确认的标的。",
+            "rationale": f"当前 {int((facts.get('stats') or {}).get('above_ma20_count') or 0)} 只持仓站上 20 日线，进一步要求温和上涨而非追涨停。",
+            "query": query(
+                price_band=_range(price * 0.5, price * 2.0, floor=1),
+                mv_band=_range(mv * 0.4, mv * 1.35, floor=10),
+                turnover_band=_range(turnover * 0.7, turnover * 1.9, floor=0.5),
+                pct_band=_range(max(0.3, pct - 0.25), pct + 2.25, floor=-10),
+                pe_band=_range(pe * 0.25, pe * 1.35, floor=1),
+            ),
+        },
+        {
+            **common,
+            "stage": "估值优化",
+            "name": "同盘估值收敛",
+            "objective": "保留相近市值和交易特征，同时主动降低估值上限，补充更有安全边际的候选。",
+            "rationale": f"持仓可用 PE 中位数约 {pe:g} 倍，本策略把估值区间压到持仓中位数以下。",
+            "query": query(
+                price_band=_range(price * 0.3, price * 1.5, floor=1),
+                mv_band=_range(mv * 0.67, mv * 2.0, floor=10),
+                turnover_band=_range(turnover * 0.25, turnover * 0.95, floor=0.2),
+                pct_band=_range(pct - 1.8, pct + 0.7, floor=-10),
+                pe_band=_range(max(5, pe * 0.15), max(20, pe * 0.45), floor=1),
+            ),
+        },
+        {
+            **common,
+            "stage": "风险分散",
+            "name": "稳健大盘补位",
+            "objective": "用更大市值、更低换手和更低估值的标的，平衡当前偏中小盘、偏活跃的持仓结构。",
+            "rationale": "这不是复制现有持仓，而是补充与当前风格相关性更低的观察方向。",
+            "query": query(
+                price_band=_range(price * 0.25, price * 2.0, floor=1),
+                mv_band=_range(max(100, mv * 3.35), max(300, mv * 10.7), floor=100),
+                turnover_band=_range(turnover * 0.2, turnover * 0.72, floor=0.2),
+                pct_band=_range(-1.0, 1.5, floor=-10),
+                pe_band=_range(5, min(40, max(20, pe * 0.45)), floor=1),
+            ),
+        },
+        {
+            **common,
+            "stage": "回调观察",
+            "name": "趋势回踩观察",
+            "objective": "寻找仍在 20 日线上、但当日涨幅有限的标的，避免只追逐已经加速上涨的股票。",
+            "rationale": "保留趋势条件，同时把当日涨跌幅压到低位区间，作为后续观察池而不是追高池。",
+            "query": query(
+                price_band=_range(price * 0.4, price * 1.5, floor=1),
+                mv_band=_range(mv * 0.47, mv * 1.35, floor=10),
+                turnover_band=_range(turnover * 0.5, turnover * 1.43, floor=0.2),
+                pct_band=_range(pct - 1.8, pct - 0.25, floor=-10),
+                pe_band=_range(pe * 0.25, pe * 1.05, floor=1),
+            ),
+        },
+    ]
+    return templates
+
+
+def _shrink_query_ranges(query: dict, scale: float) -> dict:
+    narrowed = dict(query)
+    for low_key, high_key in (
+        ("total_mv_min", "total_mv_max"),
+        ("price_min", "price_max"),
+        ("turnover_rate_min", "turnover_rate_max"),
+        ("pct_chg_min", "pct_chg_max"),
+        ("pe_min", "pe_max"),
+    ):
+        low = narrowed.get(low_key)
+        high = narrowed.get(high_key)
+        if low is None or high is None:
+            continue
+        center = (float(low) + float(high)) / 2
+        half = max(0.01, (float(high) - float(low)) * scale / 2)
+        narrowed[low_key] = round(center - half, 2)
+        narrowed[high_key] = round(center + half, 2)
+    return narrowed
+
+
+def refine_progression_template(
+    template: dict,
+    count_fn: Callable[[dict], int],
+    *,
+    target_min: int = _TEMPLATE_TARGET_MIN,
+    target_max: int = _TEMPLATE_TARGET_MAX,
+) -> dict:
+    """Run candidate counts and choose the tightest useful bounded variant."""
+    base_query = dict(template.get("query") or {})
+    variants: list[tuple[dict, int, float]] = []
+    base_count = max(0, int(count_fn(base_query) or 0))
+    variants.append((base_query, base_count, 1.0))
+    if base_count > target_max:
+        for scale in (0.85, 0.7, 0.55, 0.4):
+            candidate = _shrink_query_ranges(base_query, scale)
+            variants.append((candidate, max(0, int(count_fn(candidate) or 0)), scale))
+
+    preferred = (target_min + target_max) / 2
+
+    def score(item: tuple[dict, int, float]) -> tuple[float, float]:
+        _query, count, _scale = item
+        if target_min <= count <= target_max:
+            return (0, abs(count - preferred))
+        if count > target_max:
+            return (1, count - target_max)
+        if count > 0:
+            return (2, target_min - count)
+        return (3, float("inf"))
+
+    selected_query, universe, scale = min(variants, key=score)
+    out = dict(template)
+    out["query"] = selected_query
+    out["universe"] = universe
+    out["target_min"] = target_min
+    out["target_max"] = target_max
+    out["condition_count"] = len(
+        [value for key, value in selected_query.items() if key != "limit" and value is not None]
+    )
+    out["tightening_notes"] = (
+        ["已根据实时候选数量自动收紧市值、价格、换手、涨跌幅和估值区间"]
+        if scale < 1
+        else []
+    )
+    return out
 
 
 def position_facts(user_id: int) -> dict:
@@ -329,6 +574,7 @@ def position_facts(user_id: int) -> dict:
     positions = [feat_by_symbol[symbol] for symbol in symbols if symbol in feat_by_symbol]
     above_ma20_count = sum(1 for p in positions if p["above_ma20"])
     stats = {
+        "price": _band([p["price"] for p in positions]),
         "total_mv_yi": _band([p["total_mv_yi"] for p in positions]),
         "turnover_rate": _band([p["turnover_rate"] for p in positions]),
         "pe_ttm": _band([p["pe_ttm"] for p in positions]),

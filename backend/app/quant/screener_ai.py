@@ -206,12 +206,23 @@ def _completion_content(data: dict) -> str:
     return content.strip()
 
 
-def _llm_complete(messages: list[dict], temperature: float, timeout: float) -> dict:
+def _llm_complete(
+    messages: list[dict],
+    temperature: float,
+    timeout: float,
+    *,
+    enable_thinking: bool | None = None,
+) -> dict:
     """统一 LLM 调用：chat_completion 只包 HTTP≥400，网络/超时异常转 RuntimeError（→502）。"""
     config = active_llm_config()
     try:
         data = chat_completion(
-            messages, config, temperature=temperature, timeout=timeout, log_module="screener"
+            messages,
+            config,
+            temperature=temperature,
+            enable_thinking=enable_thinking,
+            timeout=timeout,
+            log_module="screener",
         )
     except httpx.HTTPError as exc:
         raise RuntimeError("LLM 服务请求失败（超时或网络异常），请稍后重试") from exc
@@ -229,12 +240,18 @@ def parse_query(text: str) -> dict:
             {"role": "user", "content": raw},
         ],
         temperature=0.2,
-        timeout=30.0,
+        timeout=10.0,
+        enable_thinking=False,
     )
     query = _sanitize(_extract_json(_completion_content(out["data"])))
     if not query:
         return {"query": {}, "summary": _FALLBACK_SUMMARY, "fallback": True}
     return {"query": query, "summary": _summarize(query), "fallback": False}
+
+
+def summarize_query(query: dict) -> str:
+    """Public query summary helper shared by deterministic template generation."""
+    return _summarize(query)
 
 
 def interpret_result(query: dict, universe: int, total: int, items: list[dict]) -> dict:
