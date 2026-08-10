@@ -81,6 +81,9 @@ const loginLoading = ref(false)
 const loginError = ref('')
 const error = ref('')
 const currentUser = ref<UserPayload | null>(null)
+const canViewSettings = computed(
+  () => ['admin', 'super_admin'].includes(currentUser.value?.role || '')
+)
 
 const health = ref<HealthPayload | null>(null)
 const dashboard = ref<DashboardPayload | null>(null)
@@ -983,6 +986,7 @@ function backFromChart() {
 }
 
 function navigate(page: PageKey) {
+  if (page === 'settings' && !canViewSettings.value) return
   if (page === 'digitalHumans') {
     digitalHumanInitialTab.value = 'chat'
     digitalHumanInitialSession.value = null
@@ -1204,7 +1208,7 @@ onBeforeUnmount(() => {
       />
 
       <SettingsView
-        v-else-if="activePage === 'settings'"
+        v-else-if="activePage === 'settings' && canViewSettings"
         :health="health"
         :user="currentUser"
         :agents="agents"

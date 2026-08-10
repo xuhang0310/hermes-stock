@@ -44,6 +44,9 @@ const canViewRhythm = computed(
 const canViewKnowledge = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('system:view')
 )
+const canViewSettings = computed(
+  () => ['admin', 'super_admin'].includes(props.user.role)
+)
 
 interface NavItem {
   key: PageKey
@@ -87,7 +90,7 @@ const navItems = computed<NavItem[]>(() => [
     ]
   }] : []),
   { key: 'skillSquare', label: '技能广场', icon: 'knowledge' },
-  { key: 'settings', label: '设置' }
+  ...(canViewSettings.value ? [{ key: 'settings' as PageKey, label: '设置' }] : [])
 ])
 
 function navIconUrl(item: NavItem): string {
