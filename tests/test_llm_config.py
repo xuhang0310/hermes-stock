@@ -3,18 +3,21 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core.database import Base
 from backend.app.core.llm_config import (
+    purge_retired_model_configs,
     model_supports_vision,
     persist_chat_session_model,
     resolve_chat_model_config_ids,
     resolve_model_config_ids_by_priority,
     resolve_vision_model_config_id,
 )
+from backend.app.ai.ai_api import ModelConfigIn
 from backend.app.core.models import AiChatSession, LlmModelConfig, LlmModelPlatform, User
 
 
@@ -265,6 +268,77 @@ class LlmVisionRoutingTests(unittest.TestCase):
 
         with self.SessionFactory() as db:
             self.assertEqual(db.get(AiChatSession, session_id).model_config_id, fallback_id)
+
+    def test_retired_model_is_never_routed_and_cleanup_releases_sessions(self) -> None:
+        with self.SessionFactory() as db:
+            user = User(
+                username="retired-model-owner",
+                display_name="Retired model owner",
+                role="researcher",
+                permission_scope="agent:use",
+                password_hash="test",
+            )
+            platform = LlmModelPlatform(
+                name="Retired model provider",
+                provider_type="OpenAI compatible",
+                base_url="https://retired.invalid/v1",
+                status="enabled",
+            )
+            db.add_all([user, platform])
+            db.flush()
+            retired = LlmModelConfig(
+                platform_id=platform.id,
+                display_name="Retired GPT",
+                provider_name=platform.name,
+                base_url=platform.base_url,
+                model_name=" GPT-5.6-SOL ",
+                is_active=True,
+                status="enabled",
+            )
+            fallback = LlmModelConfig(
+                platform_id=platform.id,
+                display_name="Available fallback",
+                provider_name=platform.name,
+                base_url=platform.base_url,
+                model_name="available-fallback",
+                is_active=False,
+                status="enabled",
+            )
+            db.add_all([retired, fallback])
+            db.flush()
+            chat_session = AiChatSession(
+                user_id=user.id,
+                model_config_id=retired.id,
+                title="Stale retired session",
+                status="active",
+                chat_mode="research",
+                source_type="web",
+            )
+            db.add(chat_session)
+            db.commit()
+            retired_id = retired.id
+            fallback_id = fallback.id
+            session_id = chat_session.id
+
+        with patch("backend.app.core.llm_config.SessionLocal", self.SessionFactory):
+            self.assertEqual(resolve_chat_model_config_ids(retired_id), [fallback_id])
+
+        with self.SessionFactory() as db:
+            self.assertEqual(purge_retired_model_configs(db), 1)
+            db.commit()
+
+        with self.SessionFactory() as db:
+            self.assertIsNone(db.get(LlmModelConfig, retired_id))
+            self.assertIsNone(db.get(AiChatSession, session_id).model_config_id)
+
+    def test_retired_model_cannot_be_added_again(self) -> None:
+        with self.assertRaises(ValidationError):
+            ModelConfigIn(
+                display_name="Retired GPT",
+                provider_name="OpenAI compatible",
+                base_url="https://retired.invalid/v1",
+                model_name="gpt-5.6-sol",
+            )
 
 
 if __name__ == "__main__":

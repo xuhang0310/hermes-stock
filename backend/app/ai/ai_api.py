@@ -18,7 +18,7 @@ from typing import Literal
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, case, delete, desc, func, or_, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
@@ -60,6 +60,7 @@ from backend.app.ai.prompt_recommendations import (
     schedule_recommendation_refresh,
 )
 from backend.app.core.applog import log_event
+from backend.app.core.llm_config import is_retired_model_name
 from backend.app.agents.stock_agent import run_agent_events
 from backend.app.agents.tool_approval import cancel_pending_run_approvals, normalize_approval_policy
 from backend.app.market.stock_tools import normalize_a_share_symbol, stock_strategy_payload
@@ -92,6 +93,14 @@ class ModelConfigIn(BaseModel):
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_steps: int = Field(default=6, ge=1, le=20)
     remark: str | None = None
+
+    @field_validator("model_name")
+    @classmethod
+    def reject_retired_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if is_retired_model_name(normalized):
+            raise ValueError("该模型已从平台下线，不能继续配置或使用")
+        return normalized
 
 
 class DigitalHumanIn(BaseModel):
@@ -568,7 +577,7 @@ def model_configs(
         .options(selectinload(LlmModelConfig.platform))
         .order_by(LlmModelConfig.is_active.desc(), LlmModelConfig.updated_at.desc(), LlmModelConfig.id.desc())
     ).all()
-    return [_model_out(row) for row in rows]
+    return [_model_out(row) for row in rows if not is_retired_model_name(row.model_name)]
 
 
 @router.post("/model-configs")
@@ -596,6 +605,8 @@ def update_model_config(
     model = db.get(LlmModelConfig, model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="模型配置不存在")
+    if is_retired_model_name(model.model_name):
+        raise HTTPException(status_code=400, detail="该模型已从平台下线，不能继续使用")
     if payload.is_active:
         db.execute(update(LlmModelConfig).where(LlmModelConfig.id != model_id).values(is_active=False))
     data = payload.model_dump()
@@ -617,6 +628,8 @@ def activate_model_config(
     model = db.get(LlmModelConfig, model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="模型配置不存在")
+    if is_retired_model_name(model.model_name):
+        raise HTTPException(status_code=400, detail="该模型已从平台下线，不能继续使用")
     db.execute(update(LlmModelConfig).where(LlmModelConfig.id != model_id).values(is_active=False))
     model.is_active = True
     model.status = "enabled"
@@ -655,6 +668,8 @@ def test_model_config(
     )
     if model is None:
         raise HTTPException(status_code=404, detail="模型配置不存在")
+    if is_retired_model_name(model.model_name):
+        raise HTTPException(status_code=400, detail="该模型已从平台下线，不能继续使用")
     if payload:
         platform = db.get(LlmModelPlatform, payload.platform_id) if payload.platform_id else None
         base_url = (platform.base_url if platform else payload.base_url) or model.base_url
