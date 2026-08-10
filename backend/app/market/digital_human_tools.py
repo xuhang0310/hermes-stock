@@ -918,9 +918,7 @@ def get_symbol_context(symbol: str) -> dict:
     )
     owner_user_id = current_data_owner_user_id()
     position_owner_filter = "" if owner_user_id is None else "AND p.owner_user_id = :owner_user_id"
-    snapshot_owner_filter = (
-        "" if owner_user_id is None else "WHERE owner_user_id = :owner_user_id"
-    )
+    snapshot_owner_filter = "" if owner_user_id is None else "AND owner_user_id = :owner_user_id"
     watchlist_owner_filter = "" if owner_user_id is None else "AND w.owner_user_id = :owner_user_id"
     owner_params = {"symbol": ts_code}
     if owner_user_id is not None:
@@ -948,18 +946,20 @@ def get_symbol_context(symbol: str) -> dict:
                COALESCE(s.captured_at, p.updated_at) AS updated_at,
                s.as_of_date,
                s.source_type,
+               COALESCE(s.account_id, p.account_id) AS account_id,
                a.broker_name,
                a.account_name
         FROM positions p
         LEFT JOIN (
-          SELECT symbol, MAX(id) AS snapshot_id
+          SELECT account_id, symbol, MAX(id) AS snapshot_id
           FROM position_holding_snapshots
-          {snapshot_owner_filter}
-          GROUP BY symbol
+          WHERE status = 'open' {snapshot_owner_filter}
+          GROUP BY account_id, symbol
         ) latest ON latest.symbol = p.symbol
+          AND COALESCE(latest.account_id, 0) = COALESCE(p.account_id, 0)
         LEFT JOIN position_holding_snapshots s ON s.id = latest.snapshot_id
-        LEFT JOIN position_accounts a ON a.id = s.account_id
-        WHERE p.symbol = :symbol {position_owner_filter}
+        LEFT JOIN position_accounts a ON a.id = COALESCE(s.account_id, p.account_id)
+        WHERE p.symbol = :symbol AND p.status = 'open' {position_owner_filter}
         ORDER BY COALESCE(s.captured_at, p.updated_at) DESC
         LIMIT 1
         """,
@@ -1001,10 +1001,18 @@ def get_recent_internal_evidence(symbol: str | None = None, limit: int = 12) -> 
     if ts_code:
         symbol_filter = "AND symbol = :symbol"
         params["symbol"] = ts_code
+    owner_user_id = current_data_owner_user_id()
+    owner_filter = "" if owner_user_id is None else "AND owner_user_id = :owner_user_id"
+    event_owner_filter = (
+        "" if owner_user_id is None
+        else "AND (owner_user_id = :owner_user_id OR owner_user_id IS NULL)"
+    )
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
     events = _query(
         f"""
         SELECT event_id, level, event_type, symbol, title, summary, source_type, status, created_at
-        FROM events WHERE 1=1 {symbol_filter}
+        FROM events WHERE 1=1 {symbol_filter} {event_owner_filter}
         ORDER BY created_at DESC LIMIT :limit
         """,
         params,
@@ -1012,7 +1020,7 @@ def get_recent_internal_evidence(symbol: str | None = None, limit: int = 12) -> 
     reports = _query(
         f"""
         SELECT report_id, agent_name, symbol, title, conclusion, risk_points, action_suggestion, created_at
-        FROM agent_reports WHERE 1=1 {symbol_filter}
+        FROM agent_reports WHERE 1=1 {symbol_filter} {owner_filter}
         ORDER BY created_at DESC LIMIT :limit
         """,
         params,
@@ -1020,7 +1028,7 @@ def get_recent_internal_evidence(symbol: str | None = None, limit: int = 12) -> 
     risks = _query(
         f"""
         SELECT id, symbol, risk_level, risk_type, finding, required_action, cool_down_required, created_at
-        FROM risk_checks WHERE 1=1 {symbol_filter}
+        FROM risk_checks WHERE 1=1 {symbol_filter} {owner_filter}
         ORDER BY created_at DESC LIMIT :limit
         """,
         params,
@@ -1121,6 +1129,10 @@ def get_recent_alerts(symbol: str | None = None, level: str | None = None, limit
     if level:
         filters.append("level = :level")
         params["level"] = level.strip().upper()
+    owner_user_id = current_data_owner_user_id()
+    if owner_user_id is not None:
+        filters.append("(owner_user_id = :owner_user_id OR owner_user_id IS NULL)")
+        params["owner_user_id"] = owner_user_id
     where = " AND ".join(filters) if filters else "1=1"
     alerts = _query(
         f"""
@@ -1153,14 +1165,19 @@ def get_symbol_reports(symbol: str, limit: int = 8) -> dict:
     ts_code = _normalize_symbol(symbol)
     if not ts_code:
         return {"error": f"无法识别标的: {symbol}"}
+    owner_user_id = current_data_owner_user_id()
+    owner_filter = "" if owner_user_id is None else "AND owner_user_id = :owner_user_id"
+    params = {"symbol": ts_code, "limit": limit}
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
     reports = _query(
-        """
+        f"""
         SELECT report_id, agent_name, symbol, title, conclusion, reasoning, counter_arguments,
                risk_points, action_suggestion, created_at
-        FROM agent_reports WHERE symbol = :symbol
+        FROM agent_reports WHERE symbol = :symbol {owner_filter}
         ORDER BY created_at DESC LIMIT :limit
         """,
-        {"symbol": ts_code, "limit": limit},
+        params,
     )
     return {"source": "agent_reports", "symbol": ts_code, "reports": reports}
 
@@ -1175,7 +1192,7 @@ def get_symbol_documents(symbol: str, limit: int = 8) -> dict:
                d.trust_level, ds.relevance, ds.reason
         FROM documents d
         JOIN document_symbols ds ON ds.doc_id = d.id
-        WHERE ds.symbol = :symbol
+        WHERE ds.symbol = :symbol AND d.doc_type <> 'report'
         ORDER BY COALESCE(d.published_at, d.fetched_at) DESC
         LIMIT :limit
         """,
@@ -1311,15 +1328,21 @@ def compare_universe_quant_factors(limit: int = 20) -> dict:
 def get_macro_policy_digest(query: str | None = None, limit: int = 8) -> dict:
     topic = query or "A股 宏观 政策 利率 汇率 外盘 行业轮动 风险偏好"
     external = _safe_stock_tool("search_market_intel", {"query": topic, "max_results": min(limit, 8)})
+    owner_user_id = current_data_owner_user_id()
+    owner_filter = "" if owner_user_id is None else "AND (owner_user_id = :owner_user_id OR owner_user_id IS NULL)"
+    params = {"limit": limit}
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
     events = _query(
-        """
+        f"""
         SELECT event_id, level, event_type, symbol, title, summary, source_type, created_at
         FROM events
-        WHERE title LIKE '%政策%' OR title LIKE '%宏观%' OR title LIKE '%行业%' OR event_type IN ('policy', 'macro', 'sector')
+        WHERE (title LIKE '%政策%' OR title LIKE '%宏观%' OR title LIKE '%行业%' OR event_type IN ('policy', 'macro', 'sector'))
+          {owner_filter}
         ORDER BY created_at DESC
         LIMIT :limit
         """,
-        {"limit": limit},
+        params,
     )
     return {"source": "documents+events+tavily", "query": topic, "local_documents": _recent_documents(limit), "policy_events": events, "external_results": external.get("results", []) if "error" not in external else [], "external_error": external.get("error"), "rule": "宏观结论必须落到当前持仓/自选池的影响链条，不能停留在泛泛叙事。"}
 
@@ -1449,6 +1472,7 @@ def _recent_documents(limit: int) -> list[dict[str, Any]]:
         SELECT id, doc_type, title, summary, source, source_url, published_at,
                fetched_at, trust_level, is_external_untrusted
         FROM documents
+        WHERE doc_type <> 'report'
         ORDER BY COALESCE(published_at, fetched_at) DESC
         LIMIT :limit
         """,

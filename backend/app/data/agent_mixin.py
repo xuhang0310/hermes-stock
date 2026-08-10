@@ -12,15 +12,25 @@ from backend.app.data._helpers import dt
 class AgentMixin:
     def agents(self) -> list[dict[str, Any]]:
         rows = self.db.scalars(select(AgentProfile)).all()
-        counts = dict(self.db.execute(select(AgentReport.agent_name, func.count(AgentReport.id)).group_by(AgentReport.agent_name)).all())
+        counts = dict(
+            self.db.execute(
+                select(AgentReport.agent_name, func.count(AgentReport.id))
+                .where(self._owner_clause(AgentReport))
+                .group_by(AgentReport.agent_name)
+            ).all()
+        )
         pending = dict(
             self.db.execute(
-                select(AgentTask.agent_name, func.count(AgentTask.id)).where(AgentTask.status == "pending").group_by(AgentTask.agent_name)
+                select(AgentTask.agent_name, func.count(AgentTask.id))
+                .where(AgentTask.status == "pending", self._owner_clause(AgentTask))
+                .group_by(AgentTask.agent_name)
             ).all()
         )
         running = dict(
             self.db.execute(
-                select(AgentTask.agent_name, func.count(AgentTask.id)).where(AgentTask.status == "running").group_by(AgentTask.agent_name)
+                select(AgentTask.agent_name, func.count(AgentTask.id))
+                .where(AgentTask.status == "running", self._owner_clause(AgentTask))
+                .group_by(AgentTask.agent_name)
             ).all()
         )
         order = {"pm": 0, "sentinel": 1, "intelligence": 2, "risk": 3, "researcher": 4}
@@ -47,6 +57,7 @@ class AgentMixin:
             select(AgentReport, AgentProfile.display_name, Instrument.name.label("symbol_name"))
             .outerjoin(AgentProfile, AgentProfile.agent_name == AgentReport.agent_name)
             .outerjoin(Instrument, Instrument.symbol == AgentReport.symbol)
+            .where(self._owner_clause(AgentReport))
             .order_by(desc(AgentReport.created_at))
             .limit(limit)
         ).all()
@@ -73,7 +84,7 @@ class AgentMixin:
             select(AgentReport, AgentProfile.display_name, Instrument.name.label("symbol_name"))
             .outerjoin(AgentProfile, AgentProfile.agent_name == AgentReport.agent_name)
             .outerjoin(Instrument, Instrument.symbol == AgentReport.symbol)
-            .where(AgentReport.report_id == report_id)
+            .where(AgentReport.report_id == report_id, self._owner_clause(AgentReport))
             .limit(1)
         ).first()
         if row is None:
@@ -105,6 +116,7 @@ class AgentMixin:
         rows = self.db.execute(
             select(RiskCheck, Instrument.name.label("symbol_name"))
             .outerjoin(Instrument, Instrument.symbol == RiskCheck.symbol)
+            .where(self._owner_clause(RiskCheck))
             .order_by(desc(RiskCheck.created_at))
             .limit(limit)
         ).all()

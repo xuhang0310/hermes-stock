@@ -16,6 +16,7 @@ from backend.app.core.database import Base, get_db
 from backend.app.core.models import (
     JobRun,
     DataSourceConfig,
+    DigitalHumanProfile,
     LlmModelConfig,
     Position,
     ScheduledJob,
@@ -59,6 +60,16 @@ class MultiUserDataIsolationTests(unittest.TestCase):
             db.add_all([self.admin, self.user_a, self.user_b])
             db.add_all(
                 [
+                    DigitalHumanProfile(
+                        code="stock-pm",
+                        name="投研总监",
+                        avatar_tone="professional",
+                        target_roles="*",
+                        description="测试数字人",
+                        system_prompt="测试",
+                        quick_prompts_json="[]",
+                        status="enabled",
+                    ),
                     LlmModelConfig(
                         display_name="Shared Qwen",
                         provider_name="bailian",
@@ -237,6 +248,7 @@ class MultiUserDataIsolationTests(unittest.TestCase):
                 "schedule_type": "daily",
                 "run_time": "08:30",
                 "trading_day_only": True,
+                "digital_human_code": "stock-pm",
                 "enabled": True,
             },
         )
@@ -247,6 +259,18 @@ class MultiUserDataIsolationTests(unittest.TestCase):
             self.client.get("/api/schedule/jobs", headers=self._headers(self.user_a)).json()[0]["job_key"],
             "private-a",
         )
+
+        invalid_job = self.client.post(
+            "/api/schedule/jobs",
+            headers=fresh_headers,
+            json={
+                "name": "缺少数字人的任务",
+                "job_kind": "agent_task",
+                "schedule_type": "daily",
+                "run_time": "08:40",
+            },
+        )
+        self.assertEqual(invalid_job.status_code, 422, invalid_job.text)
 
 
 if __name__ == "__main__":

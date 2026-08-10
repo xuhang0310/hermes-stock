@@ -129,7 +129,9 @@ def retrieve_chunks(
 
 
 def _doc_filters(*, symbol: str | None, doc_types: list[str] | None, trust_levels: list[str] | None) -> list:
-    filters: list = []
+    # 历史版本曾把个人 Agent 报告镜像到共享 documents。即便数据库尚未执行
+    # 清理迁移，也不能让这些旧切块通过关键词或向量召回跨用户暴露。
+    filters: list = [Document.doc_type != "report"]
     if doc_types:
         filters.append(Document.doc_type.in_(doc_types))
     if trust_levels:

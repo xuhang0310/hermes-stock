@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 import threading
 from collections.abc import Generator
 from datetime import date, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import text
-
 from backend.app.core.applog import log_event
-from backend.app.core.database import SessionLocal, engine
+from backend.app.core.database import SessionLocal
 from backend.app.ai.llm_client import stream_chat as _stream_chat
 from backend.app.ai.tool_progress import ToolArgsProgressTracker
 from backend.app.market.digital_human_tools import (
@@ -69,15 +65,6 @@ def _registry_observation_preview(name: str, result: dict) -> str:
         return stock_preview
     return digital_human_observation_preview(name, result)
 
-
-FORBIDDEN_SQL = re.compile(
-    r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|rename|"
-    r"call|handler|load_file|lock|unlock|shutdown|kill|outfile|dumpfile|benchmark|sleep|"
-    r"information_schema|performance_schema|mysql|"
-    # 通知/调度/数字人配置表存有 webhook、飞书 App Secret 等密文，禁止 Agent 查询
-    r"notify_channels|scheduled_jobs|job_runs|digital_human_profiles)\b",
-    re.IGNORECASE,
-)
 
 SCHEMA_DICTIONARY: dict[str, dict[str, Any]] = {
     "instruments": {
@@ -157,25 +144,11 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "run_sql",
-            "description": "在只读模式下执行一条 MySQL SELECT 查询并返回最多100行结果。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": {"type": "string", "description": "单条 SELECT 语句，不要带分号，不要使用写入语句。"}
-                },
-                "required": ["sql"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_schema",
-            "description": "查看 A 股研究系统的表结构。不传 table_name 返回所有可用表名清单（含业务标签）；传 table_name 返回该表的业务含义和常用字段。探索数据库结构请用本工具，不要用 run_sql 查 SHOW TABLES 或 information_schema（被沙箱禁止）。",
+            "description": "查看 A 股研究系统的共享研究表结构。不传 table_name 返回可公开表名清单；传 table_name 返回业务含义和常用字段。个人数据请使用带用户隔离的结构化工具。",
             "parameters": {
                 "type": "object",
-                "properties": {"table_name": {"type": "string", "description": "可选表名，如 positions。留空返回所有表名清单。"}},
+                "properties": {"table_name": {"type": "string", "description": "可选共享研究表名，如 daily_bars。留空返回公开表名清单。"}},
                 "required": [],
             },
         },
@@ -214,6 +187,7 @@ def _knowledge_system_prompt(memory_context: str = "") -> str:
     schema_lines = [
         f"- {table}: {meta['label']}，常用字段 {', '.join(meta['fields'])}"
         for table, meta in SCHEMA_DICTIONARY.items()
+        if table not in _SCHEMA_HIDDEN_TABLES
     ]
     memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
     return f"""你是 SixRabbits Stock 的知识库检索专家，采用 ReAct 方式工作。
@@ -227,18 +201,17 @@ def _knowledge_system_prompt(memory_context: str = "") -> str:
 工作规则:
 1. 核心工具是 search_knowledge —— 在已索引的文档切块中做混合检索（向量+关键词召回→RRF融合→重排精排），支持按标的(symbol)、文档类型(doc_types)、可信度(trust_levels)过滤。
 2. search_knowledge 返回的每条结果包含 doc_type（news/report/notice/research/upload）、title、source、content 和四路评分（vector/keyword/fused/rerank），要引用相关片段作答，标注来源。
-3. 必要时用 get_schema 探索数据库中的实体关系（如 documents 与 document_chunks 的关联），再用 run_sql 精确查询聚合统计或关联记录。
-4. run_sql 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询。
-5. SQL 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
-6. 所有结论必须标注来源（文档标题、类型、可信度）；不得编造信息。
-7. 对于简单的招呼、闲聊或与知识库搜索无关的话题，简短友好地直接回应，不查数据、不调用工具。
-8. 最终回答使用中文 Markdown，条理清晰、引用准确。"""
+3. 必要时用 get_schema 了解共享研究数据的实体关系；个人数据必须通过结构化工具访问。
+4. 所有结论必须标注来源（文档标题、类型、可信度）；不得编造信息。
+5. 对于简单的招呼、闲聊或与知识库搜索无关的话题，简短友好地直接回应，不查数据、不调用工具。
+6. 最终回答使用中文 Markdown，条理清晰、引用准确。"""
 
 
 def _system_prompt(extra_context: str | None = None, digital_human_code: str | None = None, memory_context: str = "") -> str:
     schema_lines = [
         f"- {table}: {meta['label']}，常用字段 {', '.join(meta['fields'])}"
         for table, meta in SCHEMA_DICTIONARY.items()
+        if table not in _SCHEMA_HIDDEN_TABLES
     ]
     context = f"\n\n当前数字人职责:\n{extra_context.strip()}" if extra_context and extra_context.strip() else ""
     memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
@@ -267,48 +240,19 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 1. 默认研究范围是系统自己的 open positions 和 active watchlist_items；问题未指定标的时，先分析持仓，再分析自选。用户明确问其它标的、行业或话题时，直接就其问题作答，不必强行绕回持仓。
 2. 【必做】凡回答涉及具体股票的行情、判断、风控问题，先调用 get_latest_price 获取该标的最新价格（数据库缓存，开盘时段自动刷新、收盘后走缓存不外呼），回答中标注价格与所属交易日；绝不引用记忆里的旧价。
 3. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
-4. 探索数据库结构用 get_schema（不传参列所有表名，再传表名查字段）；run_sql 是兜底工具，只能对已知表做 SELECT 查询，禁止查 SHOW TABLES / information_schema / 系统库（会被沙箱拒绝）。
+4. 探索共享研究数据结构用 get_schema；持仓、自选、报告等个人数据只能通过带用户隔离的结构化工具访问。
 5. 系统内没有的信息——外部个股、行业、政策、新闻、宏观、突发事件等——用 search_market_intel / search_stock_news 联网搜索补充，再结合内部数据作答；不要以"不在持仓/自选池"为由拒绝，你本职专业之外但用户确实需要的问题也尽力帮忙。
-6. SQL 只能执行 SELECT 只读查询，不允许写入、DDL、系统库查询或多语句。
-7. 查询前先用一句短中文说明要查什么；查询后根据 observation 校验，再继续下一步。
-8. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
-9. 用户询问“今日/当前涨停、跌停、炸板、连板或异动”时，必须调用 get_limit_list，并同时传 symbol 与目标 trade_date。不能用上一交易日收盘价否定用户描述的当日盘中事件。
-10. 若行情结果 stale=true、intraday_unavailable=true，或 trade_date 早于开盘中的当前交易日，只能说“当前数据源尚未覆盖今日盘中，无法核实”，严禁断言“今天没有涨停/没有异动”。
-11. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
-12. 最终回答使用中文 Markdown，长度与任务匹配：简单事实问题保持简短；持仓、换仓、完整研究必须严格执行已激活技能的专业报告结构，不得为了缩短而省略财务、估值、事件、技术、资金、风险、方案触发条件或证据缺口。禁止用 ASCII 字符画模拟结论卡片。{skill_rules_block}{context}"""
+6. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
+7. 用户询问“今日/当前涨停、跌停、炸板、连板或异动”时，必须调用 get_limit_list，并同时传 symbol 与目标 trade_date。不能用上一交易日收盘价否定用户描述的当日盘中事件。
+8. 若行情结果 stale=true、intraday_unavailable=true，或 trade_date 早于开盘中的当前交易日，只能说“当前数据源尚未覆盖今日盘中，无法核实”，严禁断言“今天没有涨停/没有异动”。
+9. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
+10. 最终回答使用中文 Markdown，长度与任务匹配：简单事实问题保持简短；持仓、换仓、完整研究必须严格执行已激活技能的专业报告结构，不得为了缩短而省略财务、估值、事件、技术、资金、风险、方案触发条件或证据缺口。禁止用 ASCII 字符画模拟结论卡片。{skill_rules_block}{context}"""
 
 
 def validate_sql(sql: str) -> str | None:
-    stripped = sql.strip().rstrip(";").strip()
-    if not stripped:
-        return "SQL 为空。"
-    if ";" in stripped:
-        return "只允许单条 SQL，不能包含分号。"
-    if "--" in stripped or "#" in stripped or "/*" in stripped:
-        return "不允许包含 SQL 注释。"
-    if not stripped.lower().startswith("select"):
-        return "只允许 SELECT 查询；如需了解表结构或表名清单请用 get_schema 工具（不传参可列所有表）。"
-    match = FORBIDDEN_SQL.search(stripped)
-    if match:
-        return f"包含被禁止的关键字: {match.group(0)}；如需了解表结构请用 get_schema 工具。"
-    return None
-
-
-def _normalize_sql(sql: str) -> str:
-    stripped = sql.strip().rstrip(";").strip()
-    if not re.search(r"\blimit\s+\d+", stripped, re.IGNORECASE):
-        stripped = f"{stripped} LIMIT {MAX_ROWS}"
-    return stripped
-
-
-def _serialize(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return value
+    # 多用户模式下，任意 SQL 无法可靠注入用户边界（子查询、CTE、视图均可绕过
+    # 简单表名过滤），因此彻底关闭，个人数据统一走结构化工具。
+    return "多用户模式已禁用任意 SQL，请使用带用户隔离的结构化工具。"
 
 
 def _audit(record: dict) -> None:
@@ -329,68 +273,49 @@ def _audit(record: dict) -> None:
 
 def run_sql(sql: str) -> dict:
     error = validate_sql(sql)
-    if error:
-        _audit({"tool": "run_sql", "sql": sql, "rejected": error})
-        return {"error": error}
-    normalized = _normalize_sql(sql)
-    started = time.monotonic()
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text(normalized))
-            columns = list(result.keys())
-            rows = [[_serialize(value) for value in row] for row in result.fetchmany(MAX_ROWS)]
-            truncated = result.fetchone() is not None
-    except Exception as exc:  # noqa: BLE001
-        _audit({"tool": "run_sql", "sql": normalized, "error": str(exc)[:500]})
-        return {"error": f"SQL 执行失败: {str(exc)[:500]}"}
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    _audit({"tool": "run_sql", "sql": normalized, "rows": len(rows), "ms": elapsed_ms})
-    return {"columns": columns, "rows": rows, "row_count": len(rows), "truncated": truncated, "ms": elapsed_ms}
+    _audit({"tool": "run_sql", "sql": sql, "rejected": error})
+    return {"error": error}
 
 
 # 表名本身非密文，但这几张表存有 webhook / 飞书 App Secret 等，不在 get_schema 列表里暴露
 _SCHEMA_HIDDEN_TABLES: frozenset[str] = frozenset({
+    "users",
+    "watchlist_groups", "watchlist_items",
+    "positions", "position_accounts", "position_import_batches",
+    "position_holding_snapshots", "position_trades",
+    "ai_chat_sessions", "ai_chat_messages",
+    "agent_tasks", "agent_reports", "risk_checks",
     "notify_channels", "scheduled_jobs", "job_runs", "digital_human_profiles",
 })
 
 
 def get_schema(table_name: str = "") -> dict:
-    """查看表结构。不传 table_name 返回所有可用表名清单（过滤密文表）；
-    传 table_name 返回该表的业务含义与常用字段。让 Agent 用此工具探索 schema，
-    不要用 run_sql 查 SHOW TABLES / information_schema（被只读沙箱禁止）。
+    """查看共享研究表结构。不传 table_name 返回可公开表名清单；
+    传 table_name 返回业务含义与常用字段。个人数据通过结构化工具访问。
     """
     key = (table_name or "").strip()
     if not key:
-        try:
-            with engine.connect() as conn:
-                rows = conn.execute(
-                    text(
-                        "SELECT table_name FROM information_schema.tables "
-                        "WHERE table_schema = DATABASE() ORDER BY table_name"
-                    )
-                ).scalars().all()
-        except Exception as exc:  # noqa: BLE001
-            return {"error": f"读取表清单失败: {str(exc)[:200]}"}
         tables = [
             {
                 "name": t,
-                "label": SCHEMA_DICTIONARY.get(t, {}).get("label", "未文档化"),
-                "documented": t in SCHEMA_DICTIONARY,
+                "label": meta["label"],
+                "documented": True,
             }
-            for t in rows
+            for t, meta in SCHEMA_DICTIONARY.items()
             if t not in _SCHEMA_HIDDEN_TABLES
         ]
         return {
             "tables": tables,
             "count": len(tables),
-            "hint": "传 table_name 查某张表的字段含义；未文档化的表可用 run_sql 做 SELECT 查询。",
+            "hint": "传 table_name 查共享研究表的字段含义；个人数据请使用结构化工具。",
         }
+    if key in _SCHEMA_HIDDEN_TABLES:
+        return {"error": "该表包含个人或敏感数据，请使用带用户隔离的结构化工具。"}
     meta = SCHEMA_DICTIONARY.get(key)
     if not meta:
         return {
             "error": (
-                f"表 {key} 未在字段字典中。可：1) get_schema() 不传参查看所有表名；"
-                f"2) 该表若确实存在，用 run_sql 做 SELECT 查询（仅 SELECT）。"
+                f"表 {key} 未在可公开的字段字典中。请使用 get_schema() 查看共享研究表清单。"
             )
         }
     return {"table": key, **meta}

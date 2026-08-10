@@ -104,9 +104,9 @@ This is a **multi-agent system with a durable execution runtime**, not a single 
 
 **Agent roster**: research-analyst（研究员）、intelligence-officer（情报官）、risk-officer（风控官）、quant-analyst（量化分析师）, plus transaction agents `position-entry-agent` / `watchlist-entry-agent`; `stock-pm`/`ask_stock` are excluded from delegation.
 
-**Chat modes & toolsets** — assembled per mode/digital-human in `agentscope_engine._build_definition`: `research` uses generic DB tools (`run_sql`, `get_schema`) + per-digital-human tools (`market/digital_human_tools.py`); `stock` uses the market toolset in `market/stock_tools.py` (TuShare daily/quotes/indicators, Tavily web search, MA/pattern/chip, backtests) with a built-in backtest router. The active model resolves from `LlmModelConfig` (`is_active`) falling back to `STOCK_LLM_*` env (agentscope resolves via `active_llm_config`).
+**Chat modes & toolsets** — assembled per mode/digital-human in `agentscope_engine._build_definition`: `research` uses the documented shared-schema helper (`get_schema`) plus per-digital-human structured tools (`market/digital_human_tools.py`); `stock` uses the market toolset in `market/stock_tools.py` (TuShare daily/quotes/indicators, Tavily web search, MA/pattern/chip, backtests) with a built-in backtest router. The active model resolves from `LlmModelConfig` (`is_active`) falling back to `STOCK_LLM_*` env (agentscope resolves via `active_llm_config`).
 
-**`run_sql` is a hard read-only sandbox** (`validate_sql` + `FORBIDDEN_SQL` regex): single statement, `SELECT`-only, no comments, no system schemas, auto-`LIMIT`. Every call is appended to `backend/agent_audit.log`. Keep these guards intact.
+**Arbitrary Agent SQL is disabled in multi-user mode.** Personal data must be accessed through structured tools that apply `data_user_scope`; `run_sql` remains only as a rejecting compatibility handler and logs rejected calls to `backend/agent_audit.log`. `get_schema` exposes documented shared research tables only.
 
 **Memory tiers** (`ai/`): L1 vector memory `memory.py` (recall → rerank), L2 cross-user review-experience store `experience_store.py` (sample_size/statistical_strength, market-env tags), L3 append-only hash-chained prediction ledger `ledger_store.py`.
 

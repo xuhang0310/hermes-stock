@@ -551,10 +551,18 @@ def seed_watchlist_and_position(db: Session, timestamp: datetime) -> None:
 
 
 def seed_event_flow(db: Session, timestamp: datetime) -> None:
+    position = db.scalar(
+        select(Position)
+        .where(Position.symbol == "000001.SZ", Position.status == "open")
+        .order_by(Position.id)
+        .limit(1)
+    )
+    owner_user_id = position.owner_user_id if position is not None else None
     event = db.scalar(select(Event).where(Event.event_id == "demo-l0-stop-loss-000001"))
     facts = {"price": 9.86, "stop_price": 9.89, "change_pct": -3.33, "source": "demo"}
     if event is None:
         event = Event(
+            owner_user_id=owner_user_id,
             event_id="demo-l0-stop-loss-000001",
             level="L0",
             event_type="stop_loss",
@@ -569,6 +577,7 @@ def seed_event_flow(db: Session, timestamp: datetime) -> None:
         db.add(event)
         db.flush()
     else:
+        event.owner_user_id = owner_user_id
         event.facts_json = json.dumps(facts, ensure_ascii=False)
         event.status = "routed"
 
@@ -586,6 +595,7 @@ def seed_event_flow(db: Session, timestamp: datetime) -> None:
     if task is None:
         db.add(
             AgentTask(
+                owner_user_id=owner_user_id,
                 task_id="demo-task-risk-000001",
                 event_id=event.event_id,
                 agent_name="risk",
@@ -597,11 +607,14 @@ def seed_event_flow(db: Session, timestamp: datetime) -> None:
                 finished_at=timestamp,
             )
         )
+    else:
+        task.owner_user_id = owner_user_id
 
     report = db.scalar(select(AgentReport).where(AgentReport.report_id == "demo-report-risk-000001"))
     if report is None:
         db.add(
             AgentReport(
+                owner_user_id=owner_user_id,
                 report_id="demo-report-risk-000001",
                 task_id="demo-task-risk-000001",
                 event_id=event.event_id,
@@ -619,20 +632,24 @@ def seed_event_flow(db: Session, timestamp: datetime) -> None:
                 model_name="demo-local",
             )
         )
+    else:
+        report.owner_user_id = owner_user_id
 
-    position = db.scalar(select(Position).where(Position.symbol == "000001.SZ", Position.status == "open"))
-    if position and not db.scalar(select(RiskCheck).where(RiskCheck.event_id == event.event_id)):
-        db.add(
-            RiskCheck(
-                symbol="000001.SZ",
-                position_id=position.id,
-                event_id=event.event_id,
-                risk_level="high",
-                risk_type="stop_loss",
-                finding="样例持仓触及止损线。",
-                required_action="查看依据，更新持仓计划或加入复盘。",
-                position_limit=8.0,
-                stop_condition="收盘仍低于9.89则复盘退出条件。",
-                cool_down_required=True,
-            )
+    risk_check = db.scalar(select(RiskCheck).where(RiskCheck.event_id == event.event_id))
+    if position and risk_check is None:
+        risk_check = RiskCheck(
+            owner_user_id=owner_user_id,
+            symbol="000001.SZ",
+            position_id=position.id,
+            event_id=event.event_id,
+            risk_level="high",
+            risk_type="stop_loss",
+            finding="样例持仓触及止损线。",
+            required_action="查看依据，更新持仓计划或加入复盘。",
+            position_limit=8.0,
+            stop_condition="收盘仍低于9.89则复盘退出条件。",
+            cool_down_required=True,
         )
+        db.add(risk_check)
+    elif risk_check is not None:
+        risk_check.owner_user_id = owner_user_id

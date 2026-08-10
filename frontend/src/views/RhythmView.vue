@@ -731,7 +731,7 @@ onUnmounted(() => {
           <section class="rhythm-form-section">
             <header><h3>执行内容</h3><span>选择负责的数字人和结果去向</span></header>
             <div class="rhythm-form-grid">
-              <label><span>数字人角色</span><select v-model="form.digital_human_code"><option value="">规则任务，不使用数字人</option><option v-for="item in DIGITAL_HUMANS" :key="item.code" :value="item.code">{{ item.label }}</option></select></label>
+              <label><span>数字人角色</span><select v-model="form.digital_human_code" required><option v-for="item in DIGITAL_HUMANS" :key="item.code" :value="item.code">{{ item.label }}</option></select></label>
               <label><span>结果推送</span><select v-model="form.push_channel_key"><option v-for="item in CHANNELS" :key="item.key" :value="item.key">{{ item.label }}</option></select></label>
               <label class="span-all"><span>提示词模板 <small>支持 {date}、{weekday}、{time}</small></span><textarea v-model="form.prompt_template" rows="6" placeholder="填写数字人执行任务时收到的完整指令"></textarea></label>
             </div>

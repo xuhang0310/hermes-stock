@@ -527,6 +527,7 @@ class Event(Base):
     __tablename__ = "events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     event_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
     level: Mapped[str] = mapped_column(String(16), nullable=False)
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -1306,16 +1307,18 @@ class UserMemory(Base):
 
 
 class ExperienceEntry(Base):
-    """L2 经验记忆 — 跨用户共享的复盘经验条目。
+    """L2 经验记忆 — 按用户隔离的复盘经验条目。
 
-    与 UserMemory 严格分库：UserMemory 是用户画像（按 user_id 隔离），本表是统计经验（跨用户共享，
-    按 tags/market_env/status 过滤）。每条带 sample_size + statistical_strength，防小样本过拟合。
+    与 UserMemory 严格分库：UserMemory 是用户画像，本表是用户自己的统计经验，
+    同样按 user_id 隔离并按 tags/market_env/status 过滤。每条带 sample_size +
+    statistical_strength，防小样本过拟合。
     状态：observing(观察模式，新条目观察期满才激活) → active → archived(长期无效自动降权)。
     """
 
     __tablename__ = "experience_entries"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     tags_json: Mapped[str | None] = mapped_column(Text)        # JSON：行业/形态/信号类型
     market_env_json: Mapped[str | None] = mapped_column(Text)  # JSON：牛熊/大小盘风格，防跨环境错配
@@ -1328,6 +1331,8 @@ class ExperienceEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     activated_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    user: Mapped[User] = relationship()
+
 
 class ExperienceInjection(Base):
     """经验注入留痕 — 每次把经验注入分析师决策时记录，后填成绩用于自动降权。
@@ -1339,6 +1344,7 @@ class ExperienceInjection(Base):
     __tablename__ = "experience_injections"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     entry_id: Mapped[int] = mapped_column(Integer, ForeignKey("experience_entries.id"), nullable=False)
     decision_id: Mapped[str | None] = mapped_column(String(120))  # 关联的决策/指令标识（L3 上线后填）
     injected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -1346,6 +1352,7 @@ class ExperienceInjection(Base):
     post_return: Mapped[float | None] = mapped_column(Float)       # 注入后该决策超额收益，L3 回填
     human_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    user: Mapped[User] = relationship()
     entry: Mapped["ExperienceEntry"] = relationship()
 
 
@@ -1355,12 +1362,14 @@ class ExperienceRevision(Base):
     __tablename__ = "experience_revisions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     entry_id: Mapped[int] = mapped_column(Integer, ForeignKey("experience_entries.id"), nullable=False)
     parent_revision_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("experience_revisions.id"))
     diff: Mapped[str | None] = mapped_column(Text)
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+    user: Mapped[User] = relationship()
     entry: Mapped["ExperienceEntry"] = relationship(foreign_keys=[entry_id])
     # parent 自引用关系留待需要时用 SQL 查 parent_revision_id，不在 model 定义以避开自引用复杂度
 
@@ -1385,6 +1394,7 @@ class AgentTask(Base):
     __tablename__ = "agent_tasks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     task_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
     event_id: Mapped[str | None] = mapped_column(String(120))
     agent_name: Mapped[str] = mapped_column(String(80), ForeignKey("agent_profiles.agent_name"), nullable=False)
@@ -1403,6 +1413,7 @@ class AgentReport(Base):
     __tablename__ = "agent_reports"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     report_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
     task_id: Mapped[str | None] = mapped_column(String(120))
     event_id: Mapped[str | None] = mapped_column(String(120))
@@ -1429,6 +1440,7 @@ class RiskCheck(Base):
     __tablename__ = "risk_checks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     symbol: Mapped[str | None] = mapped_column(String(24), ForeignKey("instruments.symbol"))
     position_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("positions.id"))
     event_id: Mapped[str | None] = mapped_column(String(120))

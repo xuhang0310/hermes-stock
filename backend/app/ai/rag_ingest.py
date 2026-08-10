@@ -1,4 +1,4 @@
-"""RAG 知识库摄取管线（P1）：内部语料（documents + agent_reports）→ 切块 → 嵌入 → 向量索引。
+"""RAG 知识库摄取管线（P1）：共享 documents → 切块 → 嵌入 → 向量索引。
 
 单一职责：本模块只负责"入库"（镜像报告 / 切块 / 嵌入 / 写 document_chunks / 写向量库）；
 检索在 ai/retrieval.py，HTTP 编排在 ai/ai_api.py，调度接线在 scheduler/rhythm_scheduler.py。
@@ -25,7 +25,7 @@ from sqlalchemy import func, select
 from backend.app.ai import memory as _memory
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import AgentReport, Document, DocumentChunk, DocumentSymbol
+from backend.app.core.models import Document, DocumentChunk, DocumentSymbol
 from backend.app.core.settings import settings
 
 _CHROMA_PATH = (
@@ -223,38 +223,9 @@ def vector_store_status() -> dict[str, object]:
 
 
 # --------------------------------------------------------------------------- 摄取
-def _report_hash(report_id: str) -> str:
-    """报告镜像文档的稳定唯一键（documents.content_hash）。"""
-    return hashlib.sha256(f"agent_report:{report_id}".encode()).hexdigest()[:64]
-
-
 def mirror_agent_reports() -> int:
-    """把尚未镜像的 agent_reports 转成 documents 行（doc_type=report），统一走文档摄取。"""
-    with SessionLocal() as db:
-        existing = {
-            h for h in db.scalars(select(Document.content_hash).where(Document.doc_type == "report")) if h
-        }
-        created = 0
-        for report in db.scalars(select(AgentReport)).all():
-            digest = _report_hash(report.report_id)
-            if digest in existing or not (report.content or "").strip():
-                continue
-            db.add(
-                Document(
-                    doc_type="report",
-                    title=report.title,
-                    content=report.content,
-                    summary=report.conclusion,
-                    source=f"agent:{report.agent_name}",
-                    published_at=report.created_at,
-                    trust_level="trusted",
-                    is_external_untrusted=False,
-                    content_hash=digest,
-                )
-            )
-            created += 1
-        db.commit()
-    return created
+    """兼容旧调度入口；个人 Agent 报告不再镜像到共享知识库。"""
+    return 0
 
 
 def ingest_document(doc_id: int, *, force: bool = False) -> tuple[int, int]:
@@ -262,6 +233,8 @@ def ingest_document(doc_id: int, *, force: bool = False) -> tuple[int, int]:
     with SessionLocal() as db:
         doc = db.get(Document, doc_id)
         if doc is None:
+            return 0, 0
+        if doc.doc_type == "report":
             return 0, 0
         if not force:
             existing = db.scalar(
@@ -365,7 +338,7 @@ def ingest_incremental(*, force: bool = False) -> dict:
     """镜像新报告 + 摄取所有尚无切块的文档（doc_id 幂等）。force=True 全量重灌。"""
     mirrored = mirror_agent_reports()
     with SessionLocal() as db:
-        query = select(Document.id).order_by(Document.id)
+        query = select(Document.id).where(Document.doc_type != "report").order_by(Document.id)
         if not force:
             query = query.where(Document.id.not_in(select(DocumentChunk.doc_id).distinct()))
         candidates = list(db.scalars(query))

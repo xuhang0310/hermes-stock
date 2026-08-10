@@ -925,12 +925,27 @@ class PositionWriteMixin:
             raw_json=json.dumps(payload, ensure_ascii=False),
             status=status,
         )
-        self.db.add(snapshot)
-        # Flush 后再选权威快照：快照只追加，max(id) 即当前态（与价格同步任务口径一致，
-        # 见 position_query_mixin 注释）。此处新行 flush 后就是 max(id)。
-        self.db.flush()
-
         acc_id = account.id if account else None
+        authoritative_snapshot = self.db.scalar(
+            select(PositionHoldingSnapshot)
+            .where(
+                PositionHoldingSnapshot.symbol == symbol,
+                _account_eq(acc_id, PositionHoldingSnapshot),
+                self._owner_clause(PositionHoldingSnapshot),
+            )
+            .order_by(desc(PositionHoldingSnapshot.as_of_date), desc(PositionHoldingSnapshot.id))
+            .limit(1)
+        )
+        stale_snapshot = bool(
+            snapshot.as_of_date
+            and authoritative_snapshot is not None
+            and authoritative_snapshot.as_of_date
+            and snapshot.as_of_date < authoritative_snapshot.as_of_date
+        )
+        if not stale_snapshot:
+            self.db.add(snapshot)
+            self.db.flush()
+
         position = self.db.scalar(
             select(Position)
             .where(
@@ -952,16 +967,7 @@ class PositionWriteMixin:
                 .order_by(desc(Position.id))
                 .limit(1)
             )
-        latest_snapshot = self.db.scalar(
-            select(PositionHoldingSnapshot)
-            .where(
-                PositionHoldingSnapshot.symbol == symbol,
-                _account_eq(acc_id, PositionHoldingSnapshot),
-                self._owner_clause(PositionHoldingSnapshot),
-            )
-            .order_by(desc(PositionHoldingSnapshot.id))
-            .limit(1)
-        ) or snapshot
+        latest_snapshot = authoritative_snapshot if stale_snapshot else snapshot
         if position is None:
             position = Position(
                 owner_user_id=self.owner_user_id,
@@ -992,14 +998,24 @@ class PositionWriteMixin:
             SystemLog(
                 level="INFO",
                 module="positions",
-                message="position holding saved",
-                context_json=json.dumps({"symbol": symbol, "source_type": source_type, "quantity": quantity}, ensure_ascii=False),
+                message="stale position holding ignored" if stale_snapshot else "position holding saved",
+                context_json=json.dumps(
+                    {
+                        "symbol": symbol,
+                        "source_type": source_type,
+                        "quantity": quantity,
+                        "as_of_date": snapshot.as_of_date,
+                        "ignored_stale": stale_snapshot,
+                    },
+                    ensure_ascii=False,
+                ),
             )
         )
         self.db.flush()
-        if account is not None:
+        if account is not None and not stale_snapshot:
             self._recompute_account_funds(account)
-        result = self._position_snapshot_out(snapshot, position_id=position.id, account=account)
+        result = self._position_snapshot_out(latest_snapshot, position_id=position.id, account=account)
+        result["ignored_stale"] = stale_snapshot
         if commit:
             self.db.commit()
         return result

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -665,11 +665,13 @@ def _collect_context(db: Session, *, user_id: int, digital_human_id: int | None,
     ).all()
     risks = db.execute(
         select(RiskCheck.symbol, RiskCheck.risk_level, RiskCheck.risk_type, RiskCheck.finding)
+        .where(RiskCheck.owner_user_id == user_id)
         .order_by(desc(RiskCheck.created_at))
         .limit(20)
     ).all()
     events = db.execute(
         select(Event.symbol, Event.level, Event.title)
+        .where(or_(Event.owner_user_id == user_id, Event.owner_user_id.is_(None)))
         .order_by(desc(Event.created_at))
         .limit(20)
     ).all()

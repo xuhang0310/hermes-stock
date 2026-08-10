@@ -119,7 +119,15 @@ class FeishuChatSessionTests(unittest.TestCase):
                 chat_mode="research",
                 source_type="web",
             )
-            db.add_all([feishu_session, viewer_web_session])
+            viewer_scheduler_session = AiChatSession(
+                user_id=self.viewer_id,
+                digital_human_id=self.profile_id,
+                title="访客定时任务",
+                status="active",
+                chat_mode="research",
+                source_type="scheduler",
+            )
+            db.add_all([feishu_session, viewer_web_session, viewer_scheduler_session])
             db.commit()
 
             marker = ai_api._session_source_out(feishu_session)
@@ -141,7 +149,10 @@ class FeishuChatSessionTests(unittest.TestCase):
             ).all()
 
         self.assertEqual({row.id for row in admin_rows}, {feishu_session.id})
-        self.assertEqual({row.id for row in viewer_rows}, {viewer_web_session.id})
+        self.assertEqual(
+            {row.id for row in viewer_rows},
+            {viewer_web_session.id, viewer_scheduler_session.id},
+        )
 
 
 if __name__ == "__main__":

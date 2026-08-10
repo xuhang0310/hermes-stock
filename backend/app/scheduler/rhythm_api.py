@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.core.database import get_db
 from backend.app.feishu.feishu import (
     BUILTIN_CHANNEL_KEYS,
@@ -23,7 +24,7 @@ from backend.app.feishu.feishu import (
     test_channel,
     validate_webhook_url,
 )
-from backend.app.core.models import AgentReport, Heartbeat, JobRun, NotifyChannel, ScheduledJob, SystemLog
+from backend.app.core.models import AgentReport, DigitalHumanProfile, Heartbeat, JobRun, NotifyChannel, ScheduledJob, SystemLog
 from backend.app.scheduler.rhythm_scheduler import DH_TO_AGENT, HEARTBEAT_COMPONENT, dispatch_manual_run, is_trading_day, now_sh
 from backend.app.core.settings import settings
 
@@ -220,6 +221,21 @@ def _validate_schedule_shape(payload: ScheduleJobIn) -> None:
             raise HTTPException(status_code=422, detail=f"{field_name} 必须是 HH:MM") from exc
 
 
+def _validate_agent_job(db: Session, payload: ScheduleJobIn, context: AuthContext) -> None:
+    code = (payload.digital_human_code or "").strip()
+    if not code:
+        raise HTTPException(status_code=422, detail="Agent 定时任务必须选择可用的数字人")
+    profile = db.scalar(
+        select(DigitalHumanProfile)
+        .where(DigitalHumanProfile.code == code, DigitalHumanProfile.status == "enabled")
+        .limit(1)
+    )
+    if profile is None:
+        raise HTTPException(status_code=422, detail="所选数字人不存在或已停用")
+    if not target_roles_allow(profile.target_roles, context.user.role):
+        raise HTTPException(status_code=403, detail="当前用户角色无权使用所选数字人")
+
+
 def _activate_agent_report_jobs(db: Session) -> list[ScheduledJob]:
     """Enable report jobs without round-tripping their human-readable fields."""
     jobs = list(
@@ -313,7 +329,12 @@ def _run_output_content(db: Session, run: JobRun) -> str | None:
         return run.output_content
     if run.report_id:
         report_content = db.scalar(
-            select(AgentReport.content).where(AgentReport.report_id == run.report_id).limit(1)
+            select(AgentReport.content)
+            .where(
+                AgentReport.report_id == run.report_id,
+                AgentReport.owner_user_id == run.owner_user_id,
+            )
+            .limit(1)
         )
         if report_content:
             return report_content
@@ -405,6 +426,7 @@ def create_schedule_job(
         raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
     _validate_schedule_text_encoding(payload)
     _validate_schedule_shape(payload)
+    _validate_agent_job(db, payload, context)
     job_key = payload.job_key or f"user-{context.user.id}-{uuid4().hex[:12]}"
     if db.scalar(select(ScheduledJob.id).where(ScheduledJob.job_key == job_key).limit(1)):
         raise HTTPException(status_code=409, detail="任务标识已存在")
@@ -453,6 +475,7 @@ def update_schedule_job(
         raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
     _validate_schedule_text_encoding(payload)
     _validate_schedule_shape(payload)
+    _validate_agent_job(db, payload, context)
 
     job.name = payload.name
     job.description = payload.description

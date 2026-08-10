@@ -385,9 +385,12 @@ def _run_agent_report(
         profile = session.scalar(
             select(DigitalHumanProfile).where(DigitalHumanProfile.code == snap["digital_human_code"]).limit(1)
         )
-        report = session.get(AgentReport, report_id)
+        report = session.scalar(
+            select(AgentReport).where(AgentReport.report_id == report_id).limit(1)
+        )
         if report is None:
             report = AgentReport(
+                owner_user_id=snap.get("owner_user_id"),
                 report_id=report_id,
                 task_id=snap["job_key"],
                 agent_name=agent_name,
@@ -400,6 +403,9 @@ def _run_agent_report(
             )
             session.add(report)
         else:
+            if report.owner_user_id != snap.get("owner_user_id"):
+                raise RuntimeError("Scheduled report ownership mismatch.")
+            report.owner_user_id = snap.get("owner_user_id")
             report.task_id = snap["job_key"]
             report.agent_name = agent_name
             report.title = title[:300]
@@ -616,7 +622,11 @@ def _run_position_price_sync_locked(now: datetime) -> str:
     with SessionLocal() as session:
         latest_ids = (
             select(func.max(PositionHoldingSnapshot.id))
-            .group_by(PositionHoldingSnapshot.account_id, PositionHoldingSnapshot.symbol)
+            .group_by(
+                PositionHoldingSnapshot.owner_user_id,
+                PositionHoldingSnapshot.account_id,
+                PositionHoldingSnapshot.symbol,
+            )
         )
         snaps = [
             s
@@ -628,15 +638,16 @@ def _run_position_price_sync_locked(now: datetime) -> str:
 
         # 只在 positions 表、还没有任何快照的 open 持仓（如 seed/历史数据）：补建一条快照，
         # 否则展示层（读最新快照）的最新价/市值永远是空。
-        covered = {(s.account_id, s.symbol) for s in snaps}
+        covered = {(s.owner_user_id, s.account_id, s.symbol) for s in snaps}
         orphan_positions = [
             p
             for p in session.scalars(select(Position).where(Position.status == "open")).all()
-            if (p.quantity or 0) > 0 and (p.account_id, p.symbol) not in covered
+            if (p.quantity or 0) > 0 and (p.owner_user_id, p.account_id, p.symbol) not in covered
         ]
         for pos in orphan_positions:
             instrument = session.get(Instrument, pos.symbol)
             snap = PositionHoldingSnapshot(
+                owner_user_id=pos.owner_user_id,
                 account_id=pos.account_id,
                 symbol=pos.symbol,
                 symbol_name=instrument.name if instrument else pos.symbol,

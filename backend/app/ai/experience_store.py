@@ -1,8 +1,8 @@
-"""L2 经验记忆 — 跨用户共享的复盘经验库。
+"""L2 经验记忆 — 按用户隔离的复盘经验库。
 
 与 UserMemory(ai/memory.py) 严格分库：
   - UserMemory 是用户画像（按 user_id 隔离，个性化对话用）
-  - 本库是统计经验（跨用户共享，分析师工作参考用，按 tags/market_env/status 过滤）
+  - 本库是用户自己的统计经验（按 user_id/tags/market_env/status 过滤）
 
 复用 memory.py 的 _embed（嵌入）和 _rerank_scores（精排），但用独立 ChromaDB collection
 ("experience_entries")，与 user_memories 隔离，零改动现有用户记忆。
@@ -51,6 +51,8 @@ _EXP_CHROMA_PATH = (
     if settings.experience_chroma_dir
     else Path(__file__).resolve().parents[2] / "chroma_exp_data"
 )
+# 使用新集合隔离旧版无 user_id 的共享向量；旧集合保留但不再召回。
+_EXP_COLLECTION = f"{settings.experience_milvus_collection}_user_v2"
 
 _exp_col: Any = None
 _exp_ready: bool | None = None
@@ -70,7 +72,7 @@ class _ChromaExperienceStore:
         _EXP_CHROMA_PATH.mkdir(parents=True, exist_ok=True)
         client = chromadb.PersistentClient(path=str(_EXP_CHROMA_PATH))
         self._col = client.get_or_create_collection(
-            name=settings.experience_milvus_collection,
+            name=_EXP_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
 
@@ -83,11 +85,17 @@ class _ChromaExperienceStore:
     def delete_status(self, status: str) -> None:
         self._col.delete(where={"status": status})
 
-    def query(self, embeddings: list[list[float]], n: int, status: str) -> list[tuple[int, float]]:
+    def query(
+        self,
+        embeddings: list[list[float]],
+        n: int,
+        status: str,
+        user_id: int,
+    ) -> list[tuple[int, float]]:
         res = self._col.query(
             query_embeddings=embeddings,
             n_results=n,
-            where={"status": status},
+            where={"$and": [{"status": status}, {"user_id": int(user_id)}]},
             include=["distances"],
         )
         ids = res.get("ids", [[]])[0]
@@ -107,12 +115,13 @@ class _MilvusExperienceStore:
 
         if _memory._ensure_embedding() is None or not _memory._embedding_dim:
             raise RuntimeError("嵌入维度未知，无法创建经验集合")
-        self._name = settings.experience_milvus_collection
+        self._name = _EXP_COLLECTION
         self._c = MilvusClient(uri=settings.milvus_uri, token=settings.milvus_token or "")
         if not self._c.has_collection(self._name):
             schema = self._c.create_schema(auto_id=False, enable_dynamic_field=False)
             schema.add_field("id", DataType.INT64, is_primary=True)
             schema.add_field("vector", DataType.FLOAT_VECTOR, dim=_memory._embedding_dim)
+            schema.add_field("user_id", DataType.INT64)
             schema.add_field("status", DataType.VARCHAR, max_length=24)
             schema.add_field("tags", DataType.VARCHAR, max_length=4096)
             schema.add_field("market_env", DataType.VARCHAR, max_length=4096)
@@ -131,6 +140,7 @@ class _MilvusExperienceStore:
             {
                 "id": int(entry_id),
                 "vector": vector,
+                "user_id": int((meta or {}).get("user_id", 0)),
                 "status": str((meta or {}).get("status") or ""),
                 "tags": str((meta or {}).get("tags") or "")[:4096],
                 "market_env": str((meta or {}).get("market_env") or "")[:4096],
@@ -147,14 +157,20 @@ class _MilvusExperienceStore:
             raise ValueError("不支持的经验状态")
         self._c.delete(collection_name=self._name, filter=f'status == "{status}"')
 
-    def query(self, embeddings: list[list[float]], n: int, status: str) -> list[tuple[int, float]]:
+    def query(
+        self,
+        embeddings: list[list[float]],
+        n: int,
+        status: str,
+        user_id: int,
+    ) -> list[tuple[int, float]]:
         if status not in {"active", "observing", "archived"}:
             return []
         res = self._c.search(
             collection_name=self._name,
             data=embeddings,
             limit=n,
-            filter=f'status == "{status}"',
+            filter=f'status == "{status}" and user_id == {int(user_id)}',
             output_fields=[],
             consistency_level="Strong",
         )
@@ -200,7 +216,12 @@ def _index_experience(entry: ExperienceEntry) -> None:
     try:
         col.upsert(
             [str(entry.id)], vec,
-            [{"status": entry.status, "tags": entry.tags_json or "", "market_env": entry.market_env_json or ""}],
+            [{
+                "user_id": entry.user_id,
+                "status": entry.status,
+                "tags": entry.tags_json or "",
+                "market_env": entry.market_env_json or "",
+            }],
             [entry.content],
         )
     except Exception:  # noqa: BLE001
@@ -217,7 +238,7 @@ def _delete_experience_vector(entry_id: int) -> None:
         pass
 
 
-def _vector_search_entries(query: str, n: int) -> list[tuple[int, float]]:
+def _vector_search_entries(query: str, user_id: int, n: int) -> list[tuple[int, float]]:
     """向量语义检索 active 经验，返回 [(entry_id, similarity), ...]，分越高越相关。"""
     col = _get_exp_store()
     if col is None:
@@ -226,7 +247,7 @@ def _vector_search_entries(query: str, n: int) -> list[tuple[int, float]]:
     if vec is None:
         return []
     try:
-        return col.query(vec, n, "active")
+        return col.query(vec, n, "active", user_id)
     except Exception:  # noqa: BLE001
         return []
 
@@ -239,6 +260,7 @@ def _vector_search_entries(query: str, n: int) -> list[tuple[int, float]]:
 def add_experience(
     db: Session,
     *,
+    user_id: int,
     content: str,
     tags: list[str] | None = None,
     market_env: list[str] | None = None,
@@ -249,6 +271,7 @@ def add_experience(
 ) -> ExperienceEntry:
     """新增一条经验。默认 observing 观察模式；active=True 直接激活（如手动录入可信经验）。"""
     entry = ExperienceEntry(
+        user_id=user_id,
         content=content.strip()[:2000],
         tags_json=json.dumps(tags or [], ensure_ascii=False),
         market_env_json=json.dumps(market_env or [], ensure_ascii=False),
@@ -265,9 +288,14 @@ def add_experience(
     return entry
 
 
-def activate_experience(db: Session, entry_id: int) -> bool:
+def activate_experience(db: Session, entry_id: int, *, user_id: int) -> bool:
     """观察期满或人工放行：observing → active，重建向量索引（status 变了要重写 metadata）。"""
-    entry = db.get(ExperienceEntry, entry_id)
+    entry = db.scalar(
+        select(ExperienceEntry).where(
+            ExperienceEntry.id == entry_id,
+            ExperienceEntry.user_id == user_id,
+        ).limit(1)
+    )
     if entry is None or entry.status != "observing":
         return False
     entry.status = "active"
@@ -277,9 +305,14 @@ def activate_experience(db: Session, entry_id: int) -> bool:
     return True
 
 
-def archive_experience(db: Session, entry_id: int) -> bool:
+def archive_experience(db: Session, entry_id: int, *, user_id: int) -> bool:
     """手动归档（长期无效自动降权也走此路径）。"""
-    entry = db.get(ExperienceEntry, entry_id)
+    entry = db.scalar(
+        select(ExperienceEntry).where(
+            ExperienceEntry.id == entry_id,
+            ExperienceEntry.user_id == user_id,
+        ).limit(1)
+    )
     if entry is None or entry.status == "archived":
         return False
     entry.status = "archived"
@@ -331,6 +364,7 @@ def _market_env_matches(entry: ExperienceEntry, target_env: str | None) -> bool:
 def retrieve_experiences(
     db: Session,
     *,
+    user_id: int,
     query: str,
     market_env: str | None = None,
     tags: list[str] | None = None,
@@ -343,14 +377,14 @@ def retrieve_experiences(
     """
     rerank_on = all(_resolve_rerank_cfg())
     pool_n = EXPERIENCE_RERANK_POOL if rerank_on else limit
-    hits = _vector_search_entries(query, pool_n)
+    hits = _vector_search_entries(query, user_id, pool_n)
     if not hits:
         return ""
 
     entries: list[ExperienceEntry] = []
     for entry_id, sim in hits:
         entry = db.get(ExperienceEntry, entry_id)
-        if entry is None or entry.status != "active":
+        if entry is None or entry.user_id != user_id or entry.status != "active":
             continue
         if not _market_env_matches(entry, market_env):
             continue
@@ -385,7 +419,9 @@ def retrieve_experiences(
         )
         try:
             db.add(ExperienceInjection(
-                entry_id=entry.id, relevance_score=None,
+                user_id=user_id,
+                entry_id=entry.id,
+                relevance_score=None,
             ))
             entry.injected_count = (entry.injected_count or 0) + 1
         except Exception:  # noqa: BLE001
@@ -398,23 +434,41 @@ def retrieve_experiences(
     return block
 
 
-def backfill_injection(db: Session, injection_id: int, post_return: float, decision_id: str | None = None) -> bool:
+def backfill_injection(
+    db: Session,
+    injection_id: int,
+    post_return: float,
+    decision_id: str | None = None,
+    *,
+    user_id: int,
+) -> bool:
     """成绩回填：L3 台账结算后，把注入后该决策的超额收益回填到注入留痕，并刷新经验条目平均回报。
 
     L3 未上线前此函数不会被调用（无数据源），接口已就位。
     """
-    inj = db.get(ExperienceInjection, injection_id)
+    inj = db.scalar(
+        select(ExperienceInjection).where(
+            ExperienceInjection.id == injection_id,
+            ExperienceInjection.user_id == user_id,
+        ).limit(1)
+    )
     if inj is None:
         return False
     inj.post_return = float(post_return)
     if decision_id:
         inj.decision_id = decision_id
     # 刷新经验条目平均回报
-    entry = db.get(ExperienceEntry, inj.entry_id)
+    entry = db.scalar(
+        select(ExperienceEntry).where(
+            ExperienceEntry.id == inj.entry_id,
+            ExperienceEntry.user_id == user_id,
+        ).limit(1)
+    )
     if entry is not None:
         all_injs = db.scalars(
             select(ExperienceInjection).where(
                 ExperienceInjection.entry_id == entry.id,
+                ExperienceInjection.user_id == user_id,
                 ExperienceInjection.post_return.is_not(None),
             )
         ).all()
@@ -453,7 +507,10 @@ def rebuild_experience_index(db: Session) -> int:
     if col is None:
         return -1
     entries = db.scalars(
-        select(ExperienceEntry).where(ExperienceEntry.status != "archived")
+        select(ExperienceEntry).where(
+            ExperienceEntry.user_id.is_not(None),
+            ExperienceEntry.status != "archived",
+        )
     ).all()
     if not entries:
         return 0
@@ -472,7 +529,12 @@ def rebuild_experience_index(db: Session) -> int:
         try:
             col.upsert(
                 [str(e.id) for e in chunk], vecs,
-                [{"status": e.status, "tags": e.tags_json or "", "market_env": e.market_env_json or ""} for e in chunk],
+                [{
+                    "user_id": e.user_id,
+                    "status": e.status,
+                    "tags": e.tags_json or "",
+                    "market_env": e.market_env_json or "",
+                } for e in chunk],
                 [e.content for e in chunk],
             )
             total += len(chunk)

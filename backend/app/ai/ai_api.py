@@ -2086,25 +2086,15 @@ def _message_backtest_map(db: Session, session_id: int) -> dict[int, str]:
 
 
 def _session_visibility(context: AuthContext):
-    owned_session = and_(
+    return and_(
         AiChatSession.user_id == context.user.id,
         or_(
-            AiChatSession.source_type.in_(["web", "delegation", "workflow", "task_batch"]),
+            AiChatSession.source_type.in_([
+                "web", "feishu", "scheduler", "delegation", "workflow", "task_batch",
+            ]),
             AiChatSession.source_type.is_(None),
         ),
     )
-    if "all" in context.permissions or "digital_human:manage" in context.permissions:
-        return or_(
-            owned_session,
-            AiChatSession.source_type.in_([
-                "feishu",
-                "scheduler",
-                "delegation",
-                "workflow",
-                "task_batch",
-            ]),
-        )
-    return owned_session
 
 
 def _session_source_out(row: AiChatSession) -> dict:
@@ -2505,7 +2495,11 @@ def _prepare_agent_chat(
     )
     if l1_summary:
         memory_context = f"{memory_context}\n\n{l1_summary}" if memory_context else l1_summary
-    experience_context = retrieve_experiences(db, query=effective_question)
+    experience_context = retrieve_experiences(
+        db,
+        user_id=context.user.id,
+        query=effective_question,
+    )
     if experience_context:
         memory_context = f"{memory_context}\n\n{experience_context}" if memory_context else experience_context
 

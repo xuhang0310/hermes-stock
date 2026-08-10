@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, desc, func, select
+from sqlalchemy import case, desc, func, or_, select
 
 from backend.app.core.models import (
     AgentReport,
@@ -152,6 +152,11 @@ def _approval_preview(row: AgentToolApproval) -> str:
 
 
 class SystemMixin:
+    def _visible_event_clause(self):
+        if self.owner_user_id is None:
+            return Event.id.is_not(None)
+        return or_(Event.owner_user_id == self.owner_user_id, Event.owner_user_id.is_(None))
+
     def health(self) -> dict[str, Any]:
         return {
             "ok": True,
@@ -184,7 +189,7 @@ class SystemMixin:
         risk_counts = {"high": 0, "medium": 0, "low": 0}
         for level, total in self.db.execute(
             select(RiskCheck.risk_level, func.count())
-            .where(RiskCheck.created_at >= last_24h)
+            .where(RiskCheck.created_at >= last_24h, self._owner_clause(RiskCheck))
             .group_by(RiskCheck.risk_level)
         ).all():
             risk_counts[_risk_level(level)] += int(total)
@@ -241,8 +246,12 @@ class SystemMixin:
                     )
                 )
                 or 0,
-                "l0_events": self.db.scalar(select(func.count(Event.id)).where(Event.level == "L0")) or 0,
-                "reports": self.db.scalar(select(func.count(AgentReport.id))) or 0,
+                "l0_events": self.db.scalar(
+                    select(func.count(Event.id)).where(Event.level == "L0", self._visible_event_clause())
+                ) or 0,
+                "reports": self.db.scalar(
+                    select(func.count(AgentReport.id)).where(self._owner_clause(AgentReport))
+                ) or 0,
                 "high_risk_24h": risk_counts["high"],
                 "pending_approvals": len(approvals),
                 "running_jobs": len(runtime["running"]),
@@ -277,7 +286,10 @@ class SystemMixin:
             },
             "today": {
                 "reports": self.db.scalar(
-                    select(func.count(AgentReport.id)).where(AgentReport.created_at >= day_start)
+                    select(func.count(AgentReport.id)).where(
+                        AgentReport.created_at >= day_start,
+                        self._owner_clause(AgentReport),
+                    )
                 )
                 or 0,
             },
@@ -534,12 +546,14 @@ class SystemMixin:
         risk_rows = self.db.execute(
             select(RiskCheck, Instrument.name.label("symbol_name"))
             .outerjoin(Instrument, Instrument.symbol == RiskCheck.symbol)
+            .where(self._owner_clause(RiskCheck))
             .order_by(desc(RiskCheck.created_at))
             .limit(6)
         ).all()
         event_rows = self.db.execute(
             select(Event, Instrument.name.label("symbol_name"))
             .outerjoin(Instrument, Instrument.symbol == Event.symbol)
+            .where(self._visible_event_clause())
             .order_by(desc(Event.created_at))
             .limit(6)
         ).all()
@@ -575,6 +589,7 @@ class SystemMixin:
         rows = self.db.execute(
             select(Event, Instrument.name.label("symbol_name"))
             .outerjoin(Instrument, Instrument.symbol == Event.symbol)
+            .where(self._visible_event_clause())
             .order_by(case((Event.level == "L0", 0), (Event.level == "L1", 1), else_=2), desc(Event.created_at))
             .limit(limit)
         ).all()
@@ -584,7 +599,7 @@ class SystemMixin:
         row = self.db.execute(
             select(Event, Instrument.name.label("symbol_name"))
             .outerjoin(Instrument, Instrument.symbol == Event.symbol)
-            .where(Event.event_id == event_id)
+            .where(Event.event_id == event_id, self._visible_event_clause())
         ).first()
         if row is None:
             return None
@@ -613,7 +628,12 @@ class SystemMixin:
                 "created_at": dt(item.created_at),
             }
             for item in self.db.scalars(
-                select(AgentReport).where(AgentReport.event_id == event.event_id).order_by(desc(AgentReport.created_at))
+                select(AgentReport)
+                .where(
+                    AgentReport.event_id == event.event_id,
+                    self._owner_clause(AgentReport),
+                )
+                .order_by(desc(AgentReport.created_at))
             )
         ]
         return result

@@ -143,6 +143,15 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
 
         _add_column("users", "token_version", "token_version INT NOT NULL DEFAULT 1")
+        # Legacy L2 experience rows were shared and cannot be safely attributed
+        # to one user. Keep them unowned (and therefore invisible) instead of
+        # assigning private history to the administrator by guesswork.
+        for table in (
+            "experience_entries",
+            "experience_injections",
+            "experience_revisions",
+        ):
+            _add_column(table, "user_id", "user_id INT NULL")
 
         for column, ddl in (
             ("broker_code", "broker_code VARCHAR(40) NULL"),
@@ -158,6 +167,7 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             _add_column("position_accounts", column, ddl)
         _add_column("positions", "account_id", "account_id INT NULL")
         _add_column("job_runs", "owner_user_id", "owner_user_id INT NULL")
+        _add_column("events", "owner_user_id", "owner_user_id INT NULL")
         for table in (
             "watchlist_groups",
             "watchlist_items",
@@ -166,6 +176,9 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             "position_import_batches",
             "position_holding_snapshots",
             "position_trades",
+            "agent_tasks",
+            "agent_reports",
+            "risk_checks",
         ):
             _add_column(table, "owner_user_id", "owner_user_id INT NULL")
 
@@ -184,6 +197,9 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             "position_import_batches",
             "position_holding_snapshots",
             "position_trades",
+            "agent_tasks",
+            "agent_reports",
+            "risk_checks",
         ):
             connection.execute(
                 text(
@@ -191,6 +207,45 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
                     "WHERE owner_user_id IS NULL"
                 )
             )
+
+        # 规则引擎事件来自个人持仓/自选；市场、政策等公共事件继续保持无主共享。
+        connection.execute(
+            text(
+                f"UPDATE events SET owner_user_id = {legacy_owner_sql} "
+                "WHERE owner_user_id IS NULL AND source_type = 'rule_engine'"
+            )
+        )
+
+        # 旧版本把个人 Agent 报告镜像进共享 documents。清除这批历史镜像及其
+        # 关系行；向量库里的孤立 id 不再能通过数据库 JOIN 命中。
+        private_report_doc = "d.doc_type = 'report' AND d.source LIKE 'agent:%'"
+        connection.execute(
+            text(
+                "UPDATE knowledge_uploads ku JOIN documents d ON d.id = ku.doc_id "
+                f"SET ku.doc_id = NULL WHERE {private_report_doc}"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE workspace_documents wd JOIN documents d ON d.id = wd.ingested_doc_id "
+                f"SET wd.ingested_doc_id = NULL WHERE {private_report_doc}"
+            )
+        )
+        connection.execute(
+            text(
+                "DELETE ds FROM document_symbols ds JOIN documents d ON d.id = ds.doc_id "
+                f"WHERE {private_report_doc}"
+            )
+        )
+        connection.execute(
+            text(
+                "DELETE dc FROM document_chunks dc JOIN documents d ON d.id = dc.doc_id "
+                f"WHERE {private_report_doc}"
+            )
+        )
+        connection.execute(
+            text(f"DELETE d FROM documents d WHERE {private_report_doc}")
+        )
 
         # Merge legacy Agent-created `default` groups into the canonical
         # per-user group. Duplicates are soft-removed before moving rows.
@@ -444,6 +499,13 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
 
         _add_index("agent_runs", "ix_agent_runs_team_id", "team_id")
         _add_index("scheduled_jobs", "ix_scheduled_jobs_owner_user_id", "owner_user_id")
+        _add_index("events", "ix_events_owner_user_id", "owner_user_id")
+        for table in (
+            "experience_entries",
+            "experience_injections",
+            "experience_revisions",
+        ):
+            _add_index(table, f"ix_{table}_user_id", "user_id")
         for table in (
             "watchlist_groups",
             "watchlist_items",
@@ -452,6 +514,9 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             "position_import_batches",
             "position_holding_snapshots",
             "position_trades",
+            "agent_tasks",
+            "agent_reports",
+            "risk_checks",
         ):
             _add_index(table, f"ix_{table}_owner_user_id", "owner_user_id")
         _add_index("watchlist_items", "ix_watchlist_items_symbol", "symbol")

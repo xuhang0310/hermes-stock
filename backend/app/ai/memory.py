@@ -24,7 +24,7 @@ from backend.app.core.llm_config import active_llm_config
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import AiChatMessage, UserMemory
+from backend.app.core.models import AiChatMessage, AiChatSession, UserMemory
 from backend.app.core.settings import settings
 
 # ---------------------------------------------------------------------------
@@ -541,6 +541,24 @@ def digest_conversation(
     digital_human_id: int | None = None,
 ) -> int:
     """从对话中提取结构化记忆并写入 DB + 向量索引。返回新增/更新的记忆数。"""
+    chat_session = db.scalar(
+        select(AiChatSession).where(
+            AiChatSession.id == session_id,
+            AiChatSession.user_id == user_id,
+            AiChatSession.status != "deleted",
+        ).limit(1)
+    )
+    if chat_session is None:
+        log_event(
+            "agent",
+            "WARNING",
+            f"拒绝消化无权访问的会话 session:{session_id} user:{user_id}",
+            to_db=False,
+        )
+        return 0
+    # 会话归属是可信来源，避免调用方把记忆错误挂到另一个数字人。
+    digital_human_id = chat_session.digital_human_id
+
     messages = db.scalars(
         select(AiChatMessage)
         .where(AiChatMessage.session_id == session_id, AiChatMessage.error.is_(None))
