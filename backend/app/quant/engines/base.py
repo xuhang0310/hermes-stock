@@ -319,7 +319,7 @@ class BaseEngine(ABC):
         self, close_df: pd.DataFrame, ts: pd.Timestamp, row_idx: int,
         _close_arr: np.ndarray, _code_to_col: Dict[str, int],
     ) -> float:
-        """Total equity = free cash + sum(unrealised PnL) per position."""
+        """Total equity = free cash + marked position value."""
         if not self.positions:
             return self.capital
 
@@ -330,7 +330,8 @@ class BaseEngine(ABC):
                 _arr=_close_arr, _row=row_idx, _col=_code_to_col.get(sym),
             )
             unrealized = self._calc_pnl(sym, pos.direction, pos.size, pos.entry_price, cp)
-            equity += unrealized
+            position_value = pos.size * pos.entry_price + unrealized
+            equity += position_value
         return equity
 
     def _rebalance(
@@ -404,9 +405,12 @@ class BaseEngine(ABC):
         if pos is None:
             return
 
-        pnl = self._calc_pnl(symbol, pos.direction, pos.size, pos.entry_price, exit_price)
+        gross_pnl = self._calc_pnl(symbol, pos.direction, pos.size, pos.entry_price, exit_price)
         exit_comm = self.calc_commission(pos.size, exit_price, pos.direction, is_open=False)
-        pnl_pct = pnl / (pos.size * pos.entry_price) * 100 if pos.size * pos.entry_price > 1e-9 else 0.0
+        total_commission = pos.entry_commission + exit_comm
+        pnl = gross_pnl - total_commission
+        entry_value = pos.size * pos.entry_price
+        pnl_pct = pnl / entry_value if entry_value > 1e-9 else 0.0
 
         self.capital += pos.size * exit_price - exit_comm
 
@@ -425,7 +429,7 @@ class BaseEngine(ABC):
             pnl_pct=pnl_pct,
             exit_reason=reason,
             holding_bars=holding_bars,
-            commission=pos.entry_commission + exit_comm,
+            commission=total_commission,
             entry_margin=pos.size * pos.entry_price,
             exit_margin=pos.size * exit_price,
         ))

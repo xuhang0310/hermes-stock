@@ -283,8 +283,10 @@ def run_signal_backtest(
                 "entry_price": round(t.entry_price, 2),
                 "exit_price": round(t.exit_price, 2),
                 "size": int(t.size),
+                "gross_pnl": round(t.pnl + t.commission, 2),
+                "fees": round(t.commission, 2),
                 "pnl": round(t.pnl, 2),
-                "pnl_pct": round(t.pnl_pct, 2),
+                "pnl_pct": round(t.pnl_pct, 6),
                 "holding_bars": t.holding_bars,
                 "exit_reason": exit_reasons[i],
             }
@@ -455,8 +457,9 @@ def _enrich_report(
     metrics["annual_volatility"] = metrics.get("volatility", 0)
     metrics["final_equity"] = metrics.get("final_equity", result.get("equity_curve", [{}])[-1].get("equity", 0) if result.get("equity_curve") else 0)
     metrics["profit_loss_ratio"] = metrics.get("profit_factor", 0)
-    metrics["excess_return"] = metrics.get("alpha", 0)
-    metrics["benchmark_return"] = 0
+    metrics.setdefault("excess_return", None)
+    metrics.setdefault("benchmark_return", None)
+    metrics["alpha_annual"] = metrics.get("alpha_annual", metrics.get("alpha"))
 
     # 交易数据字段映射
     for t in trades:
@@ -562,7 +565,7 @@ def _enrich_report(
     result["period"]["trading_days"] = len(result.get("equity_curve", []))
 
     # 基准标签
-    result["benchmark_label"] = "沪深300"
+    result["benchmark_label"] = "标的买入持有" if len(symbols) == 1 else "等权股票池"
 
     # 源码（调用方传入引擎源码快照；未传时保留占位说明）
     result["source_code"] = source_code or f"# {strategy_code}\n# 策略代码未保存，请查看回测配置"

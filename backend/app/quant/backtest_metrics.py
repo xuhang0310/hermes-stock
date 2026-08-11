@@ -113,8 +113,12 @@ def calc_metrics(
     alpha = 0.0
     beta = 0.0
     information_ratio = 0.0
+    benchmark_return = None
+    excess_return = None
     if bench_ret is not None and len(bench_ret) > 1:
         bench_ret = bench_ret.reindex(port_ret.index).fillna(0.0)
+        benchmark_return = float((1 + bench_ret).prod() - 1)
+        excess_return = float(total_return - benchmark_return)
         active_ret = port_ret - bench_ret
         cov = np.cov(port_ret, bench_ret)
         if cov.shape == (2, 2):
@@ -156,6 +160,8 @@ def calc_metrics(
         "max_consecutive_wins": max_consecutive_wins,
         "max_consecutive_losses": max_consecutive_losses,
         "alpha": alpha,
+        "benchmark_return": benchmark_return,
+        "excess_return": excess_return,
         "beta": beta,
         "information_ratio": information_ratio,
         "concentration": concentration,
