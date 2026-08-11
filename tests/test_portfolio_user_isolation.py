@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import Base
-from backend.app.core.models import Instrument, User
+from backend.app.core.models import Instrument, StockDailyBasic, StockLatestPrice, User
 from backend.app.data.errors import PositionNotFoundError
 from backend.app.data.repository import StockRepository
 
@@ -64,10 +65,43 @@ class PortfolioUserIsolationTests(unittest.TestCase):
             "B 的理由",
             added_by="owner-b",
         )
+        self.db.add_all(
+            [
+                StockLatestPrice(
+                    symbol="600036.SH",
+                    name="招商银行",
+                    price=38.25,
+                    pre_close=37.5,
+                    pct_chg=2.0,
+                    trade_date="20260811",
+                    source="tushare.rt_k",
+                    fetched_at=datetime(2026, 8, 11, 10, 1),
+                ),
+                StockDailyBasic(
+                    symbol="600036.SH",
+                    trade_date="20260808",
+                    total_mv=900_000,
+                ),
+                StockDailyBasic(
+                    symbol="600036.SH",
+                    trade_date="20260811",
+                    total_mv=1_024_500,
+                ),
+            ]
+        )
+        self.db.commit()
 
         self.assertNotEqual(item_a["id"], item_b["id"])
-        self.assertEqual(self.repo_a.watchlist()[0]["reason"], "A 的理由")
-        self.assertEqual(self.repo_b.watchlist()[0]["reason"], "B 的理由")
+        row_a = self.repo_a.watchlist()[0]
+        row_b = self.repo_b.watchlist()[0]
+        self.assertEqual(row_a["reason"], "A 的理由")
+        self.assertEqual(row_b["reason"], "B 的理由")
+        self.assertEqual(row_a["current_price"], 38.25)
+        self.assertEqual(row_a["current_pct_chg"], 2.0)
+        self.assertEqual(row_a["total_mv"], 1_024_500)
+        self.assertEqual(row_a["total_mv_yi"], 102.45)
+        self.assertEqual(row_a["market_trade_date"], "20260811")
+        self.assertIn("tushare.rt_k", row_a["market_source"])
         with self.assertRaises(ValueError):
             self.repo_b.remove_watchlist_item(item_a["id"], removed_by="owner-b")
 

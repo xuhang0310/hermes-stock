@@ -841,7 +841,7 @@ tbody tr.clickable-row:focus-visible td {
 }
 
 .watchlist-table {
-  min-width: 920px;
+  min-width: 1240px;
 }
 
 .watchlist-table td {
@@ -851,6 +851,33 @@ tbody tr.clickable-row:focus-visible td {
 .watchlist-symbol {
   color: var(--gold-2);
   font-variant-numeric: tabular-nums;
+}
+
+.watchlist-market-value,
+.watchlist-market-change,
+.watchlist-market-cap {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-market-value {
+  color: #f0e4c5;
+  font-weight: 700;
+}
+
+.watchlist-market-change.is-up {
+  color: #ff6f6f;
+  font-weight: 700;
+}
+
+.watchlist-market-change.is-down {
+  color: #38c997;
+  font-weight: 700;
+}
+
+.watchlist-market-change.is-flat,
+.watchlist-market-cap {
+  color: #cfc7b6;
 }
 
 .watchlist-reason {

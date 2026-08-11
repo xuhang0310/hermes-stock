@@ -291,6 +291,13 @@ export type WatchlistItem = {
   status: string
   added_at: string
   updated_at: string
+  current_price: number | null
+  current_pct_chg: number | null
+  total_mv: number | null
+  total_mv_yi: number | null
+  market_trade_date: string | null
+  market_fetched_at: string | null
+  market_source: string | null
 }
 
 export type WatchlistAgentPendingAction = {

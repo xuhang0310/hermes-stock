@@ -5,9 +5,16 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select
 
-from backend.app.core.models import Instrument, SystemLog, WatchlistGroup, WatchlistItem
+from backend.app.core.models import (
+    Instrument,
+    StockDailyBasic,
+    StockLatestPrice,
+    SystemLog,
+    WatchlistGroup,
+    WatchlistItem,
+)
 from backend.app.data._helpers import dt, normalize_a_share_symbol
 
 
@@ -20,8 +27,41 @@ class WatchlistMixin:
             .where(WatchlistItem.status == "active", self._owner_clause(WatchlistItem))
             .order_by(desc(WatchlistItem.updated_at))
         ).all()
-        return [
-            {
+        symbols = {item.symbol for item, _, _ in rows}
+        latest_prices = {
+            row.symbol: row
+            for row in self.db.scalars(
+                select(StockLatestPrice).where(StockLatestPrice.symbol.in_(symbols))
+            ).all()
+        } if symbols else {}
+        latest_basic_dates = (
+            select(
+                StockDailyBasic.symbol.label("symbol"),
+                func.max(StockDailyBasic.trade_date).label("trade_date"),
+            )
+            .where(StockDailyBasic.symbol.in_(symbols))
+            .group_by(StockDailyBasic.symbol)
+            .subquery()
+        )
+        latest_basics = {
+            row.symbol: row
+            for row in self.db.scalars(
+                select(StockDailyBasic).join(
+                    latest_basic_dates,
+                    and_(
+                        StockDailyBasic.symbol == latest_basic_dates.c.symbol,
+                        StockDailyBasic.trade_date == latest_basic_dates.c.trade_date,
+                    ),
+                )
+            ).all()
+        } if symbols else {}
+
+        payload: list[dict[str, Any]] = []
+        for item, instrument_name, group_name in rows:
+            price = latest_prices.get(item.symbol)
+            basic = latest_basics.get(item.symbol)
+            total_mv = basic.total_mv if basic else None
+            payload.append({
                 "id": item.id,
                 "symbol": item.symbol,
                 "name": instrument_name,
@@ -30,9 +70,23 @@ class WatchlistMixin:
                 "status": item.status,
                 "added_at": dt(item.added_at),
                 "updated_at": dt(item.updated_at),
-            }
-            for item, instrument_name, group_name in rows
-        ]
+                "current_price": price.price if price else None,
+                "current_pct_chg": price.pct_chg if price else None,
+                # TuShare daily_basic.total_mv uses ten-thousand CNY.
+                "total_mv": total_mv,
+                "total_mv_yi": round(float(total_mv) / 10_000, 4) if total_mv is not None else None,
+                "market_trade_date": (price.trade_date if price else None) or (basic.trade_date if basic else None),
+                "market_fetched_at": dt(price.fetched_at) if price else None,
+                "market_source": "+".join(
+                    source
+                    for source in (
+                        price.source if price else None,
+                        "tushare.daily_basic" if basic else None,
+                    )
+                    if source
+                ) or None,
+            })
+        return payload
 
     def add_watchlist_item(
         self,

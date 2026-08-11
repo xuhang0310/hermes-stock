@@ -133,6 +133,33 @@ function formatTime(value: string) {
   })
 }
 
+function formatNumber(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined) return '-'
+  const number = Number(value)
+  return Number.isFinite(number)
+    ? number.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+    : '-'
+}
+
+function formatChange(value: number | null | undefined) {
+  if (value === null || value === undefined) return '-'
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '-'
+  return `${number > 0 ? '+' : ''}${number.toFixed(2)}%`
+}
+
+function changeTone(value: number | null | undefined) {
+  if (value === null || value === undefined) return 'is-flat'
+  const number = Number(value)
+  if (!Number.isFinite(number) || number === 0) return 'is-flat'
+  return number > 0 ? 'is-up' : 'is-down'
+}
+
+function marketDataTitle(item: WatchlistItem) {
+  const parts = [item.market_source || 'TuShare', item.market_trade_date ? `交易日 ${item.market_trade_date}` : '']
+  return parts.filter(Boolean).join(' · ')
+}
+
 function modelLabel(model: ModelConfig | null | undefined) {
   if (!model) return '默认模型'
   return `${model.display_name || model.model_name}${model.is_active ? ' · 默认' : ''}`
@@ -287,6 +314,9 @@ function stepLabel(step: PositionAgentStep) {
           <tr>
             <th>标的</th>
             <th>名称</th>
+            <th title="TuShare rt_k 最新行情">当前价格</th>
+            <th title="TuShare rt_k 最新行情">当前涨跌幅</th>
+            <th title="TuShare daily_basic，单位亿元">总市值</th>
             <th>分组</th>
             <th>理由</th>
             <th>加入时间</th>
@@ -295,13 +325,13 @@ function stepLabel(step: PositionAgentStep) {
         </thead>
         <tbody>
           <tr v-if="props.loading">
-            <td colspan="6" class="empty-cell watchlist-loading-cell">
+            <td colspan="9" class="empty-cell watchlist-loading-cell">
               <span class="watchlist-loading-dot" aria-hidden="true"></span>
               正在读取最新自选...
             </td>
           </tr>
           <tr v-else-if="!props.watchlist.length">
-            <td colspan="6" class="empty-cell">暂无自选标的</td>
+            <td colspan="9" class="empty-cell">暂无自选标的</td>
           </tr>
           <tr
             v-for="item in props.watchlist"
@@ -314,6 +344,15 @@ function stepLabel(step: PositionAgentStep) {
           >
             <td><strong class="watchlist-symbol">{{ item.symbol }}</strong></td>
             <td>{{ item.name }}</td>
+            <td class="watchlist-market-value" :title="marketDataTitle(item)">
+              {{ formatNumber(item.current_price) }}
+            </td>
+            <td class="watchlist-market-change" :class="changeTone(item.current_pct_chg)" :title="marketDataTitle(item)">
+              {{ formatChange(item.current_pct_chg) }}
+            </td>
+            <td class="watchlist-market-cap" :title="marketDataTitle(item)">
+              {{ item.total_mv_yi == null ? '-' : `${formatNumber(item.total_mv_yi, 2)} 亿` }}
+            </td>
             <td>{{ item.group_name }}</td>
             <td class="watchlist-reason" :title="item.reason || ''">{{ item.reason || '-' }}</td>
             <td>{{ formatTime(item.added_at) }}</td>

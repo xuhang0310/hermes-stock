@@ -607,12 +607,19 @@ def _sync_prices_and_finalize(ran_at: datetime, *, run_id: str | None) -> dict[s
 
 
 def _run_position_price_sync_locked(now: datetime) -> str:
-    """规则任务（不经 LLM）：批量同步全部 open 持仓价格，重算市值/浮盈与账户资金。
+    """规则任务（不经 LLM）：批量同步全部 open 持仓和活跃自选行情。
 
-    交易时段每分钟调用一次 TuShare rt_k 批量接口；外部请求期间不持有数据库连接。
+    持仓会重算市值/浮盈与账户资金；自选只刷新共享行情缓存。交易时段每分钟调用一次
+    TuShare rt_k 批量接口；外部请求期间不持有数据库连接。
     整批请求失败时保留上一轮价格并令任务失败，避免用空值覆盖有效行情。
     """
-    from backend.app.core.models import Instrument, Position, PositionAccount, PositionHoldingSnapshot
+    from backend.app.core.models import (
+        Instrument,
+        Position,
+        PositionAccount,
+        PositionHoldingSnapshot,
+        WatchlistItem,
+    )
     from backend.app.data.repository import StockRepository
     from backend.app.market.stock_tools import get_realtime_quotes
 
@@ -664,13 +671,18 @@ def _run_position_price_sync_locked(now: datetime) -> str:
             snaps.append(snap)
         session.flush()
         snap_ids = [s.id for s in snaps]
-        symbols = sorted({s.symbol for s in snaps})
+        watchlist_symbols = set(
+            session.scalars(
+                select(WatchlistItem.symbol).where(WatchlistItem.status == "active")
+            ).all()
+        )
+        symbols = sorted({s.symbol for s in snaps} | watchlist_symbols)
         session.commit()
 
-    if not snap_ids:
-        return "无 open 持仓，跳过价格同步"
+    if not symbols:
+        return "无 open 持仓或自选标的，跳过价格同步"
 
-    # 无会话阶段：一次批量拉取全部持仓行情，不占用数据库连接。
+    # 无会话阶段：一次批量拉取全部持仓与自选行情，不占用数据库连接。
     batch = get_realtime_quotes(symbols)
     if not isinstance(batch, dict) or batch.get("error"):
         reason = batch.get("error") if isinstance(batch, dict) else "返回格式错误"
@@ -678,7 +690,7 @@ def _run_position_price_sync_locked(now: datetime) -> str:
     quotes = batch.get("quotes") or {}
     failures = batch.get("missing_symbols") or []
     if not quotes:
-        raise RuntimeError("实时行情同步失败: TuShare rt_k 未返回任何有效持仓行情")
+        raise RuntimeError("实时行情同步失败: TuShare rt_k 未返回任何有效持仓或自选行情")
 
     # 会话二（短）：按 id 重载快照写价，并重算账户资金
     updated = 0
@@ -718,7 +730,7 @@ def _run_position_price_sync_locked(now: datetime) -> str:
         session.commit()
 
     preview = (
-        f"实时同步 {len(quotes)} 个标的行情，更新 {updated} 条持仓快照，"
+        f"实时同步 {len(quotes)} 个持仓/自选标的行情，更新 {updated} 条持仓快照，"
         f"重算 {len(touched_accounts)} 个账户资金；来源 {batch.get('source')}，"
         f"耗时 {batch.get('ms', 0)}ms"
     )

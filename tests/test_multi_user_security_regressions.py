@@ -19,6 +19,8 @@ from backend.app.core.models import (
     PositionHoldingSnapshot,
     RiskCheck,
     User,
+    WatchlistGroup,
+    WatchlistItem,
 )
 from backend.app.data.repository import StockRepository
 from backend.app.data.user_scope import data_user_scope
@@ -169,6 +171,55 @@ class MultiUserSecurityRegressionTests(unittest.TestCase):
             self.assertEqual(len(snapshots), 2)
             self.assertEqual({item.owner_user_id for item in snapshots}, owner_ids)
             self.assertEqual({item.position_quantity for item in snapshots}, {100, 200})
+
+    def test_price_sync_fetches_symbols_that_only_exist_in_watchlists(self) -> None:
+        with self.SessionFactory() as db:
+            owner = User(
+                username="watch-sync-owner",
+                display_name="Watch Sync Owner",
+                password_hash="x",
+                role="researcher",
+            )
+            instrument = Instrument(
+                symbol="600000.SH",
+                name="浦发银行",
+                market="SH",
+                type="stock",
+                status="active",
+            )
+            db.add_all([owner, instrument])
+            db.flush()
+            group = WatchlistGroup(owner_user_id=owner.id, name="我的自选")
+            db.add(group)
+            db.flush()
+            db.add(
+                WatchlistItem(
+                    owner_user_id=owner.id,
+                    symbol=instrument.symbol,
+                    group_id=group.id,
+                    status="active",
+                )
+            )
+            db.commit()
+
+        quotes = {
+            "quotes": {"600000.SH": {"price": 12.0, "pre_close": 11.5}},
+            "missing_symbols": [],
+            "source": "tushare.rt_k",
+            "ms": 1,
+        }
+        with patch.object(rhythm_scheduler, "SessionLocal", self.SessionFactory), patch(
+            "backend.app.market.stock_tools.get_realtime_quotes",
+            return_value=quotes,
+        ) as quote_batch:
+            result = rhythm_scheduler._run_position_price_sync_locked(
+                datetime(2026, 8, 10, 10, 0)
+            )
+
+        quote_batch.assert_called_once_with(["600000.SH"])
+        self.assertIn("1 个持仓/自选标的行情", result)
+        with self.SessionFactory() as db:
+            self.assertEqual(db.query(PositionHoldingSnapshot).count(), 0)
 
     def test_scheduled_report_retry_updates_same_owned_report(self) -> None:
         with self.SessionFactory() as db:
