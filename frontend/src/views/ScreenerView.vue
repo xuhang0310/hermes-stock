@@ -366,6 +366,12 @@ const sortedResultItems = computed(() => {
 const checkedResultItems = computed(() =>
   allSortedResultItems.value.filter((item) => checkedSymbols.value.includes(item.symbol))
 )
+const quickBacktestTitle = computed(() => {
+  const count = checkedResultItems.value.length
+  if (count < 1 || count > 20) return '快速回测请选择 1–20 只股票'
+  if (count < 3) return '1–2 只股票使用双均线趋势策略回测'
+  return '3–20 只股票使用横截面动量策略回测'
+})
 const allPageChecked = computed(() =>
   sortedResultItems.value.length > 0 && sortedResultItems.value.every((item) => checkedSymbols.value.includes(item.symbol))
 )
@@ -924,7 +930,7 @@ function isoDate(date: Date): string {
 }
 
 async function runQuickBacktest() {
-  if (backtestLoading.value || checkedResultItems.value.length < 3 || checkedResultItems.value.length > 20) return
+  if (backtestLoading.value || checkedResultItems.value.length < 1 || checkedResultItems.value.length > 20) return
   backtestLoading.value = true
   backtestError.value = ''
   try {
@@ -935,12 +941,16 @@ async function runQuickBacktest() {
     const start = new Date(end)
     start.setFullYear(start.getFullYear() - 2)
     const symbols = checkedResultItems.value.map((item) => item.symbol)
+    const strategyCode = symbols.length < 3 ? 'ma_cross' : 'momentum'
+    const strategyParams: Record<string, number> = strategyCode === 'ma_cross'
+      ? { short_period: 5, long_period: 20 }
+      : { lookback: 20, top_n: Math.min(5, symbols.length) }
     const out = await api.runStrategyBacktest({
-      strategy_code: 'momentum',
+      strategy_code: strategyCode,
       symbols,
       start_date: isoDate(start),
       end_date: isoDate(end),
-      strategy_params: { lookback: 20, top_n: Math.min(5, symbols.length) },
+      strategy_params: strategyParams,
     })
     emit('openBacktest', out.run_id)
   } catch (err) {
@@ -1460,7 +1470,7 @@ onBeforeUnmount(() => {
                 <button type="button" :disabled="!checkedResultItems.length || bulkWatchlistAdding" @click="addCheckedToWatchlist">{{ bulkWatchlistAdding ? '加入中…' : `加入自选 (${checkedResultItems.length})` }}</button>
                 <button type="button" :disabled="!checkedResultItems.length || checkedResultItems.length > 4" :title="checkedResultItems.length > 4 ? '对比最多选择 4 只股票' : ''" @click="addCheckedToComparison">加入对比 ({{ checkedResultItems.length }})</button>
                 <button type="button" :disabled="checkedResultItems.length !== 1" title="问股一次只能选择 1 只股票" @click="askCheckedStock">问股</button>
-                <button type="button" class="primary" :disabled="backtestLoading || checkedResultItems.length < 3 || checkedResultItems.length > 20" title="快速回测请选择 3–20 只股票" @click="runQuickBacktest">{{ backtestLoading ? '回测运行中…' : `快速回测 (${checkedResultItems.length})` }}</button>
+                <button type="button" class="primary" :disabled="backtestLoading || !checkedResultItems.length || checkedResultItems.length > 20" :title="quickBacktestTitle" @click="runQuickBacktest">{{ backtestLoading ? '回测运行中…' : `快速回测 (${checkedResultItems.length})` }}</button>
                 <button type="button" :disabled="!checkedResultItems.length" @click="createCheckedAgentTask">创建 Agent 任务</button>
               </div>
               <p v-if="backtestError" class="sc-action-error">快速回测失败：{{ backtestError }}</p>

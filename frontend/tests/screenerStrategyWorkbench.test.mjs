@@ -22,9 +22,19 @@ test('quick backtest uses the real deterministic backtest API', async () => {
 
   assert.match(view, /async function runQuickBacktest/)
   assert.match(view, /await api\.runStrategyBacktest/)
-  assert.match(view, /strategy_code: 'momentum'/)
+  assert.match(view, /strategy_code: strategyCode/)
   assert.match(view, /emit\('openBacktest', out\.run_id\)/)
   assert.match(app, /@open-backtest="openScreenerBacktest"/)
+})
+
+test('quick backtest supports a single checked stock with a single-stock strategy', async () => {
+  const view = await readFile(viewPath, 'utf8')
+
+  assert.match(view, /checkedResultItems\.value\.length < 1/)
+  assert.match(view, /symbols\.length < 3 \? 'ma_cross' : 'momentum'/)
+  assert.match(view, /short_period: 5, long_period: 20/)
+  assert.match(view, /快速回测请选择 1–20 只股票/)
+  assert.doesNotMatch(view, /checkedResultItems\.value\.length < 3/)
 })
 
 test('strategy workbench actions remain connected to real destinations', async () => {
@@ -45,7 +55,7 @@ test('batch result actions are driven by explicit checkbox selections', async ()
   assert.match(view, /data-testid="screener-result-checkbox"/)
   assert.match(view, /data-testid="screener-factor-checkbox"/)
   assert.match(view, /async function addCheckedToWatchlist/)
-  assert.match(view, /checkedResultItems\.value\.length < 3/)
+  assert.match(view, /checkedResultItems\.value\.length < 1/)
   assert.match(view, /height: calc\(100dvh - 340px\)/)
   assert.match(view, /\.sc-strategy-sidebar,\s*\.sc-explain-panel \{ overflow-y: auto; \}/)
 })
