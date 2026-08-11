@@ -20,6 +20,9 @@ type AgentMessage = {
   error?: string
 }
 
+type WatchlistSortKey = 'current_price' | 'current_pct_chg'
+type SortDirection = 'desc' | 'asc'
+
 const props = defineProps<{
   watchlist: WatchlistItem[]
   loading: boolean
@@ -47,6 +50,43 @@ const agentScroll = ref<HTMLElement | null>(null)
 const models = ref<ModelConfig[]>([])
 const selectedModelId = ref<number | null>(null)
 const agentPendingAction = ref<WatchlistAgentPendingAction | null>(null)
+const sortKey = ref<WatchlistSortKey | null>(null)
+const sortDirection = ref<SortDirection>('desc')
+
+const sortedWatchlist = computed(() => {
+  if (!sortKey.value) return props.watchlist
+  const key = sortKey.value
+  const direction = sortDirection.value
+  return [...props.watchlist].sort((left, right) => {
+    const leftValue = left[key]
+    const rightValue = right[key]
+    const leftMissing = leftValue === null || leftValue === undefined || !Number.isFinite(Number(leftValue))
+    const rightMissing = rightValue === null || rightValue === undefined || !Number.isFinite(Number(rightValue))
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1
+    if (leftMissing && rightMissing) return 0
+    const difference = Number(leftValue) - Number(rightValue)
+    return direction === 'asc' ? difference : -difference
+  })
+})
+
+function toggleSort(key: WatchlistSortKey) {
+  if (sortKey.value !== key) {
+    sortKey.value = key
+    sortDirection.value = 'desc'
+    return
+  }
+  sortDirection.value = sortDirection.value === 'desc' ? 'asc' : 'desc'
+}
+
+function sortIndicator(key: WatchlistSortKey) {
+  if (sortKey.value !== key) return '↕'
+  return sortDirection.value === 'desc' ? '↓' : '↑'
+}
+
+function sortAria(key: WatchlistSortKey) {
+  if (sortKey.value !== key) return 'none'
+  return sortDirection.value === 'desc' ? 'descending' : 'ascending'
+}
 
 const activeModel = computed(
   () =>
@@ -321,8 +361,28 @@ function stepLabel(step: PositionAgentStep) {
           <tr>
             <th>标的</th>
             <th>名称</th>
-            <th title="TuShare rt_k 最新行情">当前价格</th>
-            <th title="TuShare rt_k 最新行情">当前涨跌幅</th>
+            <th class="watchlist-sort-heading" title="TuShare rt_k 最新行情" :aria-sort="sortAria('current_price')">
+              <button
+                type="button"
+                class="watchlist-sort-button"
+                :class="{ 'is-active': sortKey === 'current_price' }"
+                aria-label="按当前价格排序"
+                @click="toggleSort('current_price')"
+              >
+                当前价格 <span aria-hidden="true">{{ sortIndicator('current_price') }}</span>
+              </button>
+            </th>
+            <th class="watchlist-sort-heading" title="TuShare rt_k 最新行情" :aria-sort="sortAria('current_pct_chg')">
+              <button
+                type="button"
+                class="watchlist-sort-button"
+                :class="{ 'is-active': sortKey === 'current_pct_chg' }"
+                aria-label="按当前涨跌幅排序"
+                @click="toggleSort('current_pct_chg')"
+              >
+                当前涨跌幅 <span aria-hidden="true">{{ sortIndicator('current_pct_chg') }}</span>
+              </button>
+            </th>
             <th title="现价减去 TuShare rt_k 昨收价">当前涨跌额</th>
             <th title="TuShare daily_basic，单位亿元">总市值</th>
             <th>分组</th>
@@ -342,7 +402,7 @@ function stepLabel(step: PositionAgentStep) {
             <td colspan="10" class="empty-cell">暂无自选标的</td>
           </tr>
           <tr
-            v-for="item in props.watchlist"
+            v-for="item in sortedWatchlist"
             :key="item.id"
             class="clickable-row"
             tabindex="0"

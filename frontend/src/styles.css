@@ -848,6 +848,43 @@ tbody tr.clickable-row:focus-visible td {
   vertical-align: middle;
 }
 
+.watchlist-sort-heading {
+  padding: 0;
+}
+
+.watchlist-sort-button {
+  width: 100%;
+  min-height: 42px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  padding: 10px 12px;
+  font: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+}
+
+.watchlist-sort-button span {
+  color: #81775f;
+  font-size: 13px;
+}
+
+.watchlist-sort-button:hover,
+.watchlist-sort-button:focus-visible {
+  background: rgba(213, 180, 106, 0.08);
+  color: var(--gold-2);
+  outline: none;
+}
+
+.watchlist-sort-button.is-active span {
+  color: var(--gold);
+}
+
 .watchlist-symbol {
   color: var(--gold-2);
   font-variant-numeric: tabular-nums;

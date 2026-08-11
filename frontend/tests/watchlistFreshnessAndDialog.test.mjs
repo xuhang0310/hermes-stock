@@ -26,3 +26,12 @@ test('watchlist deletion uses an in-app accessible confirmation dialog', () => {
   assert.match(watchlistSource, /@keydown\.esc="cancelDelete"/)
   assert.match(watchlistSource, /正在读取最新自选/)
 })
+
+test('watchlist price and percentage columns support accessible two-way sorting', () => {
+  assert.match(watchlistSource, /type WatchlistSortKey = 'current_price' \| 'current_pct_chg'/)
+  assert.match(watchlistSource, /const sortedWatchlist = computed/)
+  assert.match(watchlistSource, /function toggleSort/)
+  assert.match(watchlistSource, /:aria-sort="sortAria\('current_price'\)"/)
+  assert.match(watchlistSource, /:aria-sort="sortAria\('current_pct_chg'\)"/)
+  assert.match(watchlistSource, /v-for="item in sortedWatchlist"/)
+})
