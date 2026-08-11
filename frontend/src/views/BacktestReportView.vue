@@ -88,7 +88,7 @@ const primaryMetrics = computed(() => {
   }
   return [
     { label: '总收益率', value: percent(metrics.total_return), tone: tone(metrics.total_return), detail: '策略区间收益' },
-    { label: '超额收益', value: percent(metrics.excess_return), tone: tone(metrics.excess_return), detail: '相对沪深300' },
+    { label: '超额收益', value: percent(metrics.excess_return), tone: tone(metrics.excess_return), detail: `相对${run.value?.benchmark_label || '基准'}` },
     { label: '最大回撤', value: percent(metrics.max_drawdown, false), tone: 'negative' as MetricTone, detail: '峰值至谷值' },
     { label: 'Sharpe', value: number(metrics.sharpe), tone: tone(metrics.sharpe), detail: '风险调整收益' },
     { label: '胜率', value: percent(metrics.win_rate, false), tone: metrics.win_rate >= 0.5 ? 'positive' as MetricTone : 'negative' as MetricTone, detail: `${metrics.winning_trades} 赢 / ${metrics.losing_trades} 亏` },
@@ -624,7 +624,7 @@ onBeforeUnmount(destroyCharts)
           <article>
             <span>Beta / Alpha t-stat</span>
             <strong>{{ number(run.metrics.beta) }} / {{ number(run.metrics.alpha_t_stat) }}</strong>
-            <small>相对沪深300 · |t| ≥ 2 才具初步显著性</small>
+            <small>相对{{ run.benchmark_label || '基准' }} · |t| ≥ 2 才具初步显著性</small>
           </article>
         </section>
         <section v-else class="attribution-metrics">
