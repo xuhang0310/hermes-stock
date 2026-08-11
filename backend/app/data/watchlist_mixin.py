@@ -61,6 +61,13 @@ class WatchlistMixin:
             price = latest_prices.get(item.symbol)
             basic = latest_basics.get(item.symbol)
             total_mv = basic.total_mv if basic else None
+            current_change: float | None = None
+            if price and price.price is not None:
+                if price.pre_close is not None and float(price.pre_close) > 0:
+                    current_change = round(float(price.price) - float(price.pre_close), 4)
+                elif price.pct_chg is not None and float(price.pct_chg) > -100:
+                    previous_close = float(price.price) / (1 + float(price.pct_chg) / 100)
+                    current_change = round(float(price.price) - previous_close, 4)
             payload.append({
                 "id": item.id,
                 "symbol": item.symbol,
@@ -72,6 +79,7 @@ class WatchlistMixin:
                 "updated_at": dt(item.updated_at),
                 "current_price": price.price if price else None,
                 "current_pct_chg": price.pct_chg if price else None,
+                "current_change": current_change,
                 # TuShare daily_basic.total_mv uses ten-thousand CNY.
                 "total_mv": total_mv,
                 "total_mv_yi": round(float(total_mv) / 10_000, 4) if total_mv is not None else None,

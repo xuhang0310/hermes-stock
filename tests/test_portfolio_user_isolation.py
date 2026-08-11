@@ -98,6 +98,7 @@ class PortfolioUserIsolationTests(unittest.TestCase):
         self.assertEqual(row_b["reason"], "B 的理由")
         self.assertEqual(row_a["current_price"], 38.25)
         self.assertEqual(row_a["current_pct_chg"], 2.0)
+        self.assertEqual(row_a["current_change"], 0.75)
         self.assertEqual(row_a["total_mv"], 1_024_500)
         self.assertEqual(row_a["total_mv_yi"], 102.45)
         self.assertEqual(row_a["market_trade_date"], "20260811")

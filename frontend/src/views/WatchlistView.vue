@@ -148,6 +148,13 @@ function formatChange(value: number | null | undefined) {
   return `${number > 0 ? '+' : ''}${number.toFixed(2)}%`
 }
 
+function formatChangeAmount(value: number | null | undefined) {
+  if (value === null || value === undefined) return '-'
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '-'
+  return `${number > 0 ? '+' : ''}${number.toFixed(2)} 元`
+}
+
 function changeTone(value: number | null | undefined) {
   if (value === null || value === undefined) return 'is-flat'
   const number = Number(value)
@@ -316,6 +323,7 @@ function stepLabel(step: PositionAgentStep) {
             <th>名称</th>
             <th title="TuShare rt_k 最新行情">当前价格</th>
             <th title="TuShare rt_k 最新行情">当前涨跌幅</th>
+            <th title="现价减去 TuShare rt_k 昨收价">当前涨跌额</th>
             <th title="TuShare daily_basic，单位亿元">总市值</th>
             <th>分组</th>
             <th>理由</th>
@@ -325,13 +333,13 @@ function stepLabel(step: PositionAgentStep) {
         </thead>
         <tbody>
           <tr v-if="props.loading">
-            <td colspan="9" class="empty-cell watchlist-loading-cell">
+            <td colspan="10" class="empty-cell watchlist-loading-cell">
               <span class="watchlist-loading-dot" aria-hidden="true"></span>
               正在读取最新自选...
             </td>
           </tr>
           <tr v-else-if="!props.watchlist.length">
-            <td colspan="9" class="empty-cell">暂无自选标的</td>
+            <td colspan="10" class="empty-cell">暂无自选标的</td>
           </tr>
           <tr
             v-for="item in props.watchlist"
@@ -349,6 +357,9 @@ function stepLabel(step: PositionAgentStep) {
             </td>
             <td class="watchlist-market-change" :class="changeTone(item.current_pct_chg)" :title="marketDataTitle(item)">
               {{ formatChange(item.current_pct_chg) }}
+            </td>
+            <td class="watchlist-market-change" :class="changeTone(item.current_change)" :title="marketDataTitle(item)">
+              {{ formatChangeAmount(item.current_change) }}
             </td>
             <td class="watchlist-market-cap" :title="marketDataTitle(item)">
               {{ item.total_mv_yi == null ? '-' : `${formatNumber(item.total_mv_yi, 2)} 亿` }}

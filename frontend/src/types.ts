@@ -293,6 +293,7 @@ export type WatchlistItem = {
   updated_at: string
   current_price: number | null
   current_pct_chg: number | null
+  current_change: number | null
   total_mv: number | null
   total_mv_yi: number | null
   market_trade_date: string | null
