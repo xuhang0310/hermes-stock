@@ -1332,12 +1332,16 @@ def _default_jobs_owner_id(session) -> int | None:
 
 def _adopt_legacy_default_job_history(session, *, owner_user_id: int) -> None:
     """Migrate ownerless history created before per-user schedule isolation."""
-    default_keys = [item["job_key"] for item in DEFAULT_JOBS]
+    personal_default_keys = [
+        item["job_key"]
+        for item in DEFAULT_JOBS
+        if item["job_key"] != POSITION_PRICE_SYNC_JOB_KEY
+    ]
     report_ids = {
         report_id
         for report_id in session.scalars(
             select(JobRun.report_id).where(
-                JobRun.job_key.in_(default_keys),
+                JobRun.job_key.in_(personal_default_keys),
                 JobRun.owner_user_id.is_(None),
                 JobRun.report_id.is_not(None),
             )
@@ -1356,10 +1360,22 @@ def _adopt_legacy_default_job_history(session, *, owner_user_id: int) -> None:
     session.execute(
         update(JobRun)
         .where(
-            JobRun.job_key.in_(default_keys),
+            JobRun.job_key.in_(personal_default_keys),
             JobRun.owner_user_id.is_(None),
         )
         .values(owner_user_id=owner_user_id)
+    )
+
+
+def _normalize_shared_price_sync_history(session) -> None:
+    """Keep the single infrastructure task and all of its runs globally owned."""
+    # The price synchronizer is one global infrastructure job. It updates all
+    # users' holdings in a single batch and must never be duplicated or owned
+    # by one user's private task space.
+    session.execute(
+        update(JobRun)
+        .where(JobRun.job_key == POSITION_PRICE_SYNC_JOB_KEY)
+        .values(owner_user_id=None)
     )
 
 
@@ -1368,9 +1384,14 @@ def ensure_default_jobs(session) -> int:
     created = 0
     owner_user_id = _default_jobs_owner_id(session)
     for item in DEFAULT_JOBS:
+        item_owner_user_id = (
+            None if item["job_key"] == POSITION_PRICE_SYNC_JOB_KEY else owner_user_id
+        )
         existing = session.scalar(select(ScheduledJob).where(ScheduledJob.job_key == item["job_key"]).limit(1))
         if existing is not None:
-            if existing.owner_user_id is None and owner_user_id is not None:
+            if existing.job_key == POSITION_PRICE_SYNC_JOB_KEY:
+                existing.owner_user_id = None
+            elif existing.owner_user_id is None and owner_user_id is not None:
                 existing.owner_user_id = owner_user_id
             if existing.job_kind == "position_price_sync":
                 # 系统内置行情任务属于基础设施配置；版本升级时迁移为分钟同步。
@@ -1402,7 +1423,7 @@ def ensure_default_jobs(session) -> int:
                 agent_name=DH_TO_AGENT.get(item.get("digital_human_code") or ""),
                 prompt_template=item.get("prompt_template"),
                 push_channel_key=item.get("push_channel_key"),
-                owner_user_id=owner_user_id,
+                owner_user_id=item_owner_user_id,
                 enabled=item.get("enabled", False),
                 sort_order=_JOB_SORT[item["job_key"]],
             )
@@ -1410,6 +1431,7 @@ def ensure_default_jobs(session) -> int:
         created += 1
     if owner_user_id is not None:
         _adopt_legacy_default_job_history(session, owner_user_id=owner_user_id)
+    _normalize_shared_price_sync_history(session)
     if created or owner_user_id is not None:
         session.flush()
     return created

@@ -164,6 +164,10 @@ function jobKindLabel(kind: string) {
   return kind || '定时任务'
 }
 
+function isSharedJob(job: ScheduleJob) {
+  return job.is_shared || job.job_key === 'position-price-sync-1505'
+}
+
 function jobDescription(job: ScheduleJob) {
   return job.description || `${jobKindLabel(job.job_kind)}，按设定时间自动执行。`
 }
@@ -565,6 +569,7 @@ onUnmounted(() => {
             <div>
               <strong>{{ job.name }}</strong>
               <span>{{ jobKindLabel(job.job_kind) }}</span>
+              <span v-if="isSharedJob(job)">全局任务</span>
               <span v-if="job.created_via === 'agent'">总调度创建</span>
             </div>
             <p>{{ jobDescription(job) }}</p>
@@ -588,15 +593,18 @@ onUnmounted(() => {
             <time>{{ beijingFromDb(job.last_run_at) }}</time>
           </div>
           <div class="rhythm-job-actions">
-            <button type="button" @click="edit(job)">配置</button>
-            <button type="button" :class="{ danger: job.enabled }" :disabled="Boolean(actionKey)" @click="toggle(job)">
-              {{ isActionBusy('toggle', job) ? '处理中' : job.enabled ? '停用' : '启用' }}
-            </button>
-            <button class="run" type="button" :disabled="Boolean(actionKey)" @click="runNow(job)">
-              {{ isActionBusy('run', job) ? '执行中' : '立即执行' }}
-            </button>
+            <template v-if="!isSharedJob(job)">
+              <button type="button" @click="edit(job)">配置</button>
+              <button type="button" :class="{ danger: job.enabled }" :disabled="Boolean(actionKey)" @click="toggle(job)">
+                {{ isActionBusy('toggle', job) ? '处理中' : job.enabled ? '停用' : '启用' }}
+              </button>
+              <button class="run" type="button" :disabled="Boolean(actionKey)" @click="runNow(job)">
+                {{ isActionBusy('run', job) ? '执行中' : '立即执行' }}
+              </button>
+            </template>
             <button type="button" @click="showHistory(job)">运行记录</button>
             <button
+              v-if="!isSharedJob(job)"
               class="danger"
               type="button"
               :disabled="Boolean(actionKey)"
@@ -651,6 +659,7 @@ onUnmounted(() => {
         </label>
         <button class="quiet-action" type="button" @click="applyHistoryFilters">刷新记录</button>
         <button
+          v-if="!historyJob || !isSharedJob(historyJob)"
           class="quiet-action danger"
           type="button"
           :disabled="Boolean(actionKey) || !runTotal"

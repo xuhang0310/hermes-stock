@@ -113,14 +113,15 @@ class MultiUserDataIsolationTests(unittest.TestCase):
                         enabled=True,
                     ),
                     ScheduledJob(
-                        job_key="system-maintenance",
+                        job_key="position-price-sync-1505",
                         name="系统维护",
-                        job_kind="health_check",
-                        schedule_type="daily",
-                        run_time="08:00",
+                        job_kind="position_price_sync",
+                        schedule_type="interval",
+                        interval_minutes=1,
                         owner_user_id=None,
                         created_via="admin",
                         enabled=True,
+                        sort_order=80,
                     ),
                     JobRun(
                         run_id="run-a",
@@ -139,6 +140,15 @@ class MultiUserDataIsolationTests(unittest.TestCase):
                         trigger_type="schedule",
                         status="failed",
                         started_at=datetime(2026, 8, 10, 10, 0),
+                    ),
+                    JobRun(
+                        run_id="run-shared-price-sync",
+                        job_key="position-price-sync-1505",
+                        owner_user_id=None,
+                        fire_key="position-price-sync-1505@1",
+                        trigger_type="schedule",
+                        status="success",
+                        started_at=datetime(2026, 8, 10, 10, 1),
                     ),
                 ]
             )
@@ -166,21 +176,46 @@ class MultiUserDataIsolationTests(unittest.TestCase):
     def _headers(user: User) -> dict[str, str]:
         return {"Authorization": f"Bearer {create_access_token(user)}"}
 
-    def test_schedule_jobs_and_runs_are_strictly_private_even_for_super_admin(self) -> None:
+    def test_personal_schedules_are_private_while_price_sync_is_shared(self) -> None:
         response_a = self.client.get("/api/schedule/jobs", headers=self._headers(self.user_a))
         self.assertEqual(response_a.status_code, 200)
-        self.assertEqual([item["job_key"] for item in response_a.json()], ["private-a"])
+        self.assertEqual(
+            [item["job_key"] for item in response_a.json()],
+            ["private-a", "position-price-sync-1505"],
+        )
+        self.assertTrue(response_a.json()[1]["is_shared"])
 
         response_b = self.client.get("/api/schedule/jobs", headers=self._headers(self.user_b))
         self.assertEqual(response_b.status_code, 200)
-        self.assertEqual([item["job_key"] for item in response_b.json()], ["private-b"])
+        self.assertEqual(
+            [item["job_key"] for item in response_b.json()],
+            ["private-b", "position-price-sync-1505"],
+        )
 
         response_admin = self.client.get("/api/schedule/jobs", headers=self._headers(self.admin))
         self.assertEqual(response_admin.status_code, 200)
-        self.assertEqual(response_admin.json(), [])
+        self.assertEqual(
+            [item["job_key"] for item in response_admin.json()],
+            ["position-price-sync-1505"],
+        )
 
         runs_a = self.client.get("/api/schedule/runs", headers=self._headers(self.user_a))
-        self.assertEqual([item["run_id"] for item in runs_a.json()], ["run-a"])
+        self.assertEqual(
+            {item["run_id"] for item in runs_a.json()},
+            {"run-a", "run-shared-price-sync"},
+        )
+        runs_b = self.client.get("/api/schedule/runs", headers=self._headers(self.user_b))
+        self.assertEqual(
+            {item["run_id"] for item in runs_b.json()},
+            {"run-b", "run-shared-price-sync"},
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/schedule/runs/run-shared-price-sync",
+                headers=self._headers(self.user_a),
+            ).status_code,
+            200,
+        )
         self.assertEqual(
             self.client.get("/api/schedule/runs/run-b", headers=self._headers(self.user_a)).status_code,
             404,
@@ -191,6 +226,11 @@ class MultiUserDataIsolationTests(unittest.TestCase):
             headers=self._headers(self.user_b),
         )
         self.assertEqual(foreign_toggle.status_code, 404)
+        shared_toggle = self.client.post(
+            "/api/schedule/jobs/position-price-sync-1505/toggle",
+            headers=self._headers(self.user_a),
+        )
+        self.assertEqual(shared_toggle.status_code, 404)
 
         cleared = self.client.delete("/api/schedule/runs", headers=self._headers(self.user_a))
         self.assertEqual(cleared.status_code, 200)
@@ -198,6 +238,9 @@ class MultiUserDataIsolationTests(unittest.TestCase):
         with self.SessionFactory() as db:
             self.assertIsNone(db.scalar(select(JobRun).where(JobRun.run_id == "run-a")))
             self.assertIsNotNone(db.scalar(select(JobRun).where(JobRun.run_id == "run-b")))
+            self.assertIsNotNone(
+                db.scalar(select(JobRun).where(JobRun.run_id == "run-shared-price-sync"))
+            )
 
     def test_created_user_starts_without_personal_data_and_can_create_own_task(self) -> None:
         with patch("backend.app.auth.user_api.log_event"):
@@ -236,7 +279,10 @@ class MultiUserDataIsolationTests(unittest.TestCase):
 
         empty_jobs = self.client.get("/api/schedule/jobs", headers=fresh_headers)
         self.assertEqual(empty_jobs.status_code, 200)
-        self.assertEqual(empty_jobs.json(), [])
+        self.assertEqual(
+            [item["job_key"] for item in empty_jobs.json()],
+            ["position-price-sync-1505"],
+        )
 
         created_job = self.client.post(
             "/api/schedule/jobs",

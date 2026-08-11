@@ -39,7 +39,7 @@ class DefaultJobOwnershipMigrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.engine.dispose()
 
-    def test_legacy_default_jobs_runs_and_reports_are_adopted_by_admin(self) -> None:
+    def test_legacy_personal_defaults_are_adopted_while_price_sync_stays_shared(self) -> None:
         with self.SessionFactory() as db:
             admin = User(
                 username="admin",
@@ -73,6 +73,13 @@ class DefaultJobOwnershipMigrationTests(unittest.TestCase):
                         schedule_type="daily",
                         owner_user_id=another_user.id,
                     ),
+                    ScheduledJob(
+                        job_key=rhythm_scheduler.POSITION_PRICE_SYNC_JOB_KEY,
+                        name="Previously admin-owned price sync",
+                        job_kind="position_price_sync",
+                        schedule_type="interval",
+                        owner_user_id=admin.id,
+                    ),
                     AgentReport(
                         owner_user_id=None,
                         report_id="legacy-default-report",
@@ -89,6 +96,15 @@ class DefaultJobOwnershipMigrationTests(unittest.TestCase):
                         status="success",
                         started_at=datetime(2026, 8, 10, 8, 15),
                         report_id="legacy-default-report",
+                    ),
+                    JobRun(
+                        run_id="previously-admin-owned-price-sync-run",
+                        job_key=rhythm_scheduler.POSITION_PRICE_SYNC_JOB_KEY,
+                        owner_user_id=admin.id,
+                        fire_key="position-price-sync-1505@legacy",
+                        trigger_type="schedule",
+                        status="success",
+                        started_at=datetime(2026, 8, 10, 15, 5),
                     ),
                 ]
             )
@@ -110,9 +126,28 @@ class DefaultJobOwnershipMigrationTests(unittest.TestCase):
             private_job = db.scalar(
                 select(ScheduledJob).where(ScheduledJob.job_key == "private-research-job")
             )
+            shared_job = db.scalar(
+                select(ScheduledJob).where(
+                    ScheduledJob.job_key == rhythm_scheduler.POSITION_PRICE_SYNC_JOB_KEY
+                )
+            )
+            shared_run = db.scalar(
+                select(JobRun).where(
+                    JobRun.run_id == "previously-admin-owned-price-sync-run"
+                )
+            )
 
             self.assertEqual(len(default_jobs), len(default_keys))
-            self.assertEqual({job.owner_user_id for job in default_jobs}, {admin.id})
+            self.assertEqual(
+                {
+                    job.owner_user_id
+                    for job in default_jobs
+                    if job.job_key != rhythm_scheduler.POSITION_PRICE_SYNC_JOB_KEY
+                },
+                {admin.id},
+            )
+            self.assertIsNone(shared_job.owner_user_id)
+            self.assertIsNone(shared_run.owner_user_id)
             self.assertEqual(legacy_run.owner_user_id, admin.id)
             self.assertEqual(legacy_report.owner_user_id, admin.id)
             self.assertEqual(private_job.owner_user_id, another_user.id)

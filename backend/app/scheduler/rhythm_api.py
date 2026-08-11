@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.auth.auth import AuthContext, require_permission
@@ -25,7 +25,14 @@ from backend.app.feishu.feishu import (
     validate_webhook_url,
 )
 from backend.app.core.models import AgentReport, DigitalHumanProfile, Heartbeat, JobRun, NotifyChannel, ScheduledJob, SystemLog
-from backend.app.scheduler.rhythm_scheduler import DH_TO_AGENT, HEARTBEAT_COMPONENT, dispatch_manual_run, is_trading_day, now_sh
+from backend.app.scheduler.rhythm_scheduler import (
+    DH_TO_AGENT,
+    HEARTBEAT_COMPONENT,
+    POSITION_PRICE_SYNC_JOB_KEY,
+    dispatch_manual_run,
+    is_trading_day,
+    now_sh,
+)
 from backend.app.core.settings import settings
 
 
@@ -274,6 +281,7 @@ def _job_out(job: ScheduledJob) -> dict:
         "prompt_template": job.prompt_template,
         "push_channel_key": job.push_channel_key,
         "owner_user_id": job.owner_user_id,
+        "is_shared": job.job_key == POSITION_PRICE_SYNC_JOB_KEY,
         "created_by_run_id": job.created_by_run_id,
         "created_via": job.created_via,
         "allow_code_execution": bool(job.allow_code_execution),
@@ -341,6 +349,20 @@ def _run_output_content(db: Session, run: JobRun) -> str | None:
     return run.output_preview
 
 
+def _visible_job_clause(user_id: int):
+    return or_(
+        ScheduledJob.owner_user_id == user_id,
+        ScheduledJob.job_key == POSITION_PRICE_SYNC_JOB_KEY,
+    )
+
+
+def _visible_run_clause(user_id: int):
+    return or_(
+        JobRun.owner_user_id == user_id,
+        JobRun.job_key == POSITION_PRICE_SYNC_JOB_KEY,
+    )
+
+
 def _owned_job(db: Session, *, user_id: int, job_key: str) -> ScheduledJob:
     job = db.scalar(
         select(ScheduledJob)
@@ -364,7 +386,7 @@ def schedule_jobs(
 ) -> list[dict]:
     rows = db.scalars(
         select(ScheduledJob)
-        .where(ScheduledJob.owner_user_id == context.user.id)
+        .where(_visible_job_clause(context.user.id))
         .order_by(ScheduledJob.sort_order, ScheduledJob.id)
     ).all()
     return [_job_out(row) for row in rows]
@@ -379,7 +401,7 @@ def schedule_jobs_paged(
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    filters = [ScheduledJob.owner_user_id == context.user.id]
+    filters = [_visible_job_clause(context.user.id)]
     if enabled is not None:
         filters.append(ScheduledJob.enabled.is_(enabled))
     if keyword and keyword.strip():
@@ -395,7 +417,7 @@ def schedule_jobs_paged(
     enabled_total = int(
         db.scalar(
             select(func.count()).select_from(ScheduledJob).where(
-                ScheduledJob.owner_user_id == context.user.id,
+                _visible_job_clause(context.user.id),
                 ScheduledJob.enabled.is_(True),
             )
         ) or 0
@@ -565,7 +587,7 @@ def schedule_runs(
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> list[dict]:
-    query = select(JobRun).where(JobRun.owner_user_id == context.user.id)
+    query = select(JobRun).where(_visible_run_clause(context.user.id))
     if job_key:
         query = query.where(JobRun.job_key == job_key)
     if status:
@@ -583,7 +605,7 @@ def schedule_runs_paged(
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
-    filters = [JobRun.owner_user_id == context.user.id]
+    filters = [_visible_run_clause(context.user.id)]
     if job_key:
         filters.append(JobRun.job_key == job_key)
     if status:
@@ -610,7 +632,7 @@ def schedule_runs_paged(
             db.execute(
                 select(ScheduledJob.job_key, ScheduledJob.name).where(
                     ScheduledJob.job_key.in_(job_keys),
-                    ScheduledJob.owner_user_id == context.user.id,
+                    _visible_job_clause(context.user.id),
                 )
             ).all()
         )
@@ -660,7 +682,7 @@ def schedule_run_detail(
     run = db.scalar(
         select(JobRun).where(
             JobRun.run_id == run_id,
-            JobRun.owner_user_id == context.user.id,
+            _visible_run_clause(context.user.id),
         ).limit(1)
     )
     if run is None:
@@ -682,7 +704,7 @@ def schedule_status(
     for status_value, total in db.execute(
         select(JobRun.status, func.count())
         .where(
-            JobRun.owner_user_id == context.user.id,
+            _visible_run_clause(context.user.id),
             JobRun.started_at >= today_start,
         )
         .group_by(JobRun.status)

@@ -603,6 +603,7 @@ export type ScheduleJob = {
   prompt_template: string | null
   push_channel_key: string | null
   owner_user_id: number | null
+  is_shared: boolean
   created_by_run_id: string | null
   created_via: string
   allow_code_execution: boolean
