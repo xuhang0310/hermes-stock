@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.auth.auth import AuthContext
-from backend.app.core.models import Base, JobRun, NotifyChannel, ScheduledJob, User
+from backend.app.core.models import AgentReport, Base, JobRun, NotifyChannel, ScheduledJob, User
 from backend.app.feishu.feishu import (
     BUILTIN_CHANNEL_KEYS,
     SCHEDULE_CHANNEL_KEY,
@@ -28,6 +28,94 @@ from backend.app.scheduler.rhythm_api import (
     schedule_runs_paged,
 )
 from backend.app.seed.seed import seed_notify_channels
+
+
+class DefaultJobOwnershipMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.SessionFactory = sessionmaker(bind=self.engine)
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+    def test_legacy_default_jobs_runs_and_reports_are_adopted_by_admin(self) -> None:
+        with self.SessionFactory() as db:
+            admin = User(
+                username="admin",
+                display_name="System Admin",
+                role="super_admin",
+                permission_scope="",
+                password_hash="test",
+            )
+            another_user = User(
+                username="researcher",
+                display_name="Researcher",
+                role="researcher",
+                permission_scope="",
+                password_hash="test",
+            )
+            db.add_all([admin, another_user])
+            db.flush()
+            db.add_all(
+                [
+                    ScheduledJob(
+                        job_key="health-check-0815",
+                        name="Legacy system health check",
+                        job_kind="health_check",
+                        schedule_type="daily",
+                        owner_user_id=None,
+                    ),
+                    ScheduledJob(
+                        job_key="private-research-job",
+                        name="Private research job",
+                        job_kind="agent_report",
+                        schedule_type="daily",
+                        owner_user_id=another_user.id,
+                    ),
+                    AgentReport(
+                        owner_user_id=None,
+                        report_id="legacy-default-report",
+                        agent_name="pm",
+                        title="Legacy report",
+                        content="Legacy report content",
+                    ),
+                    JobRun(
+                        run_id="legacy-default-run",
+                        job_key="health-check-0815",
+                        owner_user_id=None,
+                        fire_key="health-check-0815@legacy",
+                        trigger_type="schedule",
+                        status="success",
+                        started_at=datetime(2026, 8, 10, 8, 15),
+                        report_id="legacy-default-report",
+                    ),
+                ]
+            )
+            db.commit()
+
+            rhythm_scheduler.ensure_default_jobs(db)
+            db.commit()
+
+            default_keys = [item["job_key"] for item in rhythm_scheduler.DEFAULT_JOBS]
+            default_jobs = db.scalars(
+                select(ScheduledJob).where(ScheduledJob.job_key.in_(default_keys))
+            ).all()
+            legacy_run = db.scalar(
+                select(JobRun).where(JobRun.run_id == "legacy-default-run")
+            )
+            legacy_report = db.scalar(
+                select(AgentReport).where(AgentReport.report_id == "legacy-default-report")
+            )
+            private_job = db.scalar(
+                select(ScheduledJob).where(ScheduledJob.job_key == "private-research-job")
+            )
+
+            self.assertEqual(len(default_jobs), len(default_keys))
+            self.assertEqual({job.owner_user_id for job in default_jobs}, {admin.id})
+            self.assertEqual(legacy_run.owner_user_id, admin.id)
+            self.assertEqual(legacy_report.owner_user_id, admin.id)
+            self.assertEqual(private_job.owner_user_id, another_user.id)
 
 
 class FeishuCardTests(unittest.TestCase):

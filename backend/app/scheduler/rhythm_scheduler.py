@@ -19,7 +19,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.database import SessionLocal
@@ -1305,12 +1305,73 @@ DEFAULT_JOBS = [
 _JOB_SORT = {item["job_key"]: index * 10 for index, item in enumerate(DEFAULT_JOBS)}
 
 
+def _default_jobs_owner_id(session) -> int | None:
+    """Return the enabled super admin that owns built-in scheduled jobs."""
+    owner_id = session.scalar(
+        select(User.id)
+        .where(
+            User.username == "admin",
+            User.role == "super_admin",
+            User.is_enabled.is_(True),
+        )
+        .limit(1)
+    )
+    if owner_id is not None:
+        return int(owner_id)
+    owner_id = session.scalar(
+        select(User.id)
+        .where(
+            User.role == "super_admin",
+            User.is_enabled.is_(True),
+        )
+        .order_by(User.id)
+        .limit(1)
+    )
+    return int(owner_id) if owner_id is not None else None
+
+
+def _adopt_legacy_default_job_history(session, *, owner_user_id: int) -> None:
+    """Migrate ownerless history created before per-user schedule isolation."""
+    default_keys = [item["job_key"] for item in DEFAULT_JOBS]
+    report_ids = {
+        report_id
+        for report_id in session.scalars(
+            select(JobRun.report_id).where(
+                JobRun.job_key.in_(default_keys),
+                JobRun.owner_user_id.is_(None),
+                JobRun.report_id.is_not(None),
+            )
+        ).all()
+        if report_id
+    }
+    if report_ids:
+        session.execute(
+            update(AgentReport)
+            .where(
+                AgentReport.report_id.in_(report_ids),
+                AgentReport.owner_user_id.is_(None),
+            )
+            .values(owner_user_id=owner_user_id)
+        )
+    session.execute(
+        update(JobRun)
+        .where(
+            JobRun.job_key.in_(default_keys),
+            JobRun.owner_user_id.is_(None),
+        )
+        .values(owner_user_id=owner_user_id)
+    )
+
+
 def ensure_default_jobs(session) -> int:
     """补齐内置任务；仅基础设施型价格同步任务会随版本迁移调度配置。"""
     created = 0
+    owner_user_id = _default_jobs_owner_id(session)
     for item in DEFAULT_JOBS:
         existing = session.scalar(select(ScheduledJob).where(ScheduledJob.job_key == item["job_key"]).limit(1))
         if existing is not None:
+            if existing.owner_user_id is None and owner_user_id is not None:
+                existing.owner_user_id = owner_user_id
             if existing.job_kind == "position_price_sync":
                 # 系统内置行情任务属于基础设施配置；版本升级时迁移为分钟同步。
                 existing.name = item["name"]
@@ -1341,12 +1402,15 @@ def ensure_default_jobs(session) -> int:
                 agent_name=DH_TO_AGENT.get(item.get("digital_human_code") or ""),
                 prompt_template=item.get("prompt_template"),
                 push_channel_key=item.get("push_channel_key"),
+                owner_user_id=owner_user_id,
                 enabled=item.get("enabled", False),
                 sort_order=_JOB_SORT[item["job_key"]],
             )
         )
         created += 1
-    if created:
+    if owner_user_id is not None:
+        _adopt_legacy_default_job_history(session, owner_user_id=owner_user_id)
+    if created or owner_user_id is not None:
         session.flush()
     return created
 
