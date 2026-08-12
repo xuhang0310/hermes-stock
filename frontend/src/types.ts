@@ -1639,3 +1639,15 @@ export type OpsChatSessionDetail = {
   chat_mode: string
   messages: OpsChatMessage[]
 }
+
+export type OpsLoginLog = {
+  id: number
+  username: string
+  user_id: number | null
+  role: string | null
+  success: boolean
+  reason: string | null
+  ip: string | null
+  user_agent: string | null
+  created_at: string | null
+}

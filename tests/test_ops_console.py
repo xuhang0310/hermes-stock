@@ -14,6 +14,7 @@ from backend.app.core.models import (
     AiChatMessage,
     AiChatSession,
     Instrument,
+    LoginLog,
     Position,
     User,
     WatchlistGroup,
@@ -130,6 +131,24 @@ class OpsConsoleTests(unittest.TestCase):
                 AiChatMessage(session_id=plain_session.id, role="assistant", content="这是分析结果"),
                 AiChatMessage(session_id=plain_session.id, role="tool", content="应被过滤"),
             ])
+            db.add_all([
+                LoginLog(
+                    username="zhangsan",
+                    user_id=self.ops_user.id,
+                    role="researcher",
+                    success=True,
+                    ip="127.0.0.1",
+                    user_agent="Mozilla/5.0",
+                ),
+                LoginLog(
+                    username="hacker",
+                    user_id=None,
+                    success=False,
+                    reason="bad_credentials",
+                    ip="1.2.3.4",
+                    user_agent="curl/8",
+                ),
+            ])
             db.commit()
             self.ops_session_id = ops_session.id
             self.plain_session_id = plain_session.id
@@ -235,6 +254,25 @@ class OpsConsoleTests(unittest.TestCase):
         headers = self._headers(self.ops_user)
         resp = self.client.get("/api/ops-console/chat-sessions/99999", headers=headers)
         self.assertEqual(resp.status_code, 404)
+
+    def test_login_logs_visible_to_ops_and_blocked_for_plain(self) -> None:
+        headers = self._headers(self.ops_user)
+        resp = self.client.get("/api/ops-console/login-logs", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()["data"]
+        self.assertEqual(len(rows), 2)
+        # 最近一条在前（created_at desc）；两条用不同用户名
+        usernames = {r["username"] for r in rows}
+        self.assertEqual(usernames, {"zhangsan", "hacker"})
+        failed = [r for r in rows if not r["success"]]
+        self.assertEqual(failed[0]["reason"], "bad_credentials")
+        self.assertIsNone(failed[0]["user_id"])
+
+        # 普通研究员 403
+        plain_resp = self.client.get(
+            "/api/ops-console/login-logs", headers=self._headers(self.plain_user)
+        )
+        self.assertEqual(plain_resp.status_code, 403)
 
     def test_super_admin_bypasses(self) -> None:
         headers = self._headers(self.admin)

@@ -87,6 +87,7 @@ import type {
   OpsConsoleWatchlistItem,
   OpsChatSessionListItem,
   OpsChatSessionDetail,
+  OpsLoginLog,
 } from './types'
 import { readSseStream } from './utils/sse'
 
@@ -1089,4 +1090,13 @@ export const api = {
     request<ApiEnvelope<OpsChatSessionDetail>>(
       `/api/ops-console/chat-sessions/${sessionId}`
     ).then((res) => res.data),
+  opsConsoleLoginLogs: (params: { username?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.username) query.set('username', params.username)
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<OpsLoginLog[]>>(
+      `/api/ops-console/login-logs${suffix}`
+    ).then((res) => res.data)
+  },
 }

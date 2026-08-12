@@ -22,6 +22,8 @@ from backend.app.auth.auth import (
 )
 from backend.app.core.applog import log_event
 from backend.app.core.database import get_db
+from backend.app.core.models import LoginLog
+from backend.app.core.request_context import get_trace_id
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -45,12 +47,40 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _record_login(
+    db: Session,
+    *,
+    username: str,
+    user,
+    success: bool,
+    reason: str | None,
+    request: Request,
+) -> None:
+    """落一条登录审计到 login_logs（只增；失败也记，user_id 可空）。"""
+    db.add(
+        LoginLog(
+            username=username[:80],
+            user_id=user.id if user is not None else None,
+            role=user.role if user is not None else None,
+            success=success,
+            reason=reason,
+            ip=_client_ip(request),
+            user_agent=(request.headers.get("user-agent") or "")[:255] or None,
+            trace_id=get_trace_id(),
+        )
+    )
+    db.commit()
+
+
 @router.post("/login")
 def login(payload: LoginIn, request: Request, db: Annotated[Session, Depends(get_db)]) -> dict:
     username = payload.username.strip()
     client_ip = _client_ip(request)
     retry_after = login_retry_after(username=username, client_ip=client_ip)
     if retry_after:
+        _record_login(
+            db, username=username, user=None, success=False, reason="rate_limited", request=request
+        )
         raise HTTPException(
             status_code=429,
             detail=f"登录失败次数过多，请在 {retry_after} 秒后重试",
@@ -60,10 +90,16 @@ def login(payload: LoginIn, request: Request, db: Annotated[Session, Depends(get
     if user is None:
         record_login_failure(username=username, client_ip=client_ip)
         log_event("auth", "WARNING", "登录失败", username=username)
+        _record_login(
+            db, username=username, user=None, success=False, reason="bad_credentials", request=request
+        )
         raise HTTPException(status_code=401, detail="账号或密码错误，或账号未启用")
     clear_login_failures(username=username)
     context = AuthContext(user=user, permissions=permissions_for(user))
     log_event("auth", "INFO", "登录成功", username=username, role=user.role)
+    _record_login(
+        db, username=username, user=user, success=True, reason=None, request=request
+    )
     expires_in = access_token_ttl_seconds(remember_me=payload.remember_me)
     return {
         "access_token": create_access_token(user, remember_me=payload.remember_me),

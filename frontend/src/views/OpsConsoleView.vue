@@ -137,6 +137,35 @@
         </div>
       </div>
     </section>
+
+    <!-- 登录日志 -->
+    <section v-else-if="activeTab === 'loginLogs'">
+      <div v-if="!loginLogs.length" class="ops-empty">暂无登录记录</div>
+      <table v-else class="ops-table">
+        <thead>
+          <tr>
+            <th>用户名</th>
+            <th>结果</th>
+            <th>原因</th>
+            <th>角色</th>
+            <th>IP</th>
+            <th>时间</th>
+            <th>终端</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in loginLogs" :key="row.id">
+            <td>{{ row.username }}</td>
+            <td :class="row.success ? 'pnl-up' : 'pnl-down'">{{ row.success ? '成功' : '失败' }}</td>
+            <td>{{ reasonLabel(row.reason) }}</td>
+            <td>{{ row.role || '—' }}</td>
+            <td>{{ row.ip || '—' }}</td>
+            <td>{{ row.created_at || '—' }}</td>
+            <td class="muted ua-cell">{{ row.user_agent || '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
   </div>
 </template>
 
@@ -150,12 +179,14 @@ import type {
   OpsConsoleWatchlistItem,
   OpsChatSessionListItem,
   OpsChatSessionDetail,
+  OpsLoginLog,
 } from '../types'
 
 const tabs = [
   { key: 'positions', label: '全部持仓' },
   { key: 'watchlist', label: '全部自选' },
   { key: 'chat', label: '聊天记录' },
+  { key: 'loginLogs', label: '登录日志' },
 ] as const
 
 const users = ref<OpsConsoleUser[]>([])
@@ -165,6 +196,7 @@ const activeTab = ref<(typeof tabs)[number]['key']>('positions')
 const positions = ref<OpsConsolePosition[]>([])
 const watchlist = ref<OpsConsoleWatchlistItem[]>([])
 const sessions = ref<OpsChatSessionListItem[]>([])
+const loginLogs = ref<OpsLoginLog[]>([])
 
 const loading = ref(false)
 const error = ref('')
@@ -189,6 +221,8 @@ async function loadTabData() {
       positions.value = await api.opsConsolePositions(selectedUserId.value || undefined)
     } else if (activeTab.value === 'watchlist') {
       watchlist.value = await api.opsConsoleWatchlist(selectedUserId.value || undefined)
+    } else if (activeTab.value === 'loginLogs') {
+      loginLogs.value = await api.opsConsoleLoginLogs()
     } else {
       sessions.value = await api.opsConsoleChatSessions({ userId: selectedUserId.value || undefined })
       sessionDetail.value = null
@@ -246,6 +280,15 @@ function fmtPnl(v: number | null | undefined, pct: number | null | undefined) {
   const sign = Number(v) >= 0 ? '+' : ''
   const pctTxt = pct !== null && pct !== undefined ? ` (${fmtPct(pct)})` : ''
   return `${sign}${Number(v).toFixed(2)}${pctTxt}`
+}
+
+function reasonLabel(reason: string | null): string {
+  if (!reason) return '—'
+  const map: Record<string, string> = {
+    bad_credentials: '账号或密码错误',
+    rate_limited: '失败过多限流',
+  }
+  return map[reason] || reason
 }
 
 onMounted(async () => {
@@ -395,6 +438,12 @@ watch(activeTab, () => {
   max-width: 280px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.ua-cell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 聊天双栏 */

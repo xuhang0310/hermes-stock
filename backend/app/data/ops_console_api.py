@@ -21,6 +21,7 @@ from backend.app.core.models import (
     AiChatMessage,
     AiChatSession,
     DigitalHumanProfile,
+    LoginLog,
     User,
 )
 from backend.app.core.response import ok
@@ -184,3 +185,35 @@ def ops_console_chat_session_detail(
         "chat_mode": session.chat_mode,
         "messages": message_payload,
     })
+
+
+@router.get("/api/ops-console/login-logs")
+def ops_console_login_logs(
+    username: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _context: AuthContext = Depends(require_permission("ops_console:view")),
+) -> dict:
+    """跨用户登录审计：成功/失败/限流均记录。"""
+    stmt = (
+        select(LoginLog)
+        .order_by(LoginLog.created_at.desc())
+        .limit(limit)
+    )
+    if username:
+        stmt = stmt.where(LoginLog.username == username)
+    logs = db.scalars(stmt).all()
+    return ok([
+        {
+            "id": row.id,
+            "username": row.username,
+            "user_id": row.user_id,
+            "role": row.role,
+            "success": row.success,
+            "reason": row.reason,
+            "ip": row.ip,
+            "user_agent": row.user_agent,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in logs
+    ])

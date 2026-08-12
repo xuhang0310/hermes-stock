@@ -1641,6 +1641,28 @@ class OperationLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class LoginLog(Base):
+    """登录审计：谁在何时从哪个 IP 登录成功/失败。
+
+    只增表、user_id 不做外键（与用户生命周期解耦，删用户不牵连历史登录审计）。
+    失败登录（用户名不存在/密码错/限流）也记录，username 保留输入值，user_id 可空。
+    """
+
+    __tablename__ = "login_logs"
+    __table_args__ = (Index("ix_login_logs_created", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    role: Mapped[str | None] = mapped_column(String(40))
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    reason: Mapped[str | None] = mapped_column(String(40))  # bad_credentials/disabled/rate_limited
+    ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(255))
+    trace_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class InboxNotification(Base):
     """站内通知（用户收件箱）：系统/智能体/报告等事件推送给指定用户，按用户隔离可见。
 
