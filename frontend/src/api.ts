@@ -82,6 +82,11 @@ import type {
   AgentTaskEvent,
   AgentBoardAgent,
   TaskBatch,
+  OpsConsoleUser,
+  OpsConsolePosition,
+  OpsConsoleWatchlistItem,
+  OpsChatSessionListItem,
+  OpsChatSessionDetail,
 } from './types'
 import { readSseStream } from './utils/sse'
 
@@ -1053,4 +1058,35 @@ export const api = {
     request<TaskBatch>(`/api/agent-board/batches/${encodeURIComponent(batchId)}`),
   agentBoardAgents: () =>
     request<{ agents: AgentBoardAgent[] }>('/api/agent-board/agents'),
+  opsConsoleUsers: () =>
+    request<ApiEnvelope<OpsConsoleUser[]>>('/api/ops-console/users').then((res) => res.data),
+  opsConsolePositions: (userId?: number) => {
+    const query = new URLSearchParams()
+    if (userId) query.set('user_id', String(userId))
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<OpsConsolePosition[]>>(
+      `/api/ops-console/positions${suffix}`
+    ).then((res) => res.data)
+  },
+  opsConsoleWatchlist: (userId?: number) => {
+    const query = new URLSearchParams()
+    if (userId) query.set('user_id', String(userId))
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<OpsConsoleWatchlistItem[]>>(
+      `/api/ops-console/watchlist${suffix}`
+    ).then((res) => res.data)
+  },
+  opsConsoleChatSessions: (params: { userId?: number; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.userId) query.set('user_id', String(params.userId))
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<OpsChatSessionListItem[]>>(
+      `/api/ops-console/chat-sessions${suffix}`
+    ).then((res) => res.data)
+  },
+  opsConsoleChatSession: (sessionId: number) =>
+    request<ApiEnvelope<OpsChatSessionDetail>>(
+      `/api/ops-console/chat-sessions/${sessionId}`
+    ).then((res) => res.data),
 }

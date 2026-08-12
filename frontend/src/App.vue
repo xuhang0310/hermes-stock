@@ -19,6 +19,7 @@ import BacktestReportView from './views/BacktestReportView.vue'
 import BacktestHistoryView from './views/BacktestHistoryView.vue'
 import FactorAnalysisView from './views/FactorAnalysisView.vue'
 import ScreenerView from './views/ScreenerView.vue'
+import OpsConsoleView from './views/OpsConsoleView.vue'
 import AgentTaskBoardView from './views/AgentTaskBoardView.vue'
 import { renderMarkdown } from './utils/markdown'
 import type {
@@ -54,6 +55,7 @@ type PageKey =
   | 'backtestReport'
   | 'factorAnalysis'
   | 'screener'
+  | 'opsConsole'
   | 'settings'
 
 type PositionAgentChat = {
@@ -83,6 +85,20 @@ const error = ref('')
 const currentUser = ref<UserPayload | null>(null)
 const canViewSettings = computed(
   () => ['admin', 'super_admin'].includes(currentUser.value?.role || '')
+)
+const canViewOps = computed(
+  () =>
+    !!currentUser.value &&
+    (currentUser.value.permissions.includes('all') ||
+      currentUser.value.permissions.includes('ops_console:view'))
+)
+watch(
+  () => [currentUser.value, activePage.value] as const,
+  () => {
+    if (activePage.value === 'opsConsole' && currentUser.value && !canViewOps.value) {
+      activePage.value = 'workbench'
+    }
+  }
 )
 
 const health = ref<HealthPayload | null>(null)
@@ -250,6 +266,7 @@ const pageTitle = computed(() => {
     backtestReport: '策略回测报告',
     factorAnalysis: '因子评估',
     screener: 'AI 选股',
+    opsConsole: '运维控制台',
     settings: '设置'
   }
   return labels[activePage.value]
@@ -995,14 +1012,24 @@ function navigate(page: PageKey) {
   if (page === 'askStock') askStockInitialQuestion.value = ''
   if (page === 'workbench') void refreshDashboard()
   if (page === 'watchlist') void refreshWatchlist()
-  if (page !== 'backtestReport' && window.location.pathname.startsWith('/backtests/')) {
+  if (
+    page !== 'backtestReport' &&
+    page !== 'opsConsole' &&
+    (window.location.pathname.startsWith('/backtests/') ||
+      /^\/oc-console-/i.test(window.location.pathname))
+  ) {
     window.history.pushState({}, '', '/')
   }
   activePage.value = page
 }
 
 function syncPageFromLocation() {
-  const match = window.location.pathname.match(/^\/backtests\/([a-zA-Z0-9_-]{8,64})\/?$/)
+  const pathname = window.location.pathname
+  if (/^\/oc-console-[0-9a-f]+\/?$/i.test(pathname)) {
+    activePage.value = 'opsConsole'
+    return
+  }
+  const match = pathname.match(/^\/backtests\/([a-zA-Z0-9_-]{8,64})\/?$/)
   if (match) {
     backtestRunId.value = match[1]
     activePage.value = 'backtestReport'
@@ -1201,6 +1228,8 @@ onBeforeUnmount(() => {
       <WorkspaceDocsView v-else-if="activePage === 'workspaceDocs'" />
 
       <SkillSquareView v-else-if="activePage === 'skillSquare'" />
+
+      <OpsConsoleView v-else-if="activePage === 'opsConsole' && canViewOps" />
 
       <AgentTaskBoardView
         v-else-if="activePage === 'agentTaskBoard'"

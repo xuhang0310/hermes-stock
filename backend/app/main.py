@@ -30,6 +30,7 @@ from backend.app.core.startup_validator import validate_startup
 from backend.app.data.dashboard_api import router as dashboard_router
 from backend.app.data.deps import get_repo
 from backend.app.data.logs_api import router as logs_router
+from backend.app.data.ops_console_api import router as ops_console_router
 from backend.app.data.positions_api import router as positions_router
 from backend.app.data.report_api import router as report_router
 from backend.app.data.repository import StockRepository
@@ -167,6 +168,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(dashboard_router)
     app.include_router(report_router)
     app.include_router(logs_router)
+    app.include_router(ops_console_router)
     app.include_router(tushare_router)
     app.include_router(seed_router)
     app.include_router(notification_router)

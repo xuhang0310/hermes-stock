@@ -1590,3 +1590,52 @@ export type ScreenerSavedStrategy = {
   created_at: string | null
   updated_at: string | null
 }
+
+// 运营后台（oc-console）只读视图类型
+export type OpsConsoleUser = {
+  id: number
+  username: string
+  display_name: string
+}
+
+export type OpsConsolePosition = PositionItem & {
+  owner_user_id: number
+  owner_username: string
+  owner_display_name: string
+}
+
+export type OpsConsoleWatchlistItem = WatchlistItem & {
+  owner_user_id: number
+  owner_username: string
+  owner_display_name: string
+}
+
+export type OpsChatSessionListItem = {
+  id: number
+  title: string
+  chat_mode: string
+  source_type: string
+  user_id: number
+  username: string
+  digital_human_name: string | null
+  message_count: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type OpsChatMessage = {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  error: string | null
+  created_at: string | null
+}
+
+export type OpsChatSessionDetail = {
+  id: number
+  title: string
+  username: string
+  digital_human_name: string | null
+  chat_mode: string
+  messages: OpsChatMessage[]
+}
