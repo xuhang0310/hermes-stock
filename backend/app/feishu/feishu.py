@@ -393,22 +393,17 @@ def _split_table_dense_chunk(text: str, max_tables: int) -> list[str]:
     return parts or [text]
 
 
-def _paginate_markdown(
-    text: str,
-    *,
-    has_metadata_table: bool,
-) -> list[list[str]]:
+def _paginate_markdown(text: str) -> list[list[str]]:
     """Paginate by characters, component count and Feishu's five-table limit."""
-    content_table_limit = FEISHU_MAX_TABLES_PER_CARD - (1 if has_metadata_table else 0)
     chunks = [
         part
         for chunk in split_markdown_content(text)
-        for part in _split_table_dense_chunk(chunk, content_table_limit)
+        for part in _split_table_dense_chunk(chunk, FEISHU_MAX_TABLES_PER_CARD)
     ]
 
     pages: list[list[str]] = []
     current: list[str] = []
-    current_tables = 1 if has_metadata_table else 0
+    current_tables = 0
 
     for chunk in chunks:
         chunk_tables = _count_markdown_tables(chunk)
@@ -450,13 +445,8 @@ def _metadata_markdown(metadata: list[tuple[str, str]] | None) -> str:
     ]
     if not items:
         return ""
-    rows = ["| 项目 | 内容 | 项目 | 内容 |", "| --- | --- | --- | --- |"]
-    for index in range(0, len(items), 2):
-        left = items[index]
-        right = items[index + 1] if index + 1 < len(items) else ("", "")
-        escaped = [value.replace("|", "&#124;") for value in (*left, *right)]
-        rows.append("| " + " | ".join(escaped) + " |")
-    return "\n".join(rows)
+    # 横向多列表格在飞书移动端会被裁剪右侧列，与正文表格同款纵向信息块
+    return _format_table_for_mobile(["项目", "内容"], [list(item) for item in items])
 
 
 def _card_payload(
@@ -535,7 +525,7 @@ def _build_payloads(
     template: str | None = None,
 ) -> list[dict]:
     text = content.strip() or "本次任务未返回正文。"
-    pages = _paginate_markdown(text, has_metadata_table=bool(metadata))
+    pages = _paginate_markdown(text)
     payloads: list[dict] = []
     page_count = len(pages)
     element_index = 0

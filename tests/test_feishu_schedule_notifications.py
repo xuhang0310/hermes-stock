@@ -185,7 +185,8 @@ class FeishuCardTests(unittest.TestCase):
             [element["tag"] for element in elements],
             ["markdown", "hr", "markdown", "hr", "markdown"],
         )
-        self.assertIn("| 项目 | 内容 |", elements[0]["content"])
+        self.assertIn("**任务**\n盘前简报", elements[0]["content"])
+        self.assertIn("**数字人**\n情报官", elements[0]["content"])
         self.assertIn("核心结论", elements[2]["content"])
         self.assertEqual(elements[-1]["content"], "SixRabbits Stock | 自动任务")
 
