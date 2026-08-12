@@ -260,91 +260,135 @@ watch(activeTab, () => {
 
 <style scoped>
 .ops-console {
-  padding: 20px 28px;
-  max-width: 1400px;
+  width: min(1480px, 100%);
   margin: 0 auto;
+  padding: 22px 24px 42px;
 }
+
 .ops-header {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   flex-wrap: wrap;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 .ops-header h2 {
   margin: 0;
-  font-size: 20px;
+  color: var(--gold-2);
+  font-size: 19px;
+  font-weight: 700;
 }
 .ops-readonly-badge {
-  font-size: 12px;
-  color: #8a6d3b;
-  background: #fcf8e3;
-  border: 1px solid #faebcc;
-  border-radius: 4px;
-  padding: 2px 8px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: #d8b35f;
+  background: rgba(216, 179, 95, 0.1);
+  border: 1px solid rgba(216, 179, 95, 0.3);
+  border-radius: 999px;
+  padding: 3px 10px;
 }
 .ops-filter {
   margin-left: auto;
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  color: var(--muted);
+  font-size: 12px;
 }
 .ops-filter select {
-  padding: 4px 8px;
-  border: 1px solid #d0d0d0;
-  border-radius: 4px;
-  background: #fff;
+  min-width: 180px;
+  height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #09090a;
+  color: var(--text);
+  padding: 0 10px;
+  font: inherit;
 }
+.ops-filter select:focus {
+  border-color: var(--gold);
+  outline: none;
+}
+
 .ops-tabs {
   display: flex;
-  gap: 4px;
-  border-bottom: 1px solid #e0e0e0;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
   margin-bottom: 16px;
 }
 .ops-tab {
-  background: none;
-  border: none;
-  padding: 8px 18px;
-  cursor: pointer;
-  font-size: 14px;
-  color: #666;
-  border-bottom: 2px solid transparent;
+  min-height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #0b0b0c;
+  color: var(--muted);
+  padding: 7px 16px;
+  font-size: 13px;
+}
+.ops-tab:hover {
+  border-color: var(--gold-dim);
+  color: var(--gold-2);
 }
 .ops-tab.active {
-  color: #1a1a1a;
-  border-bottom-color: #1890ff;
-  font-weight: 600;
+  border-color: var(--gold-dim);
+  background: rgba(213, 180, 106, 0.14);
+  color: var(--gold-2);
+  font-weight: 700;
 }
+
 .ops-empty {
-  padding: 32px;
+  padding: 40px;
   text-align: center;
-  color: #999;
+  color: var(--muted);
+  font-size: 13px;
 }
 .ops-error {
-  color: #d4493b;
+  color: var(--danger);
 }
+
+/* 表格沿用全局 dark 主题（th 金色、td 浅米色、hover 金光），只补结构 */
 .ops-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 .ops-table th,
 .ops-table td {
-  border: 1px solid #eee;
-  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
   text-align: left;
   vertical-align: top;
+  line-height: 1.45;
 }
 .ops-table th {
-  background: #fafafa;
-  font-weight: 600;
+  background: #141414;
+  color: var(--gold-2);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
-.ops-table tr:nth-child(even) td {
-  background: #fcfcfd;
+.ops-table td {
+  color: #e3dfd2;
+  font-size: 13px;
+}
+.ops-table tbody tr:hover td {
+  background: rgba(213, 180, 106, 0.055);
+}
+/* 红涨绿跌：td 自带 color，需更高特异性覆盖全局 */
+.ops-table td.pnl-up {
+  color: var(--danger);
+  font-weight: 700;
+}
+.ops-table td.pnl-down {
+  color: var(--ok);
+  font-weight: 700;
+}
+.ops-table .num {
+  white-space: nowrap;
 }
 .muted {
-  color: #999;
+  color: var(--muted);
   font-size: 12px;
 }
 .reason-cell {
@@ -352,85 +396,110 @@ watch(activeTab, () => {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* 聊天双栏 */
 .ops-chat {
-  display: flex;
-  gap: 12px;
-  height: calc(100vh - 240px);
-  min-height: 360px;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 14px;
+  height: calc(100vh - 260px);
+  min-height: 420px;
 }
 .ops-chat-list {
-  width: 320px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
   overflow-y: auto;
-  border: 1px solid #eee;
-  border-radius: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #0a0a0b;
 }
 .ops-chat-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid rgba(213, 180, 106, 0.2);
+  border-radius: 6px;
+  background: rgba(12, 12, 13, 0.72);
   padding: 10px 12px;
-  border-bottom: 1px solid #f0f0f0;
   cursor: pointer;
 }
 .ops-chat-item:hover {
-  background: #f7f9fc;
+  border-color: rgba(213, 180, 106, 0.56);
+  background: rgba(213, 180, 106, 0.08);
 }
 .ops-chat-item.active {
-  background: #e6f7ff;
+  border-color: var(--gold-2);
+  background: linear-gradient(90deg, rgba(213, 180, 106, 0.24), rgba(213, 180, 106, 0.08)), #111113;
+  box-shadow: inset 3px 0 0 var(--gold-2);
 }
 .session-title {
-  font-weight: 600;
-  font-size: 13px;
-  margin-bottom: 4px;
   overflow: hidden;
+  color: #f2ead2;
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .session-meta {
-  font-size: 12px;
-  color: #555;
   display: flex;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 6px;
+  color: #cfc7b6;
+  font-size: 12px;
 }
 .session-time {
-  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
 }
+
 .ops-chat-detail {
-  flex: 1;
-  border: 1px solid #eee;
-  border-radius: 6px;
+  min-width: 0;
   overflow-y: auto;
-  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #080809;
+  padding: 16px 18px;
 }
 .session-detail-head {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #f0f0f0;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.session-detail-head strong {
+  color: var(--gold-2);
+  font-size: 15px;
 }
 .msg-stream {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+  display: grid;
+  gap: 12px;
 }
 .msg-row {
-  border-left: 3px solid #ddd;
-  padding: 6px 12px;
+  border-left: 3px solid var(--line-strong);
+  border-radius: 0 6px 6px 0;
+  background: rgba(12, 12, 13, 0.6);
+  padding: 10px 14px;
 }
 .msg-user {
-  border-left-color: #1890ff;
+  border-left-color: var(--gold);
+  background: rgba(213, 180, 106, 0.06);
 }
 .msg-assistant {
-  border-left-color: #52c41a;
+  border-left-color: rgba(213, 180, 106, 0.3);
 }
 .msg-role {
+  margin-bottom: 5px;
+  color: var(--gold-2);
   font-size: 12px;
-  color: #888;
-  margin-bottom: 4px;
+  font-weight: 700;
 }
 .msg-error {
-  color: #d4493b;
+  margin-top: 5px;
+  color: var(--danger);
   font-size: 12px;
-  margin-top: 4px;
 }
 </style>
