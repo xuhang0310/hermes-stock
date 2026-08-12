@@ -366,9 +366,13 @@ class SeedAiConfigsRerunTests(unittest.TestCase):
         with self.SessionFactory() as db:
             platform = db.scalar(select(LlmModelPlatform).where(LlmModelPlatform.name == "百炼"))
             platform.api_key = "sk-ui-edited"
-            db.scalar(
+            platform.base_url = "https://ui-edited.invalid/v1"
+            default = db.scalar(
                 select(LlmModelConfig).where(LlmModelConfig.display_name == "百炼 Qwen3.7 Plus")
-            ).is_active = False
+            )
+            default.is_active = False
+            default.model_name = "qwen3.7-plus"
+            default.max_steps = 18
             db.scalar(
                 select(LlmModelConfig).where(LlmModelConfig.display_name == "百炼 Qwen3.7 Max")
             ).is_active = True
@@ -381,6 +385,12 @@ class SeedAiConfigsRerunTests(unittest.TestCase):
         with self.SessionFactory() as db:
             platform = db.scalar(select(LlmModelPlatform).where(LlmModelPlatform.name == "百炼"))
             self.assertEqual(platform.api_key, "sk-ui-edited")
+            self.assertEqual(platform.base_url, "https://ui-edited.invalid/v1")
+            default = db.scalar(
+                select(LlmModelConfig).where(LlmModelConfig.display_name == "百炼 Qwen3.7 Plus")
+            )
+            self.assertEqual(default.model_name, "qwen3.7-plus")
+            self.assertEqual(default.max_steps, 18)
             active = db.scalars(
                 select(LlmModelConfig).where(LlmModelConfig.is_active.is_(True))
             ).all()

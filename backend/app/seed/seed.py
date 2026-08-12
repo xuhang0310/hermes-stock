@@ -74,6 +74,16 @@ def _upsert(db: Session, model: type, lookup: dict, defaults: dict):
     return instance
 
 
+def _ensure(db: Session, model: type, lookup: dict, defaults: dict):
+    """仅在不缺失时创建：重跑 seed 不覆盖配置页已保存的字段。"""
+    instance = db.scalar(select(model).filter_by(**lookup).limit(1))
+    if instance is None:
+        instance = model(**{**lookup, **defaults})
+        db.add(instance)
+        db.flush()
+    return instance
+
+
 def seed_notify_channels(db: Session) -> None:
     """确保唯一飞书任务群存在，并把旧双通道配置平滑收敛到该通道。"""
     channel = db.scalar(select(NotifyChannel).where(NotifyChannel.channel_key == "feishu-daily").limit(1))
@@ -248,8 +258,9 @@ def seed_auth_and_ai_configs(db: Session) -> None:
         db.add(bailian_platform)
     bailian_platform.name = "百炼"
     bailian_platform.provider_type = "DashScope OpenAI compatible"
-    bailian_platform.base_url = bailian_base_url
-    # 环境密钥仅作初次引导：配置页保存的新密钥不能被 .env 里的旧密钥在每次部署时覆盖
+    # base_url / api_key 仅作初次引导：配置页保存的值不能被 .env 旧值在每次部署时覆盖
+    if not bailian_platform.base_url:
+        bailian_platform.base_url = bailian_base_url
     if settings.llm_api_key and not bailian_platform.api_key:
         bailian_platform.api_key = settings.llm_api_key
     bailian_platform.status = "enabled"
@@ -282,7 +293,7 @@ def seed_auth_and_ai_configs(db: Session) -> None:
         )
         is not None
     )
-    default_model = _upsert(
+    default_model = _ensure(
         db,
         LlmModelConfig,
         {"display_name": "百炼 Qwen3.7 Plus"},
@@ -304,7 +315,7 @@ def seed_auth_and_ai_configs(db: Session) -> None:
         ("百炼 GLM 5.2", "glm-5.2", "通用研究模型。"),
         ("百炼 Kimi K2.7 Code", "kimi-k2.7-code", "偏代码和结构化分析模型。"),
     ]:
-        _upsert(
+        _ensure(
             db,
             LlmModelConfig,
             {"display_name": display_name},
