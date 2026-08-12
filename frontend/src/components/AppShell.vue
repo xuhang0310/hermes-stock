@@ -48,11 +48,6 @@ const canViewKnowledge = computed(
 const canViewSettings = computed(
   () => ['admin', 'super_admin'].includes(props.user.role)
 )
-const canViewOps = computed(
-  () =>
-    props.user.permissions.includes('all') ||
-    props.user.permissions.includes('ops_console:view')
-)
 
 interface NavItem {
   key: PageKey
@@ -96,7 +91,6 @@ const navItems = computed<NavItem[]>(() => [
     ]
   }] : []),
   { key: 'skillSquare', label: '技能广场', icon: 'knowledge' },
-  ...(canViewOps.value ? [{ key: 'opsConsole' as PageKey, label: '运维控制台' }] : []),
   ...(canViewSettings.value ? [{ key: 'settings' as PageKey, label: '设置' }] : [])
 ])
 
