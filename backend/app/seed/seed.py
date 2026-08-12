@@ -249,7 +249,8 @@ def seed_auth_and_ai_configs(db: Session) -> None:
     bailian_platform.name = "百炼"
     bailian_platform.provider_type = "DashScope OpenAI compatible"
     bailian_platform.base_url = bailian_base_url
-    if settings.llm_api_key:
+    # 环境密钥仅作初次引导：配置页保存的新密钥不能被 .env 里的旧密钥在每次部署时覆盖
+    if settings.llm_api_key and not bailian_platform.api_key:
         bailian_platform.api_key = settings.llm_api_key
     bailian_platform.status = "enabled"
     bailian_platform.remark = "默认百炼 OpenAI 兼容接口，供数字人 ReAct 使用。"
@@ -274,6 +275,13 @@ def seed_auth_and_ai_configs(db: Session) -> None:
         db.flush()
 
     default_model_name = settings.llm_model or "qwen3.7-plus"
+    # 仅在尚无任何激活模型时兜底激活默认模型，避免每次部署覆盖配置页的模型选择
+    has_active_model = (
+        db.scalar(
+            select(LlmModelConfig.id).where(LlmModelConfig.is_active.is_(True)).limit(1)
+        )
+        is not None
+    )
     default_model = _upsert(
         db,
         LlmModelConfig,
@@ -284,7 +292,6 @@ def seed_auth_and_ai_configs(db: Session) -> None:
             "base_url": bailian_platform.base_url,
             "api_key": None,
             "model_name": default_model_name,
-            "is_active": True,
             "status": "enabled",
             "temperature": 0.2,
             "max_steps": settings.agent_max_steps,
@@ -307,18 +314,19 @@ def seed_auth_and_ai_configs(db: Session) -> None:
                 "base_url": bailian_platform.base_url,
                 "api_key": None,
                 "model_name": model_name,
-                "is_active": False,
                 "status": "enabled",
                 "temperature": 0.2,
                 "max_steps": 6,
                 "remark": remark,
             },
         )
-    db.execute(
-        update(LlmModelConfig)
-        .where(LlmModelConfig.id != default_model.id)
-        .values(is_active=False)
-    )
+    if not has_active_model:
+        default_model.is_active = True
+        db.execute(
+            update(LlmModelConfig)
+            .where(LlmModelConfig.id != default_model.id)
+            .values(is_active=False)
+        )
 
     digital_humans = [
         {

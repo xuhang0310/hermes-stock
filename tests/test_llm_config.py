@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -339,6 +339,52 @@ class LlmVisionRoutingTests(unittest.TestCase):
                 base_url="https://retired.invalid/v1",
                 model_name="gpt-5.6-sol",
             )
+
+
+class SeedAiConfigsRerunTests(unittest.TestCase):
+    """部署重跑 seed 不得覆盖配置页已保存的密钥与模型选择。"""
+
+    def setUp(self) -> None:
+        self.engine = create_engine(
+            "sqlite+pysqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(self.engine)
+        self.SessionFactory = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+    def test_rerun_preserves_ui_edited_key_and_active_model(self) -> None:
+        from backend.app.seed.seed import seed_auth_and_ai_configs
+
+        with self.SessionFactory() as db:
+            seed_auth_and_ai_configs(db)
+            db.commit()
+
+        with self.SessionFactory() as db:
+            platform = db.scalar(select(LlmModelPlatform).where(LlmModelPlatform.name == "百炼"))
+            platform.api_key = "sk-ui-edited"
+            db.scalar(
+                select(LlmModelConfig).where(LlmModelConfig.display_name == "百炼 Qwen3.7 Plus")
+            ).is_active = False
+            db.scalar(
+                select(LlmModelConfig).where(LlmModelConfig.display_name == "百炼 Qwen3.7 Max")
+            ).is_active = True
+            db.commit()
+
+        with self.SessionFactory() as db:
+            seed_auth_and_ai_configs(db)
+            db.commit()
+
+        with self.SessionFactory() as db:
+            platform = db.scalar(select(LlmModelPlatform).where(LlmModelPlatform.name == "百炼"))
+            self.assertEqual(platform.api_key, "sk-ui-edited")
+            active = db.scalars(
+                select(LlmModelConfig).where(LlmModelConfig.is_active.is_(True))
+            ).all()
+            self.assertEqual([model.display_name for model in active], ["百炼 Qwen3.7 Max"])
 
 
 if __name__ == "__main__":
