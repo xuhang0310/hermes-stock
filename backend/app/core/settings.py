@@ -7,6 +7,8 @@ from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
+from backend.app.core.api_keys import merge_api_keys
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]  # core/ -> app/ -> backend/（backend/.env 所在）
 # 仅在开发者本机可用作备用值源（存在才加载，不存在就跳过，不阻塞其他机器）
@@ -38,7 +40,13 @@ class Settings:
     llm_model: str = os.getenv("STOCK_LLM_MODEL", os.getenv("RABBIT_LLM_MODEL", "gpt-4.1-mini"))
     agent_max_steps: int = int(os.getenv("STOCK_AGENT_MAX_STEPS", os.getenv("RABBIT_AGENT_MAX_STEPS", "6")))
     tushare_token: str = os.getenv("STOCK_TUSHARE_TOKEN", os.getenv("TUSHARE_TOKEN", ""))
-    tavily_api_key: str = os.getenv("STOCK_TAVILY_API_KEY", os.getenv("TAVILY_API_KEY", ""))
+    # Keep the legacy single-key setting as the primary. The plural setting is
+    # a comma/newline-separated fallback pool.
+    tavily_api_keys: tuple[str, ...] = merge_api_keys(
+        os.getenv("STOCK_TAVILY_API_KEY", os.getenv("TAVILY_API_KEY", "")),
+        os.getenv("STOCK_TAVILY_API_KEYS", ""),
+    )
+    tavily_api_key: str = tavily_api_keys[0] if tavily_api_keys else ""
     brave_api_key: str = os.getenv("STOCK_BRAVE_API_KEY", os.getenv("BRAVE_API_KEY", ""))
     # 向量记忆嵌入服务（与聊天模型解耦；未配置则回退活跃 LLM 提供商的 /embeddings）
     embedding_base_url: str = os.getenv("STOCK_EMBEDDING_BASE_URL", "")

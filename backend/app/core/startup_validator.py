@@ -69,7 +69,7 @@ def validate_startup(*, fail_fast: bool = True) -> dict:
     for name, value in (
         ("STOCK_LLM_API_KEY", settings.llm_api_key),
         ("STOCK_TUSHARE_TOKEN", settings.tushare_token),
-        ("STOCK_TAVILY_API_KEY", settings.tavily_api_key),
+        ("STOCK_TAVILY_API_KEY(S)", settings.tavily_api_key),
     ):
         usable = not _is_placeholder(value)
         recommended.append(

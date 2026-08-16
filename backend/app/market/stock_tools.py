@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
+from backend.app.core.api_keys import TAVILY_POOL_PROVIDER, merge_api_keys
 from backend.app.core.database import engine
 from backend.app.core.settings import settings
 from backend.app.market.tushare_catalog import (
@@ -27,6 +29,11 @@ BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 MAX_DAILY_ROWS = 180
 MAX_MINUTE_ROWS = 8000
 _STOCK_BASIC_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": []}
+_TAVILY_KEY_LOCK = threading.Lock()
+_TAVILY_ACTIVE_KEY_INDEX = 0
+_TAVILY_RETRYABLE_STATUS_CODES = frozenset(
+    {401, 402, 403, 429, 432, 433, 500, 502, 503, 504}
+)
 
 
 STOCK_STRATEGIES: list[dict[str, str]] = [
@@ -1999,7 +2006,7 @@ def search_stock_news(query: str, symbol: str | None = None, max_results: int = 
     }
 
 
-def _resolve_search_source() -> tuple[str, str, str] | None:
+def _resolve_search_source() -> tuple[str, str | tuple[str, ...], str] | None:
     """选出当前联网搜索源，返回 (provider, api_key, url)。
 
     优先级：启用且已配 Key 的 Brave > 启用且已配 Key 的 Tavily；都没有则返回 None。
@@ -2008,37 +2015,65 @@ def _resolve_search_source() -> tuple[str, str, str] | None:
     brave_key = _data_source_api_key("brave", settings.brave_api_key)
     if brave_key:
         return "brave", brave_key, _data_source_base_url("brave", BRAVE_URL)
-    tavily_key = _data_source_api_key("tavily", settings.tavily_api_key)
-    if tavily_key:
-        return "tavily", tavily_key, _data_source_base_url("tavily", TAVILY_URL)
+    tavily_keys = _data_source_api_keys("tavily", settings.tavily_api_keys)
+    if tavily_keys:
+        return "tavily", tavily_keys, _data_source_base_url("tavily", TAVILY_URL)
     return None
 
 
-def _tavily_search(url: str, api_key: str, keyword: str, max_results: int) -> list[dict]:
-    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-        response = client.post(
-            url,
-            json={
-                "api_key": api_key,
-                "query": keyword,
-                "search_depth": "basic",
-                "include_answer": False,
-                "max_results": max_results,
-            },
-        )
+def _tavily_search(
+    url: str,
+    api_keys: str | tuple[str, ...] | list[str],
+    keyword: str,
+    max_results: int,
+) -> list[dict]:
+    """Search Tavily with sticky failover across the configured key pool."""
+    keys = merge_api_keys(api_keys)
+    if not keys:
+        raise RuntimeError("Tavily API Key 未配置")
+
+    global _TAVILY_ACTIVE_KEY_INDEX
+    with _TAVILY_KEY_LOCK:
+        start_index = _TAVILY_ACTIVE_KEY_INDEX % len(keys)
+    ordered = tuple((start_index + offset) % len(keys) for offset in range(len(keys)))
+    last_error: Exception | None = None
+
+    for key_index in ordered:
+        api_key = keys[key_index]
+        try:
+            with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+                response = client.post(
+                    url,
+                    json={
+                        "api_key": api_key,
+                        "query": keyword,
+                        "search_depth": "basic",
+                        "include_answer": False,
+                        "max_results": max_results,
+                    },
+                )
+        except httpx.HTTPError:
+            last_error = RuntimeError("Tavily Search 网络请求失败")
+            continue
+
+        if response.status_code in _TAVILY_RETRYABLE_STATUS_CODES:
+            last_error = RuntimeError(f"Tavily Search 暂不可用（HTTP {response.status_code}）")
+            continue
         response.raise_for_status()
         body = response.json()
-    results: list[dict] = []
-    for item in body.get("results") or []:
-        results.append(
+        with _TAVILY_KEY_LOCK:
+            _TAVILY_ACTIVE_KEY_INDEX = key_index
+        return [
             {
                 "title": item.get("title"),
                 "url": item.get("url"),
                 "content": item.get("content"),
                 "score": item.get("score"),
             }
-        )
-    return results
+            for item in body.get("results") or []
+        ]
+
+    raise last_error or RuntimeError("Tavily Search 调用失败")
 
 
 def _brave_search(url: str, api_key: str, keyword: str, max_results: int) -> list[dict]:
@@ -2983,11 +3018,24 @@ def _data_source_row(provider: str) -> dict[str, Any] | None:
 
 
 def _data_source_api_key(provider: str, env_value: str) -> str:
+    keys = _data_source_api_keys(provider, env_value)
+    return keys[0] if keys else ""
+
+
+def _data_source_api_keys(
+    provider: str,
+    env_values: str | tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
     row = _data_source_row(provider)
     if row and str(row.get("status") or "enabled") != "enabled":
-        return ""
-    db_key = str(row.get("api_key") or "").strip() if row else ""
-    return db_key or env_value
+        return ()
+    db_keys = str(row.get("api_key") or "").strip() if row else ""
+    pool_keys = ""
+    if provider == "tavily":
+        pool_row = _data_source_row(TAVILY_POOL_PROVIDER)
+        if pool_row and str(pool_row.get("status") or "enabled") == "enabled":
+            pool_keys = str(pool_row.get("api_key") or "").strip()
+    return merge_api_keys(db_keys, pool_keys, env_values)
 
 
 def _data_source_base_url(provider: str, default_url: str) -> str:

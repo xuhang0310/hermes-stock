@@ -22,6 +22,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, case, delete, desc, func, or_, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
+from backend.app.core.api_keys import (
+    TAVILY_POOL_PROVIDER,
+    merge_api_keys,
+    serialize_api_keys,
+)
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.duration import elapsed_wall_clock_ms
@@ -123,6 +128,7 @@ class DataSourceConfigIn(BaseModel):
     provider_type: str = Field(default="market_data", max_length=80)
     base_url: str | None = Field(default=None, max_length=255)
     api_key: str | None = Field(default=None, max_length=500)
+    additional_api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=120)
     status: str = Field(default="enabled", max_length=24)
     remark: str | None = None
@@ -342,7 +348,7 @@ def _data_source_defaults() -> dict[str, dict]:
             "display_name": "Tavily Search",
             "provider_type": "search",
             "base_url": "https://api.tavily.com/search",
-            "env_has_api_key": bool(settings.tavily_api_key),
+            "env_has_api_key": bool(settings.tavily_api_keys),
             "status": "enabled",
             "remark": "问股消息面、新闻、公告和市场叙事搜索源。",
         },
@@ -378,18 +384,39 @@ def _data_source_defaults() -> dict[str, dict]:
     }
 
 
-def _data_source_out(row: DataSourceConfig | None, provider: str) -> dict:
+def _data_source_out(
+    row: DataSourceConfig | None,
+    provider: str,
+    additional_api_keys: str | None = None,
+) -> dict:
     default = _data_source_defaults()[provider]
     api_key = row.api_key if row and row.api_key else None
     env_has_api_key = bool(default["env_has_api_key"])
+    db_keys = merge_api_keys(api_key, additional_api_keys)
+    env_keys = settings.tavily_api_keys if provider == "tavily" else ()
+    effective_keys = merge_api_keys(db_keys, env_keys)
+    key_count = len(effective_keys) if provider == "tavily" else int(bool(api_key or env_has_api_key))
+    if db_keys and env_keys:
+        key_source = "database+environment"
+    elif db_keys:
+        key_source = "database"
+    elif env_has_api_key:
+        key_source = "environment"
+    else:
+        key_source = "missing"
     return {
         "provider": provider,
         "display_name": row.display_name if row else default["display_name"],
         "provider_type": row.provider_type if row else default["provider_type"],
         "base_url": row.base_url if row and row.base_url else default["base_url"],
-        "api_key_masked": _masked(api_key) if api_key else ("ENV" if env_has_api_key else None),
-        "has_api_key": bool(api_key or env_has_api_key),
-        "key_source": "database" if api_key else ("environment" if env_has_api_key else "missing"),
+        "api_key_masked": (
+            f"{key_count} 个 Key"
+            if provider == "tavily" and key_count > 1
+            else (_masked(api_key) if api_key else ("ENV" if env_has_api_key else None))
+        ),
+        "has_api_key": bool(key_count),
+        "key_count": key_count,
+        "key_source": key_source,
         "status": row.status if row else default["status"],
         "remark": row.remark if row and row.remark else default["remark"],
         "model": (row.model if row and row.model else default.get("model")),
@@ -687,7 +714,15 @@ def data_sources(
     _context: AuthContext = Depends(require_permission("agent:use")),
 ) -> list[dict]:
     rows = {row.provider: row for row in db.scalars(select(DataSourceConfig)).all()}
-    return [_data_source_out(rows.get(provider), provider) for provider in _data_source_defaults()]
+    tavily_pool = rows.get(TAVILY_POOL_PROVIDER)
+    return [
+        _data_source_out(
+            rows.get(provider),
+            provider,
+            tavily_pool.api_key if provider == "tavily" and tavily_pool else None,
+        )
+        for provider in _data_source_defaults()
+    ]
 
 
 @router.put("/data-sources/{provider}")
@@ -704,13 +739,36 @@ def update_data_source(
     if row is None:
         row = DataSourceConfig(provider=provider_key)
         db.add(row)
+    tavily_pool = db.get(DataSourceConfig, TAVILY_POOL_PROVIDER) if provider_key == "tavily" else None
     row.display_name = payload.display_name
     row.provider_type = payload.provider_type
     row.base_url = payload.base_url
     row.status = payload.status
     row.remark = payload.remark
     if payload.api_key is not None and payload.api_key.strip():
-        row.api_key = payload.api_key.strip()
+        row.api_key = (
+            serialize_api_keys(payload.api_key)
+            if provider_key == "tavily"
+            else payload.api_key.strip()
+        )
+    if payload.additional_api_key is not None and payload.additional_api_key.strip():
+        if provider_key != "tavily":
+            raise HTTPException(status_code=400, detail="只有 Tavily 支持追加备用 Key")
+        if tavily_pool is None:
+            tavily_pool = DataSourceConfig(
+                provider=TAVILY_POOL_PROVIDER,
+                display_name="Tavily Key Pool",
+                provider_type="search",
+                status="enabled",
+                remark="Tavily 备用 Key 池；不作为独立数据源展示。",
+            )
+            db.add(tavily_pool)
+        key_pool = serialize_api_keys(
+            merge_api_keys(tavily_pool.api_key, payload.additional_api_key)
+        )
+        if len(key_pool) > 500:
+            raise HTTPException(status_code=400, detail="Tavily Key 池过大，请移除不再使用的 Key")
+        tavily_pool.api_key = key_pool
     if payload.model is not None:
         row.model = payload.model.strip() or None
     db.commit()
@@ -724,7 +782,11 @@ def update_data_source(
             _mem._store_ready = None
         except Exception:
             pass
-    return _data_source_out(row, provider_key)
+    return _data_source_out(
+        row,
+        provider_key,
+        tavily_pool.api_key if tavily_pool else None,
+    )
 
 
 @router.get("/digital-humans")

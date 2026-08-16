@@ -533,6 +533,7 @@ export type DataSourceConfig = {
   model: string | null
   api_key_masked: string | null
   has_api_key: boolean
+  key_count: number
   key_source: 'database' | 'environment' | 'missing' | string
   status: string
   remark: string | null

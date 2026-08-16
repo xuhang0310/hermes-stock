@@ -16,15 +16,15 @@ def _fetch_tavily_news(query: str, max_results: int = 15) -> list[dict]:
     """通过 Tavily 搜索 A 股市场新闻（同步）。"""
     try:
         from backend.app.core.settings import settings
-        from backend.app.market.stock_tools import TAVILY_URL, _data_source_api_key
+        from backend.app.market.stock_tools import TAVILY_URL, _data_source_api_keys
 
-        api_key = _data_source_api_key("tavily", settings.tavily_api_key)
-        if not api_key:
+        api_keys = _data_source_api_keys("tavily", settings.tavily_api_keys)
+        if not api_keys:
             logger.warning("Tavily API key 未配置，跳过新闻采集")
             return []
 
         from backend.app.market.stock_tools import _tavily_search
-        return _tavily_search(TAVILY_URL, api_key, query, max_results)
+        return _tavily_search(TAVILY_URL, api_keys, query, max_results)
     except Exception as e:
         logger.error("Tavily 新闻搜索失败: %s", e)
         return []

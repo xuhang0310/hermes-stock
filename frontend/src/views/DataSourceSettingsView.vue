@@ -16,6 +16,7 @@ const form = reactive({
   provider_type: 'market_data',
   base_url: '',
   api_key: '',
+  additional_api_key: '',
   model: '',
   status: 'enabled',
   remark: ''
@@ -51,6 +52,7 @@ function edit(row: DataSourceConfig) {
     provider_type: row.provider_type,
     base_url: row.base_url || '',
     api_key: '',
+    additional_api_key: '',
     model: row.model || '',
     status: row.status,
     remark: row.remark || ''
@@ -82,6 +84,7 @@ async function save() {
     })
     const savedName = form.display_name
     form.api_key = ''
+    form.additional_api_key = ''
     await load()
     dialogOpen.value = false
     message.value = `${savedName} 已保存，新的配置会在下一次工具调用时生效。`
@@ -93,6 +96,7 @@ async function save() {
 }
 
 function keySourceLabel(source: string) {
+  if (source === 'database+environment') return '数据库 + 环境变量'
   if (source === 'database') return '加密数据库'
   if (source === 'environment') return '环境变量'
   return '尚未配置'
@@ -193,7 +197,7 @@ onMounted(load)
           </div>
           <div class="provider-facts settings-card-facts">
             <span><b>{{ typeLabel(item.provider_type) }}</b> 类型</span>
-            <span><b>{{ keySourceLabel(item.key_source) }}</b> 密钥</span>
+            <span><b>{{ item.provider === 'tavily' ? `${item.key_count} 个` : keySourceLabel(item.key_source) }}</b> 密钥</span>
           </div>
           <div class="settings-card-detail">
             <span>{{ item.model ? '当前模型' : '接口地址' }}</span>
@@ -216,13 +220,15 @@ onMounted(load)
         <div class="dialog-body">
           <div class="friendly-tip">
             <b>{{ sourceDescription(editingSource) }}</b>
-            <span>API Key 会加密保存。留空表示保留现有密钥，数据库配置优先于环境变量。</span>
+            <span v-if="editingSource.provider === 'tavily'">当前已配置 {{ editingSource.key_count }} 个 Key。追加备用 Key 不会覆盖现有配置，额度不足时会自动切换。</span>
+            <span v-else>API Key 会安全保存。留空表示保留现有密钥，数据库配置优先于环境变量。</span>
           </div>
           <div class="form-row">
             <label><span>显示名称</span><input v-model="form.display_name" required /></label>
             <label><span>服务类型</span><select v-model="form.provider_type"><option value="market_data">市场行情</option><option value="search">新闻搜索</option><option value="embedding">向量嵌入</option><option value="rerank">结果重排</option></select></label>
           </div>
-          <label><span>API Key / Token</span><input v-model="form.api_key" type="password" placeholder="留空保留已保存值或继续使用环境变量" /></label>
+          <label v-if="editingSource.provider === 'tavily'"><span>新增备用 API Key</span><input v-model="form.additional_api_key" type="password" autocomplete="new-password" placeholder="粘贴新 Key；留空则不修改现有 Key 池" /><small>支持重复追加，系统会自动去重。</small></label>
+          <label v-else><span>API Key / Token</span><input v-model="form.api_key" type="password" placeholder="留空保留已保存值或继续使用环境变量" /></label>
           <label><span>接口地址（Base URL）</span><input v-model="form.base_url" placeholder="https://api.example.com/v1" /></label>
           <label><span>模型名称 <small>向量和重排服务需要填写</small></span><input v-model="form.model" placeholder="例如 BAAI/bge-m3、text-embedding-v3" /></label>
           <label class="friendly-switch">
