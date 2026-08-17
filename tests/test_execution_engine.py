@@ -19,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.app.core.database import Base
 from backend.app.core.models import (
+    AiChatMessage,
     AiChatSession,
     AgentRun,
     DigitalHumanProfile,
@@ -477,11 +478,47 @@ class TaskExtractorExtractTests(unittest.TestCase):
         }
         leader_run_id = "leader-agent-run-001"
 
+        # Scheduled reports are independent executions.  Historical messages
+        # remain in the scheduler session for audit, but must not be sent back
+        # to the model or failed daily prompts accumulate as fake backlog.
+        with self.SessionFactory() as db:
+            scheduler_session = AiChatSession(
+                user_id=self.user_id,
+                digital_human_id=self.agent_id,
+                title="定时任务 · 测试任务",
+                status="active",
+                chat_mode="research",
+                source_type="scheduler",
+                external_conversation_id=self.job_key,
+                source_label="定时任务",
+            )
+            db.add(scheduler_session)
+            db.flush()
+            db.add_all(
+                [
+                    AiChatMessage(
+                        session_id=scheduler_session.id,
+                        role="user",
+                        content="昨天失败后遗留的任务",
+                        event_count=0,
+                    ),
+                    AiChatMessage(
+                        session_id=scheduler_session.id,
+                        role="assistant",
+                        content="昨天的报告",
+                        event_count=0,
+                    ),
+                ]
+            )
+            db.commit()
+
+        build_request = MagicMock(return_value={"request": "payload"})
+
         with (
             patch("backend.app.scheduler.rhythm_scheduler.SessionLocal", self.SessionFactory),
             patch(
                 "backend.app.scheduler.rhythm_scheduler.build_channel_request",
-                return_value={"request": "payload"},
+                build_request,
             ),
             patch(
                 "backend.app.scheduler.rhythm_scheduler.create_channel_run",
@@ -499,12 +536,28 @@ class TaskExtractorExtractTests(unittest.TestCase):
             )
 
         self.assertEqual((answer, model_name), ("report", "model"))
+        self.assertEqual(build_request.call_args.kwargs["history"], [])
         with self.SessionFactory() as db:
             job_run = db.scalar(
                 select(JobRun).where(JobRun.run_id == self.job_run_id)
             )
             self.assertIsNotNone(job_run)
             self.assertEqual(job_run.leader_agent_run_id, leader_run_id)
+            scheduler_session = db.scalar(
+                select(AiChatSession).where(
+                    AiChatSession.source_type == "scheduler",
+                    AiChatSession.external_conversation_id == self.job_key,
+                )
+            )
+            messages = db.scalars(
+                select(AiChatMessage)
+                .where(AiChatMessage.session_id == scheduler_session.id)
+                .order_by(AiChatMessage.id)
+            ).all()
+            self.assertEqual(
+                [message.content for message in messages],
+                ["昨天失败后遗留的任务", "昨天的报告", "生成盘前简报"],
+            )
 
 
 class SerialConstraintTests(unittest.TestCase):

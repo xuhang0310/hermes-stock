@@ -100,6 +100,22 @@ class ReasoningLoopGuard:
         return None
 
 
+def _reasoning_loop_error(
+    request_payload: dict[str, Any],
+    *,
+    completed_business_write: bool,
+    transaction_agent: bool,
+) -> str:
+    prefix = "检测到模型推理内容持续重复，系统已自动停止本轮任务，避免继续占用会话或重复写入。"
+    if completed_business_write:
+        return prefix + "本轮已有写入工具执行完成，请以工具返回结果为准。"
+    if transaction_agent:
+        return prefix + "本轮没有执行新的业务写入，请重新上传截图或发送更明确的单条指令。"
+    if str(request_payload.get("source_type") or "") == "scheduler":
+        return prefix + "本轮未生成有效报告，请缩小任务范围或检查所需数据是否完整后重试。"
+    return prefix + "本轮没有执行新的业务写入，请缩小任务范围或发送更明确的单条指令。"
+
+
 def _position_confirmation_requested(request_payload: dict[str, Any]) -> bool:
     if str(request_payload.get("digital_human_code") or "") != "position-entry-agent":
         return False
@@ -1274,13 +1290,10 @@ async def run_agentscope(
             loop_reason = reasoning_guard.observe(event.delta)
             if loop_reason:
                 outcome.status = "failed"
-                outcome.error = (
-                    "检测到模型推理内容持续重复，系统已自动停止本轮任务，避免继续占用会话或重复写入。"
-                    + (
-                        "本轮已有写入工具执行完成，请以工具返回结果为准。"
-                        if completed_business_write
-                        else "本轮没有执行新的业务写入，请重新上传截图或发送更明确的单条指令。"
-                    )
+                outcome.error = _reasoning_loop_error(
+                    request_payload,
+                    completed_business_write=completed_business_write,
+                    transaction_agent=transaction_agent,
                 )
                 break
             await emit({"type": "reasoning_delta", "content": event.delta})

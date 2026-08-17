@@ -307,17 +307,12 @@ def _run_scheduled_agent(
             )
             db.add(chat_session)
             db.flush()
-        history_rows = db.scalars(
-            select(AiChatMessage)
-            .where(AiChatMessage.session_id == chat_session.id, AiChatMessage.error.is_(None))
-            .order_by(AiChatMessage.id.desc())
-            .limit(16)
-        ).all()
-        history = [
-            {"role": row.role, "content": row.content}
-            for row in reversed(history_rows)
-            if row.role in {"user", "assistant"} and row.content
-        ]
+        # Keep one scheduler session as an audit container, but every fire is
+        # an independent job.  Feeding old messages back into the model makes
+        # failed daily prompts accumulate as a fake backlog (for example, a
+        # close review starts trying to regenerate several previous dates) and
+        # eventually sends the model into a reasoning loop.
+        history: list[dict] = []
         session_id = chat_session.id
         owner_id = owner.id
         owner_label = owner.display_name

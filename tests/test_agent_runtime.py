@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.app.agent_runtime.agentscope_engine import (
     _build_tools,
+    _reasoning_loop_error,
     _resume_event,
     agentscope_available,
     run_agentscope,
@@ -41,6 +42,18 @@ class RecordingBroker:
 
     async def publish_event(self, run_id: str, seq: int) -> None:
         self.published.append((run_id, seq))
+
+
+class ReasoningLoopErrorTests(unittest.TestCase):
+    def test_scheduler_error_does_not_request_an_unrelated_screenshot(self) -> None:
+        message = _reasoning_loop_error(
+            {"source_type": "scheduler"},
+            completed_business_write=False,
+            transaction_agent=False,
+        )
+
+        self.assertIn("未生成有效报告", message)
+        self.assertNotIn("上传截图", message)
 
 
 class AgentRuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
