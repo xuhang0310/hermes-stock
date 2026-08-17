@@ -661,8 +661,6 @@ onMounted(async () => {
 
 .knowledge-center {
   width: 100%;
-  max-width: 1920px;
-  margin: 0 auto;
   grid-template-columns: 286px minmax(0, 1fr);
   gap: 12px;
 }
