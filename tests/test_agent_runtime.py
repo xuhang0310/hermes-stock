@@ -4,12 +4,14 @@ import hashlib
 import unittest
 from unittest.mock import patch
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.agent_runtime.agentscope_engine import (
+    ReasoningLoopGuard,
     _build_tools,
     _reasoning_loop_error,
     _resume_event,
@@ -54,6 +56,82 @@ class ReasoningLoopErrorTests(unittest.TestCase):
 
         self.assertIn("未生成有效报告", message)
         self.assertNotIn("上传截图", message)
+
+    def test_repeated_portfolio_facts_far_apart_do_not_look_like_a_loop(self) -> None:
+        guard = ReasoningLoopGuard(repeat_limit=5, max_chars=120_000)
+        repeated_fact = "同力天启：728064 元，占组合 19.9%"
+
+        for section in range(5):
+            self.assertIsNone(guard.observe(repeated_fact + "。"))
+            for item in range(130):
+                self.assertIsNone(
+                    guard.observe(f"第 {section} 阶段的独立核验项 {item} 内容完整且互不相同。")
+                )
+
+    def test_tightly_repeated_reasoning_still_triggers_the_guard(self) -> None:
+        guard = ReasoningLoopGuard(repeat_limit=5, max_chars=120_000)
+        reason = None
+        for _ in range(5):
+            reason = guard.observe("Let me write the report now.\n")
+
+        self.assertEqual(reason, "repeated_reasoning")
+
+
+class ChannelRunWaitTests(unittest.TestCase):
+    def test_progress_extends_idle_deadline_up_to_hard_deadline(self) -> None:
+        from backend.app.agent_runtime.channel_runs import wait_for_channel_run
+
+        clock = {"now": 0.0}
+
+        class Repository:
+            def __init__(self) -> None:
+                self.emitted: set[int] = set()
+
+            def events_after(self, run_id: str, cursor: int, limit: int = 1000):
+                del run_id, limit
+                events = []
+                for seq, at, content in (
+                    (1, 0.0, "开始"),
+                    (2, 20.0, "处理中"),
+                    (3, 40.0, "完成"),
+                ):
+                    if clock["now"] >= at and seq > cursor and seq not in self.emitted:
+                        self.emitted.add(seq)
+                        events.append(
+                            SimpleNamespace(
+                                seq=seq,
+                                event_type="content_delta",
+                                payload={"content": content},
+                            )
+                        )
+                return events
+
+            def get_run(self, run_id: str):
+                del run_id
+                return {
+                    "status": "completed" if clock["now"] >= 45.0 else "running",
+                    "result_message_id": None,
+                    "error": None,
+                    "heartbeat_at": clock["now"],
+                }
+
+        def sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        with (
+            patch("backend.app.agent_runtime.channel_runs.time.monotonic", side_effect=lambda: clock["now"]),
+            patch("backend.app.agent_runtime.channel_runs.time.sleep", side_effect=sleep),
+        ):
+            answer, model, error = wait_for_channel_run(
+                "run-1",
+                repository=Repository(),
+                timeout_seconds=30,
+                hard_timeout_seconds=90,
+            )
+
+        self.assertEqual(answer, "开始处理中完成")
+        self.assertIsNone(model)
+        self.assertIsNone(error)
 
 
 class AgentRuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):

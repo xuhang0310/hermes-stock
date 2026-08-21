@@ -52,6 +52,7 @@ def _run_dict(row: AgentRun) -> dict[str, Any]:
         "attempts": row.attempts,
         "max_attempts": row.max_attempts,
         "cancel_requested": bool(row.cancel_requested),
+        "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
         "error": row.error,
         "result_message_id": row.result_message_id,
         "completion_state": row.completion_state,

@@ -527,7 +527,7 @@ class TaskExtractorExtractTests(unittest.TestCase):
             patch(
                 "backend.app.scheduler.rhythm_scheduler.wait_for_channel_run",
                 return_value=("report", "model", None),
-            ),
+            ) as wait_for_channel_run_mock,
         ):
             answer, model_name = _run_scheduled_agent(
                 snapshot,
@@ -537,6 +537,9 @@ class TaskExtractorExtractTests(unittest.TestCase):
 
         self.assertEqual((answer, model_name), ("report", "model"))
         self.assertEqual(build_request.call_args.kwargs["history"], [])
+        wait_call = wait_for_channel_run_mock.call_args
+        self.assertEqual(wait_call.kwargs["timeout_seconds"], 930)
+        self.assertEqual(wait_call.kwargs["hard_timeout_seconds"], 2460)
         with self.SessionFactory() as db:
             job_run = db.scalar(
                 select(JobRun).where(JobRun.run_id == self.job_run_id)

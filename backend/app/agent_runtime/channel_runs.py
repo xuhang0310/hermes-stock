@@ -130,16 +130,25 @@ def wait_for_channel_run(
     *,
     repository: AgentRunRepository = agent_run_repository,
     timeout_seconds: int | None = None,
+    hard_timeout_seconds: int | None = None,
 ) -> tuple[str, str | None, str | None]:
-    deadline = time.monotonic() + max(30, timeout_seconds or settings.agent_run_timeout_seconds + 30)
+    idle_timeout = max(30, timeout_seconds or settings.agent_run_timeout_seconds + 30)
+    hard_timeout = max(idle_timeout, hard_timeout_seconds or idle_timeout)
+    started_at = time.monotonic()
+    idle_deadline = started_at + idle_timeout
+    hard_deadline = started_at + hard_timeout
     cursor = 0
     answer_parts: list[str] = []
     final_answer = ""
     model_name: str | None = None
     stream_error: str | None = None
-    while time.monotonic() < deadline:
+    last_status: str | None = None
+    last_heartbeat: str | None = None
+    while time.monotonic() < min(idle_deadline, hard_deadline):
+        made_progress = False
         for event in repository.events_after(run_id, cursor, limit=1000):
             cursor = event.seq
+            made_progress = True
             payload = event.payload
             event_type = event.event_type
             if payload.get("reset_stream"):
@@ -157,7 +166,15 @@ def wait_for_channel_run(
         run = repository.get_run(run_id)
         if run is None:
             return "", model_name, "Agent run disappeared."
-        if run["status"] in {"completed", "failed", "cancelled"}:
+        run_status = str(run.get("status") or "")
+        heartbeat = str(run.get("heartbeat_at") or "") or None
+        if run_status != last_status or (heartbeat is not None and heartbeat != last_heartbeat):
+            made_progress = True
+        last_status = run_status
+        last_heartbeat = heartbeat
+        if made_progress:
+            idle_deadline = min(hard_deadline, time.monotonic() + idle_timeout)
+        if run_status in {"completed", "failed", "cancelled"}:
             if run.get("result_message_id"):
                 with SessionLocal() as db:
                     message = db.get(AiChatMessage, int(run["result_message_id"]))
@@ -165,9 +182,9 @@ def wait_for_channel_run(
                         final_answer = message.content or final_answer
                         stream_error = message.error or stream_error
             return final_answer or "".join(answer_parts).strip(), model_name, run.get("error") or stream_error
-        if run["status"] == "waiting_approval":
+        if run_status == "waiting_approval":
             return "", model_name, "Channel run is waiting for an approval that must be completed in the web console."
-        if run["status"] == "waiting_children":
+        if run_status == "waiting_children":
             time.sleep(0.25)
             continue
         time.sleep(0.25)

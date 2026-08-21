@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -68,14 +69,29 @@ def _agent_loop_duplicate_tool_limit() -> int:
 
 
 class ReasoningLoopGuard:
-    """Detect repeated long sentences in streamed model reasoning."""
+    """Detect local repetition without treating recurring facts as a loop.
 
-    def __init__(self, *, repeat_limit: int = 3, max_chars: int = 20_000) -> None:
+    Financial research legitimately repeats the same holding value in several
+    distant sections (portfolio summary, risk review, and action plan).  A
+    process-wide counter therefore produces false positives on long reports.
+    Real model loops repeat within a much smaller recent window, so only keep
+    counts for the latest eligible sentences.
+    """
+
+    def __init__(
+        self,
+        *,
+        repeat_limit: int = 3,
+        max_chars: int = 20_000,
+        window_sentences: int = 120,
+    ) -> None:
         self.repeat_limit = max(2, repeat_limit)
         self.max_chars = max(1_000, max_chars)
+        self.window_sentences = max(self.repeat_limit, window_sentences)
         self.total_chars = 0
         self._tail = ""
         self._sentence_counts: dict[str, int] = {}
+        self._recent_sentences: deque[str] = deque()
 
     def observe(self, delta: str) -> str | None:
         content = str(delta or "")
@@ -93,6 +109,14 @@ class ReasoningLoopGuard:
             if len(normalized) < 16:
                 continue
             digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+            if len(self._recent_sentences) >= self.window_sentences:
+                expired = self._recent_sentences.popleft()
+                remaining = self._sentence_counts.get(expired, 1) - 1
+                if remaining > 0:
+                    self._sentence_counts[expired] = remaining
+                else:
+                    self._sentence_counts.pop(expired, None)
+            self._recent_sentences.append(digest)
             count = self._sentence_counts.get(digest, 0) + 1
             self._sentence_counts[digest] = count
             if count >= self.repeat_limit:
@@ -1294,6 +1318,15 @@ async def run_agentscope(
                     request_payload,
                     completed_business_write=completed_business_write,
                     transaction_agent=transaction_agent,
+                )
+                await emit(
+                    {
+                        "type": "agent_loop_guard_triggered",
+                        "reason": loop_reason,
+                        "reasoning_chars": reasoning_guard.total_chars,
+                        "iteration": iteration_count,
+                        "max_iterations": max_iterations,
+                    }
                 )
                 break
             await emit({"type": "reasoning_delta", "content": event.delta})

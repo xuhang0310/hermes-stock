@@ -240,6 +240,42 @@ def _render(template: str | None, now: datetime) -> str:
     )
 
 
+def _scheduled_execution_constraints(job_key: str) -> str:
+    common = (
+        "本轮是独立的定时任务，只处理提示中的当日范围；历史报告仅可作为证据，"
+        "不得补做往日任务。工具已返回的数据直接复用，同一工具与同一参数不要重复调用，"
+        "同一事实和计算不要在推理中反复核验；数据缺失时明确标注后继续完成报告。"
+    )
+    if job_key == "close-review-1530":
+        return (
+            common
+            + "先各调用一次持仓快照和止损检查等批量工具，优先使用快照中的最新价、市值、"
+            "浮盈亏和仓位结果，禁止按账户或按标的重复手算组合总额。完成必要查询后直接成稿，"
+            "正文控制在 1600 字以内。"
+        )
+    if job_key == "postmarket-research-1900":
+        return (
+            common
+            + "先一次取得完整持仓清单；每只标的优先使用公司研究聚合工具获取底稿，"
+            "仅补查底稿明确缺失且会改变结论的维度。每只持仓只输出一份合并备忘录。"
+        )
+    return common
+
+
+def _scheduled_agent_hard_timeout_seconds(snap: dict) -> int:
+    """Cover leader work, delegated-child wait, and leader resume phases."""
+
+    run_timeout = max(30, int(settings.agent_run_timeout_seconds))
+    mode = str(snap.get("delegation_mode") or "none")
+    child_timeout = (
+        max(0, int(snap.get("child_timeout_seconds") or 0))
+        if mode == "execute_and_wait"
+        else 0
+    )
+    leader_phases = 2 if mode == "execute_and_wait" else 1
+    return leader_phases * run_timeout + child_timeout + 60
+
+
 def _build_digital_human_context(code: str | None) -> str | None:
     if not code:
         return None
@@ -350,7 +386,11 @@ def _run_scheduled_agent(
         with SessionLocal() as db:
             db.add(AiChatMessage(session_id=session_id, role="user", content=question, event_count=0))
             db.commit()
-    answer, model_name, error = wait_for_channel_run(run["run_id"])
+    answer, model_name, error = wait_for_channel_run(
+        run["run_id"],
+        timeout_seconds=max(30, int(settings.agent_run_timeout_seconds)) + 30,
+        hard_timeout_seconds=_scheduled_agent_hard_timeout_seconds(snap),
+    )
     if error:
         raise RuntimeError(error)
     if not answer:
@@ -364,6 +404,7 @@ def _run_agent_report(
     job_run_id: str,
 ) -> tuple[str, int | None, str, str | None]:
     question = _render(snap["prompt_template"], now) or snap["name"]
+    question = f"{question}\n\n执行约束：{_scheduled_execution_constraints(str(snap['job_key']))}"
     answer, model_name = _run_scheduled_agent(snap, question, job_run_id)
     agent_error = None
     if agent_error:
