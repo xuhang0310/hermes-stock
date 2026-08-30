@@ -54,7 +54,7 @@ def get_factors(
     theme: str | None = Query(default=None, max_length=32),
     universe: str | None = Query(default="equity_cn", max_length=32),
     query: str | None = Query(default=None, max_length=120),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=50, ge=1, le=800),
     _context: AuthContext = Depends(require_permission("agent:use")),
 ) -> dict:
     try:

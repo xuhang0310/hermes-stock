@@ -43,6 +43,7 @@ from backend.app.paper.paper_api import router as paper_router
 from backend.app.quant.agent_board_api import router as agent_board_router
 from backend.app.quant.backtest_api import router as backtest_router, stocks_router
 from backend.app.quant.factor_api import router as factor_router
+from backend.app.quant.tushare_factor_api import router as tushare_factor_router
 from backend.app.quant.screener_api import router as screener_router
 from backend.app.scheduler.rhythm_api import router as rhythm_router
 from backend.app.scheduler.rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
@@ -156,6 +157,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(user_router)
     app.include_router(ai_router)
+    app.include_router(tushare_factor_router)
     app.include_router(factor_router)
     app.include_router(backtest_router)
     app.include_router(stocks_router)

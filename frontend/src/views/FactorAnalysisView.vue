@@ -9,7 +9,7 @@ import type { FactorBenchmarkItem, FactorBenchmarkResult, FactorSymbolCoverage }
 const loading = ref(false)
 const running = ref(false)
 const error = ref('')
-const catalog = ref<Array<{ id: string; zoo: string; nickname: string | null }>>([])
+const catalog = ref<Array<{ id: string; zoo: string; nickname: string | null; cached_rows?: number }>>([])
 const catalogLoading = ref(false)
 const catalogError = ref('')
 const selectedIds = ref(new Set<string>())
@@ -45,13 +45,20 @@ let icDetailChart: ReturnType<typeof createChart> | null = null
 let icResizeObserver: ResizeObserver | null = null
 const copied = ref(false)
 const filterQuery = ref('')
-const zooFilter = ref<'all' | 'price' | 'alpha101' | 'qlib158' | 'gtja191' | 'academic' | 'fundamental'>('price')
+const zooFilter = ref<'all' | 'price' | 'alpha101' | 'qlib158' | 'gtja191' | 'academic' | 'fundamental' | 'tushare'>('price')
+const syncStart = ref('')
+const syncEnd = ref('')
+const syncing = ref(false)
+const catalogSyncing = ref(false)
+const syncMessage = ref('')
+const syncError = ref('')
 
 const categoryLabels: Record<string, string> = { alive: '有效', reversed: '反转', dead: '失效' }
 const categoryTone: Record<string, string> = { alive: 'pos', reversed: 'warn', dead: 'muted' }
 
 const zooOptions = [
   { value: 'price', label: '量价可算（推荐）', zoos: ['alpha101', 'qlib158', 'gtja191'] },
+  { value: 'tushare', label: 'TuShare因子库（付费）', zoos: ['tushare'] },
   { value: 'alpha101', label: 'alpha101', zoos: ['alpha101'] },
   { value: 'qlib158', label: 'qlib158', zoos: ['qlib158'] },
   { value: 'gtja191', label: 'gtja191', zoos: ['gtja191'] },
@@ -78,6 +85,10 @@ const filteredCatalog = computed(() => {
 })
 
 const selectedCount = computed(() => selectedIds.value.size)
+
+const selectedTushareIds = computed(() =>
+  Array.from(selectedIds.value).filter((id) => id.startsWith('tushare:'))
+)
 
 const canRun = computed(
   () => symbols.value.length >= 5 && selectedIds.value.size > 0 && selectedIds.value.size <= 20
@@ -276,6 +287,15 @@ function skipReasonText(reason: string): string {
   if (reason.includes('IC 序列为空')) {
     return '样本覆盖不足（股票数太少或区间太短），请加更多股票或扩大区间'
   }
+  if (reason.includes('TuShare 因子值尚未摄入')) {
+    return '该 TuShare 因子值还没同步到本地：在下方"TuShare 官方因子库"勾选它并点"同步因子值"，再重新评估'
+  }
+  if (reason.includes('TuShare 因子目录尚未同步')) {
+    return 'TuShare 因子目录还没同步：先在下方点"同步因子目录"'
+  }
+  if (reason.includes('TuShare 因子库中不存在')) {
+    return '该因子不在 TuShare 因子库目录中，请先同步目录核对名称'
+  }
   return reason
 }
 
@@ -300,12 +320,57 @@ async function loadCatalog() {
   catalogLoading.value = true
   catalogError.value = ''
   try {
-    const res = await api.factorList({ limit: 200 })
-    catalog.value = res.items.map((it) => ({ id: it.id, zoo: it.zoo, nickname: it.nickname ?? null }))
+    const res = await api.factorList({ limit: 800 })
+    catalog.value = res.items.map((it) => ({
+      id: it.id,
+      zoo: it.zoo,
+      nickname: it.nickname ?? null,
+      cached_rows: it.cached_rows ?? 0,
+    }))
   } catch (reason) {
     catalogError.value = reason instanceof Error ? reason.message : '加载因子库失败'
   } finally {
     catalogLoading.value = false
+  }
+}
+
+async function syncTushareCatalog() {
+  catalogSyncing.value = true
+  syncError.value = ''
+  syncMessage.value = ''
+  try {
+    const res = await api.tushareFactorCatalogSync()
+    syncMessage.value = `因子目录同步完成：共 ${res.total} 个因子`
+    await loadCatalog()
+  } catch (reason) {
+    syncError.value = reason instanceof Error ? reason.message : 'TuShare 因子目录同步失败'
+  } finally {
+    catalogSyncing.value = false
+  }
+}
+
+async function syncTushareValues() {
+  const names = selectedTushareIds.value.map((id) => id.slice('tushare:'.length))
+  if (!names.length || syncing.value) return
+  syncing.value = true
+  syncError.value = ''
+  syncMessage.value = ''
+  try {
+    const res = await api.tushareFactorSync({
+      factor_names: names,
+      start_date: syncStart.value || null,
+      end_date: syncEnd.value || null,
+      symbols: symbols.value.length ? symbols.value : null,
+    })
+    const errNote = res.errors.length ? `，${res.errors.length} 个(因子×日期)失败` : ''
+    syncMessage.value =
+      `因子值同步完成：${res.window.start_date}~${res.window.end_date} 共 ${res.trading_days} 个交易日，` +
+      `写入 ${res.stored_rows} 条${errNote}`
+    await loadCatalog()
+  } catch (reason) {
+    syncError.value = reason instanceof Error ? reason.message : 'TuShare 因子值同步失败'
+  } finally {
+    syncing.value = false
   }
 }
 
@@ -450,10 +515,49 @@ onMounted(loadCatalog)
         >
           <input type="checkbox" :checked="selectedIds.has(f.id)" @change="toggleFactor(f.id)" />
           <span class="fa-chip-id">{{ f.id }}</span>
-          <span class="fa-chip-meta">{{ f.zoo }}<template v-if="f.nickname"> · {{ f.nickname }}</template></span>
+          <span class="fa-chip-meta">
+            {{ f.zoo }}<template v-if="f.zoo === 'tushare'"> · {{ f.cached_rows ? `已缓存 ${f.cached_rows} 条` : '未同步' }}</template><template v-if="f.nickname"> · {{ f.nickname }}</template>
+          </span>
         </label>
       </div>
       <div v-else class="fa-state fa-state-sm">没有匹配的因子</div>
+    </section>
+
+    <section class="fa-picker">
+      <header class="fa-picker-head">
+        <div>
+          <strong>TuShare 官方因子库（付费接口）</strong>
+          <span class="fa-hint fa-tushare-hint">
+            用法：①点"同步因子目录"→②上方筛选"TuShare因子库"勾选因子→③点"同步选中因子值"缓存到本地→④正常"开始评估"
+          </span>
+        </div>
+        <div class="fa-picker-actions">
+          <input v-model="syncStart" type="text" class="fa-input fa-sync-input" placeholder="起始 YYYYMMDD（空=近90天）" />
+          <input v-model="syncEnd" type="text" class="fa-input fa-sync-input" placeholder="结束 YYYYMMDD（空=今天）" />
+          <button type="button" class="btn-outline" :disabled="catalogSyncing" @click="syncTushareCatalog">
+            <span class="btn-spin" :class="{ spin: catalogSyncing }"></span>
+            {{ catalogSyncing ? '同步中' : '同步因子目录' }}
+          </button>
+          <button
+            type="button"
+            class="btn-outline"
+            :disabled="syncing || !selectedTushareIds.length || selectedTushareIds.length > 10"
+            :title="!selectedTushareIds.length ? '先在上方勾选 TuShare 因子' : selectedTushareIds.length > 10 ? '一次最多同步 10 个 TuShare 因子' : '按上方股票池过滤缓存'"
+            @click="syncTushareValues"
+          >
+            <span class="btn-spin" :class="{ spin: syncing }"></span>
+            {{ syncing ? '同步中' : `同步选中因子值（${selectedTushareIds.length}）` }}
+          </button>
+        </div>
+      </header>
+      <div v-if="syncError" class="notice notice-danger fa-sync-notice">
+        <strong>同步失败</strong>
+        <span>{{ syncError }}</span>
+      </div>
+      <div v-else-if="syncMessage" class="fa-sync-ok">{{ syncMessage }}</div>
+      <p class="fa-hint fa-tushare-note">
+        单次最多 60 次请求（因子数×交易日数），区间太长请分段同步，缓存会自动累积；因子值按上方股票池过滤后缓存。
+      </p>
     </section>
 
     <template v-if="results.length">
@@ -799,6 +903,33 @@ onMounted(loadCatalog)
   width: auto;
   min-width: 150px;
   cursor: pointer;
+}
+
+.fa-sync-input {
+  width: 190px;
+}
+
+.fa-sync-notice {
+  margin-bottom: 8px;
+}
+
+.fa-sync-ok {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(39, 197, 138, 0.3);
+  border-radius: 6px;
+  background: rgba(39, 197, 138, 0.06);
+  color: var(--ok);
+  font-size: 12.5px;
+}
+
+.fa-tushare-hint {
+  display: block;
+  margin-top: 4px;
+}
+
+.fa-tushare-note {
+  margin: 0;
 }
 
 .fa-skipped {

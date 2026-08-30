@@ -76,6 +76,9 @@ import type {
   ScreenerTemplateRecommendation,
   FactorBenchmarkInterpretation,
   FactorBenchmarkResult,
+  TushareFactorCatalogResult,
+  TushareFactorCatalogSyncResult,
+  TushareFactorSyncResult,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -699,6 +702,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  tushareFactorCatalog: (params: { factor_type?: string; query?: string } = {}) => {
+    const query = new URLSearchParams()
+    if (params.factor_type) query.set('factor_type', params.factor_type)
+    if (params.query) query.set('query', params.query)
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<TushareFactorCatalogResult>>(
+      `/api/factors/tushare/catalog${suffix}`
+    ).then((res) => res.data)
+  },
+  tushareFactorCatalogSync: () =>
+    request<ApiEnvelope<TushareFactorCatalogSyncResult>>('/api/factors/tushare/catalog/sync', {
+      method: 'POST',
+      body: '{}',
+    }).then((res) => res.data),
+  tushareFactorSync: (payload: {
+    factor_names: string[]
+    start_date?: string | null
+    end_date?: string | null
+    symbols?: string[] | null
+  }) =>
+    request<ApiEnvelope<TushareFactorSyncResult>>('/api/factors/tushare/sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
   runScreener: (payload: ScreenerQuery) =>
     request<ApiEnvelope<ScreenerResult>>('/api/screener/run', {
       method: 'POST',
@@ -796,7 +823,7 @@ export const api = {
     if (params.zoo) query.set('zoo', params.zoo)
     if (params.limit) query.set('limit', String(params.limit))
     const suffix = query.size ? `?${query.toString()}` : ''
-    return request<{ items: Array<{ id: string; zoo: string; nickname?: string | null }> }>(
+    return request<{ items: Array<{ id: string; zoo: string; nickname?: string | null; cached_rows?: number }> }>(
       `/api/factors${suffix}`
     )
   },

@@ -1452,6 +1452,40 @@ export type FactorBenchmarkInterpretation = {
   model: string | null
 }
 
+// TuShare 官方因子库（付费接口）：目录 + 按需缓存
+export type TushareFactorMeta = {
+  id: string
+  zoo: 'tushare'
+  factor_name: string
+  factor_type: string
+  nickname: string
+  factor_desc: string
+  cached_rows: number
+  cached_min_date: string | null
+  cached_max_date: string | null
+}
+
+export type TushareFactorCatalogResult = {
+  total: number
+  by_type: Array<{ factor_type: string; count: number }>
+  items: TushareFactorMeta[]
+}
+
+export type TushareFactorCatalogSyncResult = {
+  total: number
+  by_type: Record<string, number>
+}
+
+export type TushareFactorSyncResult = {
+  window: { start_date: string; end_date: string }
+  trading_days: number
+  stored_rows: number
+  symbols_filtered: number | null
+  factors: Array<{ factor_name: string; stored_rows: number; days: number }>
+  errors: Array<{ factor_name: string; trade_date: string; error: string }>
+  note: string
+}
+
 // 统一响应信封（core/response.py::ok/fail），新增端点共用
 export type ApiEnvelope<T> = {
   success: boolean

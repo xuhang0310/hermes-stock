@@ -1663,6 +1663,42 @@ class LoginLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class TushareFactorCatalog(Base):
+    """TuShare 官方因子库目录（付费接口）：``factor_list`` 同步的因子元信息。
+
+    与 ``tushare_factor_values`` 配合：目录回答"有哪些因子"，值表缓存按需摄入的因子值。
+    """
+
+    __tablename__ = "tushare_factor_catalog"
+
+    factor_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    asset_type: Mapped[str] = mapped_column(String(8), nullable=False, default="STK")
+    factor_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    factor_desc: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TushareFactorValue(Base):
+    """TuShare 因子值缓存：按 (因子, 交易日) 截面按需摄入，重复摄入幂等覆盖。
+
+    TuShare 因子值由官方基于全市场计算（部分为截面排名），本地按股票池过滤行不改变
+    保留值本身的含义。``trade_date`` 存 YYYYMMDD 字符串（与 TuShare 口径一致）。
+    """
+
+    __tablename__ = "tushare_factor_values"
+    __table_args__ = (
+        UniqueConstraint("factor_name", "symbol", "trade_date", name="uq_tushare_factor_values"),
+        Index("ix_tushare_factor_values_factor_date", "factor_name", "trade_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    factor_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False, index=True)  # 000001.SZ
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    factor_value: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class InboxNotification(Base):
     """站内通知（用户收件箱）：系统/智能体/报告等事件推送给指定用户，按用户隔离可见。
 

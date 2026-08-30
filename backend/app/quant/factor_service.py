@@ -10,6 +10,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.database import SessionLocal
@@ -22,12 +23,20 @@ from backend.app.quant.factors.registry import (
     SkipAlpha,
     get_default_registry,
 )
+from backend.app.quant.tushare_factor_service import (
+    TUSHARE_FACTOR_ZOO,
+    known_factor_names as tushare_known_factor_names,
+    list_catalog as tushare_list_catalog,
+    load_factor_panel as tushare_load_factor_panel,
+    parse_tushare_factor_id,
+    tushare_factor_id,
+)
 
 MAX_FACTOR_SYMBOLS = 50
 MAX_BENCH_FACTORS = 20
-MAX_FACTOR_LIST = 200
+MAX_FACTOR_LIST = 800
 MIN_CROSS_SECTION = 5
-_VALID_ZOOS = frozenset({"alpha101", "gtja191", "qlib158", "academic", "fundamental"})
+_VALID_ZOOS = frozenset({"alpha101", "gtja191", "qlib158", "academic", "fundamental", TUSHARE_FACTOR_ZOO})
 _DATE_RE = re.compile(r"^\d{8}$")
 
 
@@ -187,12 +196,42 @@ def _alpha_summary(alpha: Any) -> dict[str, Any]:
     }
 
 
+def _tushare_summary(meta: dict[str, Any]) -> dict[str, Any]:
+    """TuShare 目录行 → 与 ``_alpha_summary`` 同构的因子卡片（附带缓存覆盖信息）。"""
+    factor_type = str(meta.get("factor_type") or "").strip()
+    return {
+        "id": meta.get("id") or tushare_factor_id(str(meta.get("factor_name") or "")),
+        "zoo": TUSHARE_FACTOR_ZOO,
+        "nickname": meta.get("nickname"),
+        "theme": [factor_type] if factor_type else [],
+        "formula_latex": "",
+        "columns_required": [],
+        "extras_required": [],
+        "requires_sector": False,
+        "universe": ["equity_cn"],
+        "frequency": ["daily"],
+        "decay_horizon": None,
+        "min_warmup_bars": None,
+        "notes": meta.get("factor_desc") or "",
+        "factor_name": meta.get("factor_name"),
+        "factor_type": factor_type,
+        "cached_rows": int(meta.get("cached_rows") or 0),
+        "cached_min_date": meta.get("cached_min_date"),
+        "cached_max_date": meta.get("cached_max_date"),
+    }
+
+
 def factor_health() -> dict[str, Any]:
     registry = get_default_registry()
     health = registry.health()
+    zoos = {zoo: len(registry.list(zoo=zoo)) for zoo in sorted(_VALID_ZOOS) if zoo != TUSHARE_FACTOR_ZOO}
+    try:
+        zoos[TUSHARE_FACTOR_ZOO] = len(tushare_known_factor_names())
+    except SQLAlchemyError:
+        zoos[TUSHARE_FACTOR_ZOO] = 0  # 目录表尚未建立（未跑 create_all）时不影响主库健康信息
     return {
         **health,
-        "zoos": {zoo: len(registry.list(zoo=zoo)) for zoo in sorted(_VALID_ZOOS)},
+        "zoos": zoos,
         "source": "Vibe-Trading factor zoo (vendored, MIT; Qlib attribution retained)",
     }
 
@@ -208,24 +247,46 @@ def list_factors(
     if zoo and zoo not in _VALID_ZOOS:
         raise ValueError(f"未知因子库：{zoo}")
     registry = get_default_registry()
-    ids = registry.list(zoo=zoo, theme=theme, universe=universe)
     needle = str(query or "").strip().lower()
-    if needle:
-        ids = [
-            alpha_id
-            for alpha_id in ids
-            if needle in alpha_id.lower()
-            or needle in str(registry.get(alpha_id).meta.get("nickname") or "").lower()
-        ]
+    items: list[dict[str, Any]] = []
+    if zoo != TUSHARE_FACTOR_ZOO:
+        ids = registry.list(zoo=zoo, theme=theme, universe=universe)
+        if needle:
+            ids = [
+                alpha_id
+                for alpha_id in ids
+                if needle in alpha_id.lower()
+                or needle in str(registry.get(alpha_id).meta.get("nickname") or "").lower()
+            ]
+        items.extend(_alpha_summary(registry.get(alpha_id)) for alpha_id in ids)
+    # TuShare 官方因子库：目录存本地表，无 theme 元数据；按主题筛选时不参与
+    if zoo in (None, TUSHARE_FACTOR_ZOO) and theme is None and universe in (None, "equity_cn"):
+        try:
+            items.extend(
+                _tushare_summary(meta)
+                for meta in tushare_list_catalog(query=needle or None)
+            )
+        except SQLAlchemyError:
+            if zoo == TUSHARE_FACTOR_ZOO:
+                raise ValueError("TuShare 因子目录表尚未就绪，请重启应用后先同步因子目录")
     capped = max(1, min(int(limit), MAX_FACTOR_LIST))
     return {
-        "total": len(ids),
-        "returned": min(len(ids), capped),
-        "items": [_alpha_summary(registry.get(alpha_id)) for alpha_id in ids[:capped]],
+        "total": len(items),
+        "returned": min(len(items), capped),
+        "items": items[:capped],
     }
 
 
 def get_factor(alpha_id: str, *, include_source: bool = False) -> dict[str, Any]:
+    tushare_name = parse_tushare_factor_id(str(alpha_id or "").strip())
+    if tushare_name is not None:
+        match = next(
+            (meta for meta in tushare_list_catalog() if meta.get("factor_name") == tushare_name),
+            None,
+        )
+        if match is None:
+            raise KeyError(f"因子不存在：{alpha_id}")
+        return _tushare_summary(match)
     registry = get_default_registry()
     try:
         alpha = registry.get(str(alpha_id or "").strip())
@@ -245,6 +306,14 @@ def score_factor(
     end_date: str | None = None,
     refresh: bool = False,
 ) -> dict[str, Any]:
+    tushare_name = parse_tushare_factor_id(str(alpha_id or "").strip())
+    if tushare_name is not None:
+        return _score_tushare_factor(
+            tushare_name,
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+        )
     registry = get_default_registry()
     alpha = registry.get(alpha_id)
     panel, coverage, refresh_failures = _load_panel(
@@ -283,6 +352,64 @@ def score_factor(
         "scores": scores,
         "coverage": coverage.__dict__,
         "refresh_failures": refresh_failures,
+        "interpretation": (
+            "percentile 仅表示因子横截面排序；因子方向必须先用样本外 IC 验证，"
+            "不能直接把高分解释为买入建议。"
+        ),
+    }
+
+
+def _score_tushare_factor(
+    factor_name: str,
+    symbols: Iterable[str],
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
+    """TuShare 因子打分：读本地缓存面板，取最近一个有效截面排序。"""
+    alpha_id = tushare_factor_id(factor_name)
+    alpha_meta = get_factor(alpha_id)  # 目录不存在时抛 KeyError
+    normalized = _normalize_symbols(symbols)
+    end = _compact_date(end_date, fallback=date.today().strftime("%Y%m%d"))
+    start = _compact_date(
+        start_date,
+        fallback=(date.today() - timedelta(days=365)).strftime("%Y%m%d"),
+    )
+    if start is None or end is None or start > end:
+        raise ValueError("开始日期不能晚于结束日期")
+    factor = tushare_load_factor_panel(factor_name, normalized, start, end)
+    if factor is None or factor.dropna(how="all").empty:
+        raise ValueError("TuShare 因子值尚未摄入，请先在因子分析页同步该因子的因子值")
+    valid_counts = factor.notna().sum(axis=1)
+    valid_dates = valid_counts[valid_counts >= MIN_CROSS_SECTION].index
+    if valid_dates.empty:
+        raise ValueError(
+            f"因子没有形成有效横截面；当前缓存 {int(factor.shape[0])} 个交易日，"
+            f"至少需要 {MIN_CROSS_SECTION} 只股票同日有值"
+        )
+    as_of = valid_dates[-1]
+    raw = factor.loc[as_of].dropna()
+    percentile = raw.rank(method="average", pct=True)
+    scores = [
+        {
+            "symbol": symbol,
+            "raw_score": round(float(raw[symbol]), 8),
+            "percentile": round(float(percentile[symbol]), 6),
+        }
+        for symbol in raw.sort_values(ascending=False).index
+    ]
+    return {
+        "alpha": alpha_meta,
+        "as_of_date": as_of.strftime("%Y%m%d"),
+        "scores": scores,
+        "coverage": {
+            "symbols": tuple(normalized),
+            "start_date": factor.index.min().strftime("%Y%m%d"),
+            "end_date": factor.index.max().strftime("%Y%m%d"),
+            "rows": int(factor.notna().sum().sum()),
+            "dates": int(factor.shape[0]),
+        },
+        "refresh_failures": [],
         "interpretation": (
             "percentile 仅表示因子横截面排序；因子方向必须先用样本外 IC 验证，"
             "不能直接把高分解释为买入建议。"
@@ -397,8 +524,20 @@ def benchmark_factors(
         raise ValueError(f"单次最多评估 {MAX_BENCH_FACTORS} 个因子")
 
     registry = get_default_registry()
+    tushare_names: dict[str, str] = {}
     for alpha_id in ids:
-        registry.get(alpha_id)
+        tushare_name = parse_tushare_factor_id(alpha_id)
+        if tushare_name is not None:
+            tushare_names[alpha_id] = tushare_name
+        else:
+            registry.get(alpha_id)
+    if tushare_names:
+        try:
+            tushare_catalog = tushare_known_factor_names()
+        except SQLAlchemyError:
+            tushare_catalog = set()  # 目录表未就绪 → 按"目录未同步"跳过，不拖垮其余因子
+    else:
+        tushare_catalog = set()
     panel, coverage, refresh_failures = _load_panel(
         symbols,
         start_date=start_date,
@@ -419,7 +558,25 @@ def benchmark_factors(
     factor_panels: dict[str, pd.DataFrame] = {}
     for alpha_id in ids:
         try:
-            factor = registry.compute(alpha_id, panel)
+            if alpha_id in tushare_names:
+                factor_name = tushare_names[alpha_id]
+                if not tushare_catalog:
+                    raise ValueError("TuShare 因子目录尚未同步，请先在因子分析页同步因子目录")
+                if factor_name not in tushare_catalog:
+                    raise ValueError(f"TuShare 因子库中不存在该因子：{factor_name}")
+                factor = tushare_load_factor_panel(
+                    factor_name,
+                    coverage.symbols,
+                    coverage.start_date,
+                    coverage.end_date,
+                )
+                if factor is None:
+                    raise ValueError("TuShare 因子值尚未摄入，请先在因子分析页同步该因子的因子值")
+                factor = factor.reindex(index=panel["close"].index)
+                zoo_label = TUSHARE_FACTOR_ZOO
+            else:
+                factor = registry.compute(alpha_id, panel)
+                zoo_label = registry.get(alpha_id).zoo
             factor_panels[alpha_id] = factor
             ic = compute_ic_series(factor, forward_returns)
             if ic.empty:
@@ -430,7 +587,7 @@ def benchmark_factors(
             positive_ratio = float((ic > 0).mean())
             result: dict[str, Any] = {
                 "id": alpha_id,
-                "zoo": registry.get(alpha_id).zoo,
+                "zoo": zoo_label,
                 "ic_mean": round(ic_mean, 6),
                 "ic_std": round(ic_std, 6),
                 "ir": round(ir, 4),
