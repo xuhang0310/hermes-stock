@@ -142,13 +142,38 @@ class TushareFactorTests(unittest.TestCase):
             tushare_factor_service.sync_factor_values(["nope_factor"])
         self.assertIn("不存在这些因子", str(ctx.exception))
 
-    def test_sync_respects_call_cap(self) -> None:
-        # 20250101~20250331 约 64 个交易日 × 1 因子 > 60 次上限
-        with self.assertRaises(ValueError) as ctx:
-            tushare_factor_service.sync_factor_values(
-                ["roe_ttm"], start_date="20250101", end_date="20250331"
+    def test_sync_chunks_long_windows_with_offset_resume(self) -> None:
+        # 20250102~20250331 共 63 个交易日 × 1 因子 > 单片上限：自动分片，offset 续传，缓存累积
+        first = tushare_factor_service.sync_factor_values(
+            ["roe_ttm"], start_date="20250102", end_date="20250331"
+        )
+        self.assertGreater(first["planned"], 60)
+        self.assertEqual(first["offset"], 0)
+        self.assertTrue(first["has_more"])
+        self.assertFalse(first["halted"])
+        self.assertEqual(first["offset_next"], 30)
+        self.assertEqual(first["stored_rows"], 30 * len(SYMBOLS))
+
+        offset = first["offset_next"]
+        rounds = 1
+        last = first
+        while last["has_more"]:
+            last = tushare_factor_service.sync_factor_values(
+                ["roe_ttm"], start_date="20250102", end_date="20250331", offset=offset
             )
-        self.assertIn("超过单次上限", str(ctx.exception))
+            rounds += 1
+            self.assertLessEqual(last["offset_next"] - last["offset"], 30)
+            offset = last["offset_next"]
+        self.assertEqual(rounds, 3)
+        self.assertEqual(last["offset_next"], first["planned"])
+
+        with self.SessionFactory() as db:
+            rows = db.scalar(
+                select(func.count())
+                .select_from(TushareFactorValue)
+                .where(TushareFactorValue.factor_name == "roe_ttm")
+            )
+        self.assertEqual(rows, first["planned"] * len(SYMBOLS))
 
     def test_sync_values_then_load_panel_and_query(self) -> None:
         result = tushare_factor_service.sync_factor_values(
@@ -157,6 +182,14 @@ class TushareFactorTests(unittest.TestCase):
             end_date="20250228",
             symbols=SYMBOLS,
         )
+        while result["has_more"]:
+            result = tushare_factor_service.sync_factor_values(
+                ["roe_ttm"],
+                start_date="20250101",
+                end_date="20250228",
+                symbols=SYMBOLS,
+                offset=result["offset_next"],
+            )
         self.assertGreater(result["stored_rows"], 0)
         self.assertFalse(result["errors"])
 

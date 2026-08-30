@@ -22,6 +22,7 @@ class TushareFactorSyncRequest(BaseModel):
     start_date: str | None = Field(default=None, max_length=10)
     end_date: str | None = Field(default=None, max_length=10)
     symbols: list[str] | None = Field(default=None, max_length=50, description="可选股票池过滤；缺省缓存全市场截面")
+    offset: int = Field(default=0, ge=0, description="分片续传游标：任务网格=因子×交易日，单次最多执行 60 格")
 
 
 @router.get("/catalog")
@@ -65,6 +66,7 @@ def post_tushare_factor_sync(
             start_date=payload.start_date,
             end_date=payload.end_date,
             symbols=payload.symbols,
+            offset=payload.offset,
         )
     except ValueError as exc:
         return JSONResponse(status_code=400, content=fail(str(exc)))

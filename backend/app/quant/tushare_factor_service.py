@@ -29,7 +29,7 @@ from backend.app.market.stock_tools import _tushare_request, normalize_a_share_s
 TUSHARE_FACTOR_ZOO = "tushare"
 TUSHARE_FACTOR_PREFIX = "tushare:"
 MAX_SYNC_FACTORS = 10
-MAX_SYNC_CALLS = 60  # 单次同步的 factor_value 请求数上限（控制在网关超时内，可分多次同步）
+MAX_SYNC_CALLS = 30  # 单次请求的 factor_value 调用上限（30 次≈48s，远低于网关 /api 的 300s read timeout）；长区间由调用方带 offset 分片续传
 MAX_SYNC_SYMBOLS = 50
 API_PAUSE_SECONDS = 0.15
 MAX_REPORTED_ERRORS = 20
@@ -191,10 +191,14 @@ def sync_factor_values(
     start_date: str | None = None,
     end_date: str | None = None,
     symbols: Iterable[str] | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """按截面模式摄入因子值：每 (因子, 交易日) 一次全市场请求，按需过滤股票池。
 
     幂等：同一 (因子, 日期) 重复同步时，有新数据则覆盖旧行。
+
+    任务网格 = 因子 × 交易日（行优先）。单次请求最多执行 ``MAX_SYNC_CALLS`` 格，
+    超出部分由调用方携带 ``offset`` 续传（前端自动循环分片），避免网关 60s 超时。
     """
     names = [str(name or "").strip() for name in dict.fromkeys(factor_names) if str(name or "").strip()]
     if not names:
@@ -229,66 +233,80 @@ def sync_factor_values(
 
     trade_days = _trading_days(start, end)
     planned = len(names) * len(trade_days)
-    if planned > MAX_SYNC_CALLS:
-        raise ValueError(
-            f"本次需要 {planned} 次请求（{len(names)} 因子 × {len(trade_days)} 个交易日），"
-            f"超过单次上限 {MAX_SYNC_CALLS}。请缩小日期区间或减少因子数，可分多次同步（缓存会累积）。"
-        )
+    offset = max(0, int(offset or 0))
+    if offset > planned:
+        offset = planned
 
     stored_total = 0
-    per_factor: list[dict[str, Any]] = []
+    per_factor: dict[str, dict[str, Any]] = {}
     errors: list[dict[str, Any]] = []
-    for name in names:
-        stored_rows = 0
-        covered_days = 0
-        for day in trade_days:
-            response = _tushare_request("factor_value", {"factor_name": name, "trade_date": day}, "")
-            if response.get("error"):
-                if len(errors) < MAX_REPORTED_ERRORS:
-                    errors.append({"factor_name": name, "trade_date": day, "error": str(response["error"])[:200]})
-                time.sleep(API_PAUSE_SECONDS)
-                continue
-            rows = response.get("rows") or []
-            if pool is not None:
-                pool_set = set(pool)
-                rows = [row for row in rows if row.get("ts_code") in pool_set]
-            payload = [
-                {
-                    "factor_name": name,
-                    "symbol": str(row.get("ts_code") or "").strip(),
-                    "trade_date": str(row.get("trade_date") or day),
-                    "factor_value": row.get("factor_value"),
-                }
-                for row in rows
-                if row.get("ts_code")
-            ]
-            if payload:
-                with SessionLocal() as db:
-                    db.execute(
-                        delete(TushareFactorValue).where(
-                            TushareFactorValue.factor_name == name,
-                            TushareFactorValue.trade_date == day,
-                            *([TushareFactorValue.symbol.in_(pool)] if pool is not None else []),
-                        )
-                    )
-                    db.execute(insert(TushareFactorValue), payload)
-                    db.commit()
-                stored_rows += len(payload)
-            covered_days += 1
+    completed_cells = 0
+    failed_cells = 0
+    halted = False
+    for name, day in [(names[i // len(trade_days)], trade_days[i % len(trade_days)])
+                      for i in range(offset, min(offset + MAX_SYNC_CALLS, planned))]:
+        stats = per_factor.setdefault(name, {"factor_name": name, "stored_rows": 0, "days": 0})
+        response = _tushare_request("factor_value", {"factor_name": name, "trade_date": day}, "")
+        if response.get("error"):
+            if len(errors) < MAX_REPORTED_ERRORS:
+                errors.append({"factor_name": name, "trade_date": day, "error": str(response["error"])[:200]})
+            failed_cells += 1
             time.sleep(API_PAUSE_SECONDS)
-        stored_total += stored_rows
-        per_factor.append({"factor_name": name, "stored_rows": stored_rows, "days": covered_days})
+            completed_cells += 1
+            continue
+        rows = response.get("rows") or []
+        if pool is not None:
+            pool_set = set(pool)
+            rows = [row for row in rows if row.get("ts_code") in pool_set]
+        payload = [
+            {
+                "factor_name": name,
+                "symbol": str(row.get("ts_code") or "").strip(),
+                "trade_date": str(row.get("trade_date") or day),
+                "factor_value": row.get("factor_value"),
+            }
+            for row in rows
+            if row.get("ts_code")
+        ]
+        if payload:
+            with SessionLocal() as db:
+                db.execute(
+                    delete(TushareFactorValue).where(
+                        TushareFactorValue.factor_name == name,
+                        TushareFactorValue.trade_date == day,
+                        *([TushareFactorValue.symbol.in_(pool)] if pool is not None else []),
+                    )
+                )
+                db.execute(insert(TushareFactorValue), payload)
+                db.commit()
+            stats["stored_rows"] += len(payload)
+            stored_total += len(payload)
+        stats["days"] += 1
+        completed_cells += 1
+        time.sleep(API_PAUSE_SECONDS)
+
+    offset_next = offset + completed_cells
+    has_more = offset_next < planned
+    if has_more and completed_cells and failed_cells == completed_cells:
+        # 本轮全部失败（如上游故障）：停止续传，避免前端空转
+        halted = True
+        has_more = False
 
     return {
         "window": {"start_date": start, "end_date": end},
         "trading_days": len(trade_days),
         "stored_rows": stored_total,
         "symbols_filtered": len(pool) if pool is not None else None,
-        "factors": per_factor,
+        "factors": list(per_factor.values()),
         "errors": errors,
+        "planned": planned,
+        "offset": offset,
+        "offset_next": offset_next,
+        "has_more": has_more,
+        "halted": halted,
         "note": (
             "因子值已缓存到本地，重复同步同一区间会覆盖旧值；"
-            "如需更长历史，请分多次同步（缓存累积）。"
+            "长区间自动按每 30 次请求分片续传，缓存累积。"
         ),
     }
 

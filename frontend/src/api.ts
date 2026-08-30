@@ -722,6 +722,7 @@ export const api = {
     start_date?: string | null
     end_date?: string | null
     symbols?: string[] | null
+    offset?: number | null
   }) =>
     request<ApiEnvelope<TushareFactorSyncResult>>('/api/factors/tushare/sync', {
       method: 'POST',

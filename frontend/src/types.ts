@@ -1483,6 +1483,11 @@ export type TushareFactorSyncResult = {
   symbols_filtered: number | null
   factors: Array<{ factor_name: string; stored_rows: number; days: number }>
   errors: Array<{ factor_name: string; trade_date: string; error: string }>
+  planned: number
+  offset: number
+  offset_next: number
+  has_more: boolean
+  halted: boolean
   note: string
 }
 

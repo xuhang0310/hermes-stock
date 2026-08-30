@@ -59,6 +59,7 @@ const syncing = ref(false)
 const catalogSyncing = ref(false)
 const syncMessage = ref('')
 const syncError = ref('')
+const syncProgress = ref('')
 
 const categoryLabels: Record<string, string> = { alive: '有效', reversed: '反转', dead: '失效' }
 const categoryTone: Record<string, string> = { alive: 'pos', reversed: 'warn', dead: 'muted' }
@@ -362,22 +363,47 @@ async function syncTushareValues() {
   syncing.value = true
   syncError.value = ''
   syncMessage.value = ''
+  syncProgress.value = ''
   try {
-    const res = await api.tushareFactorSync({
-      factor_names: names,
-      start_date: syncStart.value || null,
-      end_date: syncEnd.value || null,
-      symbols: symbols.value.length ? symbols.value : null,
-    })
-    const errNote = res.errors.length ? `，${res.errors.length} 个(因子×日期)失败` : ''
+    let offset = 0
+    let planned = 0
+    let tradingDays = 0
+    let windowText = ''
+    let totalStored = 0
+    let totalErrors = 0
+    let halted = false
+    for (;;) {
+      const res = await api.tushareFactorSync({
+        factor_names: names,
+        start_date: syncStart.value || null,
+        end_date: syncEnd.value || null,
+        symbols: symbols.value.length ? symbols.value : null,
+        offset,
+      })
+      planned = res.planned
+      tradingDays = res.trading_days
+      windowText = `${res.window.start_date}~${res.window.end_date}`
+      totalStored += res.stored_rows
+      totalErrors += res.errors.length
+      offset = res.offset_next
+      halted = res.halted
+      if (res.has_more) {
+        syncProgress.value = `同步中 ${offset}/${planned}（因子×交易日），已写入 ${totalStored} 条…`
+        continue
+      }
+      break
+    }
+    const errNote = totalErrors ? `，${totalErrors} 个(因子×日期)失败` : ''
+    const haltNote = halted ? '（本轮全部失败已中止，可稍后重试续传）' : ''
     syncMessage.value =
-      `因子值同步完成：${res.window.start_date}~${res.window.end_date} 共 ${res.trading_days} 个交易日，` +
-      `写入 ${res.stored_rows} 条${errNote}`
+      `因子值同步完成：${windowText} 共 ${tradingDays} 个交易日，` +
+      `写入 ${totalStored} 条${errNote}${haltNote}`
     await loadCatalog()
   } catch (reason) {
     syncError.value = reason instanceof Error ? reason.message : 'TuShare 因子值同步失败'
   } finally {
     syncing.value = false
+    syncProgress.value = ''
   }
 }
 
@@ -609,9 +635,10 @@ onMounted(loadCatalog)
         <strong>同步失败</strong>
         <span>{{ syncError }}</span>
       </div>
+      <div v-else-if="syncProgress" class="fa-sync-ok">{{ syncProgress }}</div>
       <div v-else-if="syncMessage" class="fa-sync-ok">{{ syncMessage }}</div>
       <p class="fa-hint fa-tushare-note">
-        单次最多 60 次请求（因子数×交易日数），区间太长请分段同步，缓存会自动累积；因子值按上方股票池过滤后缓存。
+        长区间自动分片续传（每片 ≤30 次请求，无需手动分段），缓存会自动累积；因子值按上方股票池过滤后缓存。
       </p>
     </section>
 
