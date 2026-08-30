@@ -298,17 +298,19 @@ def sync_factor_values(
 
 def load_factor_panel(
     factor_name: str,
-    symbols: Iterable[str],
+    symbols: Iterable[str] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame | None:
-    """读取缓存因子值并整形成 (日期 × 股票) 面板；无缓存返回 None。"""
-    wanted = [str(symbol) for symbol in symbols]
-    if not wanted:
-        return None
+    """读取缓存因子值并整形成 (日期 × 股票) 面板；无缓存返回 None。
+
+    ``symbols`` 为 None 时读取该因子全部缓存行（全市场截面摄入模式）。
+    """
+    wanted = [str(symbol) for symbol in symbols] if symbols is not None else []
     with SessionLocal() as db:
         statement = select(TushareFactorValue).where(TushareFactorValue.factor_name == factor_name)
-        statement = statement.where(TushareFactorValue.symbol.in_(wanted))
+        if wanted:
+            statement = statement.where(TushareFactorValue.symbol.in_(wanted))
         if start_date:
             statement = statement.where(TushareFactorValue.trade_date >= _compact_date(start_date))
         if end_date:
@@ -327,7 +329,9 @@ def load_factor_panel(
         ]
     )
     panel = frame.pivot(index="trade_date", columns="symbol", values="factor_value").sort_index()
-    return panel.reindex(columns=wanted).astype(float)
+    if wanted:
+        panel = panel.reindex(columns=wanted)
+    return panel.astype(float)
 
 
 def query_values(
@@ -362,3 +366,81 @@ def query_values(
         }
         for row in rows
     ]
+
+
+# ------------------------------------------------------------------ Agent 工具数据源
+
+MAX_TOOL_SYMBOLS = 20
+MAX_TOOL_ROWS = 500
+MAX_TOOL_CATALOG_ROWS = 50
+
+
+def get_tushare_factors(
+    factor_name: str | None = None,
+    *,
+    symbols: Iterable[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Agent 工具 ``get_tushare_factors`` 的数据源，只读本地缓存，不外呼。
+
+    - ``factor_name`` 缺省：返回目录（前 50 个，含缓存覆盖），供数字人了解有哪些因子；
+    - 指定 ``factor_name``：返回该因子已缓存的因子值（建议给定 ``symbols``；
+      缺省按最近缓存行截断返回）。
+    """
+    if not str(factor_name or "").strip():
+        items = list_catalog()
+        rows = [
+            {
+                "factor_name": item["factor_name"],
+                "factor_type": item["factor_type"],
+                "nickname": item["nickname"],
+                "cached_rows": item["cached_rows"],
+                "cached_max_date": item["cached_max_date"],
+            }
+            for item in items[:MAX_TOOL_CATALOG_ROWS]
+        ]
+        return {
+            "source": "tushare.factor_catalog",
+            "count": len(rows),
+            "rows": rows,
+            "truncated": len(items) > len(rows),
+        }
+
+    name = str(factor_name).strip()
+    if name not in known_factor_names():
+        raise ValueError(f"TuShare 因子库中不存在因子：{name}")
+    wanted = list(dict.fromkeys(normalize_a_share_symbol(str(symbol)) for symbol in (symbols or [])))
+    if len(wanted) > MAX_TOOL_SYMBOLS:
+        raise ValueError(f"股票数量不能超过 {MAX_TOOL_SYMBOLS} 只")
+
+    with SessionLocal() as db:
+        statement = (
+            select(TushareFactorValue)
+            .where(TushareFactorValue.factor_name == name)
+            .order_by(TushareFactorValue.trade_date.desc(), TushareFactorValue.symbol)
+        )
+        if wanted:
+            statement = statement.where(TushareFactorValue.symbol.in_(wanted))
+        if start_date:
+            statement = statement.where(TushareFactorValue.trade_date >= _compact_date(start_date))
+        if end_date:
+            statement = statement.where(TushareFactorValue.trade_date <= _compact_date(end_date))
+        cap = max(1, min(int(limit or 100), MAX_TOOL_ROWS))
+        rows = db.scalars(statement.limit(cap)).all()
+    return {
+        "source": "tushare.factor_value",
+        "factor_name": name,
+        "count": len(rows),
+        "rows": [
+            {
+                "symbol": row.symbol,
+                "trade_date": row.trade_date,
+                "factor_value": row.factor_value,
+            }
+            for row in rows
+        ],
+        "truncated": len(rows) >= cap,
+        "note": "因子值来自本地缓存（以最近同步窗口为限）；横截面排序打分请用 score_factor_universe。",
+    }

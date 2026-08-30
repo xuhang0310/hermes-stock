@@ -32,7 +32,9 @@ from backend.app.core.models import (
     ScreenerTemplateRecommendation,
     StockDailyBasic,
     StockLatestPrice,
+    TushareFactorValue,
 )
+from backend.app.quant import tushare_factor_service
 
 _TECH_POOL_MAX = 300  # 技术条件二次筛选的候选上限，防止全表 K 线扫描
 _LIST_LIMIT_MAX = 100
@@ -44,10 +46,18 @@ _TEMPLATE_TARGET_MAX = 120
 
 
 def _base_query(filters: dict):
-    """基础 + 量能估值条件：最新价 JOIN instruments LEFT JOIN daily_basic 最新快照。"""
+    """基础 + 量能估值条件：最新价 JOIN instruments LEFT JOIN daily_basic 最新快照。
+
+    设了 ``factor_name`` 时再 INNER JOIN 该因子最新缓存截面（无缓存值的股票被剔除），
+    并把 ``factor_value`` 追加进 select 列（行变为 5 元组）。
+    """
+    has_factor = bool(filters.get("factor_name"))
+    columns = [StockLatestPrice, Instrument.market, Instrument.type, StockDailyBasic]
+    if has_factor:
+        columns.append(TushareFactorValue.factor_value)
     latest_basic_date = select(func.max(StockDailyBasic.trade_date)).scalar_subquery()
     stmt = (
-        select(StockLatestPrice, Instrument.market, Instrument.type, StockDailyBasic)
+        select(*columns)
         .join(Instrument, Instrument.symbol == StockLatestPrice.symbol)
         .outerjoin(
             StockDailyBasic,
@@ -58,6 +68,24 @@ def _base_query(filters: dict):
         )
         .where(StockLatestPrice.price.isnot(None))
     )
+    if has_factor:
+        latest_factor_date = (
+            select(func.max(TushareFactorValue.trade_date))
+            .where(TushareFactorValue.factor_name == filters["factor_name"])
+            .scalar_subquery()
+        )
+        stmt = stmt.join(
+            TushareFactorValue,
+            and_(
+                TushareFactorValue.symbol == StockLatestPrice.symbol,
+                TushareFactorValue.factor_name == filters["factor_name"],
+                TushareFactorValue.trade_date == latest_factor_date,
+            ),
+        )
+        if filters.get("factor_min") is not None:
+            stmt = stmt.where(TushareFactorValue.factor_value >= filters["factor_min"])
+        if filters.get("factor_max") is not None:
+            stmt = stmt.where(TushareFactorValue.factor_value <= filters["factor_max"])
     if filters.get("stock_type"):
         stmt = stmt.where(Instrument.type == filters["stock_type"])
     if filters.get("market"):
@@ -170,6 +198,23 @@ def _ma_value(bars: list[dict], n: int) -> float | None:
     return round(sum(closes) / n, 3)
 
 
+def _validate_factor_filter(db, filters: dict) -> str | None:
+    """校验因子条件并返回因子快照日期；因子不存在/未缓存时抛 ValueError。"""
+    factor_name = filters.get("factor_name")
+    if not factor_name:
+        return None
+    if factor_name not in tushare_factor_service.known_factor_names():
+        raise ValueError(f"TuShare 因子库中不存在因子：{factor_name}")
+    factor_as_of = db.scalar(
+        select(func.max(TushareFactorValue.trade_date)).where(
+            TushareFactorValue.factor_name == factor_name
+        )
+    )
+    if not factor_as_of:
+        raise ValueError(f"因子 {factor_name} 的值尚未同步，请先在因子分析页同步该因子的因子值")
+    return str(factor_as_of)
+
+
 def run_screener(
     *,
     market: str | None = None,
@@ -187,17 +232,21 @@ def run_screener(
     pe_min: float | None = None,
     pe_max: float | None = None,
     above_ma: int | None = None,
+    factor_name: str | None = None,
+    factor_min: float | None = None,
+    factor_max: float | None = None,
     limit: int = 50,
 ) -> dict:
-    """执行选股，返回 {universe, total, items}。
+    """执行选股，返回 {universe, total, items, factor_as_of}。
 
     市值入参单位为亿元；above_ma 仅支持 5/10/20；技术条件以"满足则保留、
-    数据不足则剔除"处理。
+    数据不足则剔除"处理。因子条件作用于 TuShare 因子库最新缓存截面。
     """
     if above_ma is not None and above_ma not in _ALLOWED_MA:
         raise ValueError(f"均线周期只支持 {_ALLOWED_MA}")
     limit = max(1, min(int(limit or 50), _LIST_LIMIT_MAX))
     need_tech = above_ma is not None
+    has_factor = bool((factor_name or "").strip())
     filters = {
         "market": market,
         "stock_type": stock_type,
@@ -213,9 +262,13 @@ def run_screener(
         "total_mv_max": total_mv_max,
         "pe_min": pe_min,
         "pe_max": pe_max,
+        "factor_name": (factor_name or "").strip() or None,
+        "factor_min": factor_min,
+        "factor_max": factor_max,
     }
 
     with SessionLocal() as db:
+        factor_as_of = _validate_factor_filter(db, filters)
         stmt = _base_query(filters).order_by(
             desc(StockLatestPrice.pct_chg), StockLatestPrice.symbol
         )
@@ -225,23 +278,25 @@ def run_screener(
         rows = db.execute(stmt.limit(_TECH_POOL_MAX if need_tech else limit)).all()
 
         items = []
-        for price, market_value, _type, basic in rows:
+        for row in rows:
+            price, market_value, _type, basic = row[0], row[1], row[2], row[3]
             total_mv = getattr(basic, "total_mv", None) if basic is not None else None
-            items.append(
-                {
-                    "symbol": price.symbol,
-                    "name": price.name,
-                    "market": market_value,
-                    "price": price.price,
-                    "pct_chg": price.pct_chg,
-                    "trade_date": price.trade_date,
-                    "volume_ratio": basic.volume_ratio if basic is not None else None,
-                    "turnover_rate": basic.turnover_rate if basic is not None else None,
-                    "total_mv_yi": round(total_mv / _WAN_PER_YI, 1) if total_mv else None,
-                    "pe_ttm": basic.pe_ttm if basic is not None else None,
-                    "ma_value": None,
-                }
-            )
+            item = {
+                "symbol": price.symbol,
+                "name": price.name,
+                "market": market_value,
+                "price": price.price,
+                "pct_chg": price.pct_chg,
+                "trade_date": price.trade_date,
+                "volume_ratio": basic.volume_ratio if basic is not None else None,
+                "turnover_rate": basic.turnover_rate if basic is not None else None,
+                "total_mv_yi": round(total_mv / _WAN_PER_YI, 1) if total_mv else None,
+                "pe_ttm": basic.pe_ttm if basic is not None else None,
+                "ma_value": None,
+            }
+            if has_factor:
+                item["factor_value"] = row[4]
+            items.append(item)
 
         if need_tech and items:
             bars_needed = max(_VOLUME_RATIO_WINDOW + 1, above_ma or 0)
@@ -260,7 +315,12 @@ def run_screener(
                 kept.append(item)
             items = kept[:limit]
 
-    return {"universe": int(universe), "total": len(items), "items": items}
+    return {
+        "universe": int(universe),
+        "total": len(items),
+        "items": items,
+        "factor_as_of": factor_as_of,
+    }
 
 
 def count_screener_candidates(query: dict) -> int:
@@ -268,7 +328,8 @@ def count_screener_candidates(query: dict) -> int:
 
     ``above_ma`` is intentionally excluded here. The returned value is an upper
     bound before the moving-average check, so a template kept below the target
-    can never expand beyond it after technical filtering.
+    can never expand beyond it after technical filtering. Factor conditions are
+    pure SQL, so they ARE included.
     """
     filters = {
         "market": query.get("market"),
@@ -285,8 +346,12 @@ def count_screener_candidates(query: dict) -> int:
         "total_mv_max": query.get("total_mv_max"),
         "pe_min": query.get("pe_min"),
         "pe_max": query.get("pe_max"),
+        "factor_name": (query.get("factor_name") or "").strip() or None,
+        "factor_min": query.get("factor_min"),
+        "factor_max": query.get("factor_max"),
     }
     with SessionLocal() as db:
+        _validate_factor_filter(db, filters)
         stmt = _base_query(filters)
         return int(
             db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0

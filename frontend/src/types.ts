@@ -1486,6 +1486,28 @@ export type TushareFactorSyncResult = {
   note: string
 }
 
+// 多因子综合打分（横截面 z-score 加权）
+export type FactorCompositeRow = {
+  rank: number
+  symbol: string
+  name: string | null
+  market: string | null
+  price: number | null
+  pct_chg: number | null
+  composite_score: number
+  percentile: number
+  factor_scores: Record<string, { raw: number; z: number }>
+}
+
+export type FactorCompositeResult = {
+  universe: number
+  total: number
+  rows: FactorCompositeRow[]
+  factors_used: Array<{ id: string; zoo: string; as_of_date: string; weight: number }>
+  skipped: Array<{ id: string; reason: string }>
+  interpretation: string
+}
+
 // 统一响应信封（core/response.py::ok/fail），新增端点共用
 export type ApiEnvelope<T> = {
   success: boolean
@@ -1510,6 +1532,9 @@ export type ScreenerQuery = {
   pe_min?: number
   pe_max?: number
   above_ma?: number
+  factor_name?: string
+  factor_min?: number
+  factor_max?: number
   limit?: number
 }
 
@@ -1525,12 +1550,14 @@ export type ScreenerItem = {
   total_mv_yi: number | null
   pe_ttm: number | null
   ma_value: number | null
+  factor_value?: number | null
 }
 
 export type ScreenerResult = {
   universe: number
   total: number
   items: ScreenerItem[]
+  factor_as_of?: string | null
 }
 
 export type ScreenerSyncStats = {

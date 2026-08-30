@@ -33,6 +33,9 @@ class ScreenerQueryIn(BaseModel):
     pe_min: float | None = Field(default=None, description="市盈率 TTM 下限（含）")
     pe_max: float | None = Field(default=None, description="市盈率 TTM 上限（含）")
     above_ma: int | None = Field(default=None, description="收盘须站上该周期均线（仅 5/10/20）")
+    factor_name: str | None = Field(default=None, max_length=64, description="TuShare 官方因子名（如 roe_ttm），按最新缓存截面过滤")
+    factor_min: float | None = Field(default=None, description="因子值下限（含；因子值可为负）")
+    factor_max: float | None = Field(default=None, description="因子值上限（含；因子值可为负）")
     limit: int = Field(default=50, ge=1, le=100, description="返回条数上限")
 
 
@@ -58,6 +61,9 @@ def screener_run(
             pe_min=payload.pe_min,
             pe_max=payload.pe_max,
             above_ma=payload.above_ma,
+            factor_name=payload.factor_name,
+            factor_min=payload.factor_min,
+            factor_max=payload.factor_max,
             limit=payload.limit,
         )
     except ValueError as exc:

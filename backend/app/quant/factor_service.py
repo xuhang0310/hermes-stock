@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.database import SessionLocal
 from backend.app.core.llm_config import active_llm_config
-from backend.app.core.models import DailyBar
+from backend.app.core.models import DailyBar, Instrument, StockLatestPrice
 from backend.app.market.stock_tools import get_tushare_daily, normalize_a_share_symbol
 from backend.app.quant.factors.factor_analysis_core import compute_ic_series
 from backend.app.quant.factors.registry import (
@@ -23,6 +23,7 @@ from backend.app.quant.factors.registry import (
     SkipAlpha,
     get_default_registry,
 )
+from backend.app.quant.factor_signal_engine import _zscore_cross_section
 from backend.app.quant.tushare_factor_service import (
     TUSHARE_FACTOR_ZOO,
     known_factor_names as tushare_known_factor_names,
@@ -35,6 +36,8 @@ from backend.app.quant.tushare_factor_service import (
 MAX_FACTOR_SYMBOLS = 50
 MAX_BENCH_FACTORS = 20
 MAX_FACTOR_LIST = 800
+MAX_COMPOSITE_FACTORS = 10
+MAX_COMPOSITE_ROWS = 200
 MIN_CROSS_SECTION = 5
 _VALID_ZOOS = frozenset({"alpha101", "gtja191", "qlib158", "academic", "fundamental", TUSHARE_FACTOR_ZOO})
 _DATE_RE = re.compile(r"^\d{8}$")
@@ -412,6 +415,182 @@ def _score_tushare_factor(
         "refresh_failures": [],
         "interpretation": (
             "percentile 仅表示因子横截面排序；因子方向必须先用样本外 IC 验证，"
+            "不能直接把高分解释为买入建议。"
+        ),
+    }
+
+
+# ------------------------------------------------------------------ 多因子综合打分
+
+
+def _latest_price_map(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """批量取最新价/名称/涨跌幅，缺缓存的 symbol 不出现在结果里（容忍为 None）。"""
+    if not symbols:
+        return {}
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(
+                StockLatestPrice.symbol,
+                StockLatestPrice.name,
+                StockLatestPrice.price,
+                StockLatestPrice.pct_chg,
+                Instrument.market,
+            )
+            .join(Instrument, Instrument.symbol == StockLatestPrice.symbol)
+            .where(StockLatestPrice.symbol.in_(symbols))
+        ).all()
+    return {
+        row[0]: {"name": row[1], "price": row[2], "pct_chg": row[3], "market": row[4]}
+        for row in rows
+    }
+
+
+def composite_score_factors(
+    factor_ids: Iterable[str],
+    *,
+    weights: dict[str, float] | None = None,
+    symbols: Iterable[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """多因子综合打分：各因子取最新有效横截面 → z-score → 加权求和 → 排名。
+
+    - ``tushare:`` 前缀因子读本地缓存面板；``symbols`` 缺省时用缓存的全市场截面。
+    - 本地预置因子（alpha101/gtja191/qlib158 等）必须提供 ``symbols``（≤50 只）。
+    - 无法形成有效横截面的因子进 ``skipped``；全部失败才抛 ValueError。
+    - 权重缺省等权，可负（做空方向）；按 Σ|w| 归一化。
+    """
+    ids: list[str] = []
+    for raw in factor_ids:
+        alpha_id = str(raw or "").strip()
+        if alpha_id and alpha_id not in ids:
+            ids.append(alpha_id)
+    if not ids:
+        raise ValueError("至少选择一个因子")
+    if len(ids) > MAX_COMPOSITE_FACTORS:
+        raise ValueError(f"综合打分最多支持 {MAX_COMPOSITE_FACTORS} 个因子")
+    limit = max(1, min(int(limit or 50), MAX_COMPOSITE_ROWS))
+
+    normalized = _normalize_symbols(symbols) if symbols else None
+    has_local = any(parse_tushare_factor_id(alpha_id) is None for alpha_id in ids)
+    if has_local and normalized is None:
+        raise ValueError("包含本地预置因子时必须提供股票池（5-50 只）")
+
+    end = _compact_date(end_date, fallback=date.today().strftime("%Y%m%d"))
+    start = _compact_date(
+        start_date,
+        fallback=(date.today() - timedelta(days=365)).strftime("%Y%m%d"),
+    )
+    if start is None or end is None or start > end:
+        raise ValueError("开始日期不能晚于结束日期")
+
+    registry = get_default_registry()
+    local_panel = None
+    if has_local:
+        local_panel, _, _ = _load_panel(normalized, start_date=start, end_date=end)
+
+    sections: dict[str, pd.Series] = {}
+    as_ofs: dict[str, str] = {}
+    zoos: dict[str, str] = {}
+    skipped: list[dict[str, str]] = []
+    for alpha_id in ids:
+        tushare_name = parse_tushare_factor_id(alpha_id)
+        try:
+            if tushare_name is not None:
+                get_factor(alpha_id)  # 目录不存在时抛 KeyError
+                factor = tushare_load_factor_panel(tushare_name, normalized, start, end)
+                if factor is None or factor.dropna(how="all").empty:
+                    raise ValueError("TuShare 因子值尚未摄入，请先在因子分析页同步该因子")
+                zoos[alpha_id] = TUSHARE_FACTOR_ZOO
+            else:
+                alpha = registry.get(alpha_id)
+                factor = registry.compute(alpha_id, local_panel)
+                zoos[alpha_id] = alpha.zoo
+            valid_counts = factor.notna().sum(axis=1)
+            valid_dates = valid_counts[valid_counts >= MIN_CROSS_SECTION].index
+            if valid_dates.empty:
+                raise ValueError(
+                    f"没有形成有效横截面（至少需要 {MIN_CROSS_SECTION} 只股票同日有值）"
+                )
+            as_of = valid_dates[-1]
+            sections[alpha_id] = factor.loc[as_of].dropna()
+            as_ofs[alpha_id] = as_of.strftime("%Y%m%d")
+        except (KeyError, ValueError, SkipAlpha, RegistryError) as exc:
+            skipped.append({"id": alpha_id, "reason": str(exc)})
+
+    if not sections:
+        reasons = "；".join(f"{item['id']}: {item['reason']}" for item in skipped)
+        raise ValueError(f"没有任何因子能形成有效横截面。{reasons}")
+
+    common = sorted(set.intersection(*(set(series.index) for series in sections.values())))
+    if len(common) < MIN_CROSS_SECTION:
+        raise ValueError(
+            f"各因子共同覆盖的股票只有 {len(common)} 只，少于 {MIN_CROSS_SECTION} 只，"
+            "无法形成有效横截面；请检查因子缓存范围或更换股票池"
+        )
+
+    used = list(sections)
+    raw_weights = []
+    for alpha_id in used:
+        try:
+            weight = float((weights or {}).get(alpha_id, 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        raw_weights.append(weight)
+    norm = sum(abs(weight) for weight in raw_weights)
+    if norm <= 1e-12:
+        raise ValueError("因子权重不能全为 0")
+    norm_weights = [weight / norm for weight in raw_weights]
+
+    raw_frame = pd.DataFrame({alpha_id: sections[alpha_id].reindex(common) for alpha_id in used})
+    z_frame = _zscore_cross_section(raw_frame.T).T  # 行=因子逐行标准化后转回 行=股票
+    composite = sum(z_frame[alpha_id] * weight for alpha_id, weight in zip(used, norm_weights))
+    composite = composite.dropna().sort_values(ascending=False)
+    if composite.empty:
+        raise ValueError("所有股票的因子值均无效（标准差为 0），无法打分")
+    percentile = composite.rank(method="average", pct=True)
+    price_map = _latest_price_map(common)
+
+    rows: list[dict[str, Any]] = []
+    for rank, symbol in enumerate(composite.index[:limit], start=1):
+        quote = price_map.get(symbol) or {}
+        rows.append(
+            {
+                "rank": rank,
+                "symbol": symbol,
+                "name": quote.get("name"),
+                "market": quote.get("market"),
+                "price": quote.get("price"),
+                "pct_chg": quote.get("pct_chg"),
+                "composite_score": round(float(composite[symbol]), 6),
+                "percentile": round(float(percentile[symbol]), 6),
+                "factor_scores": {
+                    alpha_id: {
+                        "raw": round(float(sections[alpha_id][symbol]), 8),
+                        "z": round(float(z_frame.loc[symbol, alpha_id]), 6),
+                    }
+                    for alpha_id in used
+                },
+            }
+        )
+
+    return {
+        "universe": int(len(composite)),
+        "total": len(rows),
+        "rows": rows,
+        "factors_used": [
+            {
+                "id": alpha_id,
+                "zoo": zoos[alpha_id],
+                "as_of_date": as_ofs[alpha_id],
+                "weight": round(weight, 6),
+            }
+            for alpha_id, weight in zip(used, norm_weights)
+        ],
+        "skipped": skipped,
+        "interpretation": (
+            "综合得分仅为因子横截面加权排序，不代表预期收益；因子方向必须先用样本外 IC 验证，"
             "不能直接把高分解释为买入建议。"
         ),
     }

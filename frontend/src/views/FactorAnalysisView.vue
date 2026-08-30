@@ -4,7 +4,7 @@ import { ColorType, HistogramSeries, LineSeries, createChart } from 'lightweight
 import type { Time } from 'lightweight-charts'
 import { api } from '../api'
 import { renderMarkdown } from '../utils/markdown'
-import type { FactorBenchmarkItem, FactorBenchmarkResult, FactorSymbolCoverage } from '../types'
+import type { FactorBenchmarkItem, FactorBenchmarkResult, FactorCompositeResult, FactorSymbolCoverage } from '../types'
 
 const loading = ref(false)
 const running = ref(false)
@@ -33,6 +33,13 @@ const interpretError = ref('')
 const icCompareHost = ref<HTMLElement | null>(null)
 const icDetailHost = ref<HTMLElement | null>(null)
 const selectedDetail = ref<string | null>(null)
+
+const compositeWeights = ref('')
+const compositeSymbolsInput = ref('')
+const compositeLimit = ref(50)
+const compositeRunning = ref(false)
+const compositeError = ref('')
+const compositeResult = ref<FactorCompositeResult | null>(null)
 
 const icPalette = [
   '#42dfad', '#eabf63', '#49b8d1', '#c78cff', '#f25f64', '#9cd36a', '#70a5ff',
@@ -405,6 +412,54 @@ async function run() {
   }
 }
 
+function pctTone(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return ''
+  if (value > 0) return 'pnl-up'
+  if (value < 0) return 'pnl-down'
+  return ''
+}
+
+function shortFactorId(id: string): string {
+  return id.replace(/^tushare:/, '')
+}
+
+async function runComposite() {
+  if (!selectedIds.value.size || compositeRunning.value) return
+  compositeRunning.value = true
+  compositeError.value = ''
+  compositeResult.value = null
+  try {
+    const factorIds = Array.from(selectedIds.value)
+    // 权重按逗号分隔、与上方勾选顺序对齐；留空 = 等权
+    const parts = compositeWeights.value
+      .split(/[,，\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const weights: Record<string, number> = {}
+    parts.forEach((raw, index) => {
+      const value = Number(raw)
+      const id = factorIds[index]
+      if (id && Number.isFinite(value)) weights[id] = value
+    })
+    const symbols = compositeSymbolsInput.value
+      .split(/[,，\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    compositeResult.value = await api.factorCompositeScore({
+      factor_ids: factorIds,
+      weights: Object.keys(weights).length ? weights : null,
+      symbols: symbols.length ? symbols : null,
+      start_date: startDate.value || null,
+      end_date: endDate.value || null,
+      limit: compositeLimit.value,
+    })
+  } catch (reason) {
+    compositeError.value = reason instanceof Error ? reason.message : '综合打分失败'
+  } finally {
+    compositeRunning.value = false
+  }
+}
+
 async function interpret() {
   const res = benchmarkResult.value
   if (!res || interpretLoading.value) return
@@ -558,6 +613,85 @@ onMounted(loadCatalog)
       <p class="fa-hint fa-tushare-note">
         单次最多 60 次请求（因子数×交易日数），区间太长请分段同步，缓存会自动累积；因子值按上方股票池过滤后缓存。
       </p>
+    </section>
+
+    <section class="fa-picker fa-composite">
+      <header class="fa-picker-head">
+        <div>
+          <strong>多因子综合打分（横截面 z-score 加权）</strong>
+          <span class="fa-hint fa-tushare-hint">
+            复用上方勾选的因子（最多 10 个），日期区间沿用页面顶部起始/结束日；仅 TuShare 因子时"打分股票池"可留空 = 缓存全市场。
+          </span>
+        </div>
+        <div class="fa-picker-actions">
+          <input v-model="compositeWeights" type="text" class="fa-input fa-sync-input" placeholder="权重（逗号分隔，按勾选顺序；留空=等权）" />
+          <input v-model="compositeSymbolsInput" type="text" class="fa-input fa-composite-symbols" placeholder="打分股票池：含本地因子必填；仅 TuShare 因子留空=缓存全市场" />
+          <select v-model.number="compositeLimit" class="fa-input fa-zoo-select" aria-label="打分结果条数">
+            <option :value="20">Top 20</option>
+            <option :value="50">Top 50</option>
+            <option :value="100">Top 100</option>
+            <option :value="200">Top 200</option>
+          </select>
+          <button
+            type="button"
+            class="btn-outline"
+            data-testid="factor-composite-run"
+            :disabled="compositeRunning || !selectedCount || selectedCount > 10"
+            :title="!selectedCount ? '请先在上方勾选因子' : selectedCount > 10 ? '综合打分一次最多 10 个因子' : '按最新有效横截面计算加权 z-score 排名'"
+            @click="runComposite"
+          >
+            <span class="btn-spin" :class="{ spin: compositeRunning }"></span>
+            {{ compositeRunning ? '打分中' : `综合打分（${selectedCount}）` }}
+          </button>
+        </div>
+      </header>
+      <div v-if="compositeError" class="notice notice-danger fa-sync-notice">
+        <strong>打分失败</strong>
+        <span>{{ compositeError }}</span>
+      </div>
+      <template v-if="compositeResult">
+        <div class="fa-composite-meta">
+          <span class="fa-composite-chips">
+            <span v-for="f in compositeResult.factors_used" :key="f.id" class="fa-composite-chip">
+              {{ f.id }} · 权重 {{ f.weight.toFixed(2) }} · 截面 {{ f.as_of_date }}
+            </span>
+          </span>
+          <span v-if="compositeResult.skipped.length" class="fa-composite-skip">
+            跳过 {{ compositeResult.skipped.length }} 个：<template v-for="s in compositeResult.skipped" :key="s.id">{{ s.id }} — {{ skipReasonText(s.reason) }}；</template>
+          </span>
+        </div>
+        <div class="fa-table-wrap">
+          <table class="fa-table">
+            <thead>
+              <tr>
+                <th>排名</th>
+                <th>代码</th>
+                <th>名称</th>
+                <th class="num">现价</th>
+                <th class="num">涨跌%</th>
+                <th class="num">综合得分</th>
+                <th class="num">百分位</th>
+                <th v-for="f in compositeResult.factors_used" :key="f.id" class="num" :title="f.id">z({{ shortFactorId(f.id) }})</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in compositeResult.rows" :key="row.symbol">
+                <td>{{ row.rank }}</td>
+                <td class="fa-id">{{ row.symbol }}</td>
+                <td>{{ row.name ?? '-' }}</td>
+                <td class="num">{{ num(row.price, 2) }}</td>
+                <td class="num" :class="pctTone(row.pct_chg)">{{ row.pct_chg == null ? '-' : `${row.pct_chg > 0 ? '+' : ''}${row.pct_chg.toFixed(2)}%` }}</td>
+                <td class="num">{{ row.composite_score.toFixed(3) }}</td>
+                <td class="num">{{ percent(row.percentile, 0) }}</td>
+                <td v-for="f in compositeResult.factors_used" :key="f.id" class="num" :class="tone(row.factor_scores[f.id]?.z)">{{ num(row.factor_scores[f.id]?.z) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="fa-methodology fa-composite-note">
+          展示 {{ compositeResult.total }} / {{ compositeResult.universe.toLocaleString('zh-CN') }} 只 · {{ compositeResult.interpretation }}
+        </p>
+      </template>
     </section>
 
     <template v-if="results.length">
@@ -930,6 +1064,44 @@ onMounted(loadCatalog)
 
 .fa-tushare-note {
   margin: 0;
+}
+
+.fa-composite-symbols {
+  width: 320px;
+}
+
+.fa-composite-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.fa-composite-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fa-composite-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font-size: 11.5px;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
+.fa-composite-skip {
+  color: var(--warning);
+  line-height: 1.6;
+}
+
+.fa-composite-note {
+  border-top: none;
+  padding-top: 0;
 }
 
 .fa-skipped {

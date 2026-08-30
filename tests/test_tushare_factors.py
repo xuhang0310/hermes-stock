@@ -17,6 +17,7 @@ from backend.app.core.models import DailyBar, Instrument, TushareFactorValue, Us
 from backend.app.quant import tushare_factor_service
 from backend.app.quant.factor_service import benchmark_factors, get_factor, list_factors
 from backend.app.quant.tushare_factor_api import router as tushare_factor_router
+from backend.app.skills.registry import SkillRegistry
 
 SVC = "backend.app.quant.tushare_factor_service"
 FS = "backend.app.quant.factor_service"
@@ -212,6 +213,45 @@ class TushareFactorTests(unittest.TestCase):
         self.assertEqual(result["results"], [])
         self.assertEqual(len(result["skipped"]), 1)
         self.assertIn("TuShare 因子值尚未摄入", result["skipped"][0]["reason"])
+
+    # ------------------------------------------------ Agent 工具 get_tushare_factors
+
+    def test_agent_tool_catalog_mode(self) -> None:
+        tushare_factor_service.sync_catalog()
+        result = tushare_factor_service.get_tushare_factors()
+        self.assertEqual(result["source"], "tushare.factor_catalog")
+        self.assertEqual(result["count"], 2)
+        names = {row["factor_name"] for row in result["rows"]}
+        self.assertEqual(names, {"roe_ttm", "return_5d"})
+
+    def test_agent_tool_values_mode(self) -> None:
+        tushare_factor_service.sync_factor_values(
+            ["roe_ttm"], start_date="20250101", end_date="20250131", symbols=SYMBOLS
+        )
+        result = tushare_factor_service.get_tushare_factors(
+            "roe_ttm", symbols=["600001.SH", "600002.SH"], limit=100
+        )
+        self.assertEqual(result["source"], "tushare.factor_value")
+        self.assertGreater(result["count"], 0)
+        self.assertTrue(all(row["symbol"] in {"600001.SH", "600002.SH"} for row in result["rows"]))
+        dates = [row["trade_date"] for row in result["rows"]]
+        self.assertEqual(dates, sorted(dates, reverse=True))
+
+    def test_agent_tool_rejects_unknown_factor(self) -> None:
+        tushare_factor_service.sync_catalog()
+        with self.assertRaises(ValueError) as ctx:
+            tushare_factor_service.get_tushare_factors("nope_factor", symbols=["600001.SH"])
+        self.assertIn("不存在", str(ctx.exception))
+
+    def test_skill_registry_exposes_get_tushare_factors(self) -> None:
+        registry = SkillRegistry()
+        registry.discover()
+        tool_names = {
+            item["function"]["name"]
+            for item in registry.get_tools_for("research", role_code="quant-analyst")
+        }
+        self.assertIn("get_tushare_factors", tool_names)
+        self.assertTrue(registry.has_tool("get_tushare_factors"))
 
     # ------------------------------------------------ API 层
 

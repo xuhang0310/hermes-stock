@@ -11,6 +11,7 @@ import type {
   ScreenerSyncStatus,
   ScreenerTemplateItem,
   ScreenerTemplateRecommendation,
+  TushareFactorMeta,
 } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 
@@ -46,6 +47,11 @@ const peMin = ref('')
 const peMax = ref('')
 const aboveMa = ref('')
 const keyword = ref('')
+const factorName = ref('')
+const factorMin = ref('')
+const factorMax = ref('')
+const factorOptions = ref<TushareFactorMeta[]>([])
+const factorOptionsError = ref('')
 
 const syncStatus = ref<ScreenerSyncStatus | null>(null)
 const syncLoading = ref(false)
@@ -218,6 +224,7 @@ function queryToChips(query: ScreenerQuery): string[] {
   addRangeChip(chips, '总市值', query.total_mv_min, query.total_mv_max, '亿')
   addRangeChip(chips, 'PE', query.pe_min, query.pe_max)
   if (query.above_ma) chips.push(`站上 MA${query.above_ma}`)
+  if (query.factor_name) addRangeChip(chips, `因子 ${query.factor_name}`, query.factor_min, query.factor_max)
   if (query.keyword) chips.push(`关键词 ${query.keyword}`)
   if (query.limit) chips.push(`Top${query.limit}`)
   return chips
@@ -266,6 +273,7 @@ const visibleHistory = computed(() => {
 const builderChips = computed(() => queryToChips(buildQuery()))
 const hardFilterChips = computed(() => builderChips.value.filter((chip) => !chip.startsWith('Top')))
 const hasBuilderConditions = computed(() => hardFilterChips.value.length > 0)
+const showFactorColumn = computed(() => (result.value?.items || []).some((item) => item.factor_value != null))
 const activeStrategyName = computed(() => {
   if (strategyName.value.trim()) return strategyName.value.trim()
   const traits: string[] = []
@@ -605,6 +613,27 @@ async function loadSyncStatus() {
   }
 }
 
+async function loadFactorOptions() {
+  factorOptionsError.value = ''
+  try {
+    const catalog = await api.tushareFactorCatalog()
+    factorOptions.value = catalog.items
+  } catch (err) {
+    factorOptionsError.value = err instanceof Error ? err.message : String(err)
+    factorOptions.value = []
+  }
+}
+
+function factorOptionLabel(item: TushareFactorMeta): string {
+  const base = item.nickname && item.nickname !== item.factor_name
+    ? `${item.nickname}（${item.factor_name}）`
+    : item.factor_name
+  const cached = item.cached_rows > 0
+    ? `已缓存${item.cached_max_date ? ` 至 ${fmtDate(item.cached_max_date)}` : ''}`
+    : '未同步'
+  return `${base} · ${cached}`
+}
+
 async function syncNow() {
   if (syncLoading.value) return
   syncLoading.value = true
@@ -638,6 +667,9 @@ function applyQuery(query: ScreenerQuery) {
   peMin.value = query.pe_min != null ? String(query.pe_min) : ''
   peMax.value = query.pe_max != null ? String(query.pe_max) : ''
   aboveMa.value = query.above_ma != null ? String(query.above_ma) : ''
+  factorName.value = query.factor_name ?? ''
+  factorMin.value = query.factor_min != null ? String(query.factor_min) : ''
+  factorMax.value = query.factor_max != null ? String(query.factor_max) : ''
   keyword.value = query.keyword ?? ''
   resultLimit.value = query.limit ?? 20
 }
@@ -657,6 +689,9 @@ function buildQuery(): ScreenerQuery {
     pe_min: toNumber(peMin.value),
     pe_max: toNumber(peMax.value),
     above_ma: aboveMa.value ? Number(aboveMa.value) : undefined,
+    factor_name: factorName.value || undefined,
+    factor_min: toNumber(factorMin.value),
+    factor_max: toNumber(factorMax.value),
     keyword: String(keyword.value).trim() || undefined,
     limit: resultLimit.value,
   }
@@ -1078,7 +1113,7 @@ onMounted(() => {
   const draft = localStorage.getItem(DRAFT_KEY)
   if (draft) nlText.value = draft
   document.addEventListener('keydown', handleRuleEditorDocumentKeydown)
-  void Promise.all([loadSyncStatus(), loadRecommendation(), loadPromptHistory(), loadSavedStrategies()])
+  void Promise.all([loadSyncStatus(), loadRecommendation(), loadPromptHistory(), loadSavedStrategies(), loadFactorOptions()])
 })
 
 watch(ruleEditorOpen, (open) => {
@@ -1426,7 +1461,7 @@ onBeforeUnmount(() => {
 
           <section ref="resultSection" class="sc-results-center sc-panel">
             <header class="sc-center-head">
-              <div><h3>筛选结果 <b v-if="result">{{ allSortedResultItems.length }} / {{ result.universe.toLocaleString('zh-CN') }}</b></h3><span v-if="result">已按当前规则筛选 · 展示 Top {{ resultLimit }} 实时结果</span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
+              <div><h3>筛选结果 <b v-if="result">{{ allSortedResultItems.length }} / {{ result.universe.toLocaleString('zh-CN') }}</b></h3><span v-if="result">已按当前规则筛选 · 展示 Top {{ resultLimit }} 实时结果<template v-if="result.factor_as_of"> · 因子值截至 {{ fmtDate(result.factor_as_of) }}</template></span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
             </header>
             <nav class="sc-result-tabs" aria-label="结果视图">
               <div class="sc-result-tabset"><button type="button" :class="{ active: resultView === 'ranking' }" @click="resultView = 'ranking'">排名表</button><button type="button" :class="{ active: resultView === 'factors' }" @click="resultView = 'factors'">图表</button><button type="button" :class="{ active: resultView === 'compare' }" @click="resultView = 'compare'">对比 <em v-if="comparisonSymbols.length">{{ comparisonSymbols.length }}</em></button></div>
@@ -1440,12 +1475,13 @@ onBeforeUnmount(() => {
             <template v-if="result?.items.length">
               <div v-if="resultView === 'ranking'" class="sc-ranking-table-wrap">
                 <table class="sc-ranking-table">
-                  <thead><tr><th class="sc-check-cell"><input type="checkbox" data-testid="screener-select-page" aria-label="选择本页股票" :checked="allPageChecked" :indeterminate="somePageChecked && !allPageChecked" @change="toggleCurrentPageChecked" /></th><th>排名</th><th>标的</th><th>综合分</th><th v-if="isResultColumnVisible('value')">估值规模</th><th v-if="isResultColumnVisible('momentum')">动量</th><th v-if="isResultColumnVisible('liquidity')">流动性</th><th v-if="isResultColumnVisible('reasons')">入选理由</th><th v-if="isResultColumnVisible('risks')">主要风险</th><th></th></tr></thead>
+                  <thead><tr><th class="sc-check-cell"><input type="checkbox" data-testid="screener-select-page" aria-label="选择本页股票" :checked="allPageChecked" :indeterminate="somePageChecked && !allPageChecked" @change="toggleCurrentPageChecked" /></th><th>排名</th><th>标的</th><th v-if="showFactorColumn">因子值</th><th>综合分</th><th v-if="isResultColumnVisible('value')">估值规模</th><th v-if="isResultColumnVisible('momentum')">动量</th><th v-if="isResultColumnVisible('liquidity')">流动性</th><th v-if="isResultColumnVisible('reasons')">入选理由</th><th v-if="isResultColumnVisible('risks')">主要风险</th><th></th></tr></thead>
                   <tbody>
                     <tr v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }" @click="selectResult(item)">
                       <td class="sc-check-cell" @click.stop><input type="checkbox" data-testid="screener-result-checkbox" :aria-label="`选择 ${item.name} ${item.symbol}`" :checked="checkedSymbols.includes(item.symbol)" @change="toggleResultChecked(item)" /></td>
                       <td>{{ allSortedResultItems.findIndex((row) => row.symbol === item.symbol) + 1 }}</td>
                       <td><strong>{{ item.symbol }}</strong><span>{{ item.name }}</span></td>
+                      <td v-if="showFactorColumn">{{ item.factor_value != null ? Number(item.factor_value).toFixed(3) : '—' }}</td>
                       <td class="sc-score-cell"><b>{{ item.compositeScore.toFixed(1) }}</b></td>
                       <td v-if="isResultColumnVisible('value')">{{ item.valueScore.toFixed(1) }}</td><td v-if="isResultColumnVisible('momentum')">{{ item.momentumScore.toFixed(1) }}</td><td v-if="isResultColumnVisible('liquidity')">{{ item.liquidityScore.toFixed(1) }}</td>
                       <td v-if="isResultColumnVisible('reasons')"><div class="sc-reason-tags"><span v-for="reason in item.reasons.slice(0, 3)" :key="reason">{{ reasonTag(reason) }}</span></div></td>
@@ -1507,6 +1543,13 @@ onBeforeUnmount(() => {
                     <section><h4>股票范围</h4><label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">全部市场</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label><label class="sc-field"><span>代码或名称</span><input v-model="keyword" type="text" class="sc-input" placeholder="例如 600519 或 贵州茅台" /></label></section>
                     <section><h4>价格与规模</h4><div class="sc-range-field"><span>最新价（元）</span><div><input v-model="priceMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="priceMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>总市值（亿元）</span><div><input v-model="mvMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="mvMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
                     <section><h4>估值</h4><div class="sc-range-field"><span>PE（TTM）</span><div><input v-model="peMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="peMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
+                    <section>
+                      <h4>TuShare 因子（付费库）</h4>
+                      <label class="sc-field"><span>因子</span><select v-model="factorName" class="sc-input"><option value="">不限</option><option v-for="option in factorOptions" :key="option.factor_name" :value="option.factor_name" :disabled="!option.cached_rows">{{ factorOptionLabel(option) }}</option></select></label>
+                      <div class="sc-range-field"><span>因子值区间</span><div><input v-model="factorMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="factorMax" type="number" class="sc-input" placeholder="最高" /></div></div>
+                      <small v-if="factorOptionsError" class="sc-factor-note">因子目录读取失败：{{ factorOptionsError }}</small>
+                      <small v-else class="sc-factor-note">按最新缓存截面过滤；未同步的因子请先在因子分析页同步因子值。</small>
+                    </section>
                     <section><h4>今日交易特征</h4><div class="sc-range-field"><span>涨跌幅（%）</span><div><input v-model="pctChgMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="pctChgMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>换手率（%）</span><div><input v-model="turnoverMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="turnoverMax" type="number" class="sc-input" placeholder="最高" /></div></div><label class="sc-field"><span>量比不低于</span><input v-model="volumeRatioMin" type="number" class="sc-input" placeholder="例如 1.5" /></label></section>
                     <section><h4>趋势与输出</h4><label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label><label class="sc-field"><span>选取数量</span><select v-model.number="resultLimit" class="sc-input"><option :value="20">Top 20</option><option :value="50">Top 50</option><option :value="100">Top 100</option></select></label></section>
                   </div>

@@ -79,6 +79,7 @@ import type {
   TushareFactorCatalogResult,
   TushareFactorCatalogSyncResult,
   TushareFactorSyncResult,
+  FactorCompositeResult,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -723,6 +724,18 @@ export const api = {
     symbols?: string[] | null
   }) =>
     request<ApiEnvelope<TushareFactorSyncResult>>('/api/factors/tushare/sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
+  factorCompositeScore: (payload: {
+    factor_ids: string[]
+    weights?: Record<string, number> | null
+    symbols?: string[] | null
+    start_date?: string | null
+    end_date?: string | null
+    limit?: number | null
+  }) =>
+    request<ApiEnvelope<FactorCompositeResult>>('/api/factors/composite-score', {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((res) => res.data),

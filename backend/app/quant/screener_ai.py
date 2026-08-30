@@ -27,6 +27,8 @@ _NUMERIC_FIELDS = (
     "total_mv_max",
     "pe_min",
     "pe_max",
+    "factor_min",
+    "factor_max",
 )
 _NONNEGATIVE_FIELDS = (
     "price_min",
@@ -41,6 +43,8 @@ _NONNEGATIVE_FIELDS = (
 _ALLOWED_MARKETS = {"SH", "SZ", "BSE"}
 _ALLOWED_MA = (5, 10, 20)
 _MARKET_NAMES = {"SH": "沪市", "SZ": "深市", "BSE": "北交所"}
+# TuShare 因子名形如 roe_ttm / return_5d；只做形状校验，是否存在由选股执行时查目录
+_FACTOR_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 
 _PARSE_SYSTEM_PROMPT = """你是 A 股选股器条件解析助手，把用户的自然语言选股要求转成 JSON 选股条件。
 可用字段（只输出用户明确提到的字段，严禁自行编造条件，数值一律用 JSON 数字）：
@@ -52,6 +56,8 @@ _PARSE_SYSTEM_PROMPT = """你是 A 股选股器条件解析助手，把用户的
 - total_mv_min / total_mv_max：总市值下限/上限（**单位亿元**，用户说多少亿直接填数字）
 - pe_min / pe_max：市盈率(TTM)下限/上限
 - above_ma：收盘站上 N 日均线，5 / 10 / 20 三者之一
+- factor_name：TuShare 官方因子名（小写字母/数字/下划线，如 roe_ttm、return_5d）；仅当用户点名某个具体因子时才输出，拿不准就不要输出
+- factor_min / factor_max：该因子因子值的下限/上限（可为负数）
 - keyword：股票代码或名称关键词
 
 只输出一个 JSON 对象，不要解释、不要 markdown 包裹。示例：
@@ -135,6 +141,13 @@ def _sanitize(data: dict) -> dict:
     keyword = str(data.get("keyword") or "").strip()[:32]
     if keyword:
         out["keyword"] = keyword
+    factor_name = str(data.get("factor_name") or "").strip().lower()
+    if _FACTOR_NAME_RE.fullmatch(factor_name):
+        out["factor_name"] = factor_name
+    else:
+        # 因子名非法时连带丢弃其数值区间，避免产生没有因子的孤立条件
+        out.pop("factor_min", None)
+        out.pop("factor_max", None)
     return out
 
 
@@ -191,6 +204,17 @@ def _summarize(query: dict) -> str:
             parts.append(f"PE ≤ {_fmt(hi)}")
     if query.get("above_ma"):
         parts.append(f"站上 {query['above_ma']} 日均线")
+    if query.get("factor_name"):
+        lo, hi = query.get("factor_min"), query.get("factor_max")
+        name = query["factor_name"]
+        if lo is not None and hi is not None:
+            parts.append(f"因子 {name} 介于 {_fmt(lo)}–{_fmt(hi)}")
+        elif lo is not None:
+            parts.append(f"因子 {name} ≥ {_fmt(lo)}")
+        elif hi is not None:
+            parts.append(f"因子 {name} ≤ {_fmt(hi)}")
+        else:
+            parts.append(f"因子 {name} 有值")
     if query.get("keyword"):
         parts.append(f"关键词「{query['keyword']}」")
     if not parts:

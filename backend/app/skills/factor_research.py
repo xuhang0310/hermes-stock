@@ -1,5 +1,6 @@
 """Alpha-factor discovery, scoring, and IC/IR evaluation tools."""
 
+from backend.app.quant import tushare_factor_service
 from backend.app.quant.factor_service import (
     benchmark_factors,
     get_factor,
@@ -19,7 +20,7 @@ FACTOR_TOOL_SCHEMAS = [
                 "properties": {
                     "zoo": {
                         "type": "string",
-                        "enum": ["alpha101", "gtja191", "qlib158", "academic", "fundamental"],
+                        "enum": ["alpha101", "gtja191", "qlib158", "academic", "fundamental", "tushare"],
                     },
                     "theme": {"type": "string"},
                     "query": {"type": "string"},
@@ -108,14 +109,50 @@ FACTOR_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_tushare_factors",
+            "description": (
+                "查询 TuShare 官方因子库（付费 212 因子）在本地缓存的数据："
+                "不传 factor_name 返回因子目录（含各因子缓存行数）；"
+                "传 factor_name + symbols 返回这些股票已缓存的因子值历史。"
+                "只读本地缓存，不实时外呼；全市场横截面排序请用 score_factor_universe。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "factor_name": {
+                        "type": "string",
+                        "description": "TuShare 因子名（不带 tushare: 前缀），如 roe_ttm；留空则返回目录",
+                    },
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 20,
+                        "description": "股票代码列表；查询因子值时建议提供",
+                    },
+                    "start_date": {"type": "string", "description": "YYYYMMDD"},
+                    "end_date": {"type": "string", "description": "YYYYMMDD"},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 100,
+                        "description": "最多返回的因子值行数",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
 SKILL = {
     "name": "factor_research",
     "display_name": "量化因子研究",
-    "description": "462 个 Alpha 因子的检索、横截面评分与 IC/IR 基准评估。",
-    "version": "1.0.0",
+    "description": "462 个 Alpha 因子与 TuShare 官方因子库的检索、横截面评分与 IC/IR 基准评估。",
+    "version": "1.1.0",
     "chat_modes": ["research"],
     "roles": ["quant-analyst", "research-analyst", "stock-pm"],
     "tools": FACTOR_TOOL_SCHEMAS,
@@ -142,12 +179,20 @@ SKILL = {
             refresh=bool(a.get("refresh")),
             dedup_threshold=a.get("dedup_threshold"),
         ),
+        "get_tushare_factors": lambda a: tushare_factor_service.get_tushare_factors(
+            a.get("factor_name"),
+            symbols=list(a.get("symbols") or []) or None,
+            start_date=a.get("start_date"),
+            end_date=a.get("end_date"),
+            limit=int(a.get("limit") or 100),
+        ),
     },
     "prompt_instructions": [
         "因子高分不等于买入信号；先在同一股票池做样本外 IC/IR 评估，再解释方向。",
         "判断因子是否可信：rank_stability 高（换手低）、train_ic 与 test_ic 同号且幅度接近、ic_positive_ratio 明显偏离 0.5。",
         "因子研究至少使用 5 只股票，优先使用 20 只以上横截面，并明确时间窗口和数据覆盖。",
         "报告必须披露交易成本、停牌涨跌停、行业市值中性化尚未纳入当前快速评估。",
+        "TuShare 官方因子值来自本地缓存（get_tushare_factors），引用时必须说明对应 trade_date 与缓存窗口，不得当作实时数据。",
     ],
 }
 
