@@ -610,6 +610,27 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         # action_key 全局唯一：防止并发 create_task_batch 产生重复
         _add_unique_index("agent_delegations", "uq_delegation_action_key", "action_key")
 
+        # TuShare 因子表在 MySQL 8.4 上随库默认 utf8mb4_0900_ai_ci 建出，与既有表
+        # （utf8mb4_unicode_ci）跨表 JOIN symbol 时报 1267；统一转回 unicode_ci。
+        for table in ("tushare_factor_catalog", "tushare_factor_values"):
+            table_collation = connection.execute(
+                text(
+                    "SELECT table_collation FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() AND table_name = :t"
+                ),
+                {"t": table},
+            ).scalar()
+            if table_collation and table_collation != "utf8mb4_unicode_ci":
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {table} "
+                        "CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                    )
+                )
+                from backend.app.core.applog import get_logger
+
+                get_logger("db").info(f"迁移：{table} 排序规则转为 utf8mb4_unicode_ci")
+
 
 engine = create_engine_for_url(settings.database_url)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)

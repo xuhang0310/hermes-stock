@@ -1670,6 +1670,10 @@ class TushareFactorCatalog(Base):
     """
 
     __tablename__ = "tushare_factor_catalog"
+    __table_args__ = (
+        # 既有表全是 utf8mb4_unicode_ci（库默认是 0900_ai_ci），不一致会导致跨表字符串比较报 1267
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
 
     factor_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     asset_type: Mapped[str] = mapped_column(String(8), nullable=False, default="STK")
@@ -1689,6 +1693,8 @@ class TushareFactorValue(Base):
     __table_args__ = (
         UniqueConstraint("factor_name", "symbol", "trade_date", name="uq_tushare_factor_values"),
         Index("ix_tushare_factor_values_factor_date", "factor_name", "trade_date"),
+        # 与 instruments 等既有表跨表 JOIN symbol，排序规则必须一致（见 TushareFactorCatalog）
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

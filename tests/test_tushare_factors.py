@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -317,6 +318,33 @@ class TushareFactorTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertFalse(response.json()["success"])
+
+
+class TushareCollationGuardTests(unittest.TestCase):
+    """TuShare 因子表必须钉死 utf8mb4_unicode_ci。
+
+    既有表全是 unicode_ci 而 MySQL 8.4 库默认是 utf8mb4_0900_ai_ci，排序规则不一致时
+    跨表字符串比较报 1267（生产选股器因子条件的 500 即源于此）。
+    """
+
+    def test_models_pin_unicode_ci(self) -> None:
+        from backend.app.core.models import TushareFactorCatalog
+
+        for model in (TushareFactorCatalog, TushareFactorValue):
+            mysql_options = model.__table__.dialect_options["mysql"]
+            self.assertEqual(mysql_options["charset"], "utf8mb4")
+            self.assertEqual(mysql_options["collate"], "utf8mb4_unicode_ci")
+
+    def test_schema_upgrade_converts_legacy_collation(self) -> None:
+        database_source = (
+            Path(__file__).resolve().parents[1] / "backend" / "app" / "core" / "database.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("tushare_factor_catalog", database_source)
+        self.assertIn("tushare_factor_values", database_source)
+        self.assertIn(
+            "CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+            database_source,
+        )
 
 
 if __name__ == "__main__":
