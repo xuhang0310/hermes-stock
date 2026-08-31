@@ -275,6 +275,12 @@ def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | 
         )
 
 
+def thinking_flag(llm_config: dict) -> bool | None:
+    """推理强度配置 → enable_thinking 取值；auto 返回 None（不下发，跟随服务商默认）。"""
+    mode = str(llm_config.get("thinking_mode") or "auto")
+    return {"on": True, "off": False}.get(mode)
+
+
 def active_llm_config(model_config_id: int | None = None) -> dict:
     """获取当前活跃 LLM 模型配置。
 
@@ -284,7 +290,7 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
     Args:
         model_config_id: 可选，指定某个模型配置 ID
     Returns:
-        包含 id/display_name/provider_name/base_url/api_key/model/temperature/max_steps 的字典
+        包含 id/display_name/provider_name/base_url/api_key/model/temperature/max_steps/thinking_mode 的字典
     """
     fallback = {
         "id": None,
@@ -296,6 +302,8 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
         "temperature": 0.2,
         # 运行时覆盖优先于环境变量（白名单机制，见 core.runtime_overrides）
         "max_steps": runtime_overrides.agent_max_steps(settings.agent_max_steps),
+        # 推理强度：auto=不下发 enable_thinking，跟随服务商默认
+        "thinking_mode": "auto",
     }
     with SessionLocal() as session:
         query = select(LlmModelConfig).options(selectinload(LlmModelConfig.platform))
@@ -333,4 +341,5 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
             "max_steps": runtime_overrides.agent_max_steps(
                 int(row.max_steps or fallback["max_steps"])
             ),
+            "thinking_mode": str(row.thinking_mode or "auto"),
         }

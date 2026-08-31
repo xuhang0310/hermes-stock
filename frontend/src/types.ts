@@ -521,6 +521,7 @@ export type ModelConfig = {
   status: string
   temperature: number
   max_steps: number
+  thinking_mode: string
   remark: string | null
   updated_at: string | null
 }

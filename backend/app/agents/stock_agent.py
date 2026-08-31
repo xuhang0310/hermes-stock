@@ -21,6 +21,7 @@ from backend.app.core.llm_config import (
     active_llm_config,
     persist_chat_session_model,
     resolve_chat_model_config_ids,
+    thinking_flag,
 )
 from backend.app.data.repository import StockRepository
 from backend.app.skills.registry import skill_registry
@@ -669,7 +670,9 @@ def run_agent_events(
         while True:
             received_model_output = False
             try:
-                for kind, payload in _stream_chat(messages, llm_config, tools):
+                for kind, payload in _stream_chat(
+                    messages, llm_config, tools, enable_thinking=thinking_flag(llm_config)
+                ):
                     received_model_output = True
                     if kind == "reasoning":
                         yield {"type": "reasoning_delta", "content": payload}

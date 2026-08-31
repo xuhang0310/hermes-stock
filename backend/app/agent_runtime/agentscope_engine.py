@@ -34,7 +34,7 @@ from backend.app.agents.tool_approval import (
     requires_approval,
 )
 from backend.app.core.database import SessionLocal
-from backend.app.core.llm_config import active_llm_config
+from backend.app.core.llm_config import active_llm_config, thinking_flag
 from backend.app.core.models import AgentToolApproval
 from backend.app.core.settings import settings
 from backend.app.market.digital_human_tools import digital_human_tool_display_name, write_tool_schemas
@@ -1199,6 +1199,10 @@ async def run_agentscope(
     if not llm.get("base_url") or not llm.get("api_key"):
         raise RuntimeError("当前模型未配置 API Key 或 Base URL。")
     parameters = OpenAIChatModel.Parameters(temperature=float(llm.get("temperature", 0.2)))
+    # 推理强度：on/off 时经 extra_body 下发 enable_thinking（DashScope/通义系约定），
+    # auto 不下发任何参数；不支持该字段的服务商忽略或报错时改回 auto 即可。
+    enable_thinking = thinking_flag(llm)
+    extra_body = {"enable_thinking": enable_thinking} if enable_thinking is not None else None
     model = OpenAIChatModel(
         credential=OpenAICredential(api_key=llm["api_key"], base_url=llm["base_url"]),
         model=llm["model"],
@@ -1207,6 +1211,7 @@ async def run_agentscope(
         max_retries=2,
         retry_delay=1.0,
         client_kwargs={"timeout": 180.0},
+        extra_body=extra_body,
     )
     state = AgentState.model_validate_json(checkpoint_json) if checkpoint_json else _history_state(request_payload)
     agent = Agent(

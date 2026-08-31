@@ -40,6 +40,19 @@ class LlmClientPayloadTests(unittest.TestCase):
         self.assertIs(payload["enable_thinking"], False)
         self.assertEqual(payload["tool_choice"], "required")
 
+    def test_thinking_can_be_enabled_for_one_call(self) -> None:
+        _, payload, _ = _build_payload(
+            self.config,
+            [{"role": "user", "content": "deep research"}],
+            tools=None,
+            tool_choice=None,
+            temperature=None,
+            stream=True,
+            enable_thinking=True,
+        )
+
+        self.assertIs(payload["enable_thinking"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

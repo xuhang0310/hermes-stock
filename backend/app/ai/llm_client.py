@@ -178,11 +178,13 @@ def stream_chat(
     *,
     temperature: float | None = None,
     timeout: float = 180.0,
+    enable_thinking: bool | None = None,
 ) -> Generator[tuple[str, Any], None, None]:
     """流式 chat completion，yield ``(kind, payload)``（见 :func:`parse_sse_stream`）。"""
     url, payload, headers = _build_payload(
         llm_config, messages,
         tools=tools, tool_choice=None, temperature=temperature, stream=True,
+        enable_thinking=enable_thinking,
     )
     started = time.monotonic()
     final_message: dict | None = None

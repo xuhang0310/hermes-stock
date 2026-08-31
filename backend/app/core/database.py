@@ -181,6 +181,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             "risk_checks",
         ):
             _add_column(table, "owner_user_id", "owner_user_id INT NULL")
+        # 模型配置：推理强度（深度思考开关），既有行默认 auto=不下发参数
+        _add_column("llm_model_configs", "thinking_mode", "thinking_mode VARCHAR(16) NOT NULL DEFAULT 'auto'")
 
         legacy_owner_sql = (
             "COALESCE("

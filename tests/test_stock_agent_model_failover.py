@@ -31,7 +31,8 @@ class StockAgentModelFailoverTests(unittest.TestCase):
             },
         }
 
-        def fake_stream(_messages, llm_config, _tools):
+        def fake_stream(_messages, llm_config, _tools, **kwargs):
+            self.assertIn("enable_thinking", kwargs)
             if llm_config["id"] == 5:
                 raise RuntimeError(
                     "LLM 接口返回 403: AccessDenied.Unpurchased: Access to model denied"
