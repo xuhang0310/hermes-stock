@@ -25,6 +25,7 @@ class LlmClientPayloadTests(unittest.TestCase):
         )
 
         self.assertNotIn("enable_thinking", payload)
+        self.assertNotIn("reasoning_effort", payload)
 
     def test_thinking_can_be_disabled_for_one_call(self) -> None:
         _, payload, _ = _build_payload(
@@ -52,6 +53,20 @@ class LlmClientPayloadTests(unittest.TestCase):
         )
 
         self.assertIs(payload["enable_thinking"], True)
+
+    def test_reasoning_effort_is_passed_top_level(self) -> None:
+        _, payload, _ = _build_payload(
+            self.config,
+            [{"role": "user", "content": "深度推理"}],
+            tools=None,
+            tool_choice=None,
+            temperature=None,
+            stream=True,
+            reasoning_effort="high",
+        )
+
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertNotIn("enable_thinking", payload)
 
 
 if __name__ == "__main__":
