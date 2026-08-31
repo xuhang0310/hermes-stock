@@ -275,9 +275,19 @@ def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | 
         )
 
 
-# 推理强度分级（与 AgentScope OpenAIChatModel.Parameters.reasoning_effort 对齐，
-# 也是 OpenAI 推理模型的行业约定；auto=不下发任何推理参数，跟随服务商默认）
-REASONING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
+# 推理强度分级（对齐行业推理模型约定：OpenAI reasoning_effort / AgentScope 引擎同名参数；
+# auto=不下发任何推理参数，跟随服务商默认）
+REASONING_LEVELS = ("off", "low", "medium", "high", "xhigh", "max")
+
+# OpenAI 系顶层 reasoning_effort 透传映射：off→none；OpenAI 无 max 档，收敛到 xhigh
+_OPENAI_EFFORT = {
+    "off": "none",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "xhigh",
+}
 
 
 def reasoning_family(llm_config: dict) -> str:
@@ -307,16 +317,16 @@ def reasoning_params(llm_config: dict) -> dict:
 
     返回 ``{"reasoning_effort": str | None, "enable_thinking": bool | None}``，
     auto（或非法值）时两者均为 None，即不下发任何推理参数。
-    qwen 族把级别映射成 enable_thinking（该族思考是布尔开关，minimal≈关闭）；
-    openai 族原样透传级别（具体可选值因模型而异，若某模型拒绝某级别，
-    调低或改回 auto 即可）。
+    qwen 族把级别映射成 enable_thinking（该族思考是布尔开关，off=关闭）；
+    openai 族透传顶层 reasoning_effort（off→none、max→xhigh；具体可选值因模型
+    而异，若某模型拒绝某级别，调低或改回 auto 即可）。
     """
     level = str(llm_config.get("reasoning_effort") or "auto").lower()
     if level not in REASONING_LEVELS:
         return {"reasoning_effort": None, "enable_thinking": None}
     if reasoning_family(llm_config) == "qwen":
-        return {"reasoning_effort": None, "enable_thinking": level != "minimal"}
-    return {"reasoning_effort": level, "enable_thinking": None}
+        return {"reasoning_effort": None, "enable_thinking": level != "off"}
+    return {"reasoning_effort": _OPENAI_EFFORT[level], "enable_thinking": None}
 
 
 def active_llm_config(model_config_id: int | None = None) -> dict:

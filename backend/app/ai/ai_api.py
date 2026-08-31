@@ -95,8 +95,8 @@ class ModelConfigIn(BaseModel):
     is_active: bool = False
     status: str = Field(default="enabled", max_length=24)
     temperature: float = Field(default=0.2, ge=0, le=2)
-    max_steps: int = Field(default=6, ge=1, le=20)
-    reasoning_effort: Literal["auto", "minimal", "low", "medium", "high", "xhigh"] = "auto"
+    max_steps: int = Field(default=6, ge=1, le=60)
+    reasoning_effort: Literal["auto", "off", "low", "medium", "high", "xhigh", "max"] = "auto"
     remark: str | None = None
 
     @field_validator("model_name")

@@ -2,6 +2,7 @@
 
 行业约定（OpenAI o 系列/gpt-5、AgentScope 引擎）用分级 reasoning_effort 而非
 二值思考开关；通义/百炼系只认 enable_thinking，故按服务商映射。
+UI 为七档分段选择：自动/关闭/低/中/高/超高/最大。
 接线任缺一环，配置页的分级选择就会静默失效，因此用静态源码断言钉住：
 数据库迁移 / active_llm_config / agentscope 引擎 / legacy 引擎 / 配置 API。
 """
@@ -48,26 +49,38 @@ class ReasoningParamsTests(unittest.TestCase):
             )
 
     def test_invalid_level_falls_back_to_auto(self) -> None:
-        self.assertEqual(
-            reasoning_params({**OPENAI_LIKE, "reasoning_effort": "on"}),
-            {"reasoning_effort": None, "enable_thinking": None},
-        )
+        for legacy in ("on", "minimal", "thinking"):
+            self.assertEqual(
+                reasoning_params({**OPENAI_LIKE, "reasoning_effort": legacy}),
+                {"reasoning_effort": None, "enable_thinking": None},
+            )
 
     def test_openai_family_passes_level_through(self) -> None:
-        for level in ("minimal", "low", "medium", "high", "xhigh"):
+        for level in ("low", "medium", "high", "xhigh"):
             self.assertEqual(
                 reasoning_params({**OPENAI_LIKE, "reasoning_effort": level}),
                 {"reasoning_effort": level, "enable_thinking": None},
             )
 
+    def test_openai_family_off_and_max_mapping(self) -> None:
+        self.assertEqual(
+            reasoning_params({**OPENAI_LIKE, "reasoning_effort": "off"}),
+            {"reasoning_effort": "none", "enable_thinking": None},
+        )
+        self.assertEqual(
+            reasoning_params({**OPENAI_LIKE, "reasoning_effort": "max"}),
+            {"reasoning_effort": "xhigh", "enable_thinking": None},
+        )
+
     def test_qwen_family_maps_level_to_enable_thinking(self) -> None:
         for config in (QWEN_BY_PROVIDER, QWEN_BY_MODEL):
+            for level in ("low", "medium", "high", "xhigh", "max"):
+                self.assertEqual(
+                    reasoning_params({**config, "reasoning_effort": level}),
+                    {"reasoning_effort": None, "enable_thinking": True},
+                )
             self.assertEqual(
-                reasoning_params({**config, "reasoning_effort": "high"}),
-                {"reasoning_effort": None, "enable_thinking": True},
-            )
-            self.assertEqual(
-                reasoning_params({**config, "reasoning_effort": "minimal"}),
+                reasoning_params({**config, "reasoning_effort": "off"}),
                 {"reasoning_effort": None, "enable_thinking": False},
             )
 
@@ -100,14 +113,20 @@ class ModelConfigInReasoningEffortTests(unittest.TestCase):
         self.assertEqual(payload.reasoning_effort, "auto")
 
     def test_accepts_all_levels(self) -> None:
-        for level in ("auto", "minimal", "low", "medium", "high", "xhigh"):
+        for level in ("auto", "off", "low", "medium", "high", "xhigh", "max"):
             parsed = ModelConfigIn(**self._payload(reasoning_effort=level))
             self.assertEqual(parsed.reasoning_effort, level)
 
-    def test_rejects_legacy_switch_values(self) -> None:
-        for legacy in ("on", "off", "thinking"):
+    def test_rejects_legacy_and_unknown_values(self) -> None:
+        for legacy in ("on", "minimal", "thinking"):
             with self.assertRaises(pydantic.ValidationError):
                 ModelConfigIn(**self._payload(reasoning_effort=legacy))
+
+    def test_max_steps_cap_is_60(self) -> None:
+        parsed = ModelConfigIn(**self._payload(max_steps=60))
+        self.assertEqual(parsed.max_steps, 60)
+        with self.assertRaises(pydantic.ValidationError):
+            ModelConfigIn(**self._payload(max_steps=61))
 
 
 class ReasoningEffortWiringGuardTests(unittest.TestCase):
@@ -136,13 +155,14 @@ class ReasoningEffortWiringGuardTests(unittest.TestCase):
         source = _source("backend/app/agents/stock_agent.py")
         self.assertIn("**reasoning_params(llm_config)", source)
 
-    def test_model_config_api_exposes_field(self) -> None:
+    def test_model_config_api_exposes_field_and_caps(self) -> None:
         source = _source("backend/app/ai/ai_api.py")
         self.assertIn(
-            'reasoning_effort: Literal["auto", "minimal", "low", "medium", "high", "xhigh"]',
+            'reasoning_effort: Literal["auto", "off", "low", "medium", "high", "xhigh", "max"]',
             source,
         )
         self.assertIn('"reasoning_effort": model.reasoning_effort or "auto"', source)
+        self.assertIn("max_steps: int = Field(default=6, ge=1, le=60)", source)
 
 
 if __name__ == "__main__":

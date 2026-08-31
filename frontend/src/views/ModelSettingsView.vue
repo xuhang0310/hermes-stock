@@ -127,6 +127,16 @@ const configForm = reactive({
   remark: ''
 })
 
+const effortOptions = [
+  { value: 'auto', label: '自动' },
+  { value: 'off', label: '关闭' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '超高' },
+  { value: 'max', label: '最大' },
+]
+
 const enabledPlatforms = computed(() => platforms.value.filter((item) => item.status !== 'disabled'))
 const selectedPlatform = computed(() => platforms.value.find((item) => item.id === configForm.platform_id) || null)
 const activeModel = computed(() => configs.value.find((item) => item.is_active) || null)
@@ -542,7 +552,7 @@ onMounted(load)
           <label><span>模型 ID <small>服务商提供的调用名称</small></span><input v-model="configForm.model_name" required placeholder="例如：qwen-plus" /></label>
           <label class="friendly-switch"><input v-model="configForm.is_active" type="checkbox" /><i></i><span><b>设为默认模型</b><small>新对话将优先使用它</small></span></label>
           <button class="advanced-toggle" type="button" @click="showAdvanced = !showAdvanced">{{ showAdvanced ? '收起' : '展开' }}高级参数 <span>⌄</span></button>
-          <div v-if="showAdvanced" class="advanced-panel"><div class="form-row"><label><span>创造性（温度）</span><input v-model.number="configForm.temperature" type="number" min="0" max="2" step="0.1" /></label><label><span>最大工具步数</span><input v-model.number="configForm.max_steps" type="number" min="1" max="20" /></label><label><span>推理强度 <small>推理模型思考深度</small></span><select v-model="configForm.reasoning_effort"><option value="auto">跟随模型默认</option><option value="minimal">最弱</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极限</option></select></label></div><label><span>模型专属 Key <small>通常留空，继承平台</small></span><input v-model="configForm.api_key" type="password" /></label><label><span>备注</span><textarea v-model="configForm.remark" rows="2" /></label></div>
+          <div v-if="showAdvanced" class="advanced-panel"><div class="form-row"><label><span>创造性（温度）</span><input v-model.number="configForm.temperature" type="number" min="0" max="2" step="0.1" /></label><label><span>最大工具步数</span><input v-model.number="configForm.max_steps" type="number" min="1" max="60" /></label></div><div class="effort-row"><span class="effort-label">推理强度 <small>推理模型思考深度</small></span><div class="effort-tabs" role="radiogroup" aria-label="推理强度"><button v-for="opt in effortOptions" :key="opt.value" type="button" role="radio" :aria-checked="configForm.reasoning_effort === opt.value" :class="{ active: configForm.reasoning_effort === opt.value }" @click="configForm.reasoning_effort = opt.value">{{ opt.label }}</button></div></div><label><span>模型专属 Key <small>通常留空，继承平台</small></span><input v-model="configForm.api_key" type="password" /></label><label><span>备注</span><textarea v-model="configForm.remark" rows="2" /></label></div>
           <div v-if="configTest" class="test-result" :class="{ ok: configTest.ok, fail: !configTest.ok }"><strong>{{ testText(configTest) }}</strong><span v-if="configTest.response_preview">{{ configTest.response_preview }}</span></div>
         </div>
         <footer><button type="button" @click="closeDialog">取消</button><span></span><button type="button" :disabled="testingConfig" @click="testConfig">{{ testingConfig ? '正在测试…' : '测试模型' }}</button><button class="primary-action" type="submit" :disabled="busy">{{ busy ? '保存中…' : '保存模型' }}</button></footer>
