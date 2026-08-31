@@ -24,7 +24,6 @@ from backend.app.core.database import initialize_default_database, session_scope
 from backend.app.core.operation_log import OperationLogMiddleware
 from backend.app.core.request_id_middleware import RequestIDMiddleware
 from backend.app.core.runtime_overrides_api import router as runtime_overrides_router
-from backend.app.core.llm_config import purge_retired_model_configs
 from backend.app.core.settings import settings
 from backend.app.core.startup_validator import validate_startup
 from backend.app.data.dashboard_api import router as dashboard_router
@@ -73,15 +72,12 @@ def create_app(init_db: bool = True) -> FastAPI:
             initialize_default_database()
             # 保证内置飞书通道与节律任务存在（正常启动不跑 seed_demo，这里补齐基础数据）
             with session_scope() as db:
-                purged_models = purge_retired_model_configs(db)
                 seed_notify_channels(db)
                 seed_position_accounts(db)
                 seed_position_agent_profile(db)
                 seed_watchlist_agent_profile(db)
                 ensure_default_jobs(db)
                 ensure_ask_stock_profile(db)
-            if purged_models:
-                log_event("system", "INFO", f"已清理 {purged_models} 个下线模型配置")
             await resume_pending_uploads()
             await resume_background_tasks()
             start_prompt_recommendation_scheduler()

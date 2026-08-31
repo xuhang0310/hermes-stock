@@ -10,14 +10,14 @@ from sqlalchemy.pool import StaticPool
 
 from backend.app.core.database import Base
 from backend.app.core.llm_config import (
-    purge_retired_model_configs,
+    active_llm_config,
     model_supports_vision,
     persist_chat_session_model,
     resolve_chat_model_config_ids,
     resolve_model_config_ids_by_priority,
     resolve_vision_model_config_id,
 )
-from backend.app.ai.ai_api import ModelConfigIn
+from backend.app.ai.ai_api import ModelConfigIn, update_model_config
 from backend.app.core.models import AiChatSession, LlmModelConfig, LlmModelPlatform, User
 
 
@@ -269,29 +269,30 @@ class LlmVisionRoutingTests(unittest.TestCase):
         with self.SessionFactory() as db:
             self.assertEqual(db.get(AiChatSession, session_id).model_config_id, fallback_id)
 
-    def test_retired_model_is_never_routed_and_cleanup_releases_sessions(self) -> None:
+    def test_custom_model_name_can_be_routed_and_keeps_session_binding(self) -> None:
         with self.SessionFactory() as db:
             user = User(
-                username="retired-model-owner",
-                display_name="Retired model owner",
+                username="custom-model-owner",
+                display_name="Custom model owner",
                 role="researcher",
                 permission_scope="agent:use",
                 password_hash="test",
             )
             platform = LlmModelPlatform(
-                name="Retired model provider",
+                name="Custom model provider",
                 provider_type="OpenAI compatible",
-                base_url="https://retired.invalid/v1",
+                base_url="https://custom.invalid/v1",
+                api_key="platform-key",
                 status="enabled",
             )
             db.add_all([user, platform])
             db.flush()
-            retired = LlmModelConfig(
+            custom = LlmModelConfig(
                 platform_id=platform.id,
-                display_name="Retired GPT",
+                display_name="Custom GPT",
                 provider_name=platform.name,
                 base_url=platform.base_url,
-                model_name=" GPT-5.6-SOL ",
+                model_name="gpt-5.6-sol",
                 is_active=True,
                 status="enabled",
             )
@@ -304,41 +305,102 @@ class LlmVisionRoutingTests(unittest.TestCase):
                 is_active=False,
                 status="enabled",
             )
-            db.add_all([retired, fallback])
+            db.add_all([custom, fallback])
             db.flush()
             chat_session = AiChatSession(
                 user_id=user.id,
-                model_config_id=retired.id,
-                title="Stale retired session",
+                model_config_id=custom.id,
+                title="Custom model session",
                 status="active",
                 chat_mode="research",
                 source_type="web",
             )
             db.add(chat_session)
             db.commit()
-            retired_id = retired.id
+            custom_id = custom.id
             fallback_id = fallback.id
             session_id = chat_session.id
 
         with patch("backend.app.core.llm_config.SessionLocal", self.SessionFactory):
-            self.assertEqual(resolve_chat_model_config_ids(retired_id), [fallback_id])
+            self.assertEqual(
+                resolve_chat_model_config_ids(custom_id),
+                [custom_id, fallback_id],
+            )
+            runtime = active_llm_config(custom_id)
 
         with self.SessionFactory() as db:
-            self.assertEqual(purge_retired_model_configs(db), 1)
-            db.commit()
+            self.assertIsNotNone(db.get(LlmModelConfig, custom_id))
+            self.assertEqual(db.get(AiChatSession, session_id).model_config_id, custom_id)
+        self.assertEqual(runtime["model"], "gpt-5.6-sol")
+        self.assertEqual(runtime["base_url"], "https://custom.invalid/v1")
+        self.assertEqual(runtime["api_key"], "platform-key")
 
-        with self.SessionFactory() as db:
-            self.assertIsNone(db.get(LlmModelConfig, retired_id))
-            self.assertIsNone(db.get(AiChatSession, session_id).model_config_id)
+    def test_custom_model_name_is_accepted_and_normalized(self) -> None:
+        payload = ModelConfigIn(
+            platform_id=4,
+            display_name="Custom GPT",
+            provider_name="openai",
+            base_url="https://custom.invalid/v1",
+            model_name="  gpt-5.6-sol  ",
+            status="enabled",
+        )
 
-    def test_retired_model_cannot_be_added_again(self) -> None:
+        self.assertEqual(payload.model_name, "gpt-5.6-sol")
+
         with self.assertRaises(ValidationError):
             ModelConfigIn(
-                display_name="Retired GPT",
-                provider_name="OpenAI compatible",
-                base_url="https://retired.invalid/v1",
-                model_name="gpt-5.6-sol",
+                display_name="Blank model",
+                provider_name="openai",
+                base_url="https://custom.invalid/v1",
+                model_name="   ",
             )
+
+    def test_update_endpoint_accepts_custom_model_name(self) -> None:
+        with self.SessionFactory() as db:
+            platform = LlmModelPlatform(
+                name="OpenAI compatible custom provider",
+                provider_type="OpenAI compatible",
+                base_url="https://sub2api.invalid/v1",
+                api_key="platform-key",
+                status="enabled",
+            )
+            db.add(platform)
+            db.flush()
+            model = LlmModelConfig(
+                platform_id=platform.id,
+                display_name="Old model",
+                provider_name="openai",
+                base_url=platform.base_url,
+                model_name="old-model",
+                is_active=False,
+                status="enabled",
+            )
+            db.add(model)
+            db.commit()
+            model_id = model.id
+            platform_id = platform.id
+
+            result = update_model_config(
+                model_id,
+                ModelConfigIn(
+                    platform_id=platform_id,
+                    display_name="gpt-5.6-sol",
+                    provider_name="openai",
+                    base_url="https://sub2api.invalid/v1",
+                    api_key=None,
+                    model_name="gpt-5.6-sol",
+                    is_active=False,
+                    status="enabled",
+                    temperature=0.2,
+                    max_steps=6,
+                ),
+                db,
+            )
+
+            stored = db.get(LlmModelConfig, model_id)
+            self.assertEqual(result["model_name"], "gpt-5.6-sol")
+            self.assertEqual(stored.model_name, "gpt-5.6-sol")
+            self.assertEqual(stored.platform_id, platform_id)
 
 
 class SeedAiConfigsRerunTests(unittest.TestCase):

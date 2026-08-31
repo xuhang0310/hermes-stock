@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.app.core import runtime_overrides
@@ -31,45 +31,6 @@ _VISION_MODEL_PREFIXES = (
 
 _POSITION_AGENT_MODEL_PRIORITY = ("qwen3.7-plus", "k3")
 
-# Models explicitly retired from this application.  Keep this deny-list in the
-# routing layer as well as the settings API so stale sessions or database rows
-# can never select them again.
-RETIRED_MODEL_NAMES = frozenset({"gpt-5.6-sol"})
-
-
-def normalize_model_name(model_name: str | None) -> str:
-    return (model_name or "").strip().lower()
-
-
-def is_retired_model_name(model_name: str | None) -> bool:
-    return normalize_model_name(model_name) in RETIRED_MODEL_NAMES
-
-
-def _not_retired_model_clause():
-    return func.lower(func.trim(LlmModelConfig.model_name)).notin_(RETIRED_MODEL_NAMES)
-
-
-def purge_retired_model_configs(session) -> int:
-    """Remove retired model rows and release chat sessions bound to them."""
-    retired_ids = list(
-        session.scalars(
-            select(LlmModelConfig.id).where(
-                func.lower(func.trim(LlmModelConfig.model_name)).in_(RETIRED_MODEL_NAMES)
-            )
-        ).all()
-    )
-    if not retired_ids:
-        return 0
-    session.execute(
-        update(AiChatSession)
-        .where(AiChatSession.model_config_id.in_(retired_ids))
-        .values(model_config_id=None)
-    )
-    session.execute(delete(LlmModelConfig).where(LlmModelConfig.id.in_(retired_ids)))
-    session.flush()
-    return len(retired_ids)
-
-
 def resolve_chat_model_config_ids(model_config_id: int | None = None) -> list[int]:
     """Return enabled chat models in failover order.
 
@@ -84,7 +45,6 @@ def resolve_chat_model_config_ids(model_config_id: int | None = None) -> list[in
             .options(selectinload(LlmModelConfig.platform))
             .where(
                 LlmModelConfig.status == "enabled",
-                _not_retired_model_clause(),
             )
             .order_by(
                 LlmModelConfig.is_active.desc(),
@@ -134,7 +94,6 @@ def persist_chat_session_model(*, session_id: int, user_id: int, model_config_id
             .where(
                 LlmModelConfig.id == model_config_id,
                 LlmModelConfig.status == "enabled",
-                _not_retired_model_clause(),
             )
             .limit(1)
         )
@@ -179,7 +138,6 @@ def resolve_model_config_ids_by_priority(model_names: tuple[str, ...]) -> list[i
             .options(selectinload(LlmModelConfig.platform))
             .where(
                 LlmModelConfig.status != "disabled",
-                _not_retired_model_clause(),
             )
             .order_by(
                 LlmModelConfig.is_active.desc(),
@@ -217,7 +175,6 @@ def resolve_position_agent_model_config_id(model_config_id: int | None = None) -
                 query.where(
                     LlmModelConfig.id == model_config_id,
                     LlmModelConfig.status != "disabled",
-                    _not_retired_model_clause(),
                 ).limit(1)
             )
             if selected is None or (
@@ -229,7 +186,6 @@ def resolve_position_agent_model_config_id(model_config_id: int | None = None) -
         candidates = session.scalars(
             query.where(
                 LlmModelConfig.status != "disabled",
-                _not_retired_model_clause(),
             ).order_by(
                 LlmModelConfig.is_active.desc(),
                 LlmModelConfig.updated_at.desc(),
@@ -267,7 +223,6 @@ def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | 
                 query.where(
                     LlmModelConfig.id == model_config_id,
                     LlmModelConfig.status != "disabled",
-                    _not_retired_model_clause(),
                 ).limit(1)
             )
             if selected is None:
@@ -277,7 +232,6 @@ def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | 
                 query.where(
                     LlmModelConfig.is_active.is_(True),
                     LlmModelConfig.status == "enabled",
-                    _not_retired_model_clause(),
                 )
                 .order_by(LlmModelConfig.updated_at.desc(), LlmModelConfig.id.desc())
                 .limit(1)
@@ -289,7 +243,6 @@ def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | 
         candidates = session.scalars(
             query.where(
                 LlmModelConfig.status != "disabled",
-                _not_retired_model_clause(),
             ).order_by(
                 LlmModelConfig.is_active.desc(),
                 LlmModelConfig.updated_at.desc(),
@@ -351,7 +304,6 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
                 query.where(
                     LlmModelConfig.id == model_config_id,
                     LlmModelConfig.status != "disabled",
-                    _not_retired_model_clause(),
                 ).limit(1)
             )
             if row is None:
@@ -361,14 +313,11 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
                 query.where(
                     LlmModelConfig.is_active.is_(True),
                     LlmModelConfig.status == "enabled",
-                    _not_retired_model_clause(),
                 )
                 .order_by(LlmModelConfig.updated_at.desc(), LlmModelConfig.id.desc())
                 .limit(1)
             )
             if row is None:
-                if is_retired_model_name(fallback["model"]):
-                    raise RuntimeError("环境变量配置的模型已从平台下线，不能继续使用。")
                 return fallback
 
         platform = row.platform
