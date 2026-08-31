@@ -275,10 +275,48 @@ def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | 
         )
 
 
-def thinking_flag(llm_config: dict) -> bool | None:
-    """推理强度配置 → enable_thinking 取值；auto 返回 None（不下发，跟随服务商默认）。"""
-    mode = str(llm_config.get("thinking_mode") or "auto")
-    return {"on": True, "off": False}.get(mode)
+# 推理强度分级（与 AgentScope OpenAIChatModel.Parameters.reasoning_effort 对齐，
+# 也是 OpenAI 推理模型的行业约定；auto=不下发任何推理参数，跟随服务商默认）
+REASONING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
+
+
+def reasoning_family(llm_config: dict) -> str:
+    """按服务商/模型判定推理强度协议族。
+
+    - ``"qwen"``：通义/百炼（DashScope）系，含 OpenAI 兼容端点上的 qwen 模型，
+      只认请求体里的 ``enable_thinking``（布尔），不认 reasoning_effort；
+    - ``"openai"``：其余（OpenAI 推理系列、DeepSeek 及一般 OpenAI 兼容端点），
+      接收顶层 ``reasoning_effort`` 分级。
+    """
+    provider = str(llm_config.get("provider_name") or "").lower()
+    base_url = str(llm_config.get("base_url") or "").lower()
+    model = str(llm_config.get("model") or "").lower()
+    qwen_providers = {
+        "dashscope", "qwen", "tongyi", "aliyun",
+        "通义", "百炼", "阿里云", "阿里",
+    }
+    if provider in qwen_providers or "dashscope" in base_url:
+        return "qwen"
+    if model.startswith("qwen"):
+        return "qwen"
+    return "openai"
+
+
+def reasoning_params(llm_config: dict) -> dict:
+    """推理强度配置 → 请求参数字典。
+
+    返回 ``{"reasoning_effort": str | None, "enable_thinking": bool | None}``，
+    auto（或非法值）时两者均为 None，即不下发任何推理参数。
+    qwen 族把级别映射成 enable_thinking（该族思考是布尔开关，minimal≈关闭）；
+    openai 族原样透传级别（具体可选值因模型而异，若某模型拒绝某级别，
+    调低或改回 auto 即可）。
+    """
+    level = str(llm_config.get("reasoning_effort") or "auto").lower()
+    if level not in REASONING_LEVELS:
+        return {"reasoning_effort": None, "enable_thinking": None}
+    if reasoning_family(llm_config) == "qwen":
+        return {"reasoning_effort": None, "enable_thinking": level != "minimal"}
+    return {"reasoning_effort": level, "enable_thinking": None}
 
 
 def active_llm_config(model_config_id: int | None = None) -> dict:
@@ -290,7 +328,7 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
     Args:
         model_config_id: 可选，指定某个模型配置 ID
     Returns:
-        包含 id/display_name/provider_name/base_url/api_key/model/temperature/max_steps/thinking_mode 的字典
+        包含 id/display_name/provider_name/base_url/api_key/model/temperature/max_steps/reasoning_effort 的字典
     """
     fallback = {
         "id": None,
@@ -302,8 +340,8 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
         "temperature": 0.2,
         # 运行时覆盖优先于环境变量（白名单机制，见 core.runtime_overrides）
         "max_steps": runtime_overrides.agent_max_steps(settings.agent_max_steps),
-        # 推理强度：auto=不下发 enable_thinking，跟随服务商默认
-        "thinking_mode": "auto",
+        # 推理强度：auto=不下发推理参数，跟随服务商默认
+        "reasoning_effort": "auto",
     }
     with SessionLocal() as session:
         query = select(LlmModelConfig).options(selectinload(LlmModelConfig.platform))
@@ -341,5 +379,5 @@ def active_llm_config(model_config_id: int | None = None) -> dict:
             "max_steps": runtime_overrides.agent_max_steps(
                 int(row.max_steps or fallback["max_steps"])
             ),
-            "thinking_mode": str(row.thinking_mode or "auto"),
+            "reasoning_effort": str(row.reasoning_effort or "auto"),
         }

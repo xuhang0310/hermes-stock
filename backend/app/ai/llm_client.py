@@ -51,6 +51,7 @@ def _build_payload(
     temperature: float | None,
     stream: bool,
     enable_thinking: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, str]]:
     """组装 url / payload / headers。temperature=None 时沿用 llm_config 里的值。"""
     if not llm_config.get("api_key") or not llm_config.get("base_url"):
@@ -68,6 +69,8 @@ def _build_payload(
             payload["tool_choice"] = tool_choice
     if enable_thinking is not None:
         payload["enable_thinking"] = enable_thinking
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     headers = {"Authorization": f"Bearer {llm_config['api_key']}"}
     return url, payload, headers
 
@@ -80,6 +83,7 @@ def chat_completion(
     tool_choice: str | None = "auto",
     temperature: float | None = None,
     enable_thinking: bool | None = None,
+    reasoning_effort: str | None = None,
     timeout: float = 120.0,
     log_module: str | None = None,
 ) -> dict:
@@ -95,6 +99,7 @@ def chat_completion(
         temperature=temperature,
         stream=False,
         enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
     )
     with httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
         response = client.post(url, json=payload, headers=headers)
@@ -179,12 +184,14 @@ def stream_chat(
     temperature: float | None = None,
     timeout: float = 180.0,
     enable_thinking: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> Generator[tuple[str, Any], None, None]:
     """流式 chat completion，yield ``(kind, payload)``（见 :func:`parse_sse_stream`）。"""
     url, payload, headers = _build_payload(
         llm_config, messages,
         tools=tools, tool_choice=None, temperature=temperature, stream=True,
         enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
     )
     started = time.monotonic()
     final_message: dict | None = None

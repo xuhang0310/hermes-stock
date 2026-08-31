@@ -181,8 +181,40 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             "risk_checks",
         ):
             _add_column(table, "owner_user_id", "owner_user_id INT NULL")
-        # 模型配置：推理强度（深度思考开关），既有行默认 auto=不下发参数
-        _add_column("llm_model_configs", "thinking_mode", "thinking_mode VARCHAR(16) NOT NULL DEFAULT 'auto'")
+        # 模型配置：推理强度升级为分级 reasoning_effort（auto/minimal/low/medium/high/xhigh）。
+        # 今日的 thinking_mode 开关列直接改名沿用（取值仅 auto/on/off），
+        # 历史 on/off 语义映射为 high/minimal；新库由 create_all 直接建推理强度列。
+        def _has_column(table: str, column: str) -> bool:
+            return bool(
+                connection.execute(
+                    text(
+                        "SELECT COUNT(*) FROM information_schema.columns "
+                        "WHERE table_schema = DATABASE() AND table_name = :t AND column_name = :c"
+                    ),
+                    {"t": table, "c": column},
+                ).scalar()
+            )
+
+        if _has_column("llm_model_configs", "thinking_mode"):
+            if not _has_column("llm_model_configs", "reasoning_effort"):
+                connection.execute(
+                    text(
+                        "ALTER TABLE llm_model_configs CHANGE COLUMN thinking_mode "
+                        "reasoning_effort VARCHAR(16) NOT NULL DEFAULT 'auto'"
+                    )
+                )
+        else:
+            _add_column(
+                "llm_model_configs", "reasoning_effort",
+                "reasoning_effort VARCHAR(16) NOT NULL DEFAULT 'auto'",
+            )
+        connection.execute(
+            text(
+                "UPDATE llm_model_configs SET reasoning_effort = CASE reasoning_effort "
+                "WHEN 'on' THEN 'high' WHEN 'off' THEN 'minimal' ELSE reasoning_effort END "
+                "WHERE reasoning_effort IN ('on', 'off')"
+            )
+        )
 
         legacy_owner_sql = (
             "COALESCE("

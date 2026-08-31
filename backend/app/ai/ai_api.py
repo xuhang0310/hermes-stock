@@ -96,7 +96,7 @@ class ModelConfigIn(BaseModel):
     status: str = Field(default="enabled", max_length=24)
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_steps: int = Field(default=6, ge=1, le=20)
-    thinking_mode: Literal["auto", "on", "off"] = "auto"
+    reasoning_effort: Literal["auto", "minimal", "low", "medium", "high", "xhigh"] = "auto"
     remark: str | None = None
 
     @field_validator("model_name")
@@ -226,7 +226,7 @@ def _model_out(model: LlmModelConfig) -> dict:
         "status": model.status,
         "temperature": float(model.temperature),
         "max_steps": model.max_steps,
-        "thinking_mode": model.thinking_mode or "auto",
+        "reasoning_effort": model.reasoning_effort or "auto",
         "remark": model.remark,
         "updated_at": model.updated_at.isoformat() if model.updated_at else None,
     }
