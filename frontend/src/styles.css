@@ -1881,6 +1881,14 @@ tbody tr.clickable-row:focus-visible td {
 .friendly-switch small { color: #6e6b64; }
 .advanced-toggle { display: flex; justify-content: space-between; border: 0; background: transparent; color: #89857c; padding: 3px 0; font-size: 11px; }
 .advanced-panel { display: grid; gap: 13px; border: 1px solid #2d2b26; border-radius: 9px; background: #0d0d0c; padding: 13px; }
+.effort-row { display: grid; gap: 7px; }
+.effort-label { color: #89857c; font-size: 11px; }
+.effort-label small { color: #6e6b64; }
+.effort-tabs { display: flex; overflow: hidden; border: 1px solid #2d2b26; border-radius: 9px; background: #11110f; }
+.effort-tabs button { flex: 1; border: 0; border-right: 1px solid #2d2b26; background: transparent; color: #89857c; padding: 8px 0; font-size: 12px; cursor: pointer; transition: .15s; }
+.effort-tabs button:last-child { border-right: 0; }
+.effort-tabs button:hover { color: #d9ceb8; background: #191813; }
+.effort-tabs button.active { background: #d5b46a; color: #17140d; font-weight: 700; }
 
 /* Shared resource management language used by data, notification and digital-human settings. */
 .settings-resource-hub .provider-grid { align-items: stretch; }

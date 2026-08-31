@@ -211,8 +211,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         connection.execute(
             text(
                 "UPDATE llm_model_configs SET reasoning_effort = CASE reasoning_effort "
-                "WHEN 'on' THEN 'high' WHEN 'off' THEN 'minimal' ELSE reasoning_effort END "
-                "WHERE reasoning_effort IN ('on', 'off')"
+                "WHEN 'on' THEN 'high' WHEN 'minimal' THEN 'off' ELSE reasoning_effort END "
+                "WHERE reasoning_effort IN ('on', 'minimal')"
             )
         )
 

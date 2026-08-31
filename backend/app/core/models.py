@@ -610,8 +610,8 @@ class LlmModelConfig(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="enabled")
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.2)
     max_steps: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
-    # 推理强度分级：auto=不下发参数跟随服务商默认；minimal/low/medium/high/xhigh 按服务商映射
-    # （OpenAI 系透传顶层 reasoning_effort；通义/DashScope 系映射 enable_thinking，minimal≈关闭）
+    # 推理强度分级：auto=不下发参数跟随服务商默认；off/low/medium/high/xhigh/max 按服务商映射
+    # （OpenAI 系透传顶层 reasoning_effort，off→none、max→xhigh；通义/DashScope 系映射 enable_thinking，off=关闭）
     reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
     remark: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
