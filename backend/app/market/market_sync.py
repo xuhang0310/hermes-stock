@@ -15,14 +15,20 @@ from __future__ import annotations
 import logging
 import time
 from datetime import date, datetime, timedelta
+from math import ceil
 from typing import Any
 
 from sqlalchemy import func, select, text
 
 from backend.app.core.database import SessionLocal, engine
-from backend.app.core.models import DailyBar, Instrument, StockDailyBasic, StockLatestPrice
+from backend.app.core.models import (
+    DailyBar,
+    Instrument,
+    MarketTradingCalendar,
+    StockDailyBasic,
+    StockLatestPrice,
+)
 from backend.app.market.stock_tools import (
-    _stock_basic_rows,
     _tushare_request,
     get_trade_cal,
     normalize_a_share_symbol,
@@ -59,34 +65,105 @@ def _market_of(ts_code: str) -> str:
     return _MARKET_BY_SUFFIX.get(suffix, suffix or "CN")
 
 
-def _stock_catalog_rows() -> list[dict]:
-    """A 股目录 = 上市(L) + 暂停上市(P)，按 ts_code 去重（L 优先）。
+def _catalog_symbol(value: Any) -> str:
+    symbol = normalize_a_share_symbol(str(value or ""))
+    code, _, suffix = symbol.partition(".")
+    return symbol if len(code) == 6 and code.isdigit() and suffix in _MARKET_BY_SUFFIX else ""
 
-    只拉 L 会漏掉少数暂停上市但仍有成交的标的，导致 daily_bars 插入时撞
-    instruments 外键（1452）。P 拉取失败时降级为仅 L，不阻断同步。
+
+def _stock_catalog_rows() -> list[dict]:
+    """完整获取 L/P/D 后才允许调用方写库；不以缺席推断退市。
+
+    不使用会吞错且缓存 24h 的 _stock_basic_rows。P 可以真实为空，L/D 空值、
+    截断的 L 目录、状态冲突及任一通道失败都不可信，必须保留原缓存并报错。
     """
-    rows = list(_stock_basic_rows())  # 自带 24h 缓存的 L 目录
-    suspended = _tushare_request(
-        "stock_basic", {"list_status": "P"}, "ts_code,symbol,name,market,exchange,list_date"
+    catalog: dict[str, dict] = {}
+    for status in ("L", "P", "D"):
+        response = _tushare_request(
+            "stock_basic",
+            {"list_status": status},
+            "ts_code,symbol,name,market,exchange,industry,list_date,list_status",
+        )
+        if "error" in response:
+            raise RuntimeError(f"stock_basic({status}): {response['error']}")
+        rows = response.get("rows")
+        if not isinstance(rows, list) or (not rows and status != "P"):
+            raise RuntimeError(f"stock_basic({status}) 目录为空或格式无效，拒绝覆盖本地目录")
+        symbols: set[str] = set()
+        for row in rows:
+            symbol = _catalog_symbol(row.get("ts_code")) if isinstance(row, dict) else ""
+            if not symbol or str(row.get("list_status") or status).upper() != status:
+                raise RuntimeError(f"stock_basic({status}) 含无效标的或状态，拒绝覆盖本地目录")
+            if symbol in catalog and catalog[symbol]["list_status"] != status:
+                raise RuntimeError(f"stock_basic 目录状态冲突：{symbol}，拒绝覆盖本地目录")
+            symbols.add(symbol)
+            catalog[symbol] = {**row, "ts_code": symbol, "list_status": status}
+        if status == "L" and len(symbols) < _FULL_MARKET_BAR_MIN:
+            raise RuntimeError(f"stock_basic(L) 目录不完整：{len(symbols)} 只，拒绝覆盖本地目录")
+        time.sleep(_API_SLEEP_SECONDS)
+    return list(catalog.values())
+
+
+def load_stock_catalog_snapshot() -> list[dict[str, Any]]:
+    snapshot: list[dict[str, Any]] = []
+    for row in _stock_catalog_rows():
+        symbol = normalize_a_share_symbol(str(row.get("ts_code") or ""))
+        if "." not in symbol:
+            continue
+        snapshot.append(
+            {
+                "symbol": symbol,
+                "name": str(row.get("name") or symbol),
+                "market": row.get("market") or _market_of(symbol),
+                "stock_type": "stock",
+                "list_status": str(row.get("list_status") or "L").upper(),
+                "list_date": row.get("list_date"),
+                "industry": row.get("industry"),
+                "source": "tushare.stock_basic",
+            }
+        )
+    return sorted(snapshot, key=lambda item: item["symbol"])
+
+
+def load_local_stock_catalog_snapshot() -> list[dict[str, Any]]:
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(
+                Instrument.symbol,
+                Instrument.name,
+                Instrument.market,
+                Instrument.type,
+                Instrument.list_status,
+                Instrument.list_date,
+                Instrument.industry,
+            ).where(
+                Instrument.type == "stock",
+                Instrument.list_status.in_(("L", "P", "D")),
+            )
+        ).all()
+    return sorted(
+        [
+            {
+                "symbol": str(row.symbol),
+                "name": str(row.name or row.symbol),
+                "market": row.market,
+                "stock_type": row.type,
+                "list_status": str(row.list_status),
+                "list_date": row.list_date,
+                "industry": row.industry,
+                "source": "tushare.stock_basic.cache",
+            }
+            for row in rows
+        ],
+        key=lambda item: item["symbol"],
     )
-    if "error" in suspended:
-        logger.warning("stock_basic(P) 拉取失败，目录仅含 L：%s", suspended["error"])
-        return rows
-    seen = {str(row.get("ts_code") or "") for row in rows}
-    for row in suspended.get("rows") or []:
-        ts_code = str(row.get("ts_code") or "")
-        if ts_code and ts_code not in seen:
-            seen.add(ts_code)
-            rows.append(row)
-    return rows
 
 
 def _ensure_instruments_for_bars(rows: list[dict]) -> None:
     """FK 父表自愈：K 线里出现但 instruments 缺失的 symbol 补占位行（name=symbol）。
 
-    stock_basic 目录即使 L+P 合并仍会漏掉少数标的（已退市 D 状态但历史日仍有
-    成交等），仅靠目录会让 daily_bars 整批 1000 行撞 FK 1452 全毁，故以 K 线数据
-    本身为准兜底补父行。
+    即使完整目录仍可能漏掉历史标的；仅靠目录会让 daily_bars 整批 1000 行撞
+    FK 1452，故以 K 线补父行，但不猜测 list_status（留空，不作为上市或退市证据）。
     """
     symbols = {
         normalize_a_share_symbol(str(row.get("ts_code") or ""))
@@ -140,9 +217,12 @@ def _upsert_instruments(basic_rows: list[dict]) -> int:
     if not basic_rows:
         return 0
     stmt = text(
-        "INSERT INTO instruments (symbol, name, market, type, status, list_date) "
-        "VALUES (:symbol, :name, :market, :type, :status, :list_date) "
-        "ON DUPLICATE KEY UPDATE name=VALUES(name), market=VALUES(market), list_date=VALUES(list_date)"
+        "INSERT INTO instruments "
+        "(symbol, name, market, type, status, list_date, list_status, industry) "
+        "VALUES (:symbol, :name, :market, :type, :status, :list_date, :list_status, :industry) "
+        "ON DUPLICATE KEY UPDATE "
+        "name=VALUES(name), market=VALUES(market), list_date=VALUES(list_date), "
+        "list_status=VALUES(list_status), industry=VALUES(industry)"
     )
     count = 0
     with engine.begin() as conn:
@@ -160,6 +240,8 @@ def _upsert_instruments(basic_rows: list[dict]) -> int:
                         "type": "stock",
                         "status": "active",
                         "list_date": str(row.get("list_date") or "") or None,
+                        "list_status": str(row.get("list_status") or "").upper() or None,
+                        "industry": str(row.get("industry") or "").strip()[:120] or None,
                     }
                 )
             if params:
@@ -168,22 +250,75 @@ def _upsert_instruments(basic_rows: list[dict]) -> int:
     return count
 
 
-def _bar_date_counts(trade_dates: list[str]) -> dict[str, int]:
-    """各目标交易日在本地 daily_bars（tushare）里的行数。
+def _compact_date(value: Any) -> str:
+    compact = str(value or "").replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        return ""
+    try:
+        date.fromisoformat(_iso_date(compact))
+    except ValueError:
+        return ""
+    return compact
 
-    注意不能只查"日期是否存在"：按需缓存的零星历史会让日期早早出现，但只有
-    几十上百行，不代表全市场已同步。
-    """
+
+def _iso_date(compact: str) -> str:
+    return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+
+
+def _date_variants(trade_dates: list[str]) -> list[str]:
+    compact = {_compact_date(day) for day in trade_dates} - {""}
+    return sorted(compact | {_iso_date(day) for day in compact})
+
+
+def _date_symbol_counts(model: Any, trade_dates: list[str], *, listed_only: bool = False) -> dict[str, int]:
+    """兼容 compact/ISO 日期；先用原列 IN 缩小范围，再归一分组去重。"""
     if not trade_dates:
         return {}
-    normalized = func.replace(DailyBar.trade_date, "-", "")
+    normalized = func.replace(model.trade_date, "-", "")
+    query = select(normalized, func.count(func.distinct(model.symbol))).where(
+        model.trade_date.in_(_date_variants(trade_dates))
+    )
+    if model is DailyBar:
+        query = query.where(DailyBar.source == "tushare")
+    if listed_only:
+        query = query.join(Instrument, Instrument.symbol == model.symbol).where(
+            Instrument.type == "stock", Instrument.list_status == "L",
+        )
     with SessionLocal() as db:
-        rows = db.execute(
-            select(normalized.label("norm_date"), func.count())
-            .where(DailyBar.source == "tushare", normalized.in_(trade_dates))
-            .group_by(normalized)
-        ).all()
+        rows = db.execute(query.group_by(normalized)).all()
     return {str(norm_date): int(count) for norm_date, count in rows}
+
+
+def _bar_date_counts(trade_dates: list[str], *, listed_only: bool = False) -> dict[str, int]:
+    """各目标日不同标的数；同一 symbol 的两种日期格式不能重复计数。"""
+    return _date_symbol_counts(DailyBar, trade_dates, listed_only=listed_only)
+
+
+def _latest_local_date(db: Any, model: Any, through: str) -> str | None:
+    """分别走两种原始日期格式的范围，避免 REPLACE(date) 全表谓词扫描。"""
+    dates = []
+    for start, end in (("19000101", through), ("1900-01-01", _iso_date(through))):
+        query = select(func.max(model.trade_date)).where(
+            model.trade_date.between(start, end),
+            func.length(model.trade_date) == len(start),
+        )
+        if model is DailyBar:
+            query = query.where(DailyBar.source == "tushare")
+        day = _compact_date(db.scalar(query))
+        if day:
+            dates.append(day)
+    return max(dates) if dates else None
+
+
+def _selection_minimum_counts(catalog_count: int) -> dict[str, int]:
+    # 延迟引用同一份质量门槛，避免复制数值，普通行情同步的模块导入保持轻量。
+    from backend.app.quant.automatic_selection_scoring import DEFAULT_STRATEGY_CONFIG
+
+    quality = DEFAULT_STRATEGY_CONFIG["quality"]
+    return {
+        kind: max(_FULL_MARKET_BAR_MIN, ceil(catalog_count * float(quality[f"min_{kind}_coverage"])))
+        for kind in ("bar", "basic", "history")
+    }
 
 
 def _upsert_daily_bars(rows: list[dict]) -> int:
@@ -299,6 +434,245 @@ def _upsert_latest_prices(rows: list[dict], names: dict[str, str]) -> int:
     return count
 
 
+def _upsert_trading_calendar(rows: list[dict[str, Any]]) -> int:
+    stmt = text(
+        "INSERT INTO market_trading_calendar "
+        "(exchange, cal_date, is_open, pretrade_date, source, fetched_at) "
+        "VALUES (:exchange, :cal_date, :is_open, :pretrade_date, :source, :fetched_at) "
+        "ON DUPLICATE KEY UPDATE "
+        "is_open=VALUES(is_open), pretrade_date=VALUES(pretrade_date), "
+        "source=VALUES(source), fetched_at=VALUES(fetched_at)"
+    )
+    fetched_at = datetime.now()
+    params = []
+    for row in rows:
+        cal_date = str(row.get("cal_date") or "").replace("-", "")
+        if len(cal_date) != 8 or not cal_date.isdigit():
+            continue
+        params.append(
+            {
+                "exchange": str(row.get("exchange") or "SSE").upper()[:16],
+                "cal_date": cal_date,
+                "is_open": str(row.get("is_open") or "0").strip().lower()
+                in {"1", "true", "yes"},
+                "pretrade_date": (
+                    str(row.get("pretrade_date") or "").replace("-", "") or None
+                ),
+                "source": "tushare",
+                "fetched_at": fetched_at,
+            }
+        )
+    if not params:
+        return 0
+    with engine.begin() as conn:
+        for chunk in _chunked(params):
+            conn.execute(stmt, chunk)
+    return len(params)
+
+
+def load_local_open_trade_dates(
+    *, start_exclusive: str, limit: int = 60, exchange: str = "SSE",
+) -> list[str]:
+    cap = max(1, min(int(limit), 250))
+    start = _compact_date(start_exclusive)
+    if not start:
+        raise ValueError("前瞻评估起始交易日无效")
+    today = date.today().strftime("%Y%m%d")
+    with SessionLocal() as db:
+        dates = list(db.scalars(
+            select(MarketTradingCalendar.cal_date)
+            .where(
+                MarketTradingCalendar.exchange == exchange.upper(),
+                MarketTradingCalendar.source == "tushare",
+                MarketTradingCalendar.is_open.is_(True),
+                MarketTradingCalendar.cal_date > start,
+                MarketTradingCalendar.cal_date <= today,
+            )
+            .order_by(MarketTradingCalendar.cal_date)
+            .limit(cap)
+        ).all())
+        end = dates[-1] if len(dates) == cap else today
+        calendar_dates = set(db.scalars(
+            select(MarketTradingCalendar.cal_date).where(
+                MarketTradingCalendar.exchange == exchange.upper(),
+                MarketTradingCalendar.source == "tushare",
+                MarketTradingCalendar.cal_date.between(start, end),
+            )
+        ).all())
+    if _calendar_gaps(calendar_dates, start, end):
+        raise RuntimeError("前瞻评估交易日历不连续，不能把后续交易日冒充下一交易日")
+    return dates
+
+
+def load_local_history_trade_dates(
+    *, end_inclusive: str, limit: int = 21, exchange: str = "SSE",
+) -> list[str]:
+    """权威本地日历中截至目标日最近 limit 个交易日，按升序返回，不推测工作日。"""
+    end = _compact_date(end_inclusive)
+    if not end:
+        raise ValueError("历史交易日截止日期无效")
+    cap = max(1, min(int(limit), 250))
+    with SessionLocal() as db:
+        dates = db.scalars(
+            select(MarketTradingCalendar.cal_date)
+            .where(
+                MarketTradingCalendar.exchange == exchange.upper(),
+                MarketTradingCalendar.source == "tushare",
+                MarketTradingCalendar.is_open.is_(True),
+                MarketTradingCalendar.cal_date <= end,
+            )
+            .order_by(MarketTradingCalendar.cal_date.desc())
+            .limit(cap)
+        ).all()
+    return sorted(str(day) for day in dates)
+
+
+def _calendar_gaps(dates: set[str], start: str, end: str) -> list[str]:
+    missing = []
+    day = date.fromisoformat(_iso_date(start))
+    stop = date.fromisoformat(_iso_date(end))
+    while day <= stop:
+        compact = day.strftime("%Y%m%d")
+        if compact not in dates:
+            missing.append(compact)
+        day += timedelta(days=1)
+    return missing
+
+
+def local_selection_cache_status(history_days: int = 20) -> dict[str, Any]:
+    """无外呼的完整性检查，目标日只来自覆盖今日的 SSE 权威日历。
+
+    latest_trade_date 是日线与 basic 实际水位的较小值，不冒充日历目标；
+    覆盖率分母仅 L，P/D 保留在目录中作为排除证据，不参与覆盖率计数。
+    每个预期历史日都要有全市场数量，单只股票或重复日期格式不能通过。
+    """
+    history_days = int(history_days)
+    if not 1 <= history_days < 250:
+        raise ValueError("历史窗口只支持 1-249 个交易日")
+    today = date.today().strftime("%Y%m%d")
+    with SessionLocal() as db:
+        calendar_today = db.scalar(
+            select(MarketTradingCalendar.cal_date).where(
+                MarketTradingCalendar.exchange == "SSE",
+                MarketTradingCalendar.source == "tushare",
+                MarketTradingCalendar.cal_date == today,
+            )
+        )
+        calendar_date = db.scalar(
+            select(func.max(MarketTradingCalendar.cal_date)).where(
+                MarketTradingCalendar.exchange == "SSE",
+                MarketTradingCalendar.source == "tushare",
+                MarketTradingCalendar.is_open.is_(True),
+                MarketTradingCalendar.cal_date <= today,
+            )
+        )
+        bar_date = _latest_local_date(db, DailyBar, today)
+        basic_date = _latest_local_date(db, StockDailyBasic, today)
+        catalog_count = int(
+            db.scalar(
+                select(func.count()).select_from(Instrument).where(
+                    Instrument.type == "stock", Instrument.list_status == "L",
+                )
+            ) or 0
+        )
+    expected_date = str(calendar_date) if calendar_today and calendar_date else None
+    history_dates = (
+        load_local_history_trade_dates(end_inclusive=expected_date, limit=history_days + 1)
+        if expected_date else []
+    )
+    errors: list[str] = []
+    if not calendar_today:
+        errors.append(f"本地 SSE 权威交易日历未覆盖今日 {today}，无法确定目标交易日")
+    if not calendar_date:
+        errors.append("本地 SSE 权威交易日历无已开市交易日")
+    calendar_gaps: list[str] = []
+    if history_dates:
+        with SessionLocal() as db:
+            cached_dates = set(db.scalars(
+                select(MarketTradingCalendar.cal_date).where(
+                    MarketTradingCalendar.exchange == "SSE",
+                    MarketTradingCalendar.source == "tushare",
+                    MarketTradingCalendar.cal_date.between(history_dates[0], today),
+                )
+            ).all())
+        calendar_gaps = _calendar_gaps(cached_dates, history_dates[0], today)
+        if calendar_gaps:
+            errors.append("本地 SSE 权威交易日历缺失日期：" + ",".join(calendar_gaps))
+            # 尤其防止目标日至今日之间缺了一个开市日，旧目标不能冒充最新目标。
+            if any(day > str(calendar_date) for day in calendar_gaps):
+                expected_date = None
+    if len(history_dates) != history_days + 1:
+        errors.append(f"本地历史交易日不足：{len(history_dates)}/{history_days + 1}")
+    if not bar_date:
+        errors.append("本地全市场日线为空")
+    if not basic_date:
+        errors.append("本地 daily_basic 为空")
+    if expected_date and bar_date != expected_date:
+        errors.append(f"日线水位 {bar_date or '空'} 未对齐交易日 {expected_date}")
+    if expected_date and basic_date != expected_date:
+        errors.append(f"daily_basic 水位 {basic_date or '空'} 未对齐交易日 {expected_date}")
+    if catalog_count < _FULL_MARKET_BAR_MIN:
+        errors.append(f"本地上市 A 股目录不完整：{catalog_count} 只，至少需 {_FULL_MARKET_BAR_MIN}")
+
+    bar_counts = _bar_date_counts(history_dates, listed_only=True)
+    basic_counts = _date_symbol_counts(StockDailyBasic, [expected_date], listed_only=True) if expected_date else {}
+    bar_count = bar_counts.get(expected_date, 0)
+    basic_count = basic_counts.get(expected_date, 0)
+    minimum = _selection_minimum_counts(catalog_count)
+    if bar_count < minimum["bar"]:
+        errors.append(f"目标日日线覆盖不足：{bar_count}/{catalog_count}，至少需 {minimum['bar']}")
+    if basic_count < minimum["basic"]:
+        errors.append(f"目标日 daily_basic 覆盖不足：{basic_count}/{catalog_count}，至少需 {minimum['basic']}")
+    history_counts = {day: bar_counts.get(day, 0) for day in history_dates}
+    for day, count in history_counts.items():
+        if count < minimum["history"]:
+            errors.append(f"历史日线 {day} 覆盖不足：{count}/{catalog_count}，至少需 {minimum['history']}")
+    return {
+        "ready": not errors,
+        "expected_trade_date": expected_date,
+        "latest_trade_date": min(bar_date, basic_date) if bar_date and basic_date else None,
+        "calendar_date": str(calendar_date) if calendar_date else None,
+        "calendar_through_today": bool(calendar_today),
+        "calendar_missing_dates": calendar_gaps,
+        "bar_date": bar_date,
+        "basic_date": basic_date,
+        "catalog_count": catalog_count,
+        "bar_count": bar_count,
+        "basic_count": basic_count,
+        "bar_coverage": bar_count / catalog_count if catalog_count else 0.0,
+        "basic_coverage": basic_count / catalog_count if catalog_count else 0.0,
+        "history_days": history_days,
+        "expected_history_dates": history_dates,
+        "history_date_counts": history_counts,
+        "history_coverage_by_date": {
+            day: count / catalog_count if catalog_count else 0.0
+            for day, count in history_counts.items()
+        },
+        "minimum_counts": minimum,
+        "errors": errors,
+    }
+
+
+def _validated_market_rows(
+    response: dict, *, label: str, trade_date: str, minimum: int, listed_symbols: set[str],
+) -> list[dict]:
+    if "error" in response:
+        raise RuntimeError(f"{label}: {response['error']}")
+    rows = response.get("rows")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"{label}: 行情响应格式无效")
+    symbols: set[str] = set()
+    for row in rows:
+        symbol = _catalog_symbol(row.get("ts_code")) if isinstance(row, dict) else ""
+        if not symbol or _compact_date(row.get("trade_date")) != trade_date:
+            raise RuntimeError(f"{label}: 含无效标的或非目标日行情")
+        symbols.add(symbol)
+    count = len(symbols & listed_symbols)
+    if count < minimum:
+        raise RuntimeError(f"{label}: 全市场响应不完整，上市标的 {count}/{len(listed_symbols)}，至少需 {minimum}")
+    return rows
+
+
 def sync_market(days: int = 20) -> dict:
     """增量同步最近 ``days`` 个交易日的全市场行情（5-60 天）。
 
@@ -312,6 +686,7 @@ def sync_market(days: int = 20) -> dict:
     stats: dict[str, Any] = {
         "latest_trade_date": None,
         "target_days": int(days),
+        "calendar_rows_upserted": 0,
         "dates_fetched": 0,
         "bars_upserted": 0,
         "basic_upserted": 0,
@@ -320,28 +695,49 @@ def sync_market(days: int = 20) -> dict:
         "errors": [],
     }
 
+    today = date.today().strftime("%Y%m%d")
     cal = get_trade_cal(
-        start_date=(date.today() - timedelta(days=_CAL_LOOKBACK_DAYS)).strftime("%Y%m%d")
+        start_date=(date.today() - timedelta(days=_CAL_LOOKBACK_DAYS)).strftime("%Y%m%d"),
+        end_date=today,
+        exchange="SSE",
     )
     if "error" in cal:
         raise RuntimeError(cal["error"])
+    calendar_by_date: dict[str, dict] = {}
+    for row in cal.get("rows") or []:
+        if str(row.get("exchange") or "").upper() != "SSE":
+            continue
+        day = _compact_date(row.get("cal_date"))
+        is_open = str(row.get("is_open")).lower()
+        if not day or is_open not in {"0", "1", "false", "true"}:
+            raise RuntimeError("SSE 交易日历含无效日期或开市标记")
+        if day > today:
+            continue
+        normalized = {**row, "cal_date": day, "is_open": int(is_open in {"1", "true"})}
+        if day in calendar_by_date and calendar_by_date[day]["is_open"] != normalized["is_open"]:
+            raise RuntimeError(f"SSE 交易日历开市标记冲突：{day}")
+        calendar_by_date[day] = normalized
+    if today not in calendar_by_date:
+        raise RuntimeError(f"SSE 交易日历未覆盖今日 {today}，无法确定同步目标交易日")
     open_dates = sorted(
-        {
-            str(row.get("cal_date"))
-            for row in cal.get("rows") or []
-            if str(row.get("is_open")) == "1" and row.get("cal_date")
-        },
-        reverse=True,
+        (day for day, row in calendar_by_date.items() if row["is_open"]), reverse=True,
     )
     targets = open_dates[: int(days)]
-    if not targets:
-        raise RuntimeError("交易日历为空，无法确定同步目标交易日")
+    if len(targets) != int(days):
+        raise RuntimeError(f"SSE 交易日历不足 {days} 个交易日，无法确定完整同步窗口")
+    calendar_gaps = _calendar_gaps(set(calendar_by_date), targets[-1], today)
+    if calendar_gaps:
+        raise RuntimeError("SSE 交易日历缺失日期：" + ",".join(calendar_gaps))
     latest = targets[0]
     stats["latest_trade_date"] = latest
 
+    # 三类目录全部可信后再开始任何写入；失败时连日历水位也不推进。
     basic_rows = _stock_catalog_rows()
     if not basic_rows:
         raise RuntimeError("获取 A 股股票目录失败（TuShare stock_basic），无法同步")
+    listed_symbols = {row["ts_code"] for row in basic_rows if row["list_status"] == "L"}
+    minimum = _selection_minimum_counts(len(listed_symbols))
+    stats["calendar_rows_upserted"] = _upsert_trading_calendar(list(calendar_by_date.values()))
     stats["instruments_upserted"] = _upsert_instruments(basic_rows)
     names = {
         normalize_a_share_symbol(str(row.get("ts_code") or "")): str(row.get("name") or "")
@@ -349,20 +745,25 @@ def sync_market(days: int = 20) -> dict:
         if row.get("ts_code")
     }
 
-    existing = _bar_date_counts(targets)
+    existing = _bar_date_counts(targets, listed_only=True)
     missing = [
         d
         for d in sorted(targets)
-        if existing.get(d, 0) < _FULL_MARKET_BAR_MIN
+        if existing.get(d, 0) < minimum["bar" if d == latest else "history"]
     ]  # 旧 → 新
     latest_rows: list[dict] | None = None
     for trade_date in missing:
         day_start = time.monotonic()
         result = _tushare_request("daily", {"trade_date": trade_date}, _DAILY_FIELDS)
-        if "error" in result:
-            stats["errors"].append(f"{trade_date}: {result['error']}")
-            break  # 按日提交：已入库的保留，后续日期下次再补
-        rows = result.get("rows") or []
+        try:
+            rows = _validated_market_rows(
+                result, label=f"daily({trade_date})", trade_date=trade_date,
+                minimum=minimum["bar" if trade_date == latest else "history"],
+                listed_symbols=listed_symbols,
+            )
+        except RuntimeError as exc:
+            stats["errors"].append(str(exc))
+            break  # 按日提交：已入库的保留；空/部分响应不得冒充完整交易日
         upserted = _upsert_daily_bars(rows)
         stats["bars_upserted"] += upserted
         stats["dates_fetched"] += 1
@@ -375,21 +776,30 @@ def sync_market(days: int = 20) -> dict:
         time.sleep(_API_SLEEP_SECONDS)
 
     result = _tushare_request("daily_basic", {"trade_date": latest}, _BASIC_FIELDS)
-    if "error" in result:
-        stats["errors"].append(f"daily_basic({latest}): {result['error']}")
+    try:
+        rows = _validated_market_rows(
+            result, label=f"daily_basic({latest})", trade_date=latest,
+            minimum=minimum["basic"], listed_symbols=listed_symbols,
+        )
+    except RuntimeError as exc:
+        stats["errors"].append(str(exc))
     else:
-        stats["basic_upserted"] = _upsert_daily_basic(result.get("rows") or [])
+        stats["basic_upserted"] = _upsert_daily_basic(rows)
     time.sleep(_API_SLEEP_SECONDS)
 
     if latest_rows is None:
         # 最新交易日本地已有 K 线（本轮未拉），仍需一次调用刷新全市场最新价
         result = _tushare_request("daily", {"trade_date": latest}, _DAILY_FIELDS)
-        if "error" in result:
-            stats["errors"].append(f"latest({latest}): {result['error']}")
-        else:
-            latest_rows = result.get("rows") or []
+        try:
+            latest_rows = _validated_market_rows(
+                result, label=f"latest({latest})", trade_date=latest,
+                minimum=minimum["bar"], listed_symbols=listed_symbols,
+            )
+        except RuntimeError as exc:
+            stats["errors"].append(str(exc))
     stats["latest_prices_upserted"] = _upsert_latest_prices(latest_rows or [], names)
 
+    stats["ready"] = not stats["errors"]
     stats["elapsed_seconds"] = round(time.monotonic() - started, 1)
     logger.info(
         "market sync done: latest=%s dates_fetched=%d bars=%d basic=%d prices=%d elapsed=%.1fs",
@@ -405,17 +815,15 @@ def sync_market(days: int = 20) -> dict:
 
 def sync_status() -> dict:
     """本地同步水位（纯本地查询，不外呼）：供前端展示"数据截至哪天、多少只"。"""
-    normalized = func.replace(DailyBar.trade_date, "-", "")
     with SessionLocal() as db:
-        latest_bar_date = db.execute(
-            select(func.max(normalized)).where(DailyBar.source == "tushare")
-        ).scalar()
+        latest_bar_date = _latest_local_date(db, DailyBar, date.today().strftime("%Y%m%d"))
         bar_symbols = 0
         if latest_bar_date:
             bar_symbols = int(
                 db.execute(
                     select(func.count(func.distinct(DailyBar.symbol))).where(
-                        DailyBar.source == "tushare", normalized == str(latest_bar_date)
+                        DailyBar.source == "tushare",
+                        DailyBar.trade_date.in_(_date_variants([latest_bar_date])),
                     )
                 ).scalar()
                 or 0

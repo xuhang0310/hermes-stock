@@ -19,6 +19,7 @@ import BacktestReportView from './views/BacktestReportView.vue'
 import BacktestHistoryView from './views/BacktestHistoryView.vue'
 import FactorAnalysisView from './views/FactorAnalysisView.vue'
 import ScreenerView from './views/ScreenerView.vue'
+import AutomaticSelectionView from './views/AutomaticSelectionView.vue'
 import OpsConsoleView from './views/OpsConsoleView.vue'
 import AgentTaskBoardView from './views/AgentTaskBoardView.vue'
 import { renderMarkdown } from './utils/markdown'
@@ -55,6 +56,7 @@ type PageKey =
   | 'backtestReport'
   | 'factorAnalysis'
   | 'screener'
+  | 'automaticSelection'
   | 'opsConsole'
   | 'settings'
 
@@ -266,6 +268,7 @@ const pageTitle = computed(() => {
     backtestReport: '策略回测报告',
     factorAnalysis: '因子评估',
     screener: 'AI 选股',
+    automaticSelection: '自动选股',
     opsConsole: '运维控制台',
     settings: '设置'
   }
@@ -273,6 +276,9 @@ const pageTitle = computed(() => {
 })
 
 const pageSubtitle = computed(() => {
+  if (activePage.value === 'automaticSelection') {
+    return '确定性排名、质量门禁、不可变证据与前瞻评估'
+  }
   if (activePage.value !== 'workbench' || !dashboard.value) {
     return '问股、数字人、持仓、自选池和模型配置统一入口'
   }
@@ -1012,11 +1018,16 @@ function navigate(page: PageKey) {
   if (page === 'askStock') askStockInitialQuestion.value = ''
   if (page === 'workbench') void refreshDashboard()
   if (page === 'watchlist') void refreshWatchlist()
-  if (
+  if (page === 'automaticSelection') {
+    if (!/^\/automatic-selection\/?$/i.test(window.location.pathname)) {
+      window.history.pushState({}, '', '/automatic-selection')
+    }
+  } else if (
     page !== 'backtestReport' &&
     page !== 'opsConsole' &&
     (window.location.pathname.startsWith('/backtests/') ||
-      /^\/oc-console-/i.test(window.location.pathname))
+      /^\/oc-console-/i.test(window.location.pathname) ||
+      /^\/automatic-selection\/?$/i.test(window.location.pathname))
   ) {
     window.history.pushState({}, '', '/')
   }
@@ -1025,6 +1036,10 @@ function navigate(page: PageKey) {
 
 function syncPageFromLocation() {
   const pathname = window.location.pathname
+  if (/^\/automatic-selection\/?$/i.test(pathname)) {
+    activePage.value = 'automaticSelection'
+    return
+  }
   if (/^\/oc-console-[0-9a-f]+\/?$/i.test(pathname)) {
     activePage.value = 'opsConsole'
     return
@@ -1034,7 +1049,9 @@ function syncPageFromLocation() {
     backtestRunId.value = match[1]
     activePage.value = 'backtestReport'
   } else if (activePage.value === 'backtestReport') {
-    activePage.value = 'digitalHumans'
+    activePage.value = backtestReturnPage.value
+  } else if (activePage.value === 'automaticSelection') {
+    activePage.value = 'workbench'
   }
 }
 
@@ -1177,6 +1194,10 @@ onBeforeUnmount(() => {
         @back="closeBacktest"
       />
       <FactorAnalysisView v-else-if="activePage === 'factorAnalysis'" />
+      <AutomaticSelectionView
+        v-else-if="activePage === 'automaticSelection'"
+        :user="currentUser"
+      />
       <ScreenerView
         v-else-if="activePage === 'screener'"
         @watchlist-added="applyWatchlistItem"

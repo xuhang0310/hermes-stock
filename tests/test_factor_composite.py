@@ -119,6 +119,7 @@ class FactorCompositeTests(unittest.TestCase):
             db.commit()
 
         self._patches = [
+            patch("backend.app.core.database.SessionLocal", self.SessionFactory),
             patch(f"{SVC}.SessionLocal", self.SessionFactory),
             patch(f"{FS}.SessionLocal", self.SessionFactory),
             patch(f"{SVC}._tushare_request", _fake_tushare_request),

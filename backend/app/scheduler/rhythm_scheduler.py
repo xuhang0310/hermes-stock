@@ -39,6 +39,7 @@ from backend.app.core.models import (
     DigitalHumanProfile,
     Heartbeat,
     JobRun,
+    MarketTradingCalendar,
     ScheduledJob,
     SystemLog,
     User,
@@ -50,6 +51,17 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 HEARTBEAT_COMPONENT = "rhythm_scheduler"
 POSITION_PRICE_SYNC_JOB_KEY = "position-price-sync-1505"
+AUTOMATIC_SELECTION_DATA_JOB_KEY = "automatic-selection-data-1545"
+AUTOMATIC_SELECTION_JOB_KEY = "automatic-selection-1610"
+_AUTOMATIC_SELECTION_CLAIM_GROUP = tuple(
+    sorted(
+        (
+            AUTOMATIC_SELECTION_DATA_JOB_KEY,
+            AUTOMATIC_SELECTION_JOB_KEY,
+        )
+    )
+)
+_SAME_DAY_CATCHUP_JOB_KEYS = frozenset(_AUTOMATIC_SELECTION_CLAIM_GROUP)
 
 # 数字人 code -> agent_profiles.agent_name（AgentReport.agent_name 外键指向后者）
 DH_TO_AGENT = {
@@ -190,7 +202,17 @@ def _is_due(job: ScheduledJob, now: datetime) -> bool:
         if job.run_once_at is None or job.run_once_at > now:
             return False
     elif schedule_type in ("daily", "weekly", "monthly_last"):
-        if not job.run_time or job.run_time != now.strftime("%H:%M"):
+        if not job.run_time:
+            return False
+        current_hhmm = now.strftime("%H:%M")
+        allows_catchup = (
+            schedule_type == "daily"
+            and job.job_key in _SAME_DAY_CATCHUP_JOB_KEYS
+        )
+        if allows_catchup:
+            if current_hhmm < job.run_time:
+                return False
+        elif current_hhmm != job.run_time:
             return False
         if schedule_type in ("daily", "weekly") and not _weekday_ok(job, now):
             return False
@@ -204,7 +226,11 @@ def _is_due(job: ScheduledJob, now: datetime) -> bool:
     else:
         return False
 
-    if job.trading_day_only and not is_trading_day(now.date()):
+    if (
+        job.trading_day_only
+        and job.job_key != AUTOMATIC_SELECTION_JOB_KEY
+        and not is_trading_day(now.date())
+    ):
         return False
     return True
 
@@ -597,24 +623,40 @@ def sync_position_prices(now: datetime | None = None) -> dict[str, Any]:
             "message": "上一轮持仓价格同步仍在执行，请稍后再试",
         }
     try:
-        run_id = _claim_manual_run(POSITION_PRICE_SYNC_JOB_KEY)
-        if run_id is None:
-            with SessionLocal() as session:
-                busy = session.scalar(
-                    select(JobRun.id)
-                    .where(
-                        JobRun.job_key == POSITION_PRICE_SYNC_JOB_KEY,
-                        JobRun.status == "running",
-                        JobRun.started_at >= ran_at - timedelta(minutes=10),
-                    )
-                    .limit(1)
-                )
-            if busy is not None:
-                return {
-                    "skipped": True,
-                    "status": "skipped",
-                    "message": "定时任务正在同步持仓价格，请稍候刷新页面",
-                }
+        claim = _claim_manual_run(
+            POSITION_PRICE_SYNC_JOB_KEY,
+            expected_job_kind="position_price_sync",
+        )
+        claim_status = str(claim.get("status") or "")
+        if claim_status == "already_running":
+            return {
+                "skipped": True,
+                "status": "skipped",
+                "message": "定时任务正在同步持仓价格，请稍候刷新页面",
+            }
+        if claim_status == "invalid_kind":
+            return {
+                "skipped": True,
+                "status": "failed",
+                "message": "持仓价格同步任务类型异常，请联系管理员",
+            }
+        if claim_status not in {"claimed", "missing"}:
+            return {
+                "skipped": True,
+                "status": "failed",
+                "message": "持仓价格同步任务认领失败，请稍后重试",
+            }
+        run_id = (
+            str(claim["run_id"])
+            if claim_status == "claimed" and claim.get("run_id")
+            else None
+        )
+        if claim_status == "claimed" and run_id is None:
+            return {
+                "skipped": True,
+                "status": "failed",
+                "message": "持仓价格同步任务认领失败，请稍后重试",
+            }
         return _sync_prices_and_finalize(ran_at, run_id=run_id)
     finally:
         _position_price_sync_lock.release()
@@ -833,6 +875,130 @@ def _update_job_status(job_key: str, status: str, error: str | None, ran_at: dat
         session.commit()
 
 
+def _run_automatic_selection_data(
+    snapshot: dict[str, Any],
+    run_id: str,
+) -> tuple[str, int | None, str, str | None]:
+    from backend.app.notify.notification_service import create_notification
+    from backend.app.quant.automatic_selection_service import (
+        sync_automatic_selection_data,
+    )
+
+    result = sync_automatic_selection_data()
+    factor_sync = result.get("factor_sync") or {}
+    market_sync = result.get("market_sync") or {}
+    summary = {
+        "target_trade_date": result.get("target_trade_date"),
+        "ready": bool(result.get("ready")),
+        "strategy_count": int(result.get("strategy_count") or 0),
+        "bar_rows_upserted": int(
+            market_sync.get("bars_upserted") or 0
+        ),
+        "basic_rows_upserted": int(
+            market_sync.get("basic_upserted") or 0
+        ),
+        "calendar_rows_upserted": int(
+            market_sync.get("calendar_rows_upserted") or 0
+        ),
+        "factor_rows_stored": int(
+            factor_sync.get("stored_rows") or 0
+        ),
+        "errors": [str(item) for item in result.get("errors") or []],
+    }
+    output_content = json.dumps(
+        summary,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if summary["ready"]:
+        return output_content, None, "success", None
+
+    error = "；".join(summary["errors"])[:1000] or "自动选股数据入库未就绪"
+    owner_user_id = snapshot.get("owner_user_id")
+    if owner_user_id is None:
+        return output_content, None, "failed", error
+    notification = create_notification(
+        int(owner_user_id),
+        "自动选股数据入库失败",
+        content=(
+            f"目标交易日 {summary['target_trade_date'] or '未知'}；"
+            f"{error}"
+        ),
+        level="error",
+        category="automatic_selection",
+        link="/automatic-selection",
+    )
+    return output_content, int(notification["id"]), "failed", error
+
+
+def _run_automatic_selection(
+    snapshot: dict[str, Any],
+    run_id: str,
+) -> tuple[str, int | None, str, str | None]:
+    from backend.app.notify.notification_service import create_notification
+    from backend.app.quant.automatic_selection_service import run_automatic_selection_cycle
+
+    result = run_automatic_selection_cycle(
+        trigger_type=str(snapshot.get("trigger_type") or "scheduled"),
+        job_run_id=run_id,
+    )
+    evaluations = result.get("evaluation_updates") or {}
+    summary = {
+        "target_trade_date": result.get("target_trade_date"),
+        "strategy_count": int(result.get("strategy_count") or 0),
+        "completed_count": int(result.get("completed_count") or 0),
+        "blocked_count": int(result.get("blocked_count") or 0),
+        "failed_count": int(result.get("failed_count") or 0),
+        "selected_count": int(result.get("selected_count") or 0),
+        "evaluation_updates": {
+            "completed": int(evaluations.get("completed") or 0),
+            "insufficient_data": int(evaluations.get("insufficient_data") or 0),
+            "pending": int(evaluations.get("pending") or 0),
+            "failed": int(evaluations.get("failed") or 0),
+        },
+    }
+    output_content = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+    task_status = "success"
+    task_error: str | None = None
+    if summary["failed_count"] > 0:
+        task_status = "failed"
+        task_error = f"{summary['failed_count']} 个自动选股策略执行失败"
+    elif summary["evaluation_updates"]["failed"] > 0:
+        task_status = "failed"
+        task_error = (
+            f"{summary['evaluation_updates']['failed']} 个前瞻评估执行失败，已保留等待重试"
+        )
+    elif (
+        summary["strategy_count"] > 0
+        and summary["completed_count"] == 0
+        and summary["blocked_count"] == summary["strategy_count"]
+    ):
+        task_status = "skipped"
+        task_error = "所有启用策略均被质量门禁阻断"
+
+    owner_user_id = snapshot.get("owner_user_id")
+    if owner_user_id is None:
+        return output_content, None, task_status, task_error
+    has_warning = (
+        task_status != "success"
+        or summary["blocked_count"] > 0
+        or summary["failed_count"] > 0
+    )
+    notification = create_notification(
+        int(owner_user_id),
+        "自动选股运行完成" if not has_warning else "自动选股运行需关注",
+        content=(
+            f"目标交易日 {summary['target_trade_date'] or '未知'}；"
+            f"完成 {summary['completed_count']}，阻断 {summary['blocked_count']}，"
+            f"失败 {summary['failed_count']}，入选证据 {summary['selected_count']} 条。"
+        ),
+        level="error" if task_status == "failed" else ("warning" if has_warning else "success"),
+        category="automatic_selection",
+        link="/automatic-selection",
+    )
+    return output_content, int(notification["id"]), task_status, task_error
+
+
 def _execute_job(job_key: str, run_id: str) -> None:
     """同步执行一个任务，在线程中被调用；绝不抛出，所有结果落 job_runs。"""
     started = time.monotonic()
@@ -842,7 +1008,13 @@ def _execute_job(job_key: str, run_id: str) -> None:
         snapshot = _job_snapshot(job) if job else None
         run = session.scalar(select(JobRun).where(JobRun.run_id == run_id).limit(1))
         if snapshot is not None:
-            snapshot["trigger_type"] = run.trigger_type if run else "schedule"
+            snapshot["trigger_type"] = (
+                run.trigger_type
+                if run
+                else "schedule"
+            )
+            if run is not None:
+                snapshot["owner_user_id"] = run.owner_user_id
     if snapshot is None:
         _finalize_run(run_id, "failed", error="任务不存在")
         return
@@ -864,6 +1036,20 @@ def _execute_job(job_key: str, run_id: str) -> None:
                 error = f"健康检查已完成，但飞书任务群推送失败: {push_error}"
         elif snapshot["job_kind"] == "position_price_sync":
             output_content = _run_position_price_sync(ran_at)
+        elif snapshot["job_kind"] == "automatic_selection_data":
+            (
+                output_content,
+                notification_id,
+                status,
+                error,
+            ) = _run_automatic_selection_data(snapshot, run_id)
+        elif snapshot["job_kind"] == "automatic_selection":
+            (
+                output_content,
+                notification_id,
+                status,
+                error,
+            ) = _run_automatic_selection(snapshot, run_id)
         elif snapshot["job_kind"] == "rag_ingest":
             from backend.app.ai.rag_ingest import run_ingest
 
@@ -987,79 +1173,227 @@ def _max_concurrent_jobs() -> int:
     return max(1, settings.scheduler_max_concurrent_jobs)
 
 
+def _claim_group_job_keys(job_key: str) -> tuple[str, ...]:
+    if job_key in _AUTOMATIC_SELECTION_CLAIM_GROUP:
+        return _AUTOMATIC_SELECTION_CLAIM_GROUP
+    return (job_key,)
+
+
+def _lock_claim_group(session, job_key: str) -> dict[str, ScheduledJob]:
+    """Lock every conflict-group row in one deterministic order."""
+    keys = _claim_group_job_keys(job_key)
+    rows = session.scalars(
+        select(ScheduledJob)
+        .where(ScheduledJob.job_key.in_(keys))
+        .order_by(ScheduledJob.job_key)
+        .with_for_update()
+    ).all()
+    return {row.job_key: row for row in rows}
+
+
+def _find_running_claim(
+    session,
+    job_key: str,
+    *,
+    started_after: datetime | None = None,
+) -> JobRun | None:
+    stmt = select(JobRun).where(
+        JobRun.job_key.in_(_claim_group_job_keys(job_key)),
+        JobRun.status == "running",
+    )
+    if started_after is not None:
+        stmt = stmt.where(JobRun.started_at >= started_after)
+    return session.scalar(
+        stmt.order_by(
+            JobRun.job_key,
+            JobRun.started_at,
+            JobRun.id,
+        ).limit(1).with_for_update()
+    )
+
+
+def _scheduled_fire_key(job: ScheduledJob, now: datetime) -> str:
+    if (
+        job.schedule_type == "daily"
+        and job.job_key in _SAME_DAY_CATCHUP_JOB_KEYS
+        and job.run_time
+    ):
+        fire_minute = f"{now:%Y-%m-%d}T{job.run_time}"
+    else:
+        fire_minute = now.strftime("%Y-%m-%dT%H:%M")
+    return f"{job.job_key}@{fire_minute}"
+
+
+def _scheduled_automatic_selection_data_ready(session, now: datetime) -> bool:
+    """Use only local evidence to gate the scheduled ranking run."""
+    expected_trade_date = now.strftime("%Y%m%d")
+    local_open_date = session.scalar(
+        select(MarketTradingCalendar.cal_date)
+        .where(
+            MarketTradingCalendar.exchange == "SSE",
+            MarketTradingCalendar.cal_date == expected_trade_date,
+            MarketTradingCalendar.is_open.is_(True),
+        )
+        .limit(1)
+    )
+    if str(local_open_date or "") != expected_trade_date:
+        return False
+
+    return successful_automatic_selection_ingestion(session, expected_trade_date) is not None
+
+
+def successful_automatic_selection_ingestion(session, target_trade_date: str) -> JobRun | None:
+    # A newer failed ingestion may have partially changed the cache; an older
+    # success must not certify that newer data.
+    latest = session.scalar(
+        select(JobRun)
+        .where(JobRun.job_key == AUTOMATIC_SELECTION_DATA_JOB_KEY)
+        .order_by(JobRun.started_at.desc(), JobRun.id.desc())
+        .limit(1)
+    )
+    if latest is None or latest.status != "success":
+        return None
+    try:
+        output = json.loads(latest.output_content or "{}")
+    except (TypeError, ValueError):
+        return None
+    if (
+        isinstance(output, dict)
+        and output.get("ready") is True
+        and output.get("target_trade_date") == target_trade_date
+    ):
+        return latest
+    return None
+
+
+def _claim_job_run(
+    session,
+    job_key: str,
+    *,
+    trigger_type: str,
+    ran_at: datetime,
+    actor_user_id: int | None = None,
+    expected_job_kind: str | None = None,
+) -> dict[str, Any]:
+    locked_jobs = _lock_claim_group(session, job_key)
+    job = locked_jobs.get(job_key)
+    if job is None:
+        session.rollback()
+        return {"status": "missing", "run_id": None}
+    if expected_job_kind and job.job_kind != expected_job_kind:
+        session.rollback()
+        return {"status": "invalid_kind", "run_id": None}
+    if trigger_type == "schedule" and (
+        not job.enabled or not _is_due(job, ran_at)
+    ):
+        session.rollback()
+        return {"status": "not_due", "run_id": None}
+
+    checks_running = (
+        trigger_type == "manual"
+        or job_key in _AUTOMATIC_SELECTION_CLAIM_GROUP
+        or job.job_kind == "position_price_sync"
+    )
+    if checks_running:
+        started_after = (
+            ran_at - timedelta(minutes=2)
+            if trigger_type == "schedule"
+            and job.job_kind == "position_price_sync"
+            else None
+        )
+        running = _find_running_claim(
+            session,
+            job_key,
+            started_after=started_after,
+        )
+        if running is not None:
+            run_id = str(running.run_id) if running.run_id else None
+            session.rollback()
+            return {"status": "already_running", "run_id": run_id}
+
+    if (
+        trigger_type == "schedule"
+        and job_key == AUTOMATIC_SELECTION_JOB_KEY
+        and not _scheduled_automatic_selection_data_ready(session, ran_at)
+    ):
+        session.rollback()
+        return {"status": "waiting_dependency", "run_id": None}
+
+    run_id = uuid4().hex
+    fire_key = (
+        f"{job_key}@manual-{run_id[:8]}"
+        if trigger_type == "manual"
+        else _scheduled_fire_key(job, ran_at)
+    )
+    session.add(
+        JobRun(
+            run_id=run_id,
+            job_key=job_key,
+            owner_user_id=(
+                actor_user_id
+                if trigger_type == "manual" and actor_user_id is not None
+                else job.owner_user_id
+            ),
+            fire_key=fire_key,
+            trigger_type=trigger_type,
+            status="running",
+            started_at=ran_at,
+        )
+    )
+    if trigger_type == "schedule" and job.schedule_type == "once":
+        job.enabled = False
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return {"status": "duplicate", "run_id": None}
+    return {"status": "claimed", "run_id": run_id}
+
+
 def _claim_due_jobs(now: datetime, limit: int | None = None) -> list[tuple[str, str]]:
     if limit is not None and limit <= 0:
         return []
     claimed: list[tuple[str, str]] = []
-    minute_key = now.strftime("%Y-%m-%dT%H:%M")
     with SessionLocal() as session:
-        jobs = session.scalars(
-            select(ScheduledJob)
-            .where(ScheduledJob.enabled.is_(True))
-            .order_by(ScheduledJob.sort_order, ScheduledJob.id)
-        ).all()
-        for job in jobs:
+        job_keys = list(
+            session.scalars(
+                select(ScheduledJob.job_key)
+                .where(ScheduledJob.enabled.is_(True))
+                .order_by(ScheduledJob.sort_order, ScheduledJob.id)
+            ).all()
+        )
+        # End the discovery transaction before taking per-group claim locks.
+        session.commit()
+        for job_key in job_keys:
             if limit is not None and len(claimed) >= limit:
                 break
-            if not _is_due(job, now):
-                continue
-            if job.job_kind == "position_price_sync":
-                running = session.scalar(
-                    select(JobRun).where(
-                        JobRun.job_key == job.job_key,
-                        JobRun.status == "running",
-                        JobRun.started_at >= now - timedelta(minutes=2),
-                    ).limit(1)
-                )
-                if running is not None:
-                    continue
-            run_id = uuid4().hex
-            session.add(
-                JobRun(
-                    run_id=run_id,
-                    job_key=job.job_key,
-                    owner_user_id=job.owner_user_id,
-                    fire_key=f"{job.job_key}@{minute_key}",
-                    trigger_type="schedule",
-                    status="running",
-                    started_at=now,
-                )
+            result = _claim_job_run(
+                session,
+                str(job_key),
+                trigger_type="schedule",
+                ran_at=now,
             )
-            try:
-                if job.schedule_type == "once":
-                    job.enabled = False
-                session.commit()
-            except IntegrityError:
-                session.rollback()
-                continue
-            claimed.append((job.job_key, run_id))
+            run_id = result.get("run_id")
+            if result.get("status") == "claimed" and run_id:
+                claimed.append((str(job_key), str(run_id)))
     return claimed
 
 
-def _claim_manual_run(job_key: str) -> str | None:
+def _claim_manual_run(
+    job_key: str,
+    *,
+    actor_user_id: int | None = None,
+    expected_job_kind: str | None = None,
+) -> dict[str, Any]:
     with SessionLocal() as session:
-        job = session.scalar(select(ScheduledJob).where(ScheduledJob.job_key == job_key).limit(1))
-        if job is None:
-            return None
-        running = session.scalar(
-            select(JobRun).where(JobRun.job_key == job_key, JobRun.status == "running").limit(1)
+        return _claim_job_run(
+            session,
+            job_key,
+            trigger_type="manual",
+            ran_at=now_sh(),
+            actor_user_id=actor_user_id,
+            expected_job_kind=expected_job_kind,
         )
-        if running is not None:
-            return None
-        run_id = uuid4().hex
-        session.add(
-            JobRun(
-                run_id=run_id,
-                job_key=job_key,
-                owner_user_id=job.owner_user_id,
-                fire_key=f"{job_key}@manual-{run_id[:8]}",
-                trigger_type="manual",
-                status="running",
-                started_at=now_sh(),
-            )
-        )
-        session.commit()
-        return run_id
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -1086,13 +1420,36 @@ def _dispatch(job_key: str, run_id: str) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-async def dispatch_manual_run(job_key: str) -> str | None:
-    """手动触发：无视交易日/时间窗，立即后台执行；已在运行返回 None。"""
-    run_id = await asyncio.to_thread(_claim_manual_run, job_key)
-    if run_id is None:
-        return None
-    _dispatch(job_key, run_id)
-    return run_id
+async def dispatch_manual_run_result(
+    job_key: str,
+    *,
+    actor_user_id: int | None = None,
+    expected_job_kind: str | None = None,
+) -> dict[str, Any]:
+    result = await asyncio.to_thread(
+        _claim_manual_run,
+        job_key,
+        actor_user_id=actor_user_id,
+        expected_job_kind=expected_job_kind,
+    )
+    run_id = result.get("run_id")
+    if result.get("status") == "claimed" and run_id:
+        _dispatch(job_key, str(run_id))
+    return result
+
+
+async def dispatch_manual_run(
+    job_key: str,
+    *,
+    actor_user_id: int | None = None,
+) -> str | None:
+    """手动触发：无视交易日/时间窗，立即后台执行。"""
+    result = await dispatch_manual_run_result(
+        job_key,
+        actor_user_id=actor_user_id,
+    )
+    run_id = result.get("run_id")
+    return str(run_id) if run_id else None
 
 
 # --------------------------------------------------------------------------- #
@@ -1295,6 +1652,28 @@ DEFAULT_JOBS = [
         "digital_human_code": "short-term-hunter",
         "prompt_template": "请生成 {date} 的A股收盘快评：复盘持仓和自选池的当日表现、涨停炸板与情绪阶段，给出仓位上限与冷静期提醒，不输出下单指令。",
         "push_channel_key": "feishu-daily",
+    },
+    {
+        "job_key": AUTOMATIC_SELECTION_DATA_JOB_KEY,
+        "name": "自动选股数据入库",
+        "description": "收盘后同步全市场日线、基础指标、股票目录、交易日历和策略所需因子。",
+        "job_kind": "automatic_selection_data",
+        "schedule_type": "daily",
+        "run_time": "15:45",
+        "weekday_mask": "1,2,3,4,5",
+        "trading_day_only": True,
+        "enabled": True,
+    },
+    {
+        "job_key": AUTOMATIC_SELECTION_JOB_KEY,
+        "name": "全自动选股",
+        "description": "收盘后运行确定性多因子选股、保存不可变证据并更新前瞻评估；只做研究，不自动交易。",
+        "job_kind": "automatic_selection",
+        "schedule_type": "daily",
+        "run_time": "16:10",
+        "weekday_mask": "1,2,3,4,5",
+        "trading_day_only": True,
+        "enabled": True,
     },
     {
         "job_key": "postmarket-research-1900",

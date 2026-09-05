@@ -19,6 +19,7 @@ export type PageKey =
   | 'backtestHistory'
   | 'factorAnalysis'
   | 'screener'
+  | 'automaticSelection'
   | 'opsConsole'
   | 'settings'
 
@@ -77,7 +78,8 @@ const navItems = computed<NavItem[]>(() => [
     children: [
       { key: 'factorAnalysis', label: '因子评估' },
       { key: 'backtestHistory', label: '回测报告' },
-      { key: 'screener', label: 'AI 选股' }
+      { key: 'screener', label: 'AI 选股' },
+      { key: 'automaticSelection', label: '自动选股' }
     ]
   },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),

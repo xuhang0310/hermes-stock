@@ -80,6 +80,15 @@ import type {
   TushareFactorCatalogSyncResult,
   TushareFactorSyncResult,
   FactorCompositeResult,
+  AutomaticSelectionCandidate,
+  AutomaticSelectionDispatchResult,
+  AutomaticSelectionEvaluation,
+  AutomaticSelectionLifecycle,
+  AutomaticSelectionOverview,
+  AutomaticSelectionRun,
+  AutomaticSelectionRunDetail,
+  AutomaticSelectionStrategy,
+  AutomaticSelectionStrategyConfig,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -740,6 +749,77 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((res) => res.data),
+  automaticSelectionOverview: () =>
+    request<ApiEnvelope<AutomaticSelectionOverview>>('/api/automatic-selection/overview').then(
+      (res) => res.data
+    ),
+  automaticSelectionStrategies: (includeRetired = true) =>
+    request<ApiEnvelope<AutomaticSelectionStrategy[]>>(
+      `/api/automatic-selection/strategies?include_retired=${includeRetired}`
+    ).then((res) => res.data),
+  automaticSelectionCreateStrategy: (payload: {
+    strategy_key: string
+    name: string
+    config: AutomaticSelectionStrategyConfig
+    lifecycle_state: Exclude<AutomaticSelectionLifecycle, 'official' | 'retired'>
+    parent_strategy_id?: number | null
+  }) =>
+    request<ApiEnvelope<AutomaticSelectionStrategy>>('/api/automatic-selection/strategies', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
+  automaticSelectionPromoteStrategy: (strategyId: number, confirmationNote: string) =>
+    request<ApiEnvelope<AutomaticSelectionStrategy>>(
+      `/api/automatic-selection/strategies/${strategyId}/promote`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ confirmation_note: confirmationNote }),
+      }
+    ).then((res) => res.data),
+  automaticSelectionRetireStrategy: (strategyId: number, note?: string | null) =>
+    request<ApiEnvelope<AutomaticSelectionStrategy>>(
+      `/api/automatic-selection/strategies/${strategyId}/retire`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ note: note || null }),
+      }
+    ).then((res) => res.data),
+  automaticSelectionDispatch: () =>
+    request<ApiEnvelope<AutomaticSelectionDispatchResult>>('/api/automatic-selection/runs/dispatch', {
+      method: 'POST',
+      body: '{}',
+    }).then((res) => res.data),
+  automaticSelectionRuns: (
+    params: { strategyId?: number; status?: string; limit?: number } = {}
+  ) => {
+    const query = new URLSearchParams()
+    if (params.strategyId) query.set('strategy_id', String(params.strategyId))
+    if (params.status) query.set('status', params.status)
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.size ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<AutomaticSelectionRun[]>>(
+      `/api/automatic-selection/runs${suffix}`
+    ).then((res) => res.data)
+  },
+  automaticSelectionRunDetail: (
+    runId: string,
+    candidateScope: 'top' | 'eligible' | 'excluded' | 'all' = 'top',
+    candidateLimit = 50,
+    candidateOffset = 0
+  ) => {
+    const query = new URLSearchParams({
+      candidate_scope: candidateScope,
+      candidate_limit: String(candidateLimit),
+      candidate_offset: String(candidateOffset),
+    })
+    return request<ApiEnvelope<AutomaticSelectionRunDetail>>(
+      `/api/automatic-selection/runs/${encodeURIComponent(runId)}?${query.toString()}`
+    ).then((res) => res.data)
+  },
+  automaticSelectionRunEvaluations: (runId: string) =>
+    request<ApiEnvelope<AutomaticSelectionEvaluation[]>>(
+      `/api/automatic-selection/runs/${encodeURIComponent(runId)}/evaluations`
+    ).then((res) => res.data),
   runScreener: (payload: ScreenerQuery) =>
     request<ApiEnvelope<ScreenerResult>>('/api/screener/run', {
       method: 'POST',

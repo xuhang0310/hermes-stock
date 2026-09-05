@@ -1659,6 +1659,205 @@ export type ScreenerSavedStrategy = {
   updated_at: string | null
 }
 
+export type AutomaticSelectionLifecycle = 'official' | 'challenger' | 'shadow' | 'retired'
+
+export type AutomaticSelectionStrategyConfig = {
+  top_n: number
+  history_days: number
+  min_listing_days: number
+  min_avg_amount: number
+  winsor_lower: number
+  winsor_upper: number
+  feature_weights: Record<string, number>
+  tushare_factors: Array<{ id: string; weight: number }>
+  constraints: {
+    max_per_industry: number
+    max_per_market_cap_bucket: number
+  }
+  quality: {
+    min_bar_coverage: number
+    min_basic_coverage: number
+    min_industry_coverage: number
+    min_history_coverage: number
+    min_factor_coverage: number
+    min_eligible_count: number
+    min_evaluation_coverage: number
+  }
+  costs: {
+    commission_rate: number
+    slippage_rate: number
+  }
+  limitations: string
+  [key: string]: unknown
+}
+
+export type AutomaticSelectionStrategy = {
+  id: number
+  strategy_key: string
+  version: number
+  name: string
+  lifecycle_state: AutomaticSelectionLifecycle
+  enabled: boolean
+  is_official: boolean
+  parent_strategy_id: number | null
+  config: AutomaticSelectionStrategyConfig
+  config_hash: string
+  created_by_user_id: number | null
+  promoted_by_user_id: number | null
+  promotion_note: string | null
+  promoted_at: string | null
+  retired_at: string | null
+  created_at: string | null
+}
+
+export type AutomaticSelectionQualityGate = {
+  passed: boolean
+  metrics: {
+    catalog_count?: number
+    bar_count?: number
+    basic_count?: number
+    industry_count?: number
+    history_count?: number
+    eligible_count?: number
+    bar_coverage?: number
+    basic_coverage?: number
+    industry_coverage?: number
+    history_coverage?: number
+    factor_coverage?: Record<string, number>
+  }
+  thresholds: Record<string, number>
+  failures: Array<{
+    code: string
+    actual?: number
+    required?: number
+    message?: string
+  }>
+}
+
+export type AutomaticSelectionRun = {
+  run_id: string
+  strategy_id: number
+  strategy_key: string
+  strategy_version: number
+  strategy_name: string
+  target_trade_date: string
+  trigger_type: string
+  job_run_id: string | null
+  status: 'running' | 'completed' | 'blocked' | 'failed' | string
+  stage: string
+  config: AutomaticSelectionStrategyConfig
+  config_hash: string
+  data_fingerprint: string
+  supersedes_run_id: string | null
+  sync_summary: Record<string, unknown>
+  quality_gate: AutomaticSelectionQualityGate
+  exclusion_summary: Record<string, number>
+  universe_count: number
+  eligible_count: number
+  selected_count: number
+  selected_turnover: number | null
+  llm_status: string
+  llm_model: string | null
+  llm_explanation: string | null
+  llm_error: string | null
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+  created_at: string | null
+}
+
+export type AutomaticSelectionCandidate = {
+  symbol: string
+  name: string
+  market: string | null
+  list_status: string | null
+  list_date: string | null
+  industry: string | null
+  market_cap_bucket: string | null
+  eligible: boolean
+  exclusion_codes: string[]
+  constraint_codes: string[]
+  close_price: number | null
+  pct_chg: number | null
+  pe_ttm: number | null
+  pb: number | null
+  total_mv: number | null
+  circ_mv: number | null
+  avg_amount_20: number | null
+  momentum_20: number | null
+  volatility_20: number | null
+  factor_values: Record<string, number>
+  z_scores: Record<string, number>
+  composite_score: number | null
+  rank: number | null
+  percentile: number | null
+  selected: boolean
+  research_weight: number | null
+  change_state: 'added' | 'retained' | 'removed' | 'unchanged' | string
+  input_evidence?: {
+    expected_history_dates: string[]
+    history: Array<{
+      trade_date: string
+      close: number | null
+      amount: number | null
+    }>
+  }
+}
+
+export type AutomaticSelectionEvaluation = {
+  id: number
+  run_id: string
+  horizon: 5 | 20 | 60 | number
+  status: 'pending' | 'completed' | 'insufficient_data' | string
+  entry_trade_date: string | null
+  exit_trade_date: string | null
+  selected_count: number
+  covered_count: number
+  coverage_ratio: number | null
+  benchmark_count: number
+  benchmark_covered_count: number
+  benchmark_coverage_ratio: number | null
+  basket_return: number | null
+  benchmark_return: number | null
+  excess_return: number | null
+  max_drawdown: number | null
+  sharpe: number | null
+  information_ratio: number | null
+  turnover: number | null
+  commission_rate: number | null
+  slippage_rate: number | null
+  daily_series: Array<Record<string, unknown>>
+  per_symbol: Array<Record<string, unknown>>
+  limitations: string | null
+  error: string | null
+  evaluated_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type AutomaticSelectionRunDetail = AutomaticSelectionRun & {
+  candidates: AutomaticSelectionCandidate[]
+  candidate_total: number
+  candidate_limit: number
+  candidate_offset: number
+  evaluations: AutomaticSelectionEvaluation[]
+}
+
+export type AutomaticSelectionOverview = {
+  latest_run: AutomaticSelectionRun | null
+  top_candidates: AutomaticSelectionCandidate[]
+  evaluations: AutomaticSelectionEvaluation[]
+  recent_runs: AutomaticSelectionRun[]
+  strategy_counts: Record<AutomaticSelectionLifecycle, number>
+  official_strategy: AutomaticSelectionStrategy | null
+  limitations: string
+}
+
+export type AutomaticSelectionDispatchResult = {
+  job_run_id: string
+  job_key: string
+}
+
 // 运营后台（oc-console）只读视图类型
 export type OpsConsoleUser = {
   id: number
