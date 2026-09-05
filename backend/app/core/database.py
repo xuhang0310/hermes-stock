@@ -143,6 +143,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
 
         _add_column("users", "token_version", "token_version INT NOT NULL DEFAULT 1")
+        _add_column("instruments", "list_status", "list_status VARCHAR(8) NULL AFTER list_date")
+        _add_column("instruments", "industry", "industry VARCHAR(120) NULL AFTER list_status")
         # Legacy L2 experience rows were shared and cannot be safely attributed
         # to one user. Keep them unowned (and therefore invisible) instead of
         # assigning private history to the administrator by guesswork.

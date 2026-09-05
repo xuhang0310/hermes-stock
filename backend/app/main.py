@@ -40,6 +40,8 @@ from backend.app.market.tushare_api import router as tushare_router
 from backend.app.notify.notification_api import router as notification_router
 from backend.app.paper.paper_api import router as paper_router
 from backend.app.quant.agent_board_api import router as agent_board_router
+from backend.app.quant.automatic_selection_api import router as automatic_selection_router
+from backend.app.quant.automatic_selection_repository import ensure_default_strategy
 from backend.app.quant.backtest_api import router as backtest_router, stocks_router
 from backend.app.quant.factor_api import router as factor_router
 from backend.app.quant.factor_composite_api import router as factor_composite_router
@@ -70,6 +72,7 @@ def create_app(init_db: bool = True) -> FastAPI:
             # 建表前不入库（system_logs 尚不存在），只落进程日志
             log_event("system", "INFO", "应用启动：初始化数据库与后台组件", to_db=False)
             initialize_default_database()
+            ensure_default_strategy()
             # 保证内置飞书通道与节律任务存在（正常启动不跑 seed_demo，这里补齐基础数据）
             with session_scope() as db:
                 seed_notify_channels(db)
@@ -161,6 +164,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(stocks_router)
     app.include_router(agent_board_router)
     app.include_router(screener_router)
+    app.include_router(automatic_selection_router)
     app.include_router(rhythm_router)
     app.include_router(feishu_bot_router)
     app.include_router(positions_router)

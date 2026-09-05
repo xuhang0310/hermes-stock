@@ -573,7 +573,10 @@ async def run_schedule_job(
     context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
     _owned_job(db, user_id=context.user.id, job_key=job_key)
-    run_id = await dispatch_manual_run(job_key)
+    run_id = await dispatch_manual_run(
+        job_key,
+        actor_user_id=context.user.id,
+    )
     if run_id is None:
         raise HTTPException(status_code=409, detail="任务正在运行，请稍后再试")
     return {"run_id": run_id, "job_key": job_key}

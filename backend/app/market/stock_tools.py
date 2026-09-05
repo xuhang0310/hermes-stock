@@ -3049,7 +3049,7 @@ def _stock_basic_rows() -> list[dict[str, Any]]:
     now = time.monotonic()
     if _STOCK_BASIC_CACHE["expires_at"] > now:
         return list(_STOCK_BASIC_CACHE["rows"])
-    fields = "ts_code,symbol,name,fullname,market,exchange,list_date"
+    fields = "ts_code,symbol,name,fullname,market,exchange,industry,list_date"
     response = _tushare_request("stock_basic", {"list_status": "L"}, fields)
     if "error" in response:
         return []

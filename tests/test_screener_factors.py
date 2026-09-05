@@ -88,6 +88,7 @@ class ScreenerFactorTests(unittest.TestCase):
             db.commit()
 
         self._patches = [
+            patch("backend.app.core.database.SessionLocal", self.SessionFactory),
             patch(f"{SVC}.SessionLocal", self.SessionFactory),
             patch(f"{TSVC}.SessionLocal", self.SessionFactory),
         ]

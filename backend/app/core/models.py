@@ -21,6 +21,8 @@ class Instrument(Base):
     market: Mapped[str] = mapped_column(String(24), nullable=False)
     type: Mapped[str] = mapped_column(String(24), nullable=False)
     list_date: Mapped[str | None] = mapped_column(String(16))
+    list_status: Mapped[str | None] = mapped_column(String(8))
+    industry: Mapped[str | None] = mapped_column(String(120))
     delist_date: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -258,6 +260,24 @@ class DailyBar(Base):
     amount: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(80), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class MarketTradingCalendar(Base):
+    __tablename__ = "market_trading_calendar"
+    __table_args__ = (
+        UniqueConstraint("exchange", "cal_date", name="uq_market_trading_calendar_exchange_date"),
+        Index("ix_market_trading_calendar_open_date", "exchange", "is_open", "cal_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False, default="SSE")
+    cal_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    is_open: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    pretrade_date: Mapped[str | None] = mapped_column(String(8))
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tushare")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class BacktestRun(Base):
@@ -1706,6 +1726,200 @@ class TushareFactorValue(Base):
     trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
     factor_value: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AutomaticSelectionStrategy(Base):
+    __tablename__ = "automatic_selection_strategies"
+    __table_args__ = (
+        UniqueConstraint("strategy_key", "version", name="uq_auto_selection_strategy_version"),
+        UniqueConstraint("official_slot", name="uq_auto_selection_official_slot"),
+        Index("ix_auto_selection_strategy_state", "lifecycle_state", "enabled"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(24), nullable=False, default="shadow")
+    official_slot: Mapped[int | None] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    parent_strategy_id: Mapped[int | None] = mapped_column(Integer)
+    config_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(Integer)
+    promoted_by_user_id: Mapped[int | None] = mapped_column(Integer)
+    promotion_note: Mapped[str | None] = mapped_column(Text)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AutomaticSelectionStrategyEvent(Base):
+    __tablename__ = "automatic_selection_strategy_events"
+    __table_args__ = (
+        Index("ix_auto_selection_strategy_event", "strategy_id", "created_at"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    strategy_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    from_state: Mapped[str | None] = mapped_column(String(24))
+    to_state: Mapped[str | None] = mapped_column(String(24))
+    actor_user_id: Mapped[int | None] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AutomaticSelectionStockSnapshot(Base):
+    __tablename__ = "automatic_selection_stock_snapshots"
+    __table_args__ = (
+        UniqueConstraint("observed_trade_date", "symbol", name="uq_auto_selection_stock_snapshot"),
+        Index("ix_auto_selection_stock_snapshot_date", "observed_trade_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    observed_trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    market: Mapped[str | None] = mapped_column(String(24))
+    stock_type: Mapped[str] = mapped_column(String(24), nullable=False, default="stock")
+    list_status: Mapped[str] = mapped_column(String(8), nullable=False, default="L")
+    list_date: Mapped[str | None] = mapped_column(String(8))
+    industry: Mapped[str | None] = mapped_column(String(120))
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tushare.stock_basic")
+    raw_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AutomaticSelectionRun(Base):
+    __tablename__ = "automatic_selection_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "strategy_id",
+            "target_trade_date",
+            "config_hash",
+            "data_fingerprint",
+            name="uq_auto_selection_run_inputs",
+        ),
+        Index("ix_auto_selection_run_date_status", "target_trade_date", "status"),
+        Index("ix_auto_selection_run_strategy_date", "strategy_id", "target_trade_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    strategy_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    target_trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(24), nullable=False, default="schedule")
+    job_run_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="running")
+    stage: Mapped[str] = mapped_column(String(40), nullable=False, default="quality_gate")
+    config_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    supersedes_run_id: Mapped[str | None] = mapped_column(String(64))
+    sync_summary_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    quality_gate_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    exclusion_summary_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    universe_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    eligible_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    selected_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    selected_turnover: Mapped[float | None] = mapped_column(Float)
+    llm_status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    llm_model: Mapped[str | None] = mapped_column(String(160))
+    llm_explanation: Mapped[str | None] = mapped_column(LONG_TEXT)
+    llm_error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AutomaticSelectionCandidate(Base):
+    __tablename__ = "automatic_selection_candidates"
+    __table_args__ = (
+        UniqueConstraint("run_id", "symbol", name="uq_auto_selection_candidate"),
+        Index("ix_auto_selection_candidate_rank", "run_id", "eligible", "rank"),
+        Index("ix_auto_selection_candidate_selected", "run_id", "selected"),
+        Index("ix_auto_selection_candidate_change", "run_id", "change_state"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    market: Mapped[str | None] = mapped_column(String(24))
+    list_status: Mapped[str | None] = mapped_column(String(8))
+    list_date: Mapped[str | None] = mapped_column(String(8))
+    industry: Mapped[str | None] = mapped_column(String(120))
+    market_cap_bucket: Mapped[str | None] = mapped_column(String(16))
+    eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    exclusion_codes_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False, default="[]")
+    constraint_codes_json: Mapped[str] = mapped_column(LONG_TEXT, nullable=False, default="[]")
+    close_price: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    pe_ttm: Mapped[float | None] = mapped_column(Float)
+    pb: Mapped[float | None] = mapped_column(Float)
+    total_mv: Mapped[float | None] = mapped_column(Float)
+    circ_mv: Mapped[float | None] = mapped_column(Float)
+    avg_amount_20: Mapped[float | None] = mapped_column(Float)
+    momentum_20: Mapped[float | None] = mapped_column(Float)
+    volatility_20: Mapped[float | None] = mapped_column(Float)
+    factor_values_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    input_evidence_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    z_scores_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    composite_score: Mapped[float | None] = mapped_column(Float)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    percentile: Mapped[float | None] = mapped_column(Float)
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    research_weight: Mapped[float | None] = mapped_column(Float)
+    change_state: Mapped[str] = mapped_column(String(24), nullable=False, default="unchanged")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AutomaticSelectionEvaluation(Base):
+    __tablename__ = "automatic_selection_evaluations"
+    __table_args__ = (
+        UniqueConstraint("run_id", "horizon", name="uq_auto_selection_evaluation"),
+        Index("ix_auto_selection_evaluation_status", "status", "horizon"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    horizon: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    entry_trade_date: Mapped[str | None] = mapped_column(String(8))
+    exit_trade_date: Mapped[str | None] = mapped_column(String(8))
+    selected_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    covered_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    coverage_ratio: Mapped[float | None] = mapped_column(Float)
+    benchmark_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    benchmark_covered_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    benchmark_coverage_ratio: Mapped[float | None] = mapped_column(Float)
+    basket_return: Mapped[float | None] = mapped_column(Float)
+    benchmark_return: Mapped[float | None] = mapped_column(Float)
+    excess_return: Mapped[float | None] = mapped_column(Float)
+    max_drawdown: Mapped[float | None] = mapped_column(Float)
+    sharpe: Mapped[float | None] = mapped_column(Float)
+    information_ratio: Mapped[float | None] = mapped_column(Float)
+    turnover: Mapped[float | None] = mapped_column(Float)
+    commission_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0003)
+    slippage_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0005)
+    daily_series_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    per_symbol_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    limitations: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class InboxNotification(Base):
