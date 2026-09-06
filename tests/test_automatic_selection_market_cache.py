@@ -310,6 +310,66 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
             self.assertIn("trade_date BETWEEN", sql)
             self.assertIn("length(daily_bars.trade_date)", sql)
 
+    def test_delisted_historical_alias_cannot_collide_with_live_symbol(self):
+        responses = self.catalog_responses()
+        responses["L"]["rows"].append(
+            {
+                "ts_code": "600018.SH",
+                "name": "上港集团",
+                "list_status": "L",
+            }
+        )
+        responses["D"] = {
+            "rows": [
+                {
+                    "ts_code": "T600018.SH",
+                    "name": "上港集箱(退)",
+                    "list_status": "D",
+                },
+                {
+                    "ts_code": "600999.SH",
+                    "name": "标准退市标的",
+                    "list_status": "D",
+                },
+            ]
+        }
+        self.mock_catalog(responses)
+
+        rows = self.market._stock_catalog_rows()
+        by_symbol = {row["ts_code"]: row for row in rows}
+
+        self.assertEqual(by_symbol["600018.SH"]["list_status"], "L")
+        self.assertEqual(by_symbol["600999.SH"]["list_status"], "D")
+        self.assertNotIn("T600018.SH", by_symbol)
+        self.assertEqual(sum(row["ts_code"] == "600018.SH" for row in rows), 1)
+
+    def test_noncanonical_active_or_paused_symbol_is_a_hard_error(self):
+        for status in ("L", "P"):
+            with self.subTest(status=status):
+                responses = self.catalog_responses()
+                responses[status]["rows"] = [
+                    {"ts_code": "T600018.SH", "list_status": status}
+                ]
+                self.mock_catalog(responses)
+                with self.assertRaisesRegex(RuntimeError, rf"stock_basic\({status}\).*无效标的"):
+                    self.market._stock_catalog_rows()
+
+    def test_entirely_noncanonical_delisted_catalog_is_untrustworthy(self):
+        responses = self.catalog_responses()
+        responses["D"] = {
+            "rows": [
+                {
+                    "ts_code": "T600018.SH",
+                    "name": "上港集箱(退)",
+                    "list_status": "D",
+                }
+            ]
+        }
+        self.mock_catalog(responses)
+
+        with self.assertRaisesRegex(RuntimeError, "无标准六位股票代码"):
+            self.market._stock_catalog_rows()
+
     def test_complete_catalog_fetches_l_p_d_and_allows_empty_p(self):
         self.mock_catalog(self.catalog_responses())
         rows = self.market._stock_catalog_rows()

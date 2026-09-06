@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta
 from math import ceil
@@ -46,6 +47,7 @@ _UPSERT_CHUNK = 1000
 _FULL_MARKET_BAR_MIN = 3000
 # 北交所后缀 BJ 统一归一为 BSE（与前端市场过滤一致）
 _MARKET_BY_SUFFIX = {"SH": "SH", "SZ": "SZ", "BJ": "BSE"}
+_CATALOG_SYMBOL_RE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
 _DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
 _BASIC_FIELDS = "ts_code,trade_date,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv"
@@ -66,9 +68,8 @@ def _market_of(ts_code: str) -> str:
 
 
 def _catalog_symbol(value: Any) -> str:
-    symbol = normalize_a_share_symbol(str(value or ""))
-    code, _, suffix = symbol.partition(".")
-    return symbol if len(code) == 6 and code.isdigit() and suffix in _MARKET_BY_SUFFIX else ""
+    symbol = str(value or "").strip().upper()
+    return symbol if _CATALOG_SYMBOL_RE.fullmatch(symbol) else ""
 
 
 def _stock_catalog_rows() -> list[dict]:
@@ -78,6 +79,7 @@ def _stock_catalog_rows() -> list[dict]:
     截断的 L 目录、状态冲突及任一通道失败都不可信，必须保留原缓存并报错。
     """
     catalog: dict[str, dict] = {}
+    skipped_delisted_aliases: list[str] = []
     for status in ("L", "P", "D"):
         response = _tushare_request(
             "stock_basic",
@@ -91,8 +93,14 @@ def _stock_catalog_rows() -> list[dict]:
             raise RuntimeError(f"stock_basic({status}) 目录为空或格式无效，拒绝覆盖本地目录")
         symbols: set[str] = set()
         for row in rows:
-            symbol = _catalog_symbol(row.get("ts_code")) if isinstance(row, dict) else ""
-            if not symbol or str(row.get("list_status") or status).upper() != status:
+            raw_symbol = str(row.get("ts_code") or "").strip() if isinstance(row, dict) else ""
+            symbol = _catalog_symbol(raw_symbol)
+            if not symbol:
+                if status == "D" and raw_symbol:
+                    skipped_delisted_aliases.append(raw_symbol)
+                    continue
+                raise RuntimeError(f"stock_basic({status}) 含无效标的或状态，拒绝覆盖本地目录")
+            if str(row.get("list_status") or status).upper() != status:
                 raise RuntimeError(f"stock_basic({status}) 含无效标的或状态，拒绝覆盖本地目录")
             if symbol in catalog and catalog[symbol]["list_status"] != status:
                 raise RuntimeError(f"stock_basic 目录状态冲突：{symbol}，拒绝覆盖本地目录")
@@ -100,7 +108,15 @@ def _stock_catalog_rows() -> list[dict]:
             catalog[symbol] = {**row, "ts_code": symbol, "list_status": status}
         if status == "L" and len(symbols) < _FULL_MARKET_BAR_MIN:
             raise RuntimeError(f"stock_basic(L) 目录不完整：{len(symbols)} 只，拒绝覆盖本地目录")
+        if status == "D" and not symbols:
+            raise RuntimeError("stock_basic(D) 无标准六位股票代码，拒绝覆盖本地目录")
         time.sleep(_API_SLEEP_SECONDS)
+    if skipped_delisted_aliases:
+        logger.warning(
+            "stock_basic(D) 跳过 %d 个非标准历史别名：%s",
+            len(skipped_delisted_aliases),
+            ", ".join(skipped_delisted_aliases[:10]),
+        )
     return list(catalog.values())
 
 
