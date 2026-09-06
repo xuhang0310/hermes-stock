@@ -62,6 +62,7 @@ _AUTOMATIC_SELECTION_CLAIM_GROUP = tuple(
     )
 )
 _SAME_DAY_CATCHUP_JOB_KEYS = frozenset(_AUTOMATIC_SELECTION_CLAIM_GROUP)
+_MANUAL_TRIGGER_TYPES = frozenset(("manual", "manual_pipeline"))
 
 # 数字人 code -> agent_profiles.agent_name（AgentReport.agent_name 外键指向后者）
 DH_TO_AGENT = {
@@ -999,6 +1000,27 @@ def _run_automatic_selection(
     return output_content, int(notification["id"]), task_status, task_error
 
 
+def _run_manual_automatic_selection_followup(
+    snapshot: dict[str, Any],
+    status: str,
+) -> dict[str, Any] | None:
+    if (
+        snapshot.get("job_kind") != "automatic_selection_data"
+        or snapshot.get("trigger_type") != "manual_pipeline"
+        or status != "success"
+    ):
+        return None
+    result = _claim_manual_run(
+        AUTOMATIC_SELECTION_JOB_KEY,
+        actor_user_id=snapshot.get("owner_user_id"),
+        expected_job_kind="automatic_selection",
+    )
+    run_id = result.get("run_id")
+    if result.get("status") == "claimed" and run_id:
+        _execute_job(AUTOMATIC_SELECTION_JOB_KEY, str(run_id))
+    return result
+
+
 def _execute_job(job_key: str, run_id: str) -> None:
     """同步执行一个任务，在线程中被调用；绝不抛出，所有结果落 job_runs。"""
     started = time.monotonic()
@@ -1158,6 +1180,20 @@ def _execute_job(job_key: str, run_id: str) -> None:
         duration_ms=duration_ms,
     )
     _update_job_status(job_key, status, error, ran_at)
+    try:
+        followup = _run_manual_automatic_selection_followup(snapshot, status)
+        if followup is not None and followup.get("status") != "claimed":
+            _log(
+                "ERROR",
+                "自动选股数据入库成功，但后续排名任务未能认领",
+                {"status": followup.get("status"), "run_id": followup.get("run_id")},
+            )
+    except Exception as exc:  # noqa: BLE001
+        _log(
+            "ERROR",
+            "自动选股数据入库成功，但后续排名任务派发失败",
+            {"error": str(exc)[:500]},
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1289,8 +1325,9 @@ def _claim_job_run(
         session.rollback()
         return {"status": "not_due", "run_id": None}
 
+    manual_trigger = trigger_type in _MANUAL_TRIGGER_TYPES
     checks_running = (
-        trigger_type == "manual"
+        manual_trigger
         or job_key in _AUTOMATIC_SELECTION_CLAIM_GROUP
         or job.job_kind == "position_price_sync"
     )
@@ -1322,7 +1359,7 @@ def _claim_job_run(
     run_id = uuid4().hex
     fire_key = (
         f"{job_key}@manual-{run_id[:8]}"
-        if trigger_type == "manual"
+        if manual_trigger
         else _scheduled_fire_key(job, ran_at)
     )
     session.add(
@@ -1331,7 +1368,7 @@ def _claim_job_run(
             job_key=job_key,
             owner_user_id=(
                 actor_user_id
-                if trigger_type == "manual" and actor_user_id is not None
+                if manual_trigger and actor_user_id is not None
                 else job.owner_user_id
             ),
             fire_key=fire_key,
@@ -1384,12 +1421,15 @@ def _claim_manual_run(
     *,
     actor_user_id: int | None = None,
     expected_job_kind: str | None = None,
+    trigger_type: str = "manual",
 ) -> dict[str, Any]:
+    if trigger_type not in _MANUAL_TRIGGER_TYPES:
+        raise ValueError("手动任务触发类型无效")
     with SessionLocal() as session:
         return _claim_job_run(
             session,
             job_key,
-            trigger_type="manual",
+            trigger_type=trigger_type,
             ran_at=now_sh(),
             actor_user_id=actor_user_id,
             expected_job_kind=expected_job_kind,
@@ -1436,6 +1476,27 @@ async def dispatch_manual_run_result(
     if result.get("status") == "claimed" and run_id:
         _dispatch(job_key, str(run_id))
     return result
+
+
+async def dispatch_automatic_selection_pipeline_result(
+    *,
+    actor_user_id: int,
+) -> dict[str, Any]:
+    result = await asyncio.to_thread(
+        _claim_manual_run,
+        AUTOMATIC_SELECTION_DATA_JOB_KEY,
+        actor_user_id=actor_user_id,
+        expected_job_kind="automatic_selection_data",
+        trigger_type="manual_pipeline",
+    )
+    run_id = result.get("run_id")
+    if result.get("status") == "claimed" and run_id:
+        _dispatch(AUTOMATIC_SELECTION_DATA_JOB_KEY, str(run_id))
+    return {
+        **result,
+        "job_key": AUTOMATIC_SELECTION_DATA_JOB_KEY,
+        "pipeline_stage": "data_ingestion",
+    }
 
 
 async def dispatch_manual_run(
