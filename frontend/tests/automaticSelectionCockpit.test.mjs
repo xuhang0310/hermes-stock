@@ -46,19 +46,26 @@ function overviewEvidence(runId) {
   }
 }
 
-function createViewHarness(apiOverrides = {}) {
-  const setupMatch = viewSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)
-  assert.ok(setupMatch, 'AutomaticSelectionView script setup should be present')
-  const exposure = `
+const setupMatch = viewSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)
+assert.ok(setupMatch, 'AutomaticSelectionView script setup should be present')
+const harnessExposure = `
 ;(globalThis as Record<string, unknown>).__automaticSelectionHarness = {
   loadDashboard,
   loadRun,
+  selectScope,
+  previousCandidatePage,
+  nextCandidatePage,
+  selectCandidate,
   selectedRunId,
   runDetail,
   selectedRunDetail,
   selectedOverviewRun,
   currentRun,
+  isSelectedLatestRun,
+  runContextLabel,
   candidates,
+  selectedCandidateSymbol,
+  selectedCandidate,
   evaluations,
   candidateTotal,
   candidateLimit,
@@ -72,16 +79,26 @@ function createViewHarness(apiOverrides = {}) {
   detailLoading,
 }
 `
-  const transpiled = ts.transpileModule(`${setupMatch[1]}\n${exposure}`, {
-    compilerOptions: {
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-    },
-  }).outputText
-  const executable = transpiled
-    .split(/\r?\n/)
-    .filter((line) => !line.startsWith('import ') && !/^export\s*\{\s*\};?$/.test(line))
+const transpileResult = ts.transpileModule(`${setupMatch[1]}\n${harnessExposure}`, {
+  compilerOptions: {
+    module: ts.ModuleKind.ESNext,
+    target: ts.ScriptTarget.ES2022,
+  },
+  reportDiagnostics: true,
+})
+assert.equal(
+  transpileResult.diagnostics?.length || 0,
+  0,
+  (transpileResult.diagnostics || [])
+    .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'))
     .join('\n')
+)
+const viewExecutable = transpileResult.outputText
+  .split(/\r?\n/)
+  .filter((line) => !line.startsWith('import ') && !/^export\s*\{\s*\};?$/.test(line))
+  .join('\n')
+
+function createViewHarness(apiOverrides = {}) {
 
   const ref = (value) => ({ value })
   const computed = (getter) => Object.defineProperty({}, 'value', { get: getter })
@@ -94,13 +111,15 @@ function createViewHarness(apiOverrides = {}) {
   const context = {
     api,
     computed,
+    nextTick: (callback) => Promise.resolve().then(callback),
+    onBeforeUnmount: () => {},
     onMounted: () => {},
     ref,
     defineProps: () => ({ user: { permissions: [] } }),
     renderMarkdown: (value) => value,
     beijingFromDb: (value) => value,
   }
-  vm.runInNewContext(executable, context)
+  vm.runInNewContext(viewExecutable, context)
   return context.__automaticSelectionHarness
 }
 
@@ -147,6 +166,26 @@ test('automatic selection types preserve immutable evidence fields', () => {
   assert.match(typesSource, /input_evidence\?: \{[\s\S]*expected_history_dates: string\[\][\s\S]*trade_date: string[\s\S]*close: number \| null[\s\S]*amount: number \| null/)
 })
 
+test('cockpit uses a compact run-aware command bar, KPI strip, and three-column research workspace', () => {
+  assert.match(viewSource, /data-testid="automatic-selection-command"/)
+  assert.match(viewSource, /\{\{ runContextLabel \}\}/)
+  assert.match(viewSource, /\? '最新运行' : '历史运行'/)
+  assert.match(viewSource, /运行研究流水线/)
+  assert.match(viewSource, /确定性研究账本/)
+  assert.match(viewSource, /数据质量门禁/)
+  assert.match(viewSource, /确定性排名证据/)
+  assert.doesNotMatch(viewSource, /A-SHARE QUANT|RUN SELECTOR|QUALITY GATE|SERVER-RANKED EVIDENCE/)
+  assert.doesNotMatch(viewSource, />立即运行</)
+  assert.match(viewSource, /data-testid="automatic-selection-kpis"/)
+  assert.match(viewSource, /data-testid="automatic-selection-workspace"/)
+  assert.match(viewSource, /grid-template-columns: 240px minmax\(520px, 1fr\) 320px/)
+  assert.match(viewSource, /class="run-rail cockpit-panel"/)
+  assert.match(viewSource, /class="ranking-console cockpit-panel"/)
+  assert.match(viewSource, /class="candidate-inspector cockpit-panel"/)
+  assert.match(viewSource, /当前运行错误/)
+  assert.match(viewSource, /currentRun\.error/)
+})
+
 test('cockpit exposes quality gate, deterministic ranking and forward evaluation', () => {
   assert.match(viewSource, /data-testid="automatic-selection-quality-gate"/)
   assert.match(viewSource, /不会静默删除缺失因子后继续排名/)
@@ -161,9 +200,19 @@ test('cockpit exposes quality gate, deterministic ranking and forward evaluation
   assert.match(viewSource, /历史行情覆盖/)
   assert.match(viewSource, /qualityGate\.metrics\.history_count/)
   assert.match(viewSource, /qualityGate\.thresholds\.min_history_coverage/)
+  assert.match(viewSource, /fmtQualityValue\(failure\.code/)
+  assert.match(viewSource, /candidateScope === 'excluded'/)
+  assert.match(viewSource, /主要排除原因/)
+  assert.match(viewSource, /item\.exclusion_codes\.slice\(0, 2\)/)
+  assert.match(viewSource, /入选换手/)
+  assert.match(viewSource, /selected_turnover/)
+  assert.match(viewSource, /目标日收盘 \/ 涨跌/)
+  assert.match(viewSource, /20 日均成交额/)
+  assert.match(viewSource, /value \/ 100_000/)
+  assert.match(viewSource, /input_evidence\?\.history\?\.length/)
 })
 
-test('cockpit paginates evidence and rejects stale detail responses', () => {
+test('cockpit paginates immutable server evidence and maintains a page-local selection boundary', () => {
   assert.match(viewSource, /const CANDIDATE_PAGE_SIZE = 50/)
   assert.match(viewSource, /requestSequence !== evidenceRequestSequence/)
   assert.match(viewSource, /const selectedRunDetail = computed/)
@@ -173,6 +222,13 @@ test('cockpit paginates evidence and rejects stale detail responses', () => {
   assert.match(viewSource, /data-testid="automatic-selection-pagination"/)
   assert.match(viewSource, /previousCandidatePage/)
   assert.match(viewSource, /nextCandidatePage/)
+  assert.match(viewSource, /固定 50 行服务端分页/)
+  assert.match(viewSource, /不在本地跨页重排/)
+  assert.match(viewSource, /v-memo="\[item, selectedCandidateSymbol === item\.symbol, candidateScope\]"/)
+  assert.doesNotMatch(viewSource, /candidates\.value\.sort\(/)
+  assert.match(viewSource, /const selectedCandidateSymbol = ref\(''\)/)
+  assert.match(viewSource, /const selectedCandidate = computed/)
+  assert.match(viewSource, /function selectCandidate\(symbol: string\)/)
   assert.match(viewSource, /@click="loadDashboard\(\)"/)
   assert.match(viewSource, /selectedRunId\.value = ''/)
 })
@@ -185,10 +241,14 @@ test('selecting a run clears old evidence before the request and a failed load s
   harness.overview.value = overviewEvidence('A')
   harness.selectedRunId.value = 'A'
   harness.runDetail.value = runEvidence('A')
+  harness.selectedCandidateSymbol.value = 'candidate-A'
+  assert.equal(harness.selectedCandidate.value.symbol, 'candidate-A')
 
   const pending = harness.loadRun('B')
   assert.equal(harness.selectedRunId.value, 'B')
   assert.equal(harness.runDetail.value, null)
+  assert.equal(harness.selectedCandidateSymbol.value, '')
+  assert.equal(harness.selectedCandidate.value, null)
   assert.equal(harness.selectedRunDetail.value, null)
   assert.equal(harness.selectedOverviewRun.value, null)
   assert.equal(harness.currentRun.value, null)
@@ -204,8 +264,28 @@ test('selecting a run clears old evidence before the request and a failed load s
   await pending
   assert.equal(harness.currentRun.value, null)
   assert.equal(harness.candidates.value.length, 0)
+  assert.equal(harness.selectedCandidateSymbol.value, '')
+  assert.equal(harness.selectedCandidate.value, null)
   assert.match(harness.error.value, /B detail failed/)
   assert.equal(harness.detailLoading.value, false)
+})
+
+test('an empty run id cannot invalidate an in-flight dashboard request', async () => {
+  const nextOverview = deferred()
+  const harness = createViewHarness({
+    automaticSelectionOverview: () => nextOverview.promise,
+    automaticSelectionStrategies: async () => [],
+  })
+
+  const pendingDashboard = harness.loadDashboard()
+  await harness.loadRun('')
+  nextOverview.resolve(overviewEvidence('latest'))
+  await pendingDashboard
+
+  assert.equal(harness.loading.value, false)
+  assert.equal(harness.detailLoading.value, false)
+  assert.equal(harness.currentRun.value.run_id, 'latest')
+  assert.equal(harness.selectedCandidateSymbol.value, 'candidate-latest')
 })
 
 test('dashboard failure cannot display run A evidence under selected run B', async () => {
@@ -217,10 +297,13 @@ test('dashboard failure cannot display run A evidence under selected run B', asy
   harness.overview.value = overviewEvidence('A')
   harness.selectedRunId.value = 'A'
   harness.runDetail.value = runEvidence('A')
+  harness.selectedCandidateSymbol.value = 'candidate-A'
 
   const pending = harness.loadDashboard('B')
   assert.equal(harness.selectedRunId.value, 'B')
   assert.equal(harness.runDetail.value, null)
+  assert.equal(harness.selectedCandidateSymbol.value, '')
+  assert.equal(harness.selectedCandidate.value, null)
   assert.equal(harness.currentRun.value, null)
   assert.equal(harness.candidates.value.length, 0)
   assert.equal(harness.evaluations.value.length, 0)
@@ -245,6 +328,7 @@ test('a stale detail response cannot replace the newer run selection', async () 
   harness.overview.value = overviewEvidence('A')
   harness.selectedRunId.value = 'A'
   harness.runDetail.value = runEvidence('A')
+  harness.selectedCandidateSymbol.value = 'candidate-A'
 
   const first = harness.loadRun('B')
   const second = harness.loadRun('C')
@@ -253,6 +337,8 @@ test('a stale detail response cannot replace the newer run selection', async () 
   assert.equal(harness.selectedRunId.value, 'C')
   assert.equal(harness.runDetail.value, null)
   assert.equal(harness.currentRun.value, null)
+  assert.equal(harness.selectedCandidateSymbol.value, '')
+  assert.equal(harness.selectedCandidate.value, null)
 
   requests.C.resolve(runEvidence('C'))
   await second
@@ -260,9 +346,85 @@ test('a stale detail response cannot replace the newer run selection', async () 
   assert.equal(harness.selectedRunDetail.value.run_id, 'C')
   assert.equal(harness.currentRun.value.run_id, 'C')
   assert.equal(harness.candidates.value[0].symbol, 'candidate-C')
+  assert.equal(harness.selectedCandidateSymbol.value, 'candidate-C')
+  assert.equal(harness.selectedCandidate.value.symbol, 'candidate-C')
   assert.equal(harness.evaluations.value[0].run_id, 'C')
   assert.equal(harness.candidateTotal.value, 1)
   assert.equal(harness.detailLoading.value, false)
+})
+
+test('scope and page requests clear selection, then seed the first candidate from current evidence', async () => {
+  const scopeDetail = deferred()
+  const scopeHarness = createViewHarness({
+    automaticSelectionRunDetail: () => scopeDetail.promise,
+  })
+  scopeHarness.overview.value = overviewEvidence('A')
+  scopeHarness.selectedRunId.value = 'A'
+  scopeHarness.runDetail.value = runEvidence('A')
+  scopeHarness.selectedCandidateSymbol.value = 'candidate-A'
+
+  const pendingScope = scopeHarness.selectScope('excluded')
+  assert.equal(scopeHarness.candidateScope.value, 'excluded')
+  assert.equal(scopeHarness.runDetail.value, null)
+  assert.equal(scopeHarness.selectedCandidateSymbol.value, '')
+  assert.equal(scopeHarness.selectedCandidate.value, null)
+
+  scopeDetail.resolve(runEvidence('A', 'excluded'))
+  await pendingScope
+  assert.equal(scopeHarness.selectedCandidateSymbol.value, 'candidate-excluded')
+  assert.equal(scopeHarness.selectedCandidate.value.symbol, 'candidate-excluded')
+
+  const pageDetail = deferred()
+  const pageCalls = []
+  const pageHarness = createViewHarness({
+    automaticSelectionRunDetail: (runId, scope, limit, offset) => {
+      pageCalls.push({ runId, scope, limit, offset })
+      return pageDetail.promise
+    },
+  })
+  pageHarness.overview.value = overviewEvidence('A')
+  pageHarness.selectedRunId.value = 'A'
+  pageHarness.runDetail.value = {
+    ...runEvidence('A', 'page-one'),
+    candidate_total: 101,
+    candidate_limit: 50,
+    candidate_offset: 0,
+  }
+  pageHarness.selectedCandidateSymbol.value = 'candidate-page-one'
+
+  const pendingPage = pageHarness.nextCandidatePage()
+  assert.equal(pageHarness.runDetail.value, null)
+  assert.equal(pageHarness.selectedCandidateSymbol.value, '')
+  assert.equal(pageHarness.selectedCandidate.value, null)
+  assert.deepEqual(pageCalls, [{ runId: 'A', scope: 'top', limit: 50, offset: 50 }])
+
+  pageDetail.resolve({
+    ...runEvidence('A', 'page-two'),
+    candidate_total: 101,
+    candidate_limit: 50,
+    candidate_offset: 50,
+  })
+  await pendingPage
+  assert.equal(pageHarness.candidatePage.value, 2)
+  assert.equal(pageHarness.selectedCandidateSymbol.value, 'candidate-page-two')
+  assert.equal(pageHarness.selectedCandidate.value.symbol, 'candidate-page-two')
+})
+
+test('candidate selection is constrained to the loaded page', () => {
+  const harness = createViewHarness()
+  harness.selectedRunId.value = 'A'
+  harness.runDetail.value = {
+    ...runEvidence('A'),
+    candidates: [{ symbol: '600000.SH' }, { symbol: '000001.SZ' }],
+  }
+  harness.selectedCandidateSymbol.value = '600000.SH'
+
+  harness.selectCandidate('000001.SZ')
+  assert.equal(harness.selectedCandidateSymbol.value, '000001.SZ')
+  assert.equal(harness.selectedCandidate.value.symbol, '000001.SZ')
+
+  harness.selectCandidate('not-on-this-page')
+  assert.equal(harness.selectedCandidateSymbol.value, '000001.SZ')
 })
 
 test('cockpit formats trade dates separately from database timestamps', () => {
@@ -286,6 +448,48 @@ test('strategy lifecycle actions are permission-gated and require human confirma
   assert.match(viewSource, /确认人工晋升/)
   assert.match(viewSource, /至少 1 个已到期且覆盖达标的 5 日前瞻窗口/)
   assert.match(viewSource, /不代表统计显著或策略已通过统计验证/)
+})
+
+test('cockpit accessibility covers semantic selection, busy/live state, and modal focus behavior', () => {
+  assert.match(viewSource, /role="listbox"/)
+  assert.match(viewSource, /role="option"/)
+  assert.match(viewSource, /class="candidate-button"/)
+  assert.match(viewSource, /:aria-pressed="selectedCandidateSymbol === item\.symbol"/)
+  assert.match(viewSource, /role="tablist"/)
+  assert.match(viewSource, /aria-controls="candidate-ranking-panel"/)
+  assert.match(viewSource, /@keydown="handleScopeKeydown"/)
+  assert.match(viewSource, /ArrowLeft.*ArrowRight.*Home.*End/)
+  assert.match(viewSource, /role="tabpanel"/)
+  assert.match(viewSource, /:aria-busy="loading \|\| detailLoading"/)
+  assert.match(viewSource, /aria-live="polite"/)
+  assert.match(viewSource, /<Teleport to="body">/)
+  assert.match(viewSource, /role="dialog"/)
+  assert.match(viewSource, /aria-labelledby="strategy-dialog-title"/)
+  assert.match(viewSource, /@keydown\.esc\.stop\.prevent="closeAction"/)
+  assert.match(viewSource, /@keydown\.tab="trapDialogFocus"/)
+  assert.match(viewSource, /:inert="strategyAction \? true : undefined"/)
+  assert.match(viewSource, /document\.body\.style\.overflow = 'hidden'/)
+  assert.match(viewSource, /trigger\?\.focus\(\)/)
+  assert.match(viewSource, /button:focus-visible/)
+})
+
+test('cockpit includes explicit 1380, 980, and mobile responsive modes', () => {
+  assert.match(viewSource, /@media \(max-width: 1380px\)/)
+  assert.match(viewSource, /@media \(max-width: 980px\)/)
+  assert.match(viewSource, /@media \(max-width: 680px\)/)
+  assert.match(viewSource, /\.candidate-inspector \{[^}]*grid-column: 1 \/ -1[^}]*repeat\(4, minmax\(0, 1fr\)\)/)
+  assert.match(viewSource, /\.cockpit-workspace \{ grid-template-columns: minmax\(0, 1fr\)/)
+  assert.match(viewSource, /\.candidate-table td \{[^}]*font-size: 12px/)
+  assert.match(viewSource, /\.scope-tabs button,[\s\S]*min-height: 44px/)
+})
+
+test('drawdown uses risk severity rather than A-share return direction', () => {
+  assert.match(viewSource, /function toneForDrawdown/)
+  assert.match(viewSource, /toneForDrawdown\(evaluation\.max_drawdown\)/)
+  assert.doesNotMatch(viewSource, /toneForReturn\(evaluation\.max_drawdown\)/)
+  assert.match(viewSource, /\.risk-contained/)
+  assert.match(viewSource, /\.risk-watch/)
+  assert.match(viewSource, /\.risk-critical/)
 })
 
 test('cockpit states the research boundary and exposes no order integration', () => {
