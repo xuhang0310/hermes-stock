@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 from datetime import datetime
@@ -428,6 +429,130 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
         added = session.add.call_args.args[0]
         self.assertEqual(added.owner_user_id, 41)
         self.assertEqual(added.trigger_type, "manual")
+
+    def test_manual_pipeline_claim_persists_actor_and_pipeline_marker(self) -> None:
+        data_job = self._job(
+            rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+            "automatic_selection_data",
+            "15:45",
+            owner_user_id=17,
+        )
+        ranking_job = self._job(
+            rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
+            "automatic_selection",
+            "16:10",
+            owner_user_id=17,
+        )
+        session = MagicMock()
+        with (
+            patch.object(
+                rhythm_scheduler,
+                "_lock_claim_group",
+                return_value={
+                    data_job.job_key: data_job,
+                    ranking_job.job_key: ranking_job,
+                },
+            ),
+            patch.object(
+                rhythm_scheduler,
+                "_find_running_claim",
+                return_value=None,
+            ),
+        ):
+            result = rhythm_scheduler._claim_job_run(
+                session,
+                data_job.job_key,
+                trigger_type="manual_pipeline",
+                ran_at=datetime(2026, 9, 7, 13, 0),
+                actor_user_id=41,
+                expected_job_kind="automatic_selection_data",
+            )
+
+        self.assertEqual(result["status"], "claimed")
+        added = session.add.call_args.args[0]
+        self.assertEqual(added.owner_user_id, 41)
+        self.assertEqual(added.trigger_type, "manual_pipeline")
+        self.assertTrue(added.fire_key.startswith(f"{data_job.job_key}@manual-"))
+
+    def test_manual_button_dispatches_data_then_ranking_pipeline(self) -> None:
+        with (
+            patch.object(
+                rhythm_scheduler,
+                "_claim_manual_run",
+                return_value={"status": "claimed", "run_id": "data-run"},
+            ) as claim,
+            patch.object(rhythm_scheduler, "_dispatch") as dispatch,
+        ):
+            result = asyncio.run(
+                rhythm_scheduler.dispatch_automatic_selection_pipeline_result(
+                    actor_user_id=41,
+                )
+            )
+
+        claim.assert_called_once_with(
+            rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+            actor_user_id=41,
+            expected_job_kind="automatic_selection_data",
+            trigger_type="manual_pipeline",
+        )
+        dispatch.assert_called_once_with(
+            rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+            "data-run",
+        )
+        self.assertEqual(result["pipeline_stage"], "data_ingestion")
+        self.assertEqual(
+            result["job_key"],
+            rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+        )
+
+    def test_successful_manual_ingestion_runs_ranking_as_followup(self) -> None:
+        snapshot = {
+            "job_kind": "automatic_selection_data",
+            "trigger_type": "manual_pipeline",
+            "owner_user_id": 41,
+        }
+        with (
+            patch.object(
+                rhythm_scheduler,
+                "_claim_manual_run",
+                return_value={"status": "claimed", "run_id": "ranking-run"},
+            ) as claim,
+            patch.object(rhythm_scheduler, "_execute_job") as execute,
+        ):
+            result = rhythm_scheduler._run_manual_automatic_selection_followup(
+                snapshot,
+                "success",
+            )
+
+        self.assertEqual(result, {"status": "claimed", "run_id": "ranking-run"})
+        claim.assert_called_once_with(
+            rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
+            actor_user_id=41,
+            expected_job_kind="automatic_selection",
+        )
+        execute.assert_called_once_with(
+            rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
+            "ranking-run",
+        )
+
+    def test_failed_manual_ingestion_never_runs_ranking(self) -> None:
+        snapshot = {
+            "job_kind": "automatic_selection_data",
+            "trigger_type": "manual_pipeline",
+            "owner_user_id": 41,
+        }
+        with (
+            patch.object(rhythm_scheduler, "_claim_manual_run") as claim,
+            patch.object(rhythm_scheduler, "_execute_job") as execute,
+        ):
+            result = rhythm_scheduler._run_manual_automatic_selection_followup(
+                snapshot,
+                "failed",
+            )
+
+        self.assertIsNone(result)
+        claim.assert_not_called()
+        execute.assert_not_called()
 
     def test_position_price_sync_handles_structured_claim_statuses(self) -> None:
         ran_at = datetime(2026, 9, 7, 10, 0)

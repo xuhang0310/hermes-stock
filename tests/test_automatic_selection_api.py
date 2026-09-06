@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -213,7 +213,7 @@ class AutomaticSelectionApiTests(unittest.TestCase):
     def test_dispatch_checks_ownership_and_preserves_true_actor(self) -> None:
         with patch.object(
             api,
-            "dispatch_manual_run_result",
+            "dispatch_automatic_selection_pipeline_result",
             new=AsyncMock(
                 return_value={"status": "claimed", "run_id": "job-run-1"}
             ),
@@ -223,17 +223,30 @@ class AutomaticSelectionApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["data"]["job_run_id"], "job-run-1")
-        self.owned_job.assert_called_once_with(
-            self.db,
-            user_id=self.user.id,
-            job_key=api.AUTOMATIC_SELECTION_JOB_KEY,
+        self.assertEqual(
+            response.json()["data"],
+            {
+                "job_run_id": "job-run-1",
+                "job_key": api.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+                "pipeline_stage": "data_ingestion",
+            },
         )
-        dispatch.assert_awaited_once_with(
-            api.AUTOMATIC_SELECTION_JOB_KEY,
-            actor_user_id=self.user.id,
-            expected_job_kind="automatic_selection",
+        self.owned_job.assert_has_calls(
+            [
+                call(
+                    self.db,
+                    user_id=self.user.id,
+                    job_key=api.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+                ),
+                call(
+                    self.db,
+                    user_id=self.user.id,
+                    job_key=api.AUTOMATIC_SELECTION_JOB_KEY,
+                ),
+            ]
         )
+        self.assertEqual(self.owned_job.call_count, 2)
+        dispatch.assert_awaited_once_with(actor_user_id=self.user.id)
 
     def test_dispatch_hides_foreign_job_as_404_without_claiming(self) -> None:
         self.owned_job.side_effect = HTTPException(
@@ -243,7 +256,7 @@ class AutomaticSelectionApiTests(unittest.TestCase):
         dispatch = AsyncMock()
         with patch.object(
             api,
-            "dispatch_manual_run_result",
+            "dispatch_automatic_selection_pipeline_result",
             new=dispatch,
         ):
             response = self.client.post(
@@ -267,7 +280,7 @@ class AutomaticSelectionApiTests(unittest.TestCase):
         for claim, expected_status, expected_code in cases:
             with self.subTest(claim=claim), patch.object(
                 api,
-                "dispatch_manual_run_result",
+                "dispatch_automatic_selection_pipeline_result",
                 new=AsyncMock(return_value=claim),
             ):
                 response = self.client.post(

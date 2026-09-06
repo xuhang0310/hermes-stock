@@ -14,8 +14,9 @@ from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant.automatic_selection_scoring import RESEARCH_LIMITATIONS
 from backend.app.scheduler.rhythm_api import _owned_job
 from backend.app.scheduler.rhythm_scheduler import (
+    AUTOMATIC_SELECTION_DATA_JOB_KEY,
     AUTOMATIC_SELECTION_JOB_KEY,
-    dispatch_manual_run_result,
+    dispatch_automatic_selection_pipeline_result,
 )
 
 router = APIRouter(prefix="/api/automatic-selection", tags=["automatic-selection"])
@@ -138,15 +139,17 @@ async def automatic_selection_dispatch(
         require_permission("schedule:manage")
     ),
 ) -> dict:
-    _owned_job(
-        db,
-        user_id=context.user.id,
-        job_key=AUTOMATIC_SELECTION_JOB_KEY,
-    )
-    claim = await dispatch_manual_run_result(
+    for job_key in (
+        AUTOMATIC_SELECTION_DATA_JOB_KEY,
         AUTOMATIC_SELECTION_JOB_KEY,
+    ):
+        _owned_job(
+            db,
+            user_id=context.user.id,
+            job_key=job_key,
+        )
+    claim = await dispatch_automatic_selection_pipeline_result(
         actor_user_id=context.user.id,
-        expected_job_kind="automatic_selection",
     )
     status = str(claim.get("status") or "")
     if status == "missing":
@@ -185,9 +188,10 @@ async def automatic_selection_dispatch(
     return ok(
         {
             "job_run_id": job_run_id,
-            "job_key": AUTOMATIC_SELECTION_JOB_KEY,
+            "job_key": str(claim.get("job_key") or AUTOMATIC_SELECTION_DATA_JOB_KEY),
+            "pipeline_stage": str(claim.get("pipeline_stage") or "data_ingestion"),
         },
-        "自动选股任务已投递",
+        "自动选股数据入库与排名流水线已投递",
     )
 
 
