@@ -4,8 +4,11 @@ import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from sqlalchemy.dialects.mysql import dialect as mysql_dialect
+
 from backend.app.ai.ai_api import _chat_messages_out
 from backend.app.agent_runtime.duration import elapsed_wall_clock_ms
+from backend.app.core.models import AiChatMessage
 
 
 class ChatMessageDurationTests(unittest.TestCase):
@@ -64,6 +67,12 @@ class ChatMessageDurationTests(unittest.TestCase):
         ])
 
         self.assertEqual(rows[1]["duration_ms"], 12345)
+
+    def test_long_agent_messages_use_mysql_longtext(self) -> None:
+        dialect = mysql_dialect()
+
+        self.assertEqual(AiChatMessage.__table__.c.content.type.compile(dialect=dialect), "LONGTEXT")
+        self.assertEqual(AiChatMessage.__table__.c.error.type.compile(dialect=dialect), "LONGTEXT")
 
 
 if __name__ == "__main__":

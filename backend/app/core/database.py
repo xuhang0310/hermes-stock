@@ -142,6 +142,22 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
             if not exists:
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
 
+        def _ensure_longtext(table: str, column: str, *, nullable: bool) -> None:
+            """Upgrade an existing MySQL TEXT column without touching its data."""
+
+            data_type = connection.execute(
+                text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = :t AND column_name = :c"
+                ),
+                {"t": table, "c": column},
+            ).scalar()
+            if data_type and str(data_type).lower() != "longtext":
+                null_sql = "NULL" if nullable else "NOT NULL"
+                connection.execute(
+                    text(f"ALTER TABLE {table} MODIFY COLUMN {column} LONGTEXT {null_sql}")
+                )
+
         _add_column("users", "token_version", "token_version INT NOT NULL DEFAULT 1")
         _add_column("instruments", "list_status", "list_status VARCHAR(8) NULL AFTER list_date")
         _add_column("instruments", "industry", "industry VARCHAR(120) NULL AFTER list_status")
@@ -360,6 +376,8 @@ def _ensure_schema_upgrades(engine: Engine) -> None:
         _add_column("workspace_documents", "user_id", "user_id INT NULL")
         _add_column("ai_chat_messages", "attachments_json", "attachments_json TEXT NULL")
         _add_column("ai_chat_messages", "duration_ms", "duration_ms INT NULL")
+        _ensure_longtext("ai_chat_messages", "content", nullable=False)
+        _ensure_longtext("ai_chat_messages", "error", nullable=True)
         _add_column("agent_tool_approvals", "run_id", "run_id VARCHAR(64) NULL")
         _add_column("agent_tool_approvals", "tool_call_id", "tool_call_id VARCHAR(160) NULL")
         _add_column("agent_runs", "priority", "priority INT NOT NULL DEFAULT 100")

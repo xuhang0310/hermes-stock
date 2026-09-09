@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -942,6 +942,40 @@ class OrphanRecoveryTests(unittest.TestCase):
             orphans = worker._recover_orphan_board_tasks()
 
         self.assertEqual(orphans, [])
+
+
+class WorkerResilienceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_workflow_reconcile_failure_does_not_stop_queue_polling(self) -> None:
+        from backend.app.agent_runtime.worker import AgentRuntimeWorker
+        from backend.app.agent_runtime.redis_broker import RedisBroker
+
+        repository = MagicMock()
+        repository.session_factory = MagicMock()
+        repository.recover_stale_runs.return_value = []
+        repository.prune_terminal_events.return_value = 0
+        broker = MagicMock(spec=RedisBroker)
+        broker.dequeue = AsyncMock(return_value=None)
+        broker.enqueue = AsyncMock(return_value=False)
+        worker = AgentRuntimeWorker(repository, broker)
+        worker._record_heartbeat = MagicMock()
+        worker._recover_orphan_board_tasks = MagicMock(return_value=[])
+        worker.team_service.reconcile = MagicMock(side_effect=RuntimeError("oversized workflow"))
+        worker.workflow_service.reconcile = MagicMock(return_value=[])
+
+        def stop_after_queue_poll():
+            worker._stopping.set()
+            return None
+
+        repository.next_queued_run.side_effect = stop_after_queue_poll
+
+        with patch(
+            "backend.app.agent_runtime.worker.expire_pending_run_approvals",
+            return_value=[],
+        ):
+            await worker._loop()
+
+        repository.next_queued_run.assert_called_once_with()
+        worker.workflow_service.reconcile.assert_called_once_with()
 
 
 class OrchestrationToolSchemaTests(unittest.TestCase):

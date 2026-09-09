@@ -714,11 +714,13 @@ class AiChatMessage(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[int] = mapped_column(Integer, ForeignKey("ai_chat_sessions.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(24), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Agent Team / Workflow 会把上游节点结果拼入后续节点提示词，正文可能超过
+    # MySQL TEXT 的 64 KiB 上限。使用 LONGTEXT 避免运行时长上下文把 Worker 打断。
+    content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     attachments_json: Mapped[str | None] = mapped_column(Text)
     event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
-    error: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(LONG_TEXT)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped[AiChatSession] = relationship(back_populates="messages")
