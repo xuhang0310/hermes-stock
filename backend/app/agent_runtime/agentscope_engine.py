@@ -1579,6 +1579,7 @@ async def run_agentscope(
                             if request_payload.get("source_type") == "scheduler"
                             else None
                         ),
+                        tool_call_id=tool_call.id,
                     )
                     waiting.append(
                         {

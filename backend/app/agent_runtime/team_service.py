@@ -16,6 +16,7 @@ from backend.app.core.models import (
     AiChatSession,
     AgentDelegation,
     AgentRun,
+    AgentRunCheckpoint,
     AgentTeamRun,
     DigitalHumanProfile,
     User,
@@ -607,6 +608,28 @@ class AgentTeamService:
                     AgentTeamRun.tool_call_id == tool_call_id,
                 ).limit(1)
             )
+            # Compatibility for task batches created before their Agent tool
+            # call id was persisted on AgentTeamRun.  The durable checkpoint
+            # already contains the unambiguous call-id -> team-id mapping.
+            if team is None:
+                checkpoint = db.get(AgentRunCheckpoint, leader_run_id)
+                waiting = _loads(checkpoint.waiting_json, []) if checkpoint else []
+                mapped_team_id = next(
+                    (
+                        str(item.get("team_id") or "")
+                        for item in waiting
+                        if isinstance(item, dict)
+                        and str(item.get("tool_call_id") or "") == tool_call_id
+                    ),
+                    "",
+                )
+                if mapped_team_id:
+                    team = db.scalar(
+                        select(AgentTeamRun).where(
+                            AgentTeamRun.team_id == mapped_team_id,
+                            AgentTeamRun.leader_run_id == leader_run_id,
+                        ).limit(1)
+                    )
             if team is None or team.status == "running":
                 return None
             result = _loads(team.result_json, {})

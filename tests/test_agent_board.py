@@ -27,6 +27,8 @@ from backend.app.core.models import (
     DigitalHumanProfile,
     User,
 )
+from backend.app.agent_runtime.repository import AgentRunRepository
+from backend.app.agent_runtime.team_service import AgentTeamService
 from backend.app.quant import agent_board_service
 
 
@@ -236,6 +238,65 @@ class AgentBoardServiceTests(unittest.TestCase):
             self.assertTrue(marker["read_only"])
             self.assertTrue(marker["is_child_task"])
             self.assertRegex(marker["source_identifier"], r"^TASK-[0-9A-F]{8}-0[01]$")
+
+    def test_task_batch_keeps_tool_call_id_and_old_checkpoint_mapping_can_resume(self) -> None:
+        leader_run_id = self._make_leader_run()
+        batch = agent_board_service.TaskBatchSpec(
+            objective="核验盘前证据",
+            tasks=[
+                agent_board_service.TaskSpec(
+                    action_key="premarket_evidence_check",
+                    title="盘前证据核验",
+                    agent_code="risk-officer",
+                    instruction="核验盘前风险",
+                )
+            ],
+        )
+
+        with patch.object(agent_board_service, "session_scope", _make_session_scope(self.SessionFactory)):
+            current = agent_board_service.create_task_batch(
+                batch,
+                leader_run_id=leader_run_id,
+                user_id=self.user_id,
+                tool_call_id="call-task-batch",
+            )
+
+        with self.SessionFactory() as db:
+            team = db.get(AgentTeamRun, current["team_id"])
+            self.assertEqual(team.tool_call_id, "call-task-batch")
+            team.status = "completed"
+            team.result_json = '{"members": [], "summary": "done"}'
+            db.commit()
+
+        repository = AgentRunRepository(self.SessionFactory)
+        service = AgentTeamService(self.SessionFactory, repository)
+        self.assertEqual(
+            service.result_for_tool_call(leader_run_id, "call-task-batch")["summary"],
+            "done",
+        )
+
+        # Older rows used batch_<team_id>.  Their checkpoint still records
+        # the original tool call and remains safely recoverable.
+        with self.SessionFactory() as db:
+            team = db.get(AgentTeamRun, current["team_id"])
+            team.tool_call_id = f'batch_{current["team_id"]}'
+            db.commit()
+        repository.save_checkpoint(
+            leader_run_id,
+            engine="agentscope",
+            state_json="{}",
+            waiting=[
+                {
+                    "type": "task_batch",
+                    "team_id": current["team_id"],
+                    "tool_call_id": "call-task-batch",
+                }
+            ],
+        )
+        self.assertEqual(
+            service.result_for_tool_call(leader_run_id, "call-task-batch")["summary"],
+            "done",
+        )
 
     def test_create_task_batch_skips_disabled_agent(self) -> None:
         """测试 create_task_batch 跳过未启用的数字人"""

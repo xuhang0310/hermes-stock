@@ -66,6 +66,7 @@ def create_task_batch(
     leader_run_id: str | None = None,
     user_id: int | None = None,
     job_run_id: str | None = None,
+    tool_call_id: str | None = None,
     skip_leader_validation: bool = False,
 ) -> dict[str, Any]:
     """创建任务批次（原子事务）
@@ -155,7 +156,11 @@ def create_task_batch(
             leader_run_id=leader_run_id,
             root_run_id=leader_run_id,
             user_id=user_id,
-            tool_call_id=f"batch_{team_id}",
+            # Batches created by an Agent tool call must keep that exact call
+            # id.  The leader checkpoint resumes by tool_call_id after every
+            # child finishes; replacing it with an internal batch id makes a
+            # completed Team look unfinished and fails the parent run.
+            tool_call_id=tool_call_id or f"batch_{team_id}",
             objective=batch.objective,
             status="running",
             max_members=len(batch.tasks),
