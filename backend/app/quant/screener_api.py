@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/screener", tags=["screener"])
 
 
 class ScreenerQueryIn(BaseModel):
+    industry: str | None = Field(default=None, min_length=1, max_length=120, description="TuShare 股票基础行业，精确匹配")
     market: str | None = Field(default=None, max_length=24, description="市场/交易所过滤")
     stock_type: str | None = Field(default="stock", max_length=24, description="标的类型，默认仅股票")
     price_min: float | None = Field(default=None, ge=0, description="最新价下限（含）")
@@ -47,6 +48,7 @@ def screener_run(
     try:
         result = screener_service.run_screener(
             market=payload.market,
+            industry=payload.industry,
             stock_type=payload.stock_type,
             price_min=payload.price_min,
             price_max=payload.price_max,

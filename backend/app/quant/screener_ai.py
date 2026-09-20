@@ -59,6 +59,7 @@ _PARSE_SYSTEM_PROMPT = """你是 A 股选股器条件解析助手，把用户的
 - factor_name：TuShare 官方因子名（小写字母/数字/下划线，如 roe_ttm、return_5d）；仅当用户点名某个具体因子时才输出，拿不准就不要输出
 - factor_min / factor_max：该因子因子值的下限/上限（可为负数）
 - keyword：股票代码或名称关键词
+- industry：TuShare stock_basic 行业名称，精确匹配；只在用户明确指定行业时填写，不能用概念题材替代行业
 
 只输出一个 JSON 对象，不要解释、不要 markdown 包裹。示例：
 {"volume_ratio_min": 2, "turnover_rate_min": 5, "turnover_rate_max": 15, "total_mv_max": 200, "above_ma": 20}"""
@@ -141,6 +142,9 @@ def _sanitize(data: dict) -> dict:
     keyword = str(data.get("keyword") or "").strip()[:32]
     if keyword:
         out["keyword"] = keyword
+    industry = str(data.get("industry") or "").strip()[:120]
+    if industry:
+        out["industry"] = industry
     factor_name = str(data.get("factor_name") or "").strip().lower()
     if _FACTOR_NAME_RE.fullmatch(factor_name):
         out["factor_name"] = factor_name
@@ -217,6 +221,8 @@ def _summarize(query: dict) -> str:
             parts.append(f"因子 {name} 有值")
     if query.get("keyword"):
         parts.append(f"关键词「{query['keyword']}」")
+    if query.get("industry"):
+        parts.append(f"行业「{query['industry']}」")
     if not parts:
         return _FALLBACK_SUMMARY
     return "已解析：" + "，".join(parts)

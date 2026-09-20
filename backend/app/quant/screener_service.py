@@ -90,6 +90,8 @@ def _base_query(filters: dict):
         stmt = stmt.where(Instrument.type == filters["stock_type"])
     if filters.get("market"):
         stmt = stmt.where(Instrument.market == filters["market"])
+    if filters.get("industry"):
+        stmt = stmt.where(func.trim(Instrument.industry) == filters["industry"])
     if filters.get("price_min") is not None:
         stmt = stmt.where(StockLatestPrice.price >= filters["price_min"])
     if filters.get("price_max") is not None:
@@ -218,6 +220,7 @@ def _validate_factor_filter(db, filters: dict) -> str | None:
 def run_screener(
     *,
     market: str | None = None,
+    industry: str | None = None,
     stock_type: str | None = "stock",
     price_min: float | None = None,
     price_max: float | None = None,
@@ -249,6 +252,7 @@ def run_screener(
     has_factor = bool((factor_name or "").strip())
     filters = {
         "market": market,
+        "industry": (industry or "").strip() or None,
         "stock_type": stock_type,
         "price_min": price_min,
         "price_max": price_max,
@@ -333,6 +337,7 @@ def count_screener_candidates(query: dict) -> int:
     """
     filters = {
         "market": query.get("market"),
+        "industry": (query.get("industry") or "").strip() or None,
         "stock_type": query.get("stock_type") or "stock",
         "price_min": query.get("price_min"),
         "price_max": query.get("price_max"),

@@ -1523,6 +1523,7 @@ export type ApiEnvelope<T> = {
 }
 
 export type ScreenerQuery = {
+  industry?: string
   market?: string
   stock_type?: string
   price_min?: number
@@ -1557,6 +1558,56 @@ export type ScreenerItem = {
   pe_ttm: number | null
   ma_value: number | null
   factor_value?: number | null
+}
+
+export type IndustryMember = ScreenerItem & {
+  industry: string | null
+  amount_yi: number | null
+  status: 'valid' | 'missing' | 'no_trade' | 'invalid'
+}
+
+export type IndustryStat = {
+  industry: string
+  stock_count: number
+  valid_count: number
+  coverage: number
+  avg_pct: number | null
+  median_pct: number | null
+  up_count: number
+  down_count: number
+  flat_count: number
+  up_ratio: number | null
+  amount_yi: number | null
+  amount_count: number
+  missing_count: number
+  no_trade_count: number
+  invalid_count: number
+  leader: IndustryMember | null
+}
+
+export type IndustryOverview = {
+  snapshot_id: string
+  as_of: string | null
+  latest_available_date: string | null
+  expected_date: string | null
+  classification: string
+  source: string
+  coverage_status: 'empty' | 'partial' | 'sufficient'
+  coverage_threshold: number
+  coverage: {
+    stock_count: number; bar_count: number; valid_count: number; classified_count: number; daily_basic_count: number
+    unclassified_count: number; missing_count: number; no_trade_count: number; invalid_count: number; bar_ratio: number
+  }
+  industries: IndustryStat[]
+  warnings: string[]
+}
+
+export type IndustryMembers = {
+  snapshot_id: string
+  as_of: string | null
+  industry: string
+  total: number
+  items: IndustryMember[]
 }
 
 export type ScreenerResult = {
