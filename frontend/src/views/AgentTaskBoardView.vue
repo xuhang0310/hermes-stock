@@ -41,11 +41,11 @@ const columnIcons: Record<BoardColumn, string> = {
 }
 
 const columnColors: Record<BoardColumn, string> = {
-  queued: '#858c90',
-  running: '#3bb2d6',
-  approval: '#eabf63',
-  completed: '#20c997',
-  abnormal: '#f25f64',
+  queued: 'var(--muted)',
+  running: 'var(--cyan)',
+  approval: 'var(--gold)',
+  completed: 'var(--ok)',
+  abnormal: 'var(--danger)',
 }
 
 const columns: BoardColumn[] = ['queued', 'running', 'approval', 'completed', 'abnormal']
@@ -225,7 +225,7 @@ onBeforeUnmount(() => {
     <!-- 筛选栏 -->
     <div class="board-filters">
       <div class="search-box">
-        <span class="search-icon">&#128269;</span>
+        <span class="search-icon">&var(--ok);</span>
         <input
           v-model="searchQuery"
           type="text"
@@ -314,7 +314,7 @@ onBeforeUnmount(() => {
                   <span class="agent-avatar" v-if="task.agent_avatar">
                     <img :src="task.agent_avatar" :alt="task.agent_name || ''" />
                   </span>
-                  <span class="agent-avatar agent-icon" v-else>&#128100;</span>
+                  <span class="agent-avatar agent-icon" v-else>&var(--ok);</span>
                   <span class="agent-name">{{ task.agent_name || '未分配' }}</span>
                 </div>
               </div>
@@ -377,8 +377,8 @@ onBeforeUnmount(() => {
 .agent-task-board {
   padding: 24px;
   min-height: 100vh;
-  background: #0d1117;
-  color: #e6edf3;
+  background: var(--bg-2);
+  color: var(--text);
 }
 
 .board-toolbar {
@@ -387,36 +387,36 @@ onBeforeUnmount(() => {
   align-items: center;
   margin-bottom: 20px;
   padding-bottom: 16px;
-  border-bottom: 1px solid #30363d;
+  border-bottom: 1px solid var(--line);
 }
 
 .board-title h2 {
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 600;
   margin: 0 0 4px;
-  color: #eabf63;
+  color: var(--gold);
 }
 
 .board-title p {
   font-size: 13px;
-  color: #8b949e;
+  color: var(--muted);
   margin: 0;
 }
 
 .board-actions .btn-outline {
   background: transparent;
-  border: 1px solid #30363d;
-  color: #e6edf3;
+  border: 1px solid var(--line);
+  color: var(--text);
   padding: 8px 16px;
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
   font-size: 13px;
   transition: all 0.2s;
 }
 
 .board-actions .btn-outline:hover:not(:disabled) {
-  border-color: #eabf63;
-  color: #eabf63;
+  border-color: var(--gold);
+  color: var(--gold);
 }
 
 .board-filters {
@@ -438,32 +438,32 @@ onBeforeUnmount(() => {
   left: 12px;
   top: 50%;
   transform: translateY(-50%);
-  color: #8b949e;
+  color: var(--muted);
   font-size: 14px;
 }
 
 .search-input {
   width: 100%;
   padding: 10px 12px 10px 36px;
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  color: #e6edf3;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
   font-size: 14px;
   outline: none;
   transition: border-color 0.2s;
 }
 
 .search-input:focus {
-  border-color: #eabf63;
+  border-color: var(--gold);
 }
 
 .filter-select {
   padding: 10px 12px;
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  color: #e6edf3;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
   font-size: 13px;
   outline: none;
   cursor: pointer;
@@ -472,10 +472,10 @@ onBeforeUnmount(() => {
 
 .filter-date {
   padding: 10px 12px;
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  color: #e6edf3;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
   font-size: 13px;
   outline: none;
   cursor: pointer;
@@ -483,11 +483,11 @@ onBeforeUnmount(() => {
 }
 
 .filter-date:focus {
-  border-color: #eabf63;
+  border-color: var(--gold);
 }
 
 .filter-date-sep {
-  color: #8b949e;
+  color: var(--muted);
   font-size: 13px;
   padding: 0 4px;
 }
@@ -497,22 +497,22 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: #8b949e;
+  color: var(--muted);
 }
 
 .btn-sm {
   padding: 4px 10px;
-  background: #21262d;
-  border: 1px solid #30363d;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
   border-radius: 4px;
-  color: #e6edf3;
+  color: var(--text);
   font-size: 12px;
   cursor: pointer;
 }
 
 .btn-sm:hover {
-  border-color: #eabf63;
-  color: #eabf63;
+  border-color: var(--gold);
+  color: var(--gold);
 }
 
 .board-columns {
@@ -535,8 +535,8 @@ onBeforeUnmount(() => {
 }
 
 .board-column {
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
   cursor: pointer;
@@ -544,11 +544,11 @@ onBeforeUnmount(() => {
 }
 
 .board-column.active {
-  border-color: #eabf63;
+  border-color: var(--gold);
 }
 
 .board-column:hover {
-  border-color: #484f58;
+  border-color: var(--muted-2);
 }
 
 .column-header {
@@ -567,7 +567,7 @@ onBeforeUnmount(() => {
 .column-label {
   font-size: 14px;
   font-weight: 600;
-  color: #e6edf3;
+  color: var(--text);
   flex: 1;
 }
 
@@ -586,42 +586,42 @@ onBeforeUnmount(() => {
 
 .column-empty {
   text-align: center;
-  color: #484f58;
+  color: var(--muted-2);
   font-size: 13px;
   padding: 20px 0;
 }
 
 .task-card {
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
   padding: 12px;
   cursor: pointer;
   transition: border-color 0.2s;
 }
 
 .task-card:hover {
-  border-color: #484f58;
+  border-color: var(--muted-2);
 }
 
 .task-card.queued {
-  border-left: 3px solid #858c90;
+  border-left: 3px solid var(--muted);
 }
 
 .task-card.running {
-  border-left: 3px solid #3bb2d6;
+  border-left: 3px solid var(--cyan);
 }
 
 .task-card.approval {
-  border-left: 3px solid #eabf63;
+  border-left: 3px solid var(--gold);
 }
 
 .task-card.completed {
-  border-left: 3px solid #20c997;
+  border-left: 3px solid var(--ok);
 }
 
 .task-card.abnormal {
-  border-left: 3px solid #f25f64;
+  border-left: 3px solid var(--danger);
 }
 
 .card-header {
@@ -644,7 +644,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #21262d;
+  background: var(--surface-2);
   font-size: 14px;
 }
 
@@ -656,21 +656,21 @@ onBeforeUnmount(() => {
 
 .agent-name {
   font-size: 13px;
-  color: #e6edf3;
+  color: var(--text);
   font-weight: 500;
 }
 
 .card-title {
   font-size: 14px;
   font-weight: 600;
-  color: #e6edf3;
+  color: var(--text);
   margin-bottom: 6px;
   line-height: 1.4;
 }
 
 .card-source {
-  font-size: 11px;
-  color: #8b949e;
+  font-size: 12px;
+  color: var(--muted);
   margin-bottom: 6px;
 }
 
@@ -679,14 +679,14 @@ onBeforeUnmount(() => {
 }
 
 .priority-badge {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: 4px;
   font-weight: 600;
 }
 
 .priority-badge.high {
-  background: #f25f64;
+  background: var(--danger);
   color: #fff;
 }
 
@@ -696,52 +696,52 @@ onBeforeUnmount(() => {
 
 .progress-bar {
   height: 4px;
-  background: #21262d;
-  border-radius: 2px;
+  background: var(--surface-2);
+  border-radius: 4px;
   overflow: hidden;
   margin-bottom: 4px;
 }
 
 .progress-fill {
   height: 100%;
-  background: #3bb2d6;
-  border-radius: 2px;
+  background: var(--cyan);
+  border-radius: 4px;
   transition: width 0.3s;
 }
 
 .progress-text {
-  font-size: 11px;
-  color: #8b949e;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .card-duration {
-  font-size: 11px;
-  color: #8b949e;
+  font-size: 12px;
+  color: var(--muted);
   margin-bottom: 6px;
 }
 
 .card-approval-info {
-  font-size: 11px;
-  color: #eabf63;
+  font-size: 12px;
+  color: var(--gold);
   margin-bottom: 8px;
 }
 
 .card-completed {
-  font-size: 11px;
-  color: #20c997;
+  font-size: 12px;
+  color: var(--ok);
   margin-bottom: 6px;
 }
 
 .card-error {
-  font-size: 11px;
-  color: #f25f64;
+  font-size: 12px;
+  color: var(--danger);
   margin-bottom: 4px;
   line-height: 1.4;
 }
 
 .card-retry-info {
-  font-size: 11px;
-  color: #8b949e;
+  font-size: 12px;
+  color: var(--muted);
   margin-bottom: 8px;
 }
 
@@ -758,7 +758,7 @@ onBeforeUnmount(() => {
   flex: 1;
   padding: 5px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
   border: 1px solid;
   transition: all 0.2s;
@@ -766,44 +766,44 @@ onBeforeUnmount(() => {
 
 .btn-retry {
   background: transparent;
-  border-color: #f25f64;
-  color: #f25f64;
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .btn-retry:hover {
-  background: #f25f64;
+  background: var(--danger);
   color: #fff;
 }
 
 .btn-detail {
   background: transparent;
-  border-color: #30363d;
-  color: #e6edf3;
+  border-color: var(--line);
+  color: var(--text);
 }
 
 .btn-detail:hover {
-  border-color: #e6edf3;
+  border-color: var(--text);
 }
 
 .btn-approve {
-  background: #20c997;
-  border-color: #20c997;
-  color: #0d1117;
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--bg-2);
 }
 
 .btn-approve:hover {
-  background: #1ba87d;
+  background: var(--ok);
 }
 
 .btn-reject {
   background: transparent;
-  border-color: #30363d;
-  color: #e6edf3;
+  border-color: var(--line);
+  color: var(--text);
 }
 
 .btn-reject:hover {
-  border-color: #f25f64;
-  color: #f25f64;
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .card-meta {
@@ -813,25 +813,25 @@ onBeforeUnmount(() => {
 }
 
 .meta-tag {
-  font-size: 10px;
+  font-size: 12px;
   padding: 1px 5px;
-  background: #21262d;
-  border-radius: 3px;
-  color: #8b949e;
+  background: var(--surface-2);
+  border-radius: 4px;
+  color: var(--muted);
 }
 
 .board-state {
   text-align: center;
   padding: 40px;
-  color: #8b949e;
+  color: var(--muted);
 }
 
 .loading-mark {
   display: inline-block;
   width: 16px;
   height: 16px;
-  border: 2px solid #30363d;
-  border-top-color: #eabf63;
+  border: 2px solid var(--line);
+  border-top-color: var(--gold);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   margin-right: 8px;
@@ -845,14 +845,14 @@ onBeforeUnmount(() => {
 
 .notice {
   padding: 12px 16px;
-  border-radius: 6px;
+  border-radius: 4px;
   font-size: 13px;
 }
 
 .notice-danger {
   background: #f25f6420;
-  border: 1px solid #f25f64;
-  color: #f25f64;
+  border: 1px solid var(--danger);
+  color: var(--danger);
 }
 
 .notice-danger strong {

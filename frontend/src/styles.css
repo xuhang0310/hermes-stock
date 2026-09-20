@@ -8335,3 +8335,135 @@ body.workbench-modal-open {
     grid-column: 1;
   }
 }
+
+/* ==========================================================================
+ * 设计系统 v1（docs/design-system.md）——语义 token 与组件基类
+ * 新增或修改 UI 必须引用本层，禁止页内重新发明按钮/面板/表格。
+ * ========================================================================== */
+:root {
+  --accent: var(--gold);
+  --accent-strong: var(--gold-2);
+  --accent-dim: var(--gold-dim);
+  --up: var(--danger);   /* A 股红涨 */
+  --down: var(--ok);     /* A 股绿跌 */
+
+  --r-ctrl: 4px;
+  --r-panel: 8px;
+  --r-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --z-sticky: 2;
+  --z-drawer: 40;
+  --z-notice: 60;
+  --z-dialog: 1000;
+  --z-toast: 1100;
+
+  --motion: 140ms ease;
+}
+
+/* 按钮：primary / ghost / danger / text × md / sm */
+.ui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--motion), color var(--motion), filter var(--motion);
+}
+.ui-btn:hover:not(:disabled) { border-color: var(--accent-dim); color: var(--accent-strong); }
+.ui-btn:disabled { cursor: not-allowed; opacity: .5; }
+.ui-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-btn--primary { border-color: #785f2d; background: linear-gradient(180deg, #c29d4f, #8e6f33); color: #100d07; }
+.ui-btn--primary:hover:not(:disabled) { color: #050505; filter: brightness(1.08); }
+.ui-btn--ghost { background: transparent; }
+.ui-btn--danger { border-color: #7d3030; background: #5a2424; color: #ffd1d1; }
+.ui-btn--danger:hover:not(:disabled) { border-color: #a04444; color: #ffe4e4; }
+.ui-btn--text { min-height: 0; padding: 0; border: 0; background: none; color: var(--accent-strong); font-weight: 500; }
+.ui-btn--text:hover:not(:disabled) { color: var(--accent); }
+.ui-btn--sm { min-height: 28px; padding: 5px 10px; font-size: 12px; }
+
+/* 面板 */
+.ui-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-panel); }
+.ui-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.ui-panel-head > h3 { margin: 0; font-size: 16px; font-weight: 500; }
+.ui-panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.ui-panel-body { padding: 16px; }
+
+/* 表格 */
+.ui-table-wrap { overflow: auto; }
+.ui-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ui-table th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.ui-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-table tbody tr[aria-selected="true"] td,
+.ui-table tbody tr.selected td {
+  background: rgba(213, 180, 106, .08);
+  box-shadow: inset 2px 0 var(--accent);
+}
+.ui-table td.pnl-up { color: var(--up); }
+.ui-table td.pnl-down { color: var(--down); }
+
+/* KPI 条 */
+.ui-kpi { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 1px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--r-ctrl); background: var(--line); }
+.ui-kpi > div { display: grid; gap: 3px; align-content: center; min-height: 68px; padding: 9px 13px; background: var(--surface); }
+.ui-kpi span, .ui-kpi small { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.ui-kpi strong { overflow: hidden; color: var(--text); font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 状态胶囊 */
+.ui-pill { display: inline-flex; align-items: center; border: 1px solid; border-radius: var(--r-pill); padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+.ui-pill--ok { border-color: rgba(39, 197, 138, .35); background: rgba(39, 197, 138, .08); color: #6fd8b2; }
+.ui-pill--warning { border-color: rgba(213, 166, 66, .4); background: rgba(213, 166, 66, .1); color: #e6c36f; }
+.ui-pill--danger { border-color: rgba(255, 93, 93, .4); background: rgba(255, 93, 93, .08); color: #ff8b8b; }
+.ui-pill--muted { border-color: var(--line); background: var(--surface-2); color: var(--muted); }
+
+/* 标签页：下划线式 */
+.ui-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+.ui-tabs [role="tab"] { min-height: 34px; padding: 6px 12px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font-size: 13px; cursor: pointer; }
+.ui-tabs [role="tab"][aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent-strong); }
+.ui-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* 空状态 */
+.ui-empty { display: grid; place-content: center; justify-items: center; gap: 6px; min-height: 120px; padding: 24px; color: var(--muted); text-align: center; }
+.ui-empty strong { color: var(--text); font-size: 14px; font-weight: 500; }
+.ui-empty p { margin: 0; font-size: 12px; }
