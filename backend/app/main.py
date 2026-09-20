@@ -37,6 +37,7 @@ from backend.app.data.watchlist_api import router as watchlist_router
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
 from backend.app.feishu.feishu_bot_api import router as feishu_bot_router
 from backend.app.market.tushare_api import router as tushare_router
+from backend.app.market.industry_api import router as industry_router
 from backend.app.notify.notification_api import router as notification_router
 from backend.app.paper.paper_api import router as paper_router
 from backend.app.quant.agent_board_api import router as agent_board_router
@@ -164,6 +165,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(stocks_router)
     app.include_router(agent_board_router)
     app.include_router(screener_router)
+    app.include_router(industry_router)
     app.include_router(automatic_selection_router)
     app.include_router(rhythm_router)
     app.include_router(feishu_bot_router)

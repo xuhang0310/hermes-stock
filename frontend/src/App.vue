@@ -19,6 +19,8 @@ import BacktestReportView from './views/BacktestReportView.vue'
 import BacktestHistoryView from './views/BacktestHistoryView.vue'
 import FactorAnalysisView from './views/FactorAnalysisView.vue'
 import ScreenerView from './views/ScreenerView.vue'
+import IndustryAnalysisView from './views/IndustryAnalysisView.vue'
+import { industryQuestion } from './utils/industry'
 import AutomaticSelectionView from './views/AutomaticSelectionView.vue'
 import OpsConsoleView from './views/OpsConsoleView.vue'
 import AgentTaskBoardView from './views/AgentTaskBoardView.vue'
@@ -35,6 +37,7 @@ import type {
   PositionItem,
   PositionSymbolValidation,
   ScreenerItem,
+  IndustryMember,
   UserPayload,
   WatchlistItem
 } from './types'
@@ -56,6 +59,7 @@ type PageKey =
   | 'backtestReport'
   | 'factorAnalysis'
   | 'screener'
+  | 'industryAnalysis'
   | 'automaticSelection'
   | 'opsConsole'
   | 'settings'
@@ -79,6 +83,7 @@ type PositionAgentReviewRow = Record<string, unknown> & {
 }
 
 const activePage = ref<PageKey>('workbench')
+const screenerInitialIndustry = ref('')
 const bootstrapping = ref(false)
 const loading = ref(false)
 const loginLoading = ref(false)
@@ -268,6 +273,7 @@ const pageTitle = computed(() => {
     backtestReport: '策略回测报告',
     factorAnalysis: '因子评估',
     screener: 'AI 选股',
+    industryAnalysis: '行业分析',
     automaticSelection: '自动选股',
     opsConsole: '运维控制台',
     settings: '设置'
@@ -276,6 +282,7 @@ const pageTitle = computed(() => {
 })
 
 const pageSubtitle = computed(() => {
+  if (activePage.value === 'industryAnalysis') return '行业强弱、市场广度与成分股研究'
   if (activePage.value === 'automaticSelection') {
     return '确定性排名、质量门禁、不可变证据与前瞻评估'
   }
@@ -1018,7 +1025,9 @@ function navigate(page: PageKey) {
   if (page === 'askStock') askStockInitialQuestion.value = ''
   if (page === 'workbench') void refreshDashboard()
   if (page === 'watchlist') void refreshWatchlist()
-  if (page === 'automaticSelection') {
+  if (page === 'industryAnalysis') {
+    if (!/^\/industries\/?$/i.test(window.location.pathname)) window.history.pushState({}, '', '/industries')
+  } else if (page === 'automaticSelection') {
     if (!/^\/automatic-selection\/?$/i.test(window.location.pathname)) {
       window.history.pushState({}, '', '/automatic-selection')
     }
@@ -1027,7 +1036,8 @@ function navigate(page: PageKey) {
     page !== 'opsConsole' &&
     (window.location.pathname.startsWith('/backtests/') ||
       /^\/oc-console-/i.test(window.location.pathname) ||
-      /^\/automatic-selection\/?$/i.test(window.location.pathname))
+      /^\/automatic-selection\/?$/i.test(window.location.pathname) ||
+      /^\/industries\/?$/i.test(window.location.pathname))
   ) {
     window.history.pushState({}, '', '/')
   }
@@ -1036,6 +1046,10 @@ function navigate(page: PageKey) {
 
 function syncPageFromLocation() {
   const pathname = window.location.pathname
+  if (/^\/industries\/?$/i.test(pathname)) {
+    activePage.value = 'industryAnalysis'
+    return
+  }
   if (/^\/automatic-selection\/?$/i.test(pathname)) {
     activePage.value = 'automaticSelection'
     return
@@ -1051,6 +1065,8 @@ function syncPageFromLocation() {
   } else if (activePage.value === 'backtestReport') {
     activePage.value = backtestReturnPage.value
   } else if (activePage.value === 'automaticSelection') {
+    activePage.value = 'workbench'
+  } else if (activePage.value === 'industryAnalysis') {
     activePage.value = 'workbench'
   }
 }
@@ -1088,6 +1104,16 @@ function openBoardSession(sessionId: number) {
   digitalHumanInitialSession.value = sessionId
   digitalHumanInitialQuestion.value = ''
   activePage.value = 'digitalHumans'
+}
+
+function screenIndustry(industry: string) {
+  screenerInitialIndustry.value = industry
+  navigate('screener')
+}
+
+function openIndustryStockAnalysis(item: IndustryMember) {
+  navigate('digitalHumans')
+  digitalHumanInitialQuestion.value = industryQuestion(item)
 }
 
 function openScreenerStockAnalysis(item: ScreenerItem) {
@@ -1198,8 +1224,18 @@ onBeforeUnmount(() => {
         v-else-if="activePage === 'automaticSelection'"
         :user="currentUser"
       />
+      <IndustryAnalysisView
+        v-else-if="activePage === 'industryAnalysis'"
+        :user="currentUser"
+        @watchlist-added="applyWatchlistItem"
+        @ask-stock="openIndustryStockAnalysis"
+        @screen-industry="screenIndustry"
+        @open-screener="navigate('screener')"
+      />
       <ScreenerView
         v-else-if="activePage === 'screener'"
+        :initial-industry="screenerInitialIndustry"
+        @industry-applied="screenerInitialIndustry = ''"
         @watchlist-added="applyWatchlistItem"
         @ask-stock="openScreenerStockAnalysis"
         @open-backtest="openScreenerBacktest"

@@ -1,4 +1,6 @@
 import type {
+  IndustryOverview,
+  IndustryMembers,
   ArtifactVersion,
   AgentItem,
   DashboardPayload,
@@ -825,6 +827,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((res) => res.data),
+  industryOverview: (signal?: AbortSignal) =>
+    request<ApiEnvelope<IndustryOverview>>('/api/industries/overview', { signal }).then(res => res.data),
+  industryMembers: (params: { industry: string; snapshot_id: string; sort_by: string; order: string; offset: number; limit: number }, signal?: AbortSignal) =>
+    request<ApiEnvelope<IndustryMembers>>(`/api/industries/members?${new URLSearchParams(Object.entries(params).map(([key, value]) => [key, String(value)]))}`, { signal }).then(res => res.data),
   screenerSync: (days = 20) =>
     request<ApiEnvelope<ScreenerSyncStats>>('/api/screener/sync', {
       method: 'POST',

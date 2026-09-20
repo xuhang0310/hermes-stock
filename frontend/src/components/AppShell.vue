@@ -19,6 +19,7 @@ export type PageKey =
   | 'backtestHistory'
   | 'factorAnalysis'
   | 'screener'
+  | 'industryAnalysis'
   | 'automaticSelection'
   | 'opsConsole'
   | 'settings'
@@ -79,6 +80,7 @@ const navItems = computed<NavItem[]>(() => [
       { key: 'factorAnalysis', label: '因子评估' },
       { key: 'backtestHistory', label: '回测报告' },
       { key: 'screener', label: 'AI 选股' },
+      { key: 'industryAnalysis', label: '行业分析' },
       { key: 'automaticSelection', label: '自动选股' }
     ]
   },

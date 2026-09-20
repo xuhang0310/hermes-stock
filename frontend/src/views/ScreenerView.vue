@@ -19,7 +19,9 @@ type TemplateCategory = '热门' | '量价' | '趋势' | '估值' | '质量'
 type QuickTemplate = ScreenerTemplateItem & { category: TemplateCategory; prompt: string }
 type ScreenerWorkspace = 'quick' | 'builder' | 'saved'
 
+const props = defineProps<{ initialIndustry?: string }>()
 const emit = defineEmits<{
+  industryApplied: []
   watchlistAdded: [item: Awaited<ReturnType<typeof api.addWatchlist>>]
   askStock: [item: ScreenerItem]
   openBacktest: [runId: string]
@@ -47,6 +49,7 @@ const peMin = ref('')
 const peMax = ref('')
 const aboveMa = ref('')
 const keyword = ref('')
+const industry = ref('')
 const factorName = ref('')
 const factorMin = ref('')
 const factorMax = ref('')
@@ -226,6 +229,7 @@ function queryToChips(query: ScreenerQuery): string[] {
   if (query.above_ma) chips.push(`站上 MA${query.above_ma}`)
   if (query.factor_name) addRangeChip(chips, `因子 ${query.factor_name}`, query.factor_min, query.factor_max)
   if (query.keyword) chips.push(`关键词 ${query.keyword}`)
+  if (query.industry) chips.push(`行业 ${query.industry}`)
   if (query.limit) chips.push(`Top${query.limit}`)
   return chips
 }
@@ -671,6 +675,7 @@ function applyQuery(query: ScreenerQuery) {
   factorMin.value = query.factor_min != null ? String(query.factor_min) : ''
   factorMax.value = query.factor_max != null ? String(query.factor_max) : ''
   keyword.value = query.keyword ?? ''
+  industry.value = query.industry ?? ''
   resultLimit.value = query.limit ?? 20
 }
 
@@ -693,6 +698,7 @@ function buildQuery(): ScreenerQuery {
     factor_min: toNumber(factorMin.value),
     factor_max: toNumber(factorMax.value),
     keyword: String(keyword.value).trim() || undefined,
+    industry: industry.value.trim() || undefined,
     limit: resultLimit.value,
   }
 }
@@ -1112,6 +1118,12 @@ function formatNum(value: number | null, digits = 2): string {
 onMounted(() => {
   const draft = localStorage.getItem(DRAFT_KEY)
   if (draft) nlText.value = draft
+  if (props.initialIndustry) {
+    applyQuery({ industry: props.initialIndustry })
+    activeWorkspace.value = 'builder'
+    parseSummary.value = `已限定 ${props.initialIndustry} 行业。选股使用当前缓存行情，可继续添加条件。`
+    emit('industryApplied')
+  }
   document.addEventListener('keydown', handleRuleEditorDocumentKeydown)
   void Promise.all([loadSyncStatus(), loadRecommendation(), loadPromptHistory(), loadSavedStrategies(), loadFactorOptions()])
 })
@@ -1540,7 +1552,7 @@ onBeforeUnmount(() => {
                 </header>
                 <div class="sc-rule-dialog-body">
                   <div class="sc-config-grid">
-                    <section><h4>股票范围</h4><label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">全部市场</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label><label class="sc-field"><span>代码或名称</span><input v-model="keyword" type="text" class="sc-input" placeholder="例如 600519 或 贵州茅台" /></label></section>
+                    <section><h4>股票范围</h4><label class="sc-field"><span>市场</span><select v-model="market" class="sc-input"><option value="">全部市场</option><option value="SH">沪市</option><option value="SZ">深市</option><option value="BSE">北交所</option></select></label><label class="sc-field"><span>行业（当前分类，精确匹配）</span><input v-model="industry" type="text" maxlength="120" class="sc-input" placeholder="例如 银行；留空不限行业" /></label><label class="sc-field"><span>代码或名称</span><input v-model="keyword" type="text" class="sc-input" placeholder="例如 600519 或 贵州茅台" /></label></section>
                     <section><h4>价格与规模</h4><div class="sc-range-field"><span>最新价（元）</span><div><input v-model="priceMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="priceMax" type="number" class="sc-input" placeholder="最高" /></div></div><div class="sc-range-field"><span>总市值（亿元）</span><div><input v-model="mvMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="mvMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
                     <section><h4>估值</h4><div class="sc-range-field"><span>PE（TTM）</span><div><input v-model="peMin" type="number" class="sc-input" placeholder="最低" /><em>至</em><input v-model="peMax" type="number" class="sc-input" placeholder="最高" /></div></div></section>
                     <section>
