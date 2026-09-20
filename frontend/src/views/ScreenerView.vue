@@ -240,6 +240,15 @@ const statusLine = computed(() => {
   if (!status.latest_bar_date) return '尚未同步全市场数据'
   return `数据截至 ${fmtDate(status.latest_bar_date)} · 覆盖 ${status.bar_symbols.toLocaleString('zh-CN')} 只`
 })
+const dataStale = computed(() => {
+  const latest = syncStatus.value?.latest_bar_date
+  if (!latest) return false
+  const latestDay = new Date(`${fmtDate(latest)}T00:00:00`)
+  if (Number.isNaN(latestDay.getTime())) return false
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return (today.getTime() - latestDay.getTime()) / 86_400_000 > 3
+})
 const RECOMMENDATION_PAGE_SIZE = 5
 const RECOMMENDATION_BATCH_LABELS = ['贴近持仓', '扩展视角']
 const recommendationPageCount = computed(() => Math.max(1, Math.ceil((smartRec.value?.templates.length || 0) / RECOMMENDATION_PAGE_SIZE)))
@@ -1158,9 +1167,9 @@ onBeforeUnmount(() => {
         <button type="button" :class="{ 'is-active': activeWorkspace === 'saved' }" @click="openSavedStrategies">我的策略</button>
       </nav>
       <div class="sc-page-actions">
-        <div class="sc-data-status">
+        <div class="sc-data-status" :class="{ 'is-stale': dataStale }">
           <span class="sc-status-dot"></span>
-          <span>{{ statusLine || '正在读取市场数据状态' }}</span>
+          <span>{{ statusLine || '正在读取市场数据状态' }}<template v-if="dataStale"> · 数据可能滞后</template></span>
           <button type="button" :disabled="syncLoading" @click="syncNow">
             {{ syncLoading ? '同步中…' : '同步数据' }}
           </button>
@@ -1473,7 +1482,7 @@ onBeforeUnmount(() => {
 
           <section ref="resultSection" class="sc-results-center sc-panel">
             <header class="sc-center-head">
-              <div><h3>筛选结果 <b v-if="result">{{ allSortedResultItems.length }} / {{ result.universe.toLocaleString('zh-CN') }}</b></h3><span v-if="result">已按当前规则筛选 · 展示 Top {{ resultLimit }} 实时结果<template v-if="result.factor_as_of"> · 因子值截至 {{ fmtDate(result.factor_as_of) }}</template></span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
+              <div><h3>筛选结果 <b v-if="result">{{ allSortedResultItems.length }} / {{ result.universe.toLocaleString('zh-CN') }}</b></h3><span v-if="result">已按当前规则筛选 · 展示 Top {{ resultLimit }}（最近同步快照）<template v-if="result.factor_as_of"> · 因子值截至 {{ fmtDate(result.factor_as_of) }}</template></span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
             </header>
             <nav class="sc-result-tabs" aria-label="结果视图">
               <div class="sc-result-tabset"><button type="button" :class="{ active: resultView === 'ranking' }" @click="resultView = 'ranking'">排名表</button><button type="button" :class="{ active: resultView === 'factors' }" @click="resultView = 'factors'">图表</button><button type="button" :class="{ active: resultView === 'compare' }" @click="resultView = 'compare'">对比 <em v-if="comparisonSymbols.length">{{ comparisonSymbols.length }}</em></button></div>
@@ -1487,12 +1496,23 @@ onBeforeUnmount(() => {
             <template v-if="result?.items.length">
               <div v-if="resultView === 'ranking'" class="sc-ranking-table-wrap">
                 <table class="sc-ranking-table">
-                  <thead><tr><th class="sc-check-cell"><input type="checkbox" data-testid="screener-select-page" aria-label="选择本页股票" :checked="allPageChecked" :indeterminate="somePageChecked && !allPageChecked" @change="toggleCurrentPageChecked" /></th><th>排名</th><th>标的</th><th v-if="showFactorColumn">因子值</th><th>综合分</th><th v-if="isResultColumnVisible('value')">估值规模</th><th v-if="isResultColumnVisible('momentum')">动量</th><th v-if="isResultColumnVisible('liquidity')">流动性</th><th v-if="isResultColumnVisible('reasons')">入选理由</th><th v-if="isResultColumnVisible('risks')">主要风险</th><th></th></tr></thead>
+                  <thead><tr><th class="sc-check-cell"><input type="checkbox" data-testid="screener-select-page" aria-label="选择本页股票" :checked="allPageChecked" :indeterminate="somePageChecked && !allPageChecked" @change="toggleCurrentPageChecked" /></th><th>排名</th><th>标的</th><th class="sc-num">最新价</th><th class="sc-num">涨跌幅</th><th v-if="showFactorColumn">因子值</th><th>综合分</th><th v-if="isResultColumnVisible('value')">估值规模</th><th v-if="isResultColumnVisible('momentum')">动量</th><th v-if="isResultColumnVisible('liquidity')">流动性</th><th v-if="isResultColumnVisible('reasons')">入选理由</th><th v-if="isResultColumnVisible('risks')">主要风险</th><th></th></tr></thead>
                   <tbody>
-                    <tr v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }" @click="selectResult(item)">
+                    <tr
+                      v-for="(item, rowIndex) in sortedResultItems"
+                      :key="item.symbol"
+                      :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }"
+                      tabindex="0"
+                      :aria-selected="selectedResultItem?.symbol === item.symbol"
+                      @click="selectResult(item)"
+                      @keydown.enter="selectResult(item)"
+                      @keydown.space.prevent="selectResult(item)"
+                    >
                       <td class="sc-check-cell" @click.stop><input type="checkbox" data-testid="screener-result-checkbox" :aria-label="`选择 ${item.name} ${item.symbol}`" :checked="checkedSymbols.includes(item.symbol)" @change="toggleResultChecked(item)" /></td>
-                      <td>{{ allSortedResultItems.findIndex((row) => row.symbol === item.symbol) + 1 }}</td>
-                      <td><strong>{{ item.symbol }}</strong><span>{{ item.name }}</span></td>
+                      <td>{{ (resultPage - 1) * resultPageSize + rowIndex + 1 }}</td>
+                      <td class="sc-symbol-cell"><strong>{{ item.symbol }}</strong><span>{{ item.name }}</span></td>
+                      <td class="sc-num">{{ formatNum(item.price) }}</td>
+                      <td class="sc-num" :class="pctTone(item.pct_chg)">{{ formatPct(item.pct_chg) }}</td>
                       <td v-if="showFactorColumn">{{ item.factor_value != null ? Number(item.factor_value).toFixed(3) : '—' }}</td>
                       <td class="sc-score-cell"><b>{{ item.compositeScore.toFixed(1) }}</b></td>
                       <td v-if="isResultColumnVisible('value')">{{ item.valueScore.toFixed(1) }}</td><td v-if="isResultColumnVisible('momentum')">{{ item.momentumScore.toFixed(1) }}</td><td v-if="isResultColumnVisible('liquidity')">{{ item.liquidityScore.toFixed(1) }}</td>
@@ -1504,10 +1524,10 @@ onBeforeUnmount(() => {
                 </table>
               </div>
               <div v-else-if="resultView === 'factors'" class="sc-factor-board">
-                <article v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }" @click="selectResult(item)"><input type="checkbox" class="sc-factor-checkbox" data-testid="screener-factor-checkbox" :aria-label="`选择 ${item.name} ${item.symbol}`" :checked="checkedSymbols.includes(item.symbol)" @click.stop @change="toggleResultChecked(item)" /><header><strong>{{ item.name }}</strong><b>{{ item.compositeScore.toFixed(1) }}</b></header><div><span>估值规模</span><i><em :style="{ width: `${item.valueScore}%` }"></em></i><b>{{ item.valueScore.toFixed(0) }}</b></div><div><span>动量</span><i><em :style="{ width: `${item.momentumScore}%` }"></em></i><b>{{ item.momentumScore.toFixed(0) }}</b></div><div><span>交易活跃</span><i><em :style="{ width: `${item.liquidityScore}%` }"></em></i><b>{{ item.liquidityScore.toFixed(0) }}</b></div></article>
+                <article v-for="item in sortedResultItems" :key="item.symbol" :class="{ selected: selectedResultItem?.symbol === item.symbol, 'is-checked': checkedSymbols.includes(item.symbol) }" @click="selectResult(item)"><input type="checkbox" class="sc-factor-checkbox" data-testid="screener-factor-checkbox" :aria-label="`选择 ${item.name} ${item.symbol}`" :checked="checkedSymbols.includes(item.symbol)" @click.stop @change="toggleResultChecked(item)" /><header><strong>{{ item.name }}</strong><b>{{ item.compositeScore.toFixed(1) }}</b></header><p class="sc-factor-price">最新 {{ formatNum(item.price) }} · <em :class="pctTone(item.pct_chg)">{{ formatPct(item.pct_chg) }}</em></p><div><span>估值规模</span><i><em :style="{ width: `${item.valueScore}%` }"></em></i><b>{{ item.valueScore.toFixed(0) }}</b></div><div><span>动量</span><i><em :style="{ width: `${item.momentumScore}%` }"></em></i><b>{{ item.momentumScore.toFixed(0) }}</b></div><div><span>交易活跃</span><i><em :style="{ width: `${item.liquidityScore}%` }"></em></i><b>{{ item.liquidityScore.toFixed(0) }}</b></div></article>
               </div>
               <div v-else class="sc-compare-board">
-                <article v-for="item in comparedItems" :key="item.symbol"><header><div><strong>{{ item.name }}</strong><span>{{ item.symbol }}</span></div><b>{{ item.compositeScore.toFixed(1) }}</b></header><dl><div><dt>估值规模</dt><dd>{{ item.valueScore.toFixed(1) }}</dd></div><div><dt>动量</dt><dd>{{ item.momentumScore.toFixed(1) }}</dd></div><div><dt>活跃度</dt><dd>{{ item.liquidityScore.toFixed(1) }}</dd></div><div><dt>PE</dt><dd>{{ formatNum(item.pe_ttm, 1) }}</dd></div></dl><button type="button" @click="toggleComparison(item)">移出对比</button></article>
+                <article v-for="item in comparedItems" :key="item.symbol"><header><div><strong>{{ item.name }}</strong><span>{{ item.symbol }}</span></div><b>{{ item.compositeScore.toFixed(1) }}</b></header><p class="sc-factor-price">最新 {{ formatNum(item.price) }} · <em :class="pctTone(item.pct_chg)">{{ formatPct(item.pct_chg) }}</em></p><dl><div><dt>估值规模</dt><dd>{{ item.valueScore.toFixed(1) }}</dd></div><div><dt>动量</dt><dd>{{ item.momentumScore.toFixed(1) }}</dd></div><div><dt>活跃度</dt><dd>{{ item.liquidityScore.toFixed(1) }}</dd></div><div><dt>PE</dt><dd>{{ formatNum(item.pe_ttm, 1) }}</dd></div></dl><button type="button" @click="toggleComparison(item)">移出对比</button></article>
               </div>
               <footer class="sc-result-footer">
                 <span>显示 {{ (resultPage - 1) * resultPageSize + 1 }}–{{ Math.min(resultPage * resultPageSize, allSortedResultItems.length) }} 条，共 {{ allSortedResultItems.length }} 条</span>
@@ -2538,6 +2558,15 @@ select.sc-input {
   box-shadow: 0 0 0 3px rgba(94, 169, 120, 0.12);
 }
 
+.sc-data-status.is-stale {
+  color: #d9b56c;
+}
+
+.sc-data-status.is-stale .sc-status-dot {
+  background: #d9b56c;
+  box-shadow: 0 0 0 3px rgba(217, 181, 108, 0.15);
+}
+
 .sc-btn {
   display: inline-flex;
   min-height: 34px;
@@ -3349,16 +3378,24 @@ select.sc-input {
 .sc-result-search button { width: 32px; padding: 0; font-size: 18px; line-height: 1; }
 .sc-ranking-table-wrap { min-height: 390px; flex: 1; overflow: auto; }
 .sc-ranking-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
-.sc-ranking-table th { padding: 11px 8px; border-bottom: 1px solid var(--sc-line); background: rgba(255,255,255,.015); color: var(--sc-text-3); font-weight: 500; text-align: left; white-space: nowrap; }
+.sc-ranking-table th { position: sticky; top: 0; z-index: 2; padding: 11px 8px; border-bottom: 1px solid var(--sc-line); background: var(--sc-panel-raised); color: var(--sc-text-3); font-weight: 500; text-align: left; white-space: nowrap; }
 .sc-ranking-table td { padding: 13px 8px; border-bottom: 1px solid rgba(255,255,255,.065); color: var(--sc-text-2); vertical-align: middle; }
 .sc-ranking-table tbody tr { cursor: pointer; transition: background .15s; }
 .sc-ranking-table tbody tr:hover { background: rgba(255,255,255,.022); }
+.sc-ranking-table tbody tr:focus-visible { outline: 2px solid var(--sc-accent); outline-offset: -2px; }
 .sc-ranking-table tbody tr.selected { background: linear-gradient(90deg,rgba(215,183,111,.12),rgba(215,183,111,.035)); box-shadow: inset 2px 0 var(--sc-accent); }
 .sc-ranking-table tbody tr.is-checked { background: rgba(215,183,111,.065); }
-.sc-ranking-table td:nth-child(3) strong,
-.sc-ranking-table td:nth-child(3) span { display: block; white-space: nowrap; }
-.sc-ranking-table td:nth-child(3) strong { color: var(--sc-text); }
-.sc-ranking-table td:nth-child(3) span { margin-top: 3px; color: var(--sc-text-3); font-size: 10px; }
+.sc-ranking-table .sc-symbol-cell strong,
+.sc-ranking-table .sc-symbol-cell span { display: block; white-space: nowrap; }
+.sc-ranking-table .sc-symbol-cell strong { color: var(--sc-text); }
+.sc-ranking-table .sc-symbol-cell span { margin-top: 3px; color: var(--sc-text-3); font-size: 10px; }
+.sc-ranking-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sc-ranking-table td.pnl-up { color: #f0787c; }
+.sc-ranking-table td.pnl-down { color: #4ac69a; }
+.sc-factor-price { margin: 4px 0 10px; color: var(--sc-text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.sc-factor-price em { font-style: normal; }
+.sc-factor-price em.pnl-up { color: #f0787c; }
+.sc-factor-price em.pnl-down { color: #4ac69a; }
 .sc-check-cell { width: 34px; box-sizing: border-box; text-align: center !important; }
 .sc-check-cell input,
 .sc-factor-checkbox { width: 15px; height: 15px; margin: 0; accent-color: var(--sc-accent); cursor: pointer; }
@@ -3764,7 +3801,7 @@ select.sc-input {
   .sc-explain-panel { grid-column: auto; }
   .sc-explain-panel:not(:has(.sc-explain-empty)) { display: block; }
   .sc-ranking-table-wrap { overflow-x: auto; }
-  .sc-ranking-table { min-width: 840px; }
+  .sc-ranking-table { min-width: 980px; }
   .sc-result-tabs { align-items: flex-start; flex-direction: column; gap: 0; padding-top: 4px; }
   .sc-result-tabset { min-height: 39px; }
   .sc-result-toolbar { width: 100%; min-height: 42px; margin-left: 0; padding-bottom: 6px; }
