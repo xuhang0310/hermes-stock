@@ -156,6 +156,15 @@ test('page uses aggregate bucket, hover preview, stale badge, PE column and mobi
   assert.match(viewSource, /点击固定选择/)
 })
 
+test('page chrome stays plain: no eyebrow labels, decorative numbers, arrows or separate monospace face', () => {
+  assert.doesNotMatch(viewSource, /ia-eyebrow/)
+  assert.doesNotMatch(viewSource, /section-number/)
+  assert.doesNotMatch(viewSource, /↗/)
+  assert.doesNotMatch(viewSource, /从行业，看见市场的方向/)
+  assert.doesNotMatch(viewSource, /Consolas|monospace/)
+  assert.match(viewSource, /ia-heading-note/)
+})
+
 test('watchlist respects permission and suppresses repeated submissions while pending', async () => {
   let calls = 0
   const request = deferred()

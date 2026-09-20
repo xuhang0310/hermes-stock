@@ -557,7 +557,6 @@ onBeforeUnmount(() => {
   >
     <header class="cockpit-command" data-testid="automatic-selection-command">
       <div class="command-identity">
-        <span class="eyebrow">确定性研究账本</span>
         <div class="command-title-line">
           <h1 id="automatic-selection-title">自动选股研究驾驶舱</h1>
           <span v-if="currentRun" class="run-context" :class="{ historical: !isSelectedLatestRun }">
@@ -660,7 +659,6 @@ onBeforeUnmount(() => {
         <aside class="run-rail cockpit-panel" aria-labelledby="run-selector-title">
           <header class="panel-heading">
             <div>
-              <span class="eyebrow">运行上下文</span>
               <h2 id="run-selector-title">运行选择</h2>
             </div>
             <span>{{ selectableRuns.length }}</span>
@@ -695,7 +693,6 @@ onBeforeUnmount(() => {
           <section class="rail-evidence" data-testid="automatic-selection-quality-gate" aria-labelledby="quality-gate-title">
             <header class="rail-section-title">
               <div>
-                <span class="eyebrow">数据质量门禁</span>
                 <h3 id="quality-gate-title">质量与排除证据</h3>
               </div>
               <span v-if="qualityGate" class="gate-dot" :class="qualityGate.passed ? 'gate-pass' : 'gate-blocked'">
@@ -764,7 +761,6 @@ onBeforeUnmount(() => {
         >
           <header class="ranking-toolbar">
             <div>
-              <span class="eyebrow">确定性排名证据</span>
               <h2 id="ranking-title">候选排名</h2>
               <p>按服务端名次与入选状态稳定呈现，页面不做二次排序。</p>
             </div>
@@ -929,7 +925,6 @@ onBeforeUnmount(() => {
         >
           <header class="panel-heading">
             <div>
-              <span class="eyebrow">标的证据</span>
               <h2 id="candidate-inspector-title">标的证据检查器</h2>
             </div>
             <span v-if="selectedCandidate">#{{ selectedCandidate.rank ?? '—' }}</span>
@@ -997,7 +992,6 @@ onBeforeUnmount(() => {
       <section class="validation-section" aria-labelledby="validation-title" data-testid="automatic-selection-validation">
         <header class="governance-heading">
           <div>
-            <span class="eyebrow">前瞻验证</span>
             <h2 id="validation-title">前瞻验证与落库后解释</h2>
           </div>
           <p>确定性排名先落库，统计观察与模型解释均不能回写排名。</p>
@@ -1053,7 +1047,6 @@ onBeforeUnmount(() => {
       <section class="governance-section" aria-labelledby="governance-title" data-testid="automatic-selection-governance">
         <header class="governance-heading">
           <div>
-            <span class="eyebrow">研究治理</span>
             <h2 id="governance-title">策略治理与运行审计</h2>
           </div>
           <p>生命周期动作由人确认；不可变版本与运行证据长期保留。</p>
@@ -1139,7 +1132,6 @@ onBeforeUnmount(() => {
         >
           <header>
             <div>
-              <span class="eyebrow">人工治理</span>
               <h2 v-if="strategyAction === 'create'" id="strategy-dialog-title">创建不可变策略版本</h2>
               <h2 v-else-if="strategyAction === 'promote'" id="strategy-dialog-title">人工晋升策略</h2>
               <h2 v-else id="strategy-dialog-title">退役策略</h2>
@@ -1183,13 +1175,9 @@ onBeforeUnmount(() => {
   color: var(--text);
 }
 
-.eyebrow,
 .boundary-mark {
   color: var(--gold);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
-  letter-spacing: .13em;
-  text-transform: uppercase;
 }
 
 .cockpit-command {
@@ -1217,7 +1205,7 @@ onBeforeUnmount(() => {
 .command-run > div { display: grid; align-content: center; gap: 4px; min-height: 48px; padding: 0 14px; border-right: 1px solid var(--line); }
 .command-run span { color: var(--muted); font-size: 11px; }
 .command-run strong { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.command-run > div:first-child strong { color: var(--gold-2); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 15px; }
+.command-run > div:first-child strong { color: var(--gold-2); font-size: 15px; font-variant-numeric: tabular-nums; }
 .command-actions { display: flex; gap: 7px; justify-content: flex-end; }
 
 .research-boundary {
@@ -1303,7 +1291,7 @@ onBeforeUnmount(() => {
 .run-option.selected { background: linear-gradient(90deg, rgba(213, 180, 106, .11), transparent); box-shadow: inset 2px 0 var(--gold); }
 .run-option-top,
 .run-option-bottom { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.run-option-top b { color: var(--text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.run-option-top b { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
 .run-option-top em { color: var(--gold-2); font-size: 11px; font-style: normal; }
 .run-option-top em.historical { color: var(--muted-2); }
 .run-option > span:nth-child(2) { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -1363,10 +1351,10 @@ onBeforeUnmount(() => {
 .candidate-row:hover { background: rgba(213, 180, 106, .03); }
 .candidate-row.selected { background: linear-gradient(90deg, rgba(213, 180, 106, .1), rgba(213, 180, 106, .025)); box-shadow: inset 2px 0 var(--gold); }
 .candidate-row.candidate-excluded { background-color: rgba(255, 93, 93, .022); }
-.rank-cell strong { color: #9d9480; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.rank-cell strong { color: #9d9480; font-size: 12px; font-variant-numeric: tabular-nums; }
 .candidate-button { display: grid; gap: 2px; width: 100%; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; }
 .candidate-button strong { overflow: hidden; color: #e7dfcd; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.candidate-button small { margin: 0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.candidate-button small { margin: 0; font-variant-numeric: tabular-nums; }
 .num { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .score-cell { color: var(--gold-2) !important; font-weight: 700; }
 .exclusion-cell { text-align: left; white-space: normal; }
@@ -1403,7 +1391,7 @@ onBeforeUnmount(() => {
 .factor-ledger { display: grid; gap: 1px; background: var(--line); }
 .factor-ledger > div { display: grid; grid-template-columns: minmax(0, 1fr) auto 24px; gap: 6px; align-items: center; min-height: 27px; padding: 4px 7px; background: #151517; }
 .factor-ledger span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.factor-ledger strong { color: #ddd5c1; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.factor-ledger strong { color: #ddd5c1; font-size: 11px; font-variant-numeric: tabular-nums; }
 .factor-ledger small { color: var(--gold-dim); font-size: 9px; text-align: right; text-transform: uppercase; }
 .market-evidence dl { display: grid; gap: 6px; margin: 0; }
 .market-evidence dl div { display: flex; justify-content: space-between; gap: 8px; }

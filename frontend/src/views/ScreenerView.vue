@@ -1197,7 +1197,6 @@ onBeforeUnmount(() => {
         <article class="sc-panel sc-composer">
           <header class="sc-panel-head">
             <div>
-              <span class="sc-eyebrow">快速选股</span>
               <h3>描述你想找什么样的股票</h3>
               <p>可以写市值、估值、量价、趋势等条件，AI 只负责翻译，执行前由你确认。</p>
             </div>
@@ -1232,7 +1231,6 @@ onBeforeUnmount(() => {
         <article class="sc-panel sc-profile">
           <header class="sc-panel-head sc-profile-head">
             <div>
-              <span class="sc-eyebrow">我的持仓风格</span>
               <h3>先看懂你，再给出推进策略</h3>
             </div>
             <span class="sc-count-badge">已分析 {{ smartRec?.position_count || 0 }} 只</span>
@@ -1267,7 +1265,6 @@ onBeforeUnmount(() => {
       <section class="sc-panel sc-personalized">
         <header class="sc-section-head">
           <div>
-            <span class="sc-eyebrow">持仓推进策略</span>
             <h3>从当前持仓继续往前走</h3>
           </div>
           <div class="sc-recommend-controls">
@@ -1326,7 +1323,6 @@ onBeforeUnmount(() => {
         <article class="sc-panel sc-template-library">
           <header class="sc-section-head">
             <div>
-              <span class="sc-eyebrow">快速模板</span>
               <h3>从成熟条件组合开始</h3>
             </div>
             <button type="button" class="sc-text-btn" @click="showAllTemplates = !showAllTemplates">
@@ -1360,7 +1356,6 @@ onBeforeUnmount(() => {
         <article class="sc-panel sc-history">
           <header class="sc-section-head">
             <div>
-              <span class="sc-eyebrow">历史提示词</span>
               <h3>用过的想法，都可以再次调用</h3>
             </div>
             <span>已保留 {{ historyTotal }} 条</span>
@@ -1426,7 +1421,6 @@ onBeforeUnmount(() => {
         <header class="sc-strategy-hero">
           <div class="sc-strategy-heading">
             <div>
-              <span class="sc-eyebrow">策略构建</span>
               <h2>{{ activeStrategyName }}</h2>
             </div>
             <span class="sc-run-status" :class="{ 'is-ready': ran }">{{ parseLoading ? '解析条件中' : running ? '运行中' : ran ? '已运行' : '待运行' }}</span>
@@ -1567,7 +1561,7 @@ onBeforeUnmount(() => {
             <div v-if="ruleEditorOpen" class="sc-rule-dialog-backdrop" @mousedown.self="closeRuleEditor">
               <section ref="ruleEditor" class="sc-rule-config-dialog" role="dialog" aria-modal="true" aria-labelledby="sc-rule-dialog-title" @input="strategySaved = false" @keydown="handleRuleEditorDialogKeydown">
                 <header class="sc-rule-dialog-header">
-                  <div><span class="sc-eyebrow">编辑筛选条件</span><h3 id="sc-rule-dialog-title">设定策略范围与筛选规则</h3><p>留空表示不限，所有条件按“并且”执行</p></div>
+                  <div><h3 id="sc-rule-dialog-title">设定策略范围与筛选规则</h3><p>留空表示不限，所有条件按“并且”执行</p></div>
                   <button type="button" class="sc-rule-dialog-close" aria-label="关闭条件编辑" @click="closeRuleEditor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg></button>
                 </header>
                 <div class="sc-rule-dialog-body">
@@ -1595,7 +1589,7 @@ onBeforeUnmount(() => {
 
       <section v-else class="sc-saved-workspace">
         <header class="sc-panel sc-saved-hero">
-          <div><span class="sc-eyebrow">我的策略</span><h3>保存过的筛选条件</h3><p>可以直接运行，也可以打开后调整并覆盖保存。</p></div>
+          <div><h3>保存过的筛选条件</h3><p>可以直接运行，也可以打开后调整并覆盖保存。</p></div>
           <button type="button" class="sc-btn sc-btn-primary" @click="openBuilder">新建策略</button>
         </header>
         <div v-if="savedError" class="notice notice-danger"><strong>读取策略失败</strong><span>{{ savedError }}</span></div>
@@ -1832,7 +1826,7 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   color: var(--text);
   font-size: 12.5px;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
@@ -1902,7 +1896,7 @@ select.sc-input {
 
 .sc-table .num {
   text-align: right;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /* A 股红涨绿跌：本表 td 自带 color，需用更高特异性覆盖全局 .pnl-up/.pnl-down */
@@ -1915,7 +1909,7 @@ select.sc-input {
 }
 
 .sc-symbol {
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
   color: var(--gold-2);
 }
 
@@ -2656,15 +2650,6 @@ select.sc-input {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-}
-
-.sc-eyebrow {
-  display: block;
-  margin-bottom: 7px;
-  color: var(--sc-accent-strong);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
 }
 
 .sc-panel h3 {
