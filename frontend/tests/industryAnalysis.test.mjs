@@ -10,7 +10,7 @@ const server = await createServer({
   root: fileURLToPath(new URL('../', import.meta.url)), appType: 'custom',
   optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true, hmr: false }
 })
-const { industryTiles, industryQuestion, mergeSmallIndustries, OTHER_INDUSTRY } = await server.ssrLoadModule('/src/utils/industry.ts')
+const { industryTiles, industryQuestion, mergeSmallIndustries, OTHER_INDUSTRY, leaderScores } = await server.ssrLoadModule('/src/utils/industry.ts')
 await server.close()
 
 test('treemap is bounded, non-overlapping, and proportional for uneven industry sizes', () => {
@@ -76,7 +76,51 @@ test('research prompt keeps industry, date, genuine zero and missing values dist
   assert.match(prompt, /先核对最新行情/)
 })
 
+test('leader scores are min-max normalized, equal-weighted, and honest about missing factors', () => {
+  const member = (symbol, pct_chg, extras = {}) => ({
+    symbol, name: symbol, market: 'SH', price: 10, trade_date: '2026-09-18',
+    volume_ratio: 1, turnover_rate: 1, total_mv_yi: 100, pe_ttm: 10, ma_value: null,
+    industry: '银行', amount_yi: 10, status: 'valid', pct_chg, ...extras,
+  })
+  const rows = leaderScores([
+    member('600001.SH', 10, { turnover_rate: 8, amount_yi: 50, volume_ratio: 3, total_mv_yi: 300 }),
+    member('600002.SH', 0, { turnover_rate: 2, amount_yi: 10, volume_ratio: 1, total_mv_yi: 100 }),
+    member('600003.SH', 5, { turnover_rate: null, amount_yi: null, volume_ratio: null, total_mv_yi: null }),
+    member('600004.SH', 99, { status: 'no_trade' }),
+  ])
+  assert.equal(rows.length, 3, 'non-trading members must not enter the leader board')
+  assert.equal(rows[0].member.symbol, '600001.SH')
+  const top = rows[0]
+  assert.equal(top.factors.find(factor => factor.key === 'pct_chg').score, 100)
+  assert.equal(rows[2].member.symbol, '600002.SH')
+  assert.equal(rows[2].factors.find(factor => factor.key === 'pct_chg').score, 0)
+  const missing = rows[1].factors.find(factor => factor.key === 'turnover_rate')
+  assert.equal(missing.value, null)
+  assert.equal(missing.score, 0)
+  for (const row of rows) {
+    const expected = Math.round(row.factors.reduce((sum, factor) => sum + factor.score, 0) / row.factors.length)
+    assert.equal(row.composite, expected)
+  }
+  assert.equal(leaderScores([], 5).length, 0)
+})
+
 const viewSource = await readFile(new URL('../src/views/IndustryAnalysisView.vue', import.meta.url), 'utf8')
+
+test('page renders dual leader boards, ranking strength bars and leader score decomposition', () => {
+  assert.match(viewSource, /data-testid="industry-gainers-board"/)
+  assert.match(viewSource, /data-testid="industry-laggards-board"/)
+  assert.match(viewSource, /领涨主线/)
+  assert.match(viewSource, /领跌方向/)
+  assert.match(viewSource, /row\.leaders/)
+  assert.match(viewSource, /\{\{ row\.up_count \}\}涨 \{\{ row\.down_count \}\}跌/)
+  assert.match(viewSource, /ia-board-track/)
+  assert.match(viewSource, /ia-row-track/)
+  assert.match(viewSource, /data-testid="industry-leader-scores"/)
+  assert.match(viewSource, /龙头评分拆解/)
+  assert.match(viewSource, /上涨占比/)
+  assert.match(viewSource, /成交额/)
+  assert.match(viewSource, /不代表收益预测/)
+})
 const setup = viewSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
 const executable = ts.transpileModule(`${setup}\nObject.assign(globalThis, { harness: { refresh, loadMembers, addWatchlist, data, members, selected, error, memberError, memberLoading, adding, added } })`, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }

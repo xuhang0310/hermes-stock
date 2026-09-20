@@ -1583,6 +1583,7 @@ export type IndustryStat = {
   no_trade_count: number
   invalid_count: number
   leader: IndustryMember | null
+  leaders: IndustryMember[]
 }
 
 export type IndustryOverview = {

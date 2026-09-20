@@ -91,6 +91,7 @@ def _aggregate(industry: str, members: list[dict]) -> dict:
     amounts = [item["amount_yi"] for item in valid if item["amount_yi"] is not None]
     up = sum(value > 0 for value in pcts)
     down = sum(value < 0 for value in pcts)
+    leaders = sorted(valid, key=lambda item: (-item["pct_chg"], item["symbol"]))[:3]
     return {
         "industry": industry, "stock_count": len(members), "valid_count": len(valid),
         "coverage": len(valid) / len(members),
@@ -103,7 +104,8 @@ def _aggregate(industry: str, members: list[dict]) -> dict:
         "missing_count": sum(item["status"] == "missing" for item in members),
         "no_trade_count": sum(item["status"] == "no_trade" for item in members),
         "invalid_count": sum(item["status"] == "invalid" for item in members),
-        "leader": sorted(valid, key=lambda item: (-item["pct_chg"], item["symbol"]))[0] if valid else None,
+        "leader": leaders[0] if leaders else None,
+        "leaders": leaders,
     }
 
 

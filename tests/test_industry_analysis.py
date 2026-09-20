@@ -206,3 +206,17 @@ def test_industry_screener_filter_is_exact_and_preserved(client, db_factory):
     assert screener_service.run_screener(industry='银')['total'] == 0
     assert screener_ai._sanitize({'industry': ' 银行 '})['industry'] == '银行'
     assert '行业「银行」' in screener_ai._summarize(query)
+
+
+def test_aggregate_leaders_are_top_three_valid_members_by_strength():
+    members = [
+        {"symbol": "600001.SH", "name": "甲", "pct_chg": 9.9, "amount_yi": 1.0, "status": "valid"},
+        {"symbol": "600002.SH", "name": "乙", "pct_chg": 5.0, "amount_yi": 1.0, "status": "valid"},
+        {"symbol": "600003.SH", "name": "丙", "pct_chg": 3.0, "amount_yi": 1.0, "status": "valid"},
+        {"symbol": "600004.SH", "name": "丁", "pct_chg": 1.0, "amount_yi": 1.0, "status": "valid"},
+        {"symbol": "600005.SH", "name": "停牌", "pct_chg": 50.0, "amount_yi": None, "status": "no_trade"},
+    ]
+    agg = service._aggregate("银行", members)
+    assert [item["symbol"] for item in agg["leaders"]] == ["600001.SH", "600002.SH", "600003.SH"]
+    assert agg["leader"]["symbol"] == "600001.SH"
+    assert agg["up_count"] == 4 and agg["valid_count"] == 4

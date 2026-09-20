@@ -2528,9 +2528,19 @@ select.sc-input {
   white-space: nowrap;
 }
 
-.sc-data-status button,
+.sc-data-status button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sc-accent-strong);
+  font: inherit;
+  cursor: pointer;
+}
 
-.sc-data-status button:disabled,
+.sc-data-status button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 
 .sc-status-dot {
   width: 6px;
