@@ -52,3 +52,10 @@ test('factor cards and comparison cards carry price context', () => {
   assert.ok(factorPriceLines.length >= 3, 'factor and compare cards should both show the price line plus styles')
   assert.match(viewSource, /最新 \{\{ formatNum\(item\.price\) \}\} · <em :class="pctTone\(item\.pct_chg\)">\{\{ formatPct\(item\.pct_chg\) \}\}<\/em>/)
 })
+
+test('page chrome stays plain: no eyebrow labels and one unified font with tabular numerals', () => {
+  assert.doesNotMatch(viewSource, /sc-eyebrow/)
+  assert.doesNotMatch(viewSource, /class="eyebrow"/)
+  assert.doesNotMatch(viewSource, /font-family: ui-monospace/)
+  assert.match(viewSource, /font-variant-numeric: tabular-nums/)
+})
