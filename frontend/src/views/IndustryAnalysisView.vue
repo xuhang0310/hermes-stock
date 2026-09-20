@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError } from '../api'
 import type { IndustryMember, IndustryMembers, IndustryOverview, IndustryStat, UserPayload, WatchlistItem } from '../types'
-import { industryTiles, mergeSmallIndustries, OTHER_INDUSTRY, leaderScores } from '../utils/industry'
+import { industryTiles, mergeSmallIndustries, OTHER_INDUSTRY, leaderScores, industryStrength } from '../utils/industry'
 
 const props = defineProps<{ user: UserPayload }>()
 const emit = defineEmits<{
@@ -47,7 +47,12 @@ const gainers = computed(() => [...rankedIndustries.value]
 const laggards = computed(() => [...rankedIndustries.value]
   .sort((a, b) => (a.avg_pct ?? 0) - (b.avg_pct ?? 0) || a.industry.localeCompare(b.industry))
   .slice(0, 10))
-const leaderScoreRows = computed(() => leaderScores(members.value?.items ?? []))
+const memberScoreRows = computed(() => leaderScores(members.value?.items ?? [], 30))
+const memberScoreMap = computed(() => new Map(memberScoreRows.value.map(row => [row.member.symbol, row.composite])))
+const leaderScoreRows = computed(() => memberScoreRows.value.slice(0, 5))
+const strengthMap = computed(() => industryStrength(all.value))
+const strengthOf = (industry: string) => strengthMap.value.get(industry)
+const worst = computed(() => [...rankedIndustries.value].sort((a, b) => (a.avg_pct ?? 0) - (b.avg_pct ?? 0))[0] ?? null)
 function boardBarWidth(value: number | null, rows: IndustryStat[]): string {
   const max = Math.max(...rows.map(row => Math.abs(row.avg_pct ?? 0)), 0.01)
   return `${Math.max(6, Math.min(100, Math.abs(value ?? 0) / max * 100))}%`
@@ -146,8 +151,9 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
       <div v-if="!data.as_of || !all.length" class="ia-empty"><div class="ia-empty-mark">▦</div><h3>{{ !data.as_of ? '先准备一份市场日线' : '还没有可用的行业分类' }}</h3><p>到 AI 选股页同步全市场行情和股票目录，再回来查看行业分布。</p><button type="button" class="ui-btn ui-btn--primary" @click="emit('openScreener')">去同步数据</button></div>
       <template v-else>
         <div class="ia-metrics">
-          <article><span>行业分布</span><strong>{{ all.length }}<small> 个行业</small></strong><p><b class="rise">{{ up }} 上涨</b><i> / </i><b class="fall">{{ down }} 下跌</b></p></article>
-          <article><span>等权涨幅领先</span><strong>{{ leading?.industry || '—' }}</strong><p :class="direction(leading?.avg_pct)">{{ pct(leading?.avg_pct) }}<small> 成分股均值</small></p></article>
+          <article class="is-hot"><span>最强行业</span><strong>{{ leading?.industry || '—' }}</strong><p :class="direction(leading?.avg_pct)">{{ pct(leading?.avg_pct) }}<small> 成分股等权均值</small></p></article>
+          <article><span>最大风险</span><strong>{{ worst?.industry || '—' }}</strong><p :class="direction(worst?.avg_pct)">{{ pct(worst?.avg_pct) }}<small> 成分股等权均值</small></p></article>
+          <article><span>涨跌行业</span><strong><b class="rise">{{ up }}</b><i> / </i><b class="fall">{{ down }}</b></strong><p><small>上涨 / 下跌 · 共 {{ all.length }} 个行业</small></p></article>
           <article><span>成交最活跃</span><strong>{{ active?.industry || '—' }}</strong><p>{{ number(active?.amount_yi) }}<small> 亿元 · 非资金净流入</small></p></article>
           <article><span>数据覆盖</span><strong>{{ (data.coverage.bar_ratio * 100).toFixed(1) }}<small>%</small></strong><p>覆盖 {{ data.coverage.bar_count.toLocaleString() }} / {{ data.coverage.stock_count.toLocaleString() }} 只<i> · </i>缺 {{ data.coverage.missing_count }} · 无成交 {{ data.coverage.no_trade_count }}</p></article>
         </div>
@@ -156,10 +162,10 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
             <header><h3>领涨主线</h3><span>Top 10 · 按成分股等权涨幅</span></header>
             <button v-for="(row, index) in gainers" :key="row.industry" type="button" class="ia-board-row" :class="{ 'is-selected': selected === row.industry }" @click="choose(row.industry)">
               <span class="ia-board-rank">{{ index + 1 }}</span>
-              <span class="ia-board-name"><b>{{ row.industry }}</b><small>{{ row.up_count }}涨 {{ row.down_count }}跌</small></span>
-              <span class="ia-board-track"><em class="up" :style="{ width: boardBarWidth(row.avg_pct, gainers) }"></em></span>
-              <b class="rise">{{ pct(row.avg_pct) }}</b>
-              <span class="ia-board-leaders"><i v-for="lead in row.leaders" :key="lead.symbol">{{ lead.name }} {{ pct(lead.pct_chg) }}</i></span>
+              <span class="ia-board-name"><b>{{ row.industry }}</b><small><i class="rise">{{ row.up_count }}涨</i> <i class="fall">{{ row.down_count }}跌</i></small></span>
+              <b class="rise ia-board-pct">{{ pct(row.avg_pct) }}</b>
+              <span class="ia-board-leaders"><i v-for="lead in row.leaders" :key="lead.symbol">{{ lead.name }} <em class="rise">{{ pct(lead.pct_chg) }}</em></i></span>
+              <i class="ia-row-track"><em class="up" :style="{ width: boardBarWidth(row.avg_pct, gainers) }"></em></i>
             </button>
             <p v-if="!gainers.length" class="ia-inline-empty">暂无可统计的行业。</p>
           </article>
@@ -167,10 +173,10 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
             <header><h3>领跌方向</h3><span>Top 10 · 关注行业内逆势标的</span></header>
             <button v-for="(row, index) in laggards" :key="row.industry" type="button" class="ia-board-row" :class="{ 'is-selected': selected === row.industry }" @click="choose(row.industry)">
               <span class="ia-board-rank">{{ index + 1 }}</span>
-              <span class="ia-board-name"><b>{{ row.industry }}</b><small>{{ row.up_count }}涨 {{ row.down_count }}跌</small></span>
-              <span class="ia-board-track"><em class="down" :style="{ width: boardBarWidth(row.avg_pct, laggards) }"></em></span>
-              <b class="fall">{{ pct(row.avg_pct) }}</b>
-              <span class="ia-board-leaders"><i v-for="lead in row.leaders" :key="lead.symbol">{{ lead.name }} {{ pct(lead.pct_chg) }}</i></span>
+              <span class="ia-board-name"><b>{{ row.industry }}</b><small><i class="rise">{{ row.up_count }}涨</i> <i class="fall">{{ row.down_count }}跌</i></small></span>
+              <b class="fall ia-board-pct">{{ pct(row.avg_pct) }}</b>
+              <span class="ia-board-leaders"><i v-for="lead in row.leaders" :key="lead.symbol">{{ lead.name }} <em class="rise">{{ pct(lead.pct_chg) }}</em></i></span>
+              <i class="ia-row-track"><em class="down" :style="{ width: boardBarWidth(row.avg_pct, laggards) }"></em></i>
             </button>
             <p v-if="!laggards.length" class="ia-inline-empty">暂无可统计的行业。</p>
           </article>
@@ -205,16 +211,29 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
             </template>
             <div v-else class="ia-rank-list">
               <div class="ia-rank-label"><span>行业 / 有效样本</span><span>等权涨幅</span><span>上涨占比</span><span>成交额 / 亿</span></div>
-              <button v-for="row in visible" :key="row.industry" type="button" :class="{ 'is-selected': selected === row.industry }" :aria-pressed="selected === row.industry" @click="choose(row.industry)"><span><b>{{ row.industry }}</b><small>{{ row.up_count }}涨 {{ row.down_count }}跌 · 有效 {{ row.valid_count }}/{{ row.stock_count }}</small></span><b :class="direction(row.avg_pct)">{{ pct(row.avg_pct) }}</b><span>{{ row.up_ratio == null ? '—' : `${(row.up_ratio * 100).toFixed(0)}%` }}</span><span>{{ number(row.amount_yi, 1) }}</span><i class="ia-row-track"><em :class="(row.avg_pct ?? 0) >= 0 ? 'up' : 'down'" :style="{ width: boardBarWidth(row.avg_pct, visible) }"></em></i></button>
+              <button v-for="row in visible" :key="row.industry" type="button" :class="{ 'is-selected': selected === row.industry }" :aria-pressed="selected === row.industry" @click="choose(row.industry)"><span><b>{{ row.industry }}</b><small><i class="rise">{{ row.up_count }}涨</i> <i class="fall">{{ row.down_count }}跌</i> · 有效 {{ row.valid_count }}/{{ row.stock_count }}</small></span><b :class="direction(row.avg_pct)">{{ pct(row.avg_pct) }}<small v-if="strengthOf(row.industry) != null" class="ia-strength">强度 {{ strengthOf(row.industry) }}</small></b><span>{{ row.up_ratio == null ? '—' : `${(row.up_ratio * 100).toFixed(0)}%` }}</span><span>{{ number(row.amount_yi, 1) }}</span><i class="ia-row-track"><em :class="(row.avg_pct ?? 0) >= 0 ? 'up' : 'down'" :style="{ width: boardBarWidth(row.avg_pct, visible) }"></em></i></button>
             </div>
             <details class="ia-method"><summary>统计口径与数据说明</summary><p>按 {{ data.as_of }} 的 TuShare 日线与同日每日指标计算。涨跌幅为成分股等权均值，并非官方行业指数。无成交、无行情和字段不完整的股票不计入涨跌统计。</p><p>分类为当前股票目录；只接受单位明确的 TuShare 日线。日线覆盖达到 90% 时优先选用该日期，不代表数据绝对完整。没有行业分类 {{ data.coverage.unclassified_count }} 只，行情字段不完整 {{ data.coverage.invalid_count }} 只。</p></details>
           </section>
           <section class="ia-panel ia-detail" aria-label="行业成分股" :aria-busy="memberLoading">
-            <div class="ia-panel-head"><div><h3>{{ current?.industry || '选择一个行业' }}</h3><span class="ia-count">{{ current?.stock_count ?? 0 }} 只</span></div><button v-if="current" type="button" class="ui-btn ui-btn--primary" @click="emit('screenIndustry', current.industry)">去选股</button></div>
+            <div class="ia-panel-head"><div><h3>{{ current?.industry || '选择一个行业' }}</h3><span v-if="current && strengthOf(current.industry) != null" class="ia-strength-pill">强度 {{ strengthOf(current.industry) }}</span><span class="ia-count">{{ current?.stock_count ?? 0 }} 只</span></div><button v-if="current" type="button" class="ui-btn ui-btn--primary" @click="emit('screenIndustry', current.industry)">去选股</button></div>
             <template v-if="current">
-              <div class="ia-detail-summary"><div><small>等权涨跌幅</small><strong :class="direction(current.avg_pct)">{{ pct(current.avg_pct) }}</strong></div><div><small>中位涨跌幅</small><strong :class="direction(current.median_pct)">{{ pct(current.median_pct) }}</strong></div><div><small>上涨占比</small><strong :class="direction(current.up_ratio != null && current.up_ratio >= 0.5 ? 1 : -1)">{{ current.up_ratio == null ? '—' : `${(current.up_ratio * 100).toFixed(0)}%` }}</strong></div><div><small>成交额</small><strong>{{ number(current.amount_yi, 1) }}</strong></div><div><small>上涨 / 下跌 / 平盘</small><strong><span class="rise">{{ current.up_count }}</span> / <span class="fall">{{ current.down_count }}</span> / {{ current.flat_count }}</strong></div></div>
+              <p class="ia-detail-meta">{{ current.stock_count }} 只成分 · 平均 {{ pct(current.avg_pct) }} · 上涨占比 {{ current.up_ratio == null ? '—' : `${(current.up_ratio * 100).toFixed(0)}%` }} · 成交额 {{ number(current.amount_yi, 1) }} 亿</p>
+              <div class="ia-detail-summary"><div><small>等权涨跌幅</small><strong :class="direction(current.avg_pct)">{{ pct(current.avg_pct) }}</strong></div><div><small>中位涨跌幅</small><strong :class="direction(current.median_pct)">{{ pct(current.median_pct) }}</strong></div><div><small>强势</small><strong class="rise">{{ current.up_count }}</strong></div><div><small>弱势</small><strong class="fall">{{ current.down_count }}</strong></div><div><small>上涨占比</small><strong :class="direction(current.up_ratio != null && current.up_ratio >= 0.5 ? 1 : -1)">{{ current.up_ratio == null ? '—' : `${(current.up_ratio * 100).toFixed(0)}%` }}</strong></div></div>
               <div class="ia-breadth" aria-hidden="true" :title="`上涨 ${current.up_count} · 平盘 ${current.flat_count} · 下跌 ${current.down_count}`"><span class="ia-up-bar" :style="{ width: `${current.valid_count ? current.up_count / current.valid_count * 100 : 0}%` }" /><span class="ia-flat-bar" :style="{ width: `${current.valid_count ? current.flat_count / current.valid_count * 100 : 0}%` }" /><span class="ia-down-bar" :style="{ width: `${current.valid_count ? current.down_count / current.valid_count * 100 : 0}%` }" /></div>
               <p class="ia-note">有效 {{ current.valid_count }}/{{ current.stock_count }} · 缺日线 {{ current.missing_count }} · 无成交 {{ current.no_trade_count }} · 成交额覆盖 {{ current.amount_count }} 只</p>
+              <section v-if="current.leaders.length" class="ia-leader-cards" aria-label="本行业三龙头">
+                <h4>本行业龙头</h4>
+                <div>
+                  <article v-for="(lead, index) in current.leaders" :key="lead.symbol" :class="{ 'is-main': index === 0 }">
+                    <small>{{ index === 0 ? '👑 主龙头' : `辅龙 ${index}` }}</small>
+                    <strong>{{ lead.name }}</strong>
+                    <span>{{ lead.symbol }}</span>
+                    <b :class="direction(lead.pct_chg)">{{ pct(lead.pct_chg) }}</b>
+                    <em v-if="memberScoreMap.get(lead.symbol) != null">{{ memberScoreMap.get(lead.symbol) }} 分</em>
+                  </article>
+                </div>
+              </section>
               <section v-if="leaderScoreRows.length" class="ia-leader-board" data-testid="industry-leader-scores" aria-label="龙头评分拆解">
                 <h4>龙头评分拆解</h4>
                 <article v-for="row in leaderScoreRows" :key="row.member.symbol">
@@ -222,7 +241,7 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
                   <div class="ia-leader-factors">
                     <div v-for="factor in row.factors" :key="factor.key">
                       <span>{{ factor.label }}</span>
-                      <i><em :style="{ width: `${factor.score}%` }"></em></i>
+                      <i><em :class="`f-${factor.key}`" :style="{ width: `${factor.score}%` }"></em></i>
                       <b>{{ factor.value == null ? '—' : factor.score }}</b>
                     </div>
                   </div>
@@ -234,7 +253,7 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
               <p v-if="memberError" class="ia-message ia-error" role="alert">{{ memberError }} <button type="button" @click="refresh">刷新数据</button></p>
               <div v-else-if="memberLoading" class="ia-inline-empty" role="status">正在读取 {{ current.industry }} 成分股…</div>
               <div v-else-if="members" class="ia-table-wrap">
-                <table><thead><tr><th>股票</th><th>涨跌幅</th><th>成交额<small>亿元</small></th><th>换手率</th><th>量比</th><th>PE<small>TTM</small></th><th>总市值<small>亿元</small></th><th>研究</th></tr></thead><tbody><tr v-for="item in members.items" :key="item.symbol"><td><strong>{{ item.name }}</strong><small>{{ item.symbol }}</small><em v-if="item.status !== 'valid'">{{ statusLabel[item.status] }}</em></td><td :class="direction(item.pct_chg)">{{ pct(item.pct_chg) }}</td><td>{{ number(item.amount_yi) }}</td><td>{{ item.turnover_rate == null ? '—' : `${number(item.turnover_rate)}%` }}</td><td>{{ number(item.volume_ratio) }}</td><td>{{ number(item.pe_ttm, 1) }}</td><td>{{ number(item.total_mv_yi, 1) }}</td><td><div class="ia-row-actions"><button v-if="canAsk" type="button" :aria-label="`问股 ${item.name}`" @click="emit('askStock', item)">问股</button><button v-if="canWrite" type="button" :disabled="adding.has(item.symbol) || added.has(item.symbol)" :aria-label="`加入自选 ${item.name}`" @click="addWatchlist(item)">{{ adding.has(item.symbol) ? '添加中' : added.has(item.symbol) ? '已加入' : '+ 自选' }}</button></div></td></tr></tbody></table>
+                <table><thead><tr><th>股票</th><th>涨跌幅</th><th>成交额<small>亿元</small></th><th>换手率</th><th>量比</th><th>PE<small>TTM</small></th><th>总市值<small>亿元</small></th><th>龙头分</th><th>研究</th></tr></thead><tbody><tr v-for="item in members.items" :key="item.symbol"><td><strong>{{ item.name }}</strong><small>{{ item.symbol }}</small><em v-if="item.status !== 'valid'">{{ statusLabel[item.status] }}</em></td><td :class="direction(item.pct_chg)">{{ pct(item.pct_chg) }}</td><td>{{ number(item.amount_yi) }}</td><td>{{ item.turnover_rate == null ? '—' : `${number(item.turnover_rate)}%` }}</td><td>{{ number(item.volume_ratio) }}</td><td>{{ number(item.pe_ttm, 1) }}</td><td>{{ number(item.total_mv_yi, 1) }}</td><td><span v-if="memberScoreMap.get(item.symbol) != null" class="ia-score-cell"><i><em :style="{ width: `${memberScoreMap.get(item.symbol)}%` }"></em></i>{{ memberScoreMap.get(item.symbol) }}</span><span v-else>—</span></td><td><div class="ia-row-actions"><button v-if="canAsk" type="button" :aria-label="`问股 ${item.name}`" @click="emit('askStock', item)">问股</button><button v-if="canWrite" type="button" :disabled="adding.has(item.symbol) || added.has(item.symbol)" :aria-label="`加入自选 ${item.name}`" @click="addWatchlist(item)">{{ adding.has(item.symbol) ? '添加中' : added.has(item.symbol) ? '已加入' : '+ 自选' }}</button></div></td></tr></tbody></table>
                 <p v-if="!members.items.length" class="ia-inline-empty">当前行业暂无成分股。</p>
               </div>
               <div v-if="members && members.total > 30" class="ia-pagination"><span>第 {{ page + 1 }} / {{ Math.ceil(members.total / 30) }} 页 · {{ members.total }} 只</span><button type="button" :disabled="page === 0" @click="page--">上一页</button><button type="button" :disabled="(page + 1) * 30 >= members.total" @click="page++">下一页</button></div>
@@ -272,30 +291,37 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
 .ia-meta button { margin-left: auto; border: none; background: none; padding: 0; color: var(--gold); }
 .ia-message { border-left: 2px solid var(--gold); background: #d5b46a09; padding: 9px 14px; font-size: 12px; color: #cbb988; margin: 14px 0; line-height: 1.8; }
 .ia-message p { margin: 0; }.ia-error { color: var(--danger); border-color: var(--danger); }.ia-message button { margin-left: 10px; }
-.ia-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); padding: 24px 0; }
-.ia-metrics article { padding: 0 22px; border-left: 1px solid var(--line); }.ia-metrics article:first-child { padding-left: 0; border: 0; }
-.ia-metrics article > span { color: var(--muted); font-size: 12px; }.ia-metrics strong { display: block; font-size: 24px; margin: 10px 0 8px; font-weight: 500; }
-.ia-metrics small { font-size: 12px; color: var(--muted); font-weight: 400; }.ia-metrics p { font-size: 12px; margin: 0; }.ia-metrics b { font-weight: 400; }.ia-metrics i { font-style: normal; color: var(--muted-2); }
+.ia-metrics { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 14px; padding: 4px 0 20px; }
+.ia-metrics article { min-width: 0; padding: 14px 18px; border-radius: 8px; background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, .28); }
+.ia-metrics article.is-hot { background: linear-gradient(135deg, rgba(233, 100, 103, .12), var(--surface) 62%); }
+.ia-metrics article > span { color: var(--muted); font-size: 12px; }
+.ia-metrics strong { display: block; overflow: hidden; margin: 8px 0 6px; font-size: 20px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ia-metrics strong b { font-weight: 600; }
+.ia-metrics small { font-size: 12px; color: var(--muted); font-weight: 400; }
+.ia-metrics p { font-size: 13px; margin: 0; font-variant-numeric: tabular-nums; }
+.ia-metrics i { font-style: normal; color: var(--muted-2); }
 .ia-workspace { display: grid; grid-template-columns: minmax(330px, .9fr) minmax(450px, 1.25fr); gap: 18px; align-items: start; }
 .ia-dual-board { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-bottom: 18px; }
-.ia-board { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; min-width: 0; }
-.ia-board > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--line); }
+.ia-board { background: var(--surface); border: 0; border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); overflow: hidden; min-width: 0; }
+.ia-board > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 18px 10px; }
 .ia-board > header h3 { margin: 0; font-size: 16px; font-weight: 500; }
 .ia-board > header span { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.ia-board-row { position: relative; display: grid; grid-template-columns: 26px minmax(96px, 1.1fr) minmax(80px, 1fr) 62px; align-items: center; gap: 8px; width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 10px 18px 12px; background: none; text-align: left; }
+.ia-board-row { position: relative; display: grid; grid-template-columns: 20px minmax(96px, 1.1fr) auto; align-items: center; gap: 8px; width: 100%; border: 0; border-radius: 0; padding: 9px 18px 13px; background: none; text-align: left; }
 .ia-board-row:hover { background: rgba(213, 180, 106, .05); }
 .ia-board-row.is-selected { background: rgba(213, 180, 106, .08); box-shadow: inset 2px 0 var(--gold); }
-.ia-board-rank { color: var(--gold-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+.ia-board-rank { color: var(--muted-2); font-size: 12px; font-variant-numeric: tabular-nums; }
 .ia-board-name { min-width: 0; }
-.ia-board-name b { display: block; overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.ia-board-name small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.ia-board-track { height: 4px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
-.ia-board-track em { display: block; height: 100%; border-radius: 999px; }
-.ia-board-track em.up { background: var(--up); }
-.ia-board-track em.down { background: var(--down); }
-.ia-board-row > b { font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
-.ia-board-leaders { display: flex; flex-wrap: wrap; grid-column: 1 / -1; gap: 3px 12px; }
+.ia-board-name b { display: inline; font-size: 13px; font-weight: 500; }
+.ia-board-name small { margin-left: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.ia-board-name small i { font-style: normal; }
+.ia-board-pct { font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.ia-board-leaders { display: flex; flex-wrap: wrap; grid-column: 2 / -1; gap: 2px 14px; }
 .ia-board-leaders i { color: var(--muted); font-size: 12px; font-style: normal; font-variant-numeric: tabular-nums; }
+.ia-board-leaders em { font-style: normal; }
+.ia-row-track { position: absolute; right: 18px; bottom: 5px; left: 18px; height: 2px; }
+.ia-row-track em { display: block; height: 100%; border-radius: 999px; }
+.ia-row-track em.up { background: linear-gradient(90deg, #e96467, #d9a13d); }
+.ia-row-track em.down { background: linear-gradient(90deg, #37ad86, #4ac69a); }
 .ia-leader-board { padding: 14px 18px 2px; border-top: 1px solid var(--line); }
 .ia-leader-board > h4 { margin: 0 0 10px; font-size: 13px; font-weight: 500; }
 .ia-leader-board article { margin-bottom: 12px; }
@@ -306,25 +332,44 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
 .ia-leader-factors { display: grid; gap: 4px; }
 .ia-leader-factors > div { display: grid; grid-template-columns: 46px 1fr 30px; align-items: center; gap: 8px; }
 .ia-leader-factors span { color: var(--muted); font-size: 12px; }
-.ia-leader-factors i { height: 4px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
-.ia-leader-factors em { display: block; height: 100%; background: linear-gradient(90deg, var(--gold-dim), var(--gold-2)); }
+.ia-leader-factors i { height: 3px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.ia-leader-factors em { display: block; height: 100%; border-radius: 999px; }
+.ia-leader-factors em.f-pct_chg { background: #e96467; }
+.ia-leader-factors em.f-turnover_rate { background: #d9a13d; }
+.ia-leader-factors em.f-amount_yi { background: #3bb2d6; }
+.ia-leader-factors em.f-volume_ratio { background: #8b6fd8; }
+.ia-leader-factors em.f-total_mv_yi { background: #37ad86; }
 .ia-leader-factors b { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
-.ia-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; min-width: 0; }
-.ia-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 64px; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+.ia-score-cell { display: inline-flex; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
+.ia-score-cell i { display: block; width: 46px; height: 4px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.ia-score-cell em { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--gold-dim), var(--gold-2)); }
+.ia-panel { background: var(--surface); border: 0; border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); overflow: hidden; min-width: 0; }
+.ia-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 58px; padding: 13px 18px; border-bottom: 1px solid var(--line); }
 .ia-panel-head > div { display: flex; align-items: center; gap: 10px; min-width: 0; }.ia-panel-head h3 { font-size: 16px; margin: 0; font-weight: 500; }.ia-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.ia-strength-pill { border: 1px solid var(--gold-dim); border-radius: 999px; padding: 2px 8px; background: rgba(213, 180, 106, .1); color: var(--gold-2); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ia-detail-meta { margin: 0; padding: 12px 18px 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ia-leader-cards { padding: 14px 18px 4px; }
+.ia-leader-cards > h4 { margin: 0 0 10px; font-size: 13px; font-weight: 500; color: var(--muted); }
+.ia-leader-cards > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.ia-leader-cards article { display: grid; gap: 3px; min-width: 0; padding: 12px 14px; border-radius: 8px; background: var(--surface-2); }
+.ia-leader-cards article.is-main { background: linear-gradient(135deg, rgba(213, 180, 106, .16), var(--surface-2) 70%); box-shadow: inset 0 0 0 1px rgba(213, 180, 106, .3); }
+.ia-leader-cards small { color: var(--muted); font-size: 12px; }
+.ia-leader-cards strong { overflow: hidden; font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.ia-leader-cards span { color: var(--muted-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ia-leader-cards b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.ia-leader-cards em { color: var(--gold-2); font-size: 12px; font-style: normal; font-variant-numeric: tabular-nums; }
 
 .ia-segment { border: 1px solid var(--line); border-radius: 4px; padding: 2px; gap: 0 !important; }.ia-segment button { border: none; background: none; padding: 5px 8px; }.ia-segment button[aria-pressed=true] { color: var(--gold-2); background: #d5b46a1a; }
 .ia-toolbar { display: flex; gap: 8px; padding: 16px; }.ia-toolbar input { width: 0; min-width: 90px; flex: 1; background: var(--bg-2); }.ia-toolbar select { max-width: 160px; }
 .ia-treemap { display: block; width: calc(100% - 28px); margin: 0 14px; }.ia-treemap g { cursor: pointer; outline: none; }.ia-treemap g:hover rect,.ia-treemap g:focus-visible rect,.ia-treemap rect.selected { stroke: var(--gold-2); stroke-width: 3; }.ia-treemap text { text-anchor: middle; fill: #f6f1e6; pointer-events: none; }.ia-tile-pct { font-size: 24px; }
 .ia-legend { display: flex; gap: 8px; align-items: center; padding: 12px 18px 0; font-size: 12px; }.ia-legend i { width: 95px; height: 5px; background: linear-gradient(90deg,#138066,#303032,#ba3d46); border-radius: 4px; }.ia-legend small { margin-left: auto; color: var(--muted); font-size: 12px; }
 .ia-note { color: var(--muted); margin: 10px 18px 16px; line-height: 1.8; font-size: 12px; }
-.ia-rank-list { max-height: 610px; overflow: auto; padding: 0 10px 14px; }.ia-rank-list button,.ia-rank-label { display: grid; width: 100%; grid-template-columns: 1.4fr 1fr .85fr 1fr; gap: 8px; align-items: center; text-align: right; }.ia-rank-label { font-size: 12px; color: var(--muted); padding: 4px 10px 12px; }.ia-rank-list button { position: relative; border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 13px 10px 15px; background: none; }
-.ia-row-track { position: absolute; right: 10px; bottom: 6px; left: 10px; height: 2px; }
-.ia-row-track em { display: block; height: 100%; opacity: .55; }
-.ia-row-track em.up { background: var(--up); }
-.ia-row-track em.down { background: var(--down); }.ia-rank-list button.is-selected { background: #d5b46a12; box-shadow: inset 2px 0 var(--gold); }.ia-rank-list :is(button,.ia-rank-label) > :first-child { text-align: left; }.ia-rank-list b { font-weight: 500; }.ia-rank-list small { display: block; font-size: 12px; margin-top: 4px; color: var(--muted); }
+.ia-rank-list { max-height: 610px; overflow: auto; padding: 0 10px 14px; }.ia-rank-list button,.ia-rank-label { display: grid; width: 100%; grid-template-columns: 1.4fr 1fr .85fr 1fr; gap: 8px; align-items: center; text-align: right; }.ia-rank-label { font-size: 12px; color: var(--muted); padding: 4px 10px 12px; }.ia-rank-list button { position: relative; border: 0; border-radius: 0; padding: 12px 18px 15px; background: none; }
+.ia-rank-list button:hover { background: rgba(213, 180, 106, .045); }
+.ia-rank-list .ia-row-track { right: 18px; bottom: 6px; left: 18px; }.ia-rank-list button.is-selected { background: #d5b46a12; box-shadow: inset 2px 0 var(--gold); }.ia-rank-list :is(button,.ia-rank-label) > :first-child { text-align: left; }.ia-rank-list b { font-weight: 500; }.ia-rank-list small { display: block; font-size: 12px; margin-top: 4px; color: var(--muted); }
 .ia-method { padding: 14px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.8; }.ia-method summary { cursor: pointer; }.ia-method p { margin: 10px 0 0; }
-.ia-detail-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; padding: 22px 18px 14px; }.ia-detail-summary small { display: block; color: var(--muted); font-size: 12px; margin-bottom: 10px; }.ia-detail-summary strong { font-size: 20px; font-weight: 500; white-space: nowrap; }
+.ia-detail-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; padding: 14px 18px 14px; }.ia-detail-summary small { display: block; color: var(--muted); font-size: 12px; margin-bottom: 10px; }.ia-detail-summary strong { font-size: 20px; font-weight: 500; white-space: nowrap; }
+.ia-strength { display: block; margin-top: 2px; color: var(--muted-2); font-size: 12px; font-weight: 400; }
 .ia-breadth { display: flex; height: 6px; margin: 0 18px; background: var(--surface-3); }.ia-up-bar { background: #e96467; }.ia-down-bar { background: #37ad86; }.ia-flat-bar { background: #666; }
 .ia-member-toolbar { border-top: 1px solid var(--line); align-items: center; padding-block: 12px; }.ia-member-toolbar h4 { margin: 0 auto 0 0; font-size: 12px; font-weight: 500; }.ia-member-toolbar select { width: 95px; }
 .ia-table-wrap { overflow: auto; max-height: 660px; }.ia-table-wrap table { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }.ia-table-wrap th { text-align: right; font-size: 12px; font-weight: 400; color: var(--muted); padding: 10px 9px; background: var(--bg-2); position: sticky; top: 0; }.ia-table-wrap :is(th,td):first-child { text-align: left; padding-left: 18px; }.ia-table-wrap td { padding: 13px 9px; text-align: right; border-top: 1px solid var(--line); }.ia-table-wrap td strong { font-weight: 500; }.ia-table-wrap td small,.ia-table-wrap th small { display: block; font-size: 12px; color: var(--muted-2); margin-top: 4px; }.ia-table-wrap td em { display: block; font-style: normal; font-size: 12px; color: var(--warning); margin-top: 5px; }.ia-table-wrap tr:hover td { background: #d5b46a06; }
