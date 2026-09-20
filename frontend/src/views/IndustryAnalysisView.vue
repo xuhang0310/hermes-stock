@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError } from '../api'
 import type { IndustryMember, IndustryMembers, IndustryOverview, IndustryStat, UserPayload, WatchlistItem } from '../types'
-import { industryTiles } from '../utils/industry'
+import { industryTiles, mergeSmallIndustries, OTHER_INDUSTRY } from '../utils/industry'
 
 const props = defineProps<{ user: UserPayload }>()
 const emit = defineEmits<{
@@ -33,7 +33,13 @@ const visible = computed(() => all.value.filter(row => row.industry.includes(sea
   return Number(av == null) - Number(bv == null) || (bv ?? 0) - (av ?? 0) || a.industry.localeCompare(b.industry)
 }))
 const current = computed(() => all.value.find(row => row.industry === selected.value))
-const tiles = computed(() => industryTiles(visible.value, metric.value))
+const heatmapRows = computed(() => mergeSmallIndustries(visible.value, metric.value))
+const tiles = computed(() => industryTiles(heatmapRows.value, metric.value))
+const hoverStat = ref<IndustryStat | null>(null)
+const previewStat = computed(() => hoverStat.value ?? current.value ?? null)
+const stale = computed(() => Boolean(
+  data.value?.expected_date && data.value?.as_of && data.value.as_of < data.value.expected_date
+))
 const leading = computed(() => all.value.find(row => row.avg_pct != null))
 const active = computed(() => all.value.filter(row => row.amount_yi != null).slice().sort((a, b) => b.amount_yi! - a.amount_yi!)[0])
 const up = computed(() => all.value.filter(row => (row.avg_pct ?? 0) > 0).length)
@@ -48,15 +54,22 @@ function tileColor(row: IndustryStat) {
   const rgb = row.avg_pct > 0 ? [105 + 75 * strength, 39 + 10 * strength, 43 + 14 * strength] : row.avg_pct < 0 ? [19, 66 + 62 * strength, 57 + 34 * strength] : [52, 52, 52]
   return `rgb(${rgb.map(Math.round).join(',')})`
 }
-function choose(industry: string) { selected.value = industry; page.value = 0; actionMessage.value = '' }
+function choose(industry: string) {
+  if (industry === OTHER_INDUSTRY) {
+    view.value = 'ranking'
+    search.value = ''
+    return
+  }
+  selected.value = industry; page.value = 0; actionMessage.value = ''
+}
 
 async function refresh() {
   const id = ++overviewRequest
   overviewController?.abort(); membersController?.abort(); ++memberRequest
   overviewController = new AbortController()
   loading.value = true; error.value = ''; memberError.value = ''; members.value = null
-  // A failed refresh must not leave old rankings appearing current.
-  data.value = null
+  // Existing content stays visible (dimmed) while the new section loads;
+  // only a failure clears it, so users never lose context on transient errors.
   try {
     const result = await api.industryOverview(overviewController.signal)
     if (id !== overviewRequest) return
@@ -64,7 +77,10 @@ async function refresh() {
     if (!result.industries.some(item => item.industry === selected.value)) selected.value = result.industries[0]?.industry ?? ''
     page.value = 0
   } catch (err) {
-    if (id === overviewRequest && !(err instanceof DOMException && err.name === 'AbortError')) error.value = err instanceof Error ? err.message : '行业数据加载失败'
+    if (id === overviewRequest && !(err instanceof DOMException && err.name === 'AbortError')) {
+      data.value = null
+      error.value = err instanceof Error ? err.message : '行业数据加载失败'
+    }
   } finally { if (id === overviewRequest) loading.value = false }
 }
 
@@ -96,7 +112,10 @@ async function addWatchlist(item: IndustryMember) {
   finally { adding.value.delete(item.symbol) }
 }
 watch([selected, page, sortBy, order, () => data.value?.snapshot_id], () => void loadMembers())
-onMounted(() => void refresh())
+onMounted(() => {
+  if (typeof window !== 'undefined' && window.innerWidth < 980) view.value = 'ranking'
+  void refresh()
+})
 onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; overviewController?.abort(); membersController?.abort() })
 </script>
 
@@ -104,19 +123,21 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
   <section class="ia-page" aria-label="行业分析" data-testid="industry-analysis">
     <header class="ia-heading">
       <div><div class="ia-eyebrow">MARKET / INDUSTRIES</div><h2>从行业，看见市场的方向。</h2><p>比较行业强弱，追踪活跃个股，让下一步研究有据可循。</p></div>
-      <div class="ia-heading-actions"><span class="ia-date">日线 · {{ data?.as_of || '尚无数据' }}</span><button type="button" :disabled="loading" @click="refresh">{{ loading ? '读取中…' : '↻ 刷新数据' }}</button></div>
+      <div class="ia-heading-actions"><span class="ia-date" :class="{ stale }">日线 · {{ data?.as_of || '尚无数据' }}</span><span v-if="stale" class="ia-stale-badge">早于最近收盘日 {{ data?.expected_date }}</span><button type="button" :disabled="loading" @click="refresh">{{ loading ? '读取中…' : '↻ 刷新数据' }}</button></div>
     </header>
     <div v-if="error" class="ia-message ia-error" role="alert">{{ error }} <button type="button" @click="refresh">重试</button></div>
-    <div v-if="loading" class="ia-loading" role="status"><span class="ia-spinner" /> 正在读取本地行业行情…</div>
+    <div v-if="loading && !data" class="ia-loading" role="status"><span class="ia-spinner" /> 正在读取本地行业行情…</div>
     <template v-else-if="data">
-      <div class="ia-meta"><span>{{ data.classification }}</span><span>日线覆盖 {{ data.coverage.bar_count.toLocaleString() }} / {{ data.coverage.stock_count.toLocaleString() }} 只</span><span>有效统计 {{ data.coverage.valid_count.toLocaleString() }} 只</span><button type="button" @click="emit('openScreener')">前往同步市场数据 ↗</button></div>
+      <div v-if="loading" class="ia-refreshing" role="status">正在刷新最新截面…</div>
+      <div class="ia-content" :class="{ 'ia-dim': loading }" :aria-busy="loading">
+      <div class="ia-meta"><span>{{ data.classification }}</span><span>有效统计 {{ data.coverage.valid_count.toLocaleString() }} 只</span><button type="button" @click="emit('openScreener')">前往同步市场数据 ↗</button></div>
       <div v-if="!data.as_of || !all.length" class="ia-empty"><div class="ia-empty-mark">▦</div><h3>{{ !data.as_of ? '先准备一份市场日线' : '还没有可用的行业分类' }}</h3><p>到 AI 选股页同步全市场行情和股票目录，再回来查看行业分布。</p><button type="button" class="ia-primary" @click="emit('openScreener')">去同步数据 ↗</button></div>
       <template v-else>
         <div class="ia-metrics">
           <article><span>行业分布</span><strong>{{ all.length }}<small> 个行业</small></strong><p><b class="rise">{{ up }} 上涨</b><i> / </i><b class="fall">{{ down }} 下跌</b></p></article>
           <article><span>等权涨幅领先</span><strong>{{ leading?.industry || '—' }}</strong><p :class="direction(leading?.avg_pct)">{{ pct(leading?.avg_pct) }}<small> 成分股均值</small></p></article>
           <article><span>成交最活跃</span><strong>{{ active?.industry || '—' }}</strong><p>{{ number(active?.amount_yi) }}<small> 亿元 · 非资金净流入</small></p></article>
-          <article><span>数据覆盖</span><strong>{{ (data.coverage.bar_ratio * 100).toFixed(1) }}<small>%</small></strong><p>缺日线 {{ data.coverage.missing_count }}<i> · </i>无成交 {{ data.coverage.no_trade_count }}</p></article>
+          <article><span>数据覆盖</span><strong>{{ (data.coverage.bar_ratio * 100).toFixed(1) }}<small>%</small></strong><p>覆盖 {{ data.coverage.bar_count.toLocaleString() }} / {{ data.coverage.stock_count.toLocaleString() }} 只<i> · </i>缺 {{ data.coverage.missing_count }} · 无成交 {{ data.coverage.no_trade_count }}</p></article>
         </div>
         <div class="ia-workspace">
           <section class="ia-panel ia-overview" aria-label="行业分布">
@@ -125,15 +146,26 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
             <div v-if="!visible.length" class="ia-inline-empty">没有匹配的行业 <button type="button" @click="search = ''">清除搜索</button></div>
             <template v-else-if="view === 'heatmap'">
               <svg v-if="tiles.length" class="ia-treemap" viewBox="0 0 1000 660" role="group" aria-label="行业热力图，点击行业查看成分股">
-                <g v-for="tile in tiles" :key="tile.industry.industry" role="button" tabindex="0" :aria-pressed="selected === tile.industry.industry" :aria-label="`${tile.industry.industry}，等权涨跌幅 ${pct(tile.industry.avg_pct)}，${tile.industry.stock_count} 只股票`" @click="choose(tile.industry.industry)" @keydown.enter="choose(tile.industry.industry)" @keydown.space.prevent="choose(tile.industry.industry)">
-                  <title>{{ tile.industry.industry }} · {{ pct(tile.industry.avg_pct) }} · 有效 {{ tile.industry.valid_count }}/{{ tile.industry.stock_count }} 只</title>
+                <g v-for="tile in tiles" :key="tile.industry.industry" role="button" tabindex="0" :aria-pressed="selected === tile.industry.industry" :aria-label="`${tile.industry.industry}，等权涨跌幅 ${pct(tile.industry.avg_pct)}，${tile.industry.stock_count} 只股票`" @click="choose(tile.industry.industry)" @keydown.enter="choose(tile.industry.industry)" @keydown.space.prevent="choose(tile.industry.industry)" @mouseenter="hoverStat = tile.industry" @mouseleave="hoverStat = null" @focus="hoverStat = tile.industry" @blur="hoverStat = null">
+                  <title>{{ tile.industry.industry }} · {{ pct(tile.industry.avg_pct) }} · 有效 {{ tile.industry.valid_count }}/{{ tile.industry.stock_count }} 只{{ tile.industry.industry === OTHER_INDUSTRY ? '（点击查看明细榜单）' : '' }}</title>
                   <rect :x="tile.x + 2" :y="tile.y + 2" :width="Math.max(0, tile.width - 4)" :height="Math.max(0, tile.height - 4)" :fill="tileColor(tile.industry)" :class="{ selected: selected === tile.industry.industry }" rx="4" />
                   <template v-if="tile.width > 85 && tile.height > 64"><text :x="tile.x + tile.width / 2" :y="tile.y + tile.height / 2 - 5" :font-size="Math.min(25, (tile.width - 12) / Math.max(3, tile.industry.industry.length))">{{ tile.industry.industry }}</text><text class="ia-tile-pct" :style="{ fontSize: `${Math.min(23, (tile.width - 14) / 4.8)}px` }" :x="tile.x + tile.width / 2" :y="tile.y + tile.height / 2 + 23">{{ pct(tile.industry.avg_pct) }}</text></template>
+                  <text v-else-if="tile.width > 34 && tile.height > 22" :x="tile.x + tile.width / 2" :y="tile.y + tile.height / 2 + 4" class="ia-tile-dot">{{ tile.industry.industry === OTHER_INDUSTRY ? '其他' : '·' }}</text>
                 </g>
               </svg>
               <p v-else class="ia-inline-empty">当前行业暂无有效成交额，请切换为成分股数。</p>
+              <div class="ia-preview" aria-live="polite" data-testid="industry-hover-preview">
+                <template v-if="previewStat">
+                  <strong>{{ previewStat.industry }}</strong>
+                  <b :class="direction(previewStat.avg_pct)">{{ pct(previewStat.avg_pct) }}</b>
+                  <span>上涨 {{ previewStat.up_count }} · 下跌 {{ previewStat.down_count }} · 平盘 {{ previewStat.flat_count }}</span>
+                  <span v-if="previewStat.amount_yi != null">成交 {{ number(previewStat.amount_yi, 1) }} 亿</span>
+                  <span v-if="previewStat.leader">龙头 {{ previewStat.leader.name }} {{ pct(previewStat.leader.pct_chg) }}</span>
+                </template>
+                <span v-else class="ia-preview-hint">悬停行业块快速预览，点击固定选择</span>
+              </div>
               <div class="ia-legend"><span class="fall">下跌</span><i /><span class="rise">上涨</span><small>颜色：成分股等权涨幅</small></div>
-              <p class="ia-note">{{ metric === 'count' ? '面积按成分股数量分配。' : '面积按已覆盖成分股成交额分配，缺成交额行业不绘制。' }}灰色表示缺少有效涨幅。</p>
+              <p class="ia-note">{{ metric === 'count' ? '面积按成分股数量分配。' : '面积按已覆盖成分股成交额分配，缺成交额行业不绘制。' }}灰色表示缺少有效涨幅；尾部小行业已聚合为“{{ OTHER_INDUSTRY }}”，点击可展开榜单。涨跌幅为成分股等权均值，并非官方行业指数。</p>
             </template>
             <div v-else class="ia-rank-list">
               <div class="ia-rank-label"><span>行业 / 有效样本</span><span>等权涨幅</span><span>上涨占比</span><span>成交额 / 亿</span></div>
@@ -145,14 +177,14 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
             <div class="ia-panel-head"><div><span class="ia-section-number">02</span><h3>{{ current?.industry || '选择一个行业' }}</h3><span class="ia-count">{{ current?.stock_count ?? 0 }} 只</span></div><button v-if="current" type="button" class="ia-primary" @click="emit('screenIndustry', current.industry)">继续选股 ↗</button></div>
             <template v-if="current">
               <div class="ia-detail-summary"><div><small>等权涨跌幅</small><strong :class="direction(current.avg_pct)">{{ pct(current.avg_pct) }}</strong></div><div><small>中位涨跌幅</small><strong :class="direction(current.median_pct)">{{ pct(current.median_pct) }}</strong></div><div><small>上涨 / 下跌 / 平盘</small><strong><span class="rise">{{ current.up_count }}</span> / <span class="fall">{{ current.down_count }}</span> / {{ current.flat_count }}</strong></div></div>
-              <div class="ia-breadth" aria-hidden="true"><span class="ia-up-bar" :style="{ width: `${current.valid_count ? current.up_count / current.valid_count * 100 : 0}%` }" /><span class="ia-flat-bar" :style="{ width: `${current.valid_count ? current.flat_count / current.valid_count * 100 : 0}%` }" /><span class="ia-down-bar" :style="{ width: `${current.valid_count ? current.down_count / current.valid_count * 100 : 0}%` }" /></div>
+              <div class="ia-breadth" aria-hidden="true" :title="`上涨 ${current.up_count} · 平盘 ${current.flat_count} · 下跌 ${current.down_count}`"><span class="ia-up-bar" :style="{ width: `${current.valid_count ? current.up_count / current.valid_count * 100 : 0}%` }" /><span class="ia-flat-bar" :style="{ width: `${current.valid_count ? current.flat_count / current.valid_count * 100 : 0}%` }" /><span class="ia-down-bar" :style="{ width: `${current.valid_count ? current.down_count / current.valid_count * 100 : 0}%` }" /></div>
               <p class="ia-note">有效 {{ current.valid_count }}/{{ current.stock_count }} · 缺日线 {{ current.missing_count }} · 无成交 {{ current.no_trade_count }} · 成交额覆盖 {{ current.amount_count }} 只</p>
-              <div class="ia-toolbar ia-member-toolbar"><h4>成分股排名</h4><select v-model="sortBy" aria-label="成分股排序" @change="page = 0"><option value="pct_chg">涨跌幅</option><option value="amount_yi">成交额</option><option value="turnover_rate">换手率</option><option value="volume_ratio">量比</option><option value="total_mv_yi">市值</option></select><button type="button" :aria-label="order === 'desc' ? '切换为升序' : '切换为降序'" @click="order = order === 'desc' ? 'asc' : 'desc'; page = 0">{{ order === 'desc' ? '↓ 降序' : '↑ 升序' }}</button></div>
+              <div class="ia-toolbar ia-member-toolbar"><h4>成分股排名</h4><select v-model="sortBy" aria-label="成分股排序" @change="page = 0"><option value="pct_chg">涨跌幅</option><option value="amount_yi">成交额</option><option value="turnover_rate">换手率</option><option value="volume_ratio">量比</option><option value="pe_ttm">PE（TTM）</option><option value="total_mv_yi">市值</option></select><button type="button" :aria-label="order === 'desc' ? '切换为升序' : '切换为降序'" @click="order = order === 'desc' ? 'asc' : 'desc'; page = 0">{{ order === 'desc' ? '↓ 降序' : '↑ 升序' }}</button></div>
               <p v-if="actionMessage" class="ia-action-message" role="status">{{ actionMessage }}</p>
               <p v-if="memberError" class="ia-message ia-error" role="alert">{{ memberError }} <button type="button" @click="refresh">刷新数据</button></p>
               <div v-else-if="memberLoading" class="ia-inline-empty" role="status">正在读取 {{ current.industry }} 成分股…</div>
               <div v-else-if="members" class="ia-table-wrap">
-                <table><thead><tr><th>股票</th><th>涨跌幅</th><th>成交额<small>亿元</small></th><th>换手率</th><th>量比</th><th>总市值<small>亿元</small></th><th>研究</th></tr></thead><tbody><tr v-for="item in members.items" :key="item.symbol"><td><strong>{{ item.name }}</strong><small>{{ item.symbol }}</small><em v-if="item.status !== 'valid'">{{ statusLabel[item.status] }}</em></td><td :class="direction(item.pct_chg)">{{ pct(item.pct_chg) }}</td><td>{{ number(item.amount_yi) }}</td><td>{{ item.turnover_rate == null ? '—' : `${number(item.turnover_rate)}%` }}</td><td>{{ number(item.volume_ratio) }}</td><td>{{ number(item.total_mv_yi, 1) }}</td><td><div class="ia-row-actions"><button v-if="canAsk" type="button" :aria-label="`问股 ${item.name}`" @click="emit('askStock', item)">问股 ↗</button><button v-if="canWrite" type="button" :disabled="adding.has(item.symbol) || added.has(item.symbol)" :aria-label="`加入自选 ${item.name}`" @click="addWatchlist(item)">{{ adding.has(item.symbol) ? '添加中' : added.has(item.symbol) ? '已加入' : '+ 自选' }}</button></div></td></tr></tbody></table>
+                <table><thead><tr><th>股票</th><th>涨跌幅</th><th>成交额<small>亿元</small></th><th>换手率</th><th>量比</th><th>PE<small>TTM</small></th><th>总市值<small>亿元</small></th><th>研究</th></tr></thead><tbody><tr v-for="item in members.items" :key="item.symbol"><td><strong>{{ item.name }}</strong><small>{{ item.symbol }}</small><em v-if="item.status !== 'valid'">{{ statusLabel[item.status] }}</em></td><td :class="direction(item.pct_chg)">{{ pct(item.pct_chg) }}</td><td>{{ number(item.amount_yi) }}</td><td>{{ item.turnover_rate == null ? '—' : `${number(item.turnover_rate)}%` }}</td><td>{{ number(item.volume_ratio) }}</td><td>{{ number(item.pe_ttm, 1) }}</td><td>{{ number(item.total_mv_yi, 1) }}</td><td><div class="ia-row-actions"><button v-if="canAsk" type="button" :aria-label="`问股 ${item.name}`" @click="emit('askStock', item)">问股 ↗</button><button v-if="canWrite" type="button" :disabled="adding.has(item.symbol) || added.has(item.symbol)" :aria-label="`加入自选 ${item.name}`" @click="addWatchlist(item)">{{ adding.has(item.symbol) ? '添加中' : added.has(item.symbol) ? '已加入' : '+ 自选' }}</button></div></td></tr></tbody></table>
                 <p v-if="!members.items.length" class="ia-inline-empty">当前行业暂无成分股。</p>
               </div>
               <div v-if="members && members.total > 30" class="ia-pagination"><span>第 {{ page + 1 }} / {{ Math.ceil(members.total / 30) }} 页 · {{ members.total }} 只</span><button type="button" :disabled="page === 0" @click="page--">上一页</button><button type="button" :disabled="(page + 1) * 30 >= members.total" @click="page++">下一页</button></div>
@@ -161,6 +193,7 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
         </div>
         <footer class="ia-footer">{{ data.source }}<span>日线观察 · 个股排名用于研究比较，不代表未来收益</span></footer>
       </template>
+      </div>
     </template>
   </section>
 </template>
@@ -177,6 +210,16 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
 .ia-heading p { color: var(--muted); font-size: 12px; margin: 0; }
 .ia-heading-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .ia-date { font: 12px Consolas, monospace; color: var(--gold-2); }
+.ia-date.stale { color: var(--warning); }
+.ia-stale-badge { border: 1px solid var(--warning); border-radius: 4px; padding: 2px 7px; color: var(--warning); font-size: 10px; white-space: nowrap; }
+.ia-content { transition: opacity .15s ease; }
+.ia-content.ia-dim { opacity: .45; pointer-events: none; }
+.ia-refreshing { border-left: 2px solid var(--gold); background: #d5b46a0d; padding: 6px 14px; color: var(--gold-2); font-size: 11px; margin-bottom: 8px; }
+.ia-preview { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px; min-height: 34px; padding: 7px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.ia-preview strong { color: var(--text); font-weight: 500; }
+.ia-preview b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ia-preview-hint { color: var(--muted-2); font-size: 10px; }
+.ia-tile-dot { text-anchor: middle; fill: #d8d2c2; font-size: 13px; pointer-events: none; }
 .ia-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 22px; border-block: 1px solid var(--line); padding: 10px 0; color: var(--muted); font-size: 11px; }
 .ia-meta button { margin-left: auto; border: none; background: none; padding: 0; color: var(--gold); }
 .ia-message { border-left: 2px solid var(--gold); background: #d5b46a09; padding: 9px 14px; font-size: 12px; color: #cbb988; margin: 14px 0; line-height: 1.8; }
@@ -198,7 +241,7 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
 .ia-rank-list { max-height: 610px; overflow: auto; padding: 0 10px 14px; }.ia-rank-list button,.ia-rank-label { display: grid; width: 100%; grid-template-columns: 1.4fr 1fr .85fr 1fr; gap: 8px; align-items: center; text-align: right; }.ia-rank-label { font-size: 10px; color: var(--muted); padding: 4px 10px 12px; }.ia-rank-list button { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 13px 10px; background: none; }.ia-rank-list button.is-selected { background: #d5b46a12; box-shadow: inset 2px 0 var(--gold); }.ia-rank-list :is(button,.ia-rank-label) > :first-child { text-align: left; }.ia-rank-list b { font-weight: 500; }.ia-rank-list small { display: block; font-size: 10px; margin-top: 4px; color: var(--muted); }
 .ia-method { padding: 14px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.8; }.ia-method summary { cursor: pointer; }.ia-method p { margin: 10px 0 0; }
 .ia-detail-summary { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 12px; padding: 22px 18px 14px; }.ia-detail-summary small { display: block; color: var(--muted); font-size: 10px; margin-bottom: 10px; }.ia-detail-summary strong { font-size: 19px; font-weight: 500; white-space: nowrap; }
-.ia-breadth { display: flex; height: 3px; margin: 0 18px; background: var(--surface-3); }.ia-up-bar { background: #e96467; }.ia-down-bar { background: #37ad86; }.ia-flat-bar { background: #666; }
+.ia-breadth { display: flex; height: 6px; margin: 0 18px; background: var(--surface-3); }.ia-up-bar { background: #e96467; }.ia-down-bar { background: #37ad86; }.ia-flat-bar { background: #666; }
 .ia-member-toolbar { border-top: 1px solid var(--line); align-items: center; padding-block: 12px; }.ia-member-toolbar h4 { margin: 0 auto 0 0; font-size: 12px; font-weight: 500; }.ia-member-toolbar select { width: 95px; }
 .ia-table-wrap { overflow: auto; max-height: 660px; }.ia-table-wrap table { width: 100%; border-collapse: collapse; font-size: 11px; white-space: nowrap; }.ia-table-wrap th { text-align: right; font-size: 10px; font-weight: 400; color: var(--muted); padding: 10px 9px; background: var(--bg-2); position: sticky; top: 0; }.ia-table-wrap :is(th,td):first-child { text-align: left; padding-left: 18px; }.ia-table-wrap td { padding: 13px 9px; text-align: right; border-top: 1px solid var(--line); }.ia-table-wrap td strong { font-weight: 500; }.ia-table-wrap td small,.ia-table-wrap th small { display: block; font: 10px Consolas,monospace; color: var(--muted-2); margin-top: 4px; }.ia-table-wrap td em { display: block; font-style: normal; font-size: 10px; color: var(--warning); margin-top: 5px; }.ia-table-wrap tr:hover td { background: #d5b46a06; }
 .ia-row-actions { display: flex; flex-direction: column; gap: 5px; }.ia-row-actions button { border: 0; padding: 0 4px; color: var(--gold); background: none; font-size: 10px; }
