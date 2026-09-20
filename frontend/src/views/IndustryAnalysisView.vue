@@ -110,7 +110,6 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
     <div v-if="loading" class="ia-loading" role="status"><span class="ia-spinner" /> 正在读取本地行业行情…</div>
     <template v-else-if="data">
       <div class="ia-meta"><span>{{ data.classification }}</span><span>日线覆盖 {{ data.coverage.bar_count.toLocaleString() }} / {{ data.coverage.stock_count.toLocaleString() }} 只</span><span>有效统计 {{ data.coverage.valid_count.toLocaleString() }} 只</span><button type="button" @click="emit('openScreener')">前往同步市场数据 ↗</button></div>
-      <div v-if="data.warnings.length" class="ia-message" role="status"><p v-for="warning in data.warnings" :key="warning">{{ warning }}</p></div>
       <div v-if="!data.as_of || !all.length" class="ia-empty"><div class="ia-empty-mark">▦</div><h3>{{ !data.as_of ? '先准备一份市场日线' : '还没有可用的行业分类' }}</h3><p>到 AI 选股页同步全市场行情和股票目录，再回来查看行业分布。</p><button type="button" class="ia-primary" @click="emit('openScreener')">去同步数据 ↗</button></div>
       <template v-else>
         <div class="ia-metrics">
