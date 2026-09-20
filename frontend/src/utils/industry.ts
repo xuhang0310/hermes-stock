@@ -49,6 +49,7 @@ export function mergeSmallIndustries(
     no_trade_count: sumOf('no_trade_count'),
     invalid_count: sumOf('invalid_count'),
     leader: null,
+    leaders: [],
   }]
 }
 
@@ -87,4 +88,46 @@ export function industryQuestion(item: import('../types').IndustryMember): strin
     item.turnover_rate != null ? `换手率 ${item.turnover_rate.toFixed(2)}%。` : '',
   ].filter(Boolean).join('\n')
   return `请研究 ${item.name}（${item.symbol}）在所属行业中的表现。\n${facts}\n请先核对最新行情，再结合行业整体表现、公司基本面、催化和风险进行分析。区分事实与推断，不将涨幅排名当作未来收益预测；证据不足请明确说明。`
+}
+
+export type LeaderFactorKey = 'pct_chg' | 'turnover_rate' | 'amount_yi' | 'volume_ratio' | 'total_mv_yi'
+export type LeaderFactor = { key: LeaderFactorKey; label: string; value: number | null; score: number }
+export type LeaderScore = { member: import('../types').IndustryMember; composite: number; factors: LeaderFactor[] }
+
+const LEADER_FACTORS: Array<{ key: LeaderFactorKey; label: string }> = [
+  { key: 'pct_chg', label: '涨幅' },
+  { key: 'turnover_rate', label: '换手' },
+  { key: 'amount_yi', label: '成交额' },
+  { key: 'volume_ratio', label: '量比' },
+  { key: 'total_mv_yi', label: '市值' },
+]
+
+/**
+ * Equal-weight min-max normalized leader scores within the given member set.
+ * Values are relative to the compared members only — a strength comparison,
+ * not a return prediction. Missing factors score 0 and are disclosed as null.
+ */
+export function leaderScores(members: import('../types').IndustryMember[], top = 5): LeaderScore[] {
+  const valid = members
+    .filter(item => item.status === 'valid' && item.pct_chg != null)
+    .sort((a, b) => (b.pct_chg ?? 0) - (a.pct_chg ?? 0) || a.symbol.localeCompare(b.symbol))
+    .slice(0, top)
+  if (!valid.length) return []
+  const ranges = LEADER_FACTORS.map(({ key }) => {
+    const values = valid
+      .map(item => item[key])
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    return { min: values.length ? Math.min(...values) : 0, max: values.length ? Math.max(...values) : 0 }
+  })
+  return valid.map(member => {
+    const factors = LEADER_FACTORS.map(({ key, label }, index) => {
+      const value = member[key]
+      const { min, max } = ranges[index]
+      const usable = typeof value === 'number' && Number.isFinite(value)
+      const score = usable ? (max === min ? 60 : Math.round(((value as number) - min) / (max - min) * 100)) : 0
+      return { key, label, value: usable ? (value as number) : null, score }
+    })
+    const composite = Math.round(factors.reduce((sum, factor) => sum + factor.score, 0) / factors.length)
+    return { member, composite, factors }
+  })
 }
