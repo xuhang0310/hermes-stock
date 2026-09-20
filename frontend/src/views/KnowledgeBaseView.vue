@@ -517,13 +517,13 @@ onUnmounted(() => {
 .kb-hit { padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; margin: 0 0 12px; font-size: 12px; background: rgba(213, 180, 106, 0.02); transition: border-color 0.15s ease; }
 .kb-hit:hover { border-color: rgba(213, 180, 106, 0.45); }
 .kb-hit-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.kb-rank { flex: none; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--gold-2); border: 1px solid rgba(213, 180, 106, 0.4); border-radius: 6px; padding: 0 7px; line-height: 1.7; }
+.kb-rank { flex: none; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--gold-2); border: 1px solid rgba(213, 180, 106, 0.4); border-radius: 6px; padding: 0 7px; line-height: 1.7; }
 .kb-hit-title { font-size: 14.5px; color: var(--text); line-height: 1.45; overflow-wrap: anywhere; }
 .kb-hit-meta { display: flex; align-items: center; gap: 12px; margin: 6px 0 0 34px; font-size: 12px; color: var(--muted); }
 .kb-hit-meta a { color: #6ea8d8; text-decoration: none; }
 .kb-scores { display: flex; gap: 24px; flex-wrap: wrap; margin: 12px 0 0 34px; color: var(--muted); font-size: 11px; }
 .kb-score { display: flex; align-items: center; gap: 7px; }
-.kb-score em { font-style: normal; font-family: ui-monospace, Consolas, monospace; color: var(--text); font-size: 11px; }
+.kb-score em { font-style: normal; font-variant-numeric: tabular-nums; color: var(--text); font-size: 12px; }
 .kb-bar { display: inline-block; width: 96px; height: 6px; border-radius: 3px; background: rgba(213, 180, 106, 0.1); overflow: hidden; }
 .kb-bar b { display: block; height: 100%; border-radius: 3px; }
 .kb-bar .v { background: var(--gold-2); }

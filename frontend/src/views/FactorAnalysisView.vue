@@ -42,7 +42,7 @@ const compositeError = ref('')
 const compositeResult = ref<FactorCompositeResult | null>(null)
 
 const icPalette = [
-  '#42dfad', '#eabf63', '#49b8d1', '#c78cff', '#f25f64', '#9cd36a', '#70a5ff',
+  '#42dfad', 'var(--gold)', '#49b8d1', '#c78cff', 'var(--danger)', '#9cd36a', '#70a5ff',
   '#ff9f66', '#4dd0be', '#e8a0b8', '#d0d36a', '#5fd3c0', '#b48cff', '#ff8a5c',
   '#8fd0ff', '#a8e05f'
 ]
@@ -154,8 +154,8 @@ function makeIcChart(host: HTMLElement, height: number) {
     width: host.clientWidth || 800,
     height,
     layout: {
-      background: { type: ColorType.Solid, color: '#101315' },
-      textColor: '#8f979d',
+      background: { type: ColorType.Solid, color: 'var(--bg-2)' },
+      textColor: 'var(--muted)',
       fontFamily: '"Cascadia Mono", "SFMono-Regular", Consolas, monospace',
       fontSize: 11
     },
@@ -163,8 +163,8 @@ function makeIcChart(host: HTMLElement, height: number) {
       vertLines: { color: 'rgba(112, 123, 130, 0.08)' },
       horzLines: { color: 'rgba(112, 123, 130, 0.10)' }
     },
-    rightPriceScale: { borderColor: '#2a3034' },
-    timeScale: { borderColor: '#2a3034', timeVisible: false },
+    rightPriceScale: { borderColor: 'var(--line)' },
+    timeScale: { borderColor: 'var(--line)', timeVisible: false },
     localization: { locale: 'zh-CN' }
   })
 }
@@ -219,7 +219,7 @@ function renderIcDetail() {
   icDetailChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
   const cum = icDetailChart.addSeries(LineSeries, {
     priceScaleId: 'ic-cum',
-    color: '#eabf63',
+    color: 'var(--gold)',
     lineWidth: 2,
     priceLineVisible: false,
     lastValueVisible: false
@@ -891,7 +891,7 @@ onMounted(loadCatalog)
 .fa-title-mark {
   width: 3px;
   height: 34px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: linear-gradient(180deg, var(--gold-2), var(--gold-dim));
   flex: none;
   margin-top: 2px;
@@ -906,7 +906,7 @@ onMounted(loadCatalog)
 
 .fa-title p {
   margin: 4px 0 0;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
 }
 
@@ -939,10 +939,10 @@ onMounted(loadCatalog)
   padding: 7px 10px;
   background: var(--bg-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--text);
-  font-size: 12.5px;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
@@ -1019,7 +1019,7 @@ onMounted(loadCatalog)
   gap: 7px;
   padding: 6px 9px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   background: var(--surface);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
@@ -1041,14 +1041,14 @@ onMounted(loadCatalog)
 }
 
 .fa-chip-id {
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--gold-2);
   flex: none;
 }
 
 .fa-chip-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1078,10 +1078,10 @@ onMounted(loadCatalog)
   padding: 8px 10px;
   margin-bottom: 8px;
   border: 1px solid rgba(39, 197, 138, 0.3);
-  border-radius: 6px;
+  border-radius: 4px;
   background: rgba(39, 197, 138, 0.06);
   color: var(--ok);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .fa-tushare-hint {
@@ -1113,12 +1113,12 @@ onMounted(loadCatalog)
 
 .fa-composite-chip {
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 8px;
   border: 1px solid var(--line-strong);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);
-  font-size: 11.5px;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .fa-composite-skip {
@@ -1138,7 +1138,7 @@ onMounted(loadCatalog)
   border: 1px solid rgba(255, 93, 93, 0.25);
   border-radius: var(--radius);
   background: rgba(255, 93, 93, 0.04);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .fa-skipped strong {
@@ -1157,13 +1157,13 @@ onMounted(loadCatalog)
 
 .fa-skipped-list code {
   color: var(--danger);
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
-  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 
 .fa-skipped-hint {
   margin: 8px 0 0;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -1198,7 +1198,7 @@ onMounted(loadCatalog)
 }
 
 .stat-label {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -1214,7 +1214,7 @@ onMounted(loadCatalog)
 .fa-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .fa-table th {
@@ -1251,7 +1251,7 @@ onMounted(loadCatalog)
 
 .fa-table .num {
   text-align: right;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .fa-check-cell {
@@ -1271,13 +1271,13 @@ onMounted(loadCatalog)
 
 .fa-id {
   color: var(--gold-2);
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .fa-cat {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 8px;
   border: 1px solid var(--line);
 }
 
@@ -1298,7 +1298,7 @@ onMounted(loadCatalog)
   border: 1px solid rgba(213, 180, 106, 0.3);
   border-radius: var(--radius);
   background: rgba(213, 180, 106, 0.05);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .fa-dedup strong {
@@ -1312,9 +1312,9 @@ onMounted(loadCatalog)
 }
 
 .fa-dedup-tag {
-  font-size: 11.5px;
+  font-size: 12px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 8px;
   border: 1px solid var(--line-strong);
   color: var(--text);
   background: rgba(255, 255, 255, 0.03);
@@ -1350,7 +1350,7 @@ onMounted(loadCatalog)
 }
 
 .fa-interpret-model {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   margin-bottom: 6px;
 }
@@ -1384,7 +1384,7 @@ onMounted(loadCatalog)
 
 .fa-ic-chart {
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   overflow: hidden;
 }
 
@@ -1399,9 +1399,9 @@ onMounted(loadCatalog)
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .fa-ic-dot {
@@ -1413,7 +1413,7 @@ onMounted(loadCatalog)
 }
 
 .fa-ic-detail-title {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
   margin: 4px 0 6px;
 }
@@ -1438,14 +1438,14 @@ onMounted(loadCatalog)
 }
 
 .fa-hint {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
 }
 
 .fa-methodology {
   position: relative;
   margin: 0;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.6;
   color: var(--muted);
   border-top: 1px dashed var(--line);
@@ -1467,7 +1467,7 @@ onMounted(loadCatalog)
   align-items: center;
   gap: 7px;
   padding: 8px 14px;
-  border-radius: 6px;
+  border-radius: 4px;
   border: 1px solid var(--line-strong);
   background: transparent;
   color: var(--text);
@@ -1510,7 +1510,7 @@ onMounted(loadCatalog)
   padding: 12px 14px;
   margin-bottom: 14px;
   border-radius: var(--radius);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .notice-danger {

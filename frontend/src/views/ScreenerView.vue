@@ -1174,10 +1174,10 @@ onBeforeUnmount(() => {
             {{ syncLoading ? '同步中…' : '同步数据' }}
           </button>
         </div>
-        <button type="button" class="sc-btn sc-btn-ghost" @click="activeWorkspace === 'quick' ? saveDraft() : openQuick()">
+        <button type="button" class="ui-btn ui-btn--ghost" @click="activeWorkspace === 'quick' ? saveDraft() : openQuick()">
           {{ activeWorkspace === 'quick' ? (draftSaved ? '已保存' : '保存草稿') : '返回快速选股' }}
         </button>
-        <button type="button" class="sc-btn sc-btn-primary" @click="newStrategy">新建选股</button>
+        <button type="button" class="ui-btn ui-btn--primary" @click="newStrategy">新建选股</button>
       </div>
     </header>
 
@@ -1213,15 +1213,15 @@ onBeforeUnmount(() => {
             ></textarea>
             <div class="sc-prompt-footer">
               <span>支持自然语言 · Ctrl / ⌘ + Enter 生成</span>
-              <button v-if="nlText" type="button" class="sc-text-btn" @click="clearPrompt">清空</button>
+              <button v-if="nlText" type="button" class="ui-btn--text" @click="clearPrompt">清空</button>
             </div>
           </div>
           <div v-if="parseError" class="sc-inline-error">{{ parseError }}</div>
           <div class="sc-composer-actions">
-            <button type="button" class="sc-text-btn" @click="openBuilder">
+            <button type="button" class="ui-btn--text" @click="openBuilder">
               手动设置高级条件
             </button>
-            <button type="button" class="sc-btn sc-btn-primary sc-generate" :disabled="parseLoading || !nlText.trim()" @click="parseNL">
+            <button type="button" class="ui-btn ui-btn--primary sc-generate" :disabled="parseLoading || !nlText.trim()" @click="parseNL">
               <span v-if="parseLoading" class="btn-spin spin"></span>
               {{ parseLoading ? '正在理解条件…' : '生成选股方案' }}
             </button>
@@ -1247,7 +1247,7 @@ onBeforeUnmount(() => {
             <p v-if="profileDetailsOpen" class="sc-profile-detail">
               风格标签来自持仓结构和当前可用行情，仅用于组织筛选条件，不代表收益判断。
             </p>
-            <button type="button" class="sc-text-btn" @click="profileDetailsOpen = !profileDetailsOpen">
+            <button type="button" class="ui-btn--text" @click="profileDetailsOpen = !profileDetailsOpen">
               {{ profileDetailsOpen ? '收起分析说明' : '查看分析说明' }}
             </button>
           </template>
@@ -1255,7 +1255,7 @@ onBeforeUnmount(() => {
             <strong>还没有可分析的持仓</strong>
             <p>录入持仓后，可生成与你当前风格更贴近的快捷模板。</p>
           </div>
-          <button type="button" class="sc-btn sc-btn-ghost sc-profile-refresh" :disabled="recLoading" @click="refreshRecommendation">
+          <button type="button" class="ui-btn ui-btn--ghost sc-profile-refresh" :disabled="recLoading" @click="refreshRecommendation">
             <span class="btn-spin" :class="{ spin: recLoading }"></span>
             {{ recLoading ? '正在分析持仓…' : '重新分析并生成策略' }}
           </button>
@@ -1304,7 +1304,7 @@ onBeforeUnmount(() => {
               <span>{{ templateCount(tpl) }}</span>
               <button
                 type="button"
-                class="sc-btn sc-btn-soft"
+                class="ui-btn ui-btn--ghost"
                 @click="usePrompt(templatePrompt(tpl), tpl.query, tpl.rationale || tpl.objective || '')"
               >
                 进入策略构建
@@ -1315,7 +1315,7 @@ onBeforeUnmount(() => {
         <div v-else-if="recLoading" class="sc-loading-state">正在分析持仓并生成模板…</div>
         <div v-else class="sc-empty-line">
           <span>暂无个性化模板，可先使用下方通用模板。</span>
-          <button type="button" class="sc-text-btn" @click="refreshRecommendation">立即生成</button>
+          <button type="button" class="ui-btn--text" @click="refreshRecommendation">立即生成</button>
         </div>
       </section>
 
@@ -1325,7 +1325,7 @@ onBeforeUnmount(() => {
             <div>
               <h3>从成熟条件组合开始</h3>
             </div>
-            <button type="button" class="sc-text-btn" @click="showAllTemplates = !showAllTemplates">
+            <button type="button" class="ui-btn--text" @click="showAllTemplates = !showAllTemplates">
               {{ showAllTemplates ? '按分类查看' : '查看全部模板' }}
             </button>
           </header>
@@ -1396,7 +1396,7 @@ onBeforeUnmount(() => {
               </button>
               <button
                 type="button"
-                class="sc-btn sc-btn-soft"
+                class="ui-btn ui-btn--ghost"
                 data-testid="screener-history-open-builder"
                 :disabled="parseLoading"
                 @click="usePrompt(item.text, item.parsed_query, item.parse_summary, item.id)"
@@ -1427,10 +1427,10 @@ onBeforeUnmount(() => {
             <span v-if="lastRunAt" class="sc-last-run">最后运行 {{ lastRunAt }}</span>
           </div>
           <div class="sc-hero-actions">
-            <button type="button" class="sc-btn sc-btn-ghost" @click="openRuleEditor">编辑条件</button>
+            <button type="button" class="ui-btn ui-btn--ghost" @click="openRuleEditor">编辑条件</button>
             <input v-model="strategyName" type="text" maxlength="120" placeholder="策略名称" @input="strategySaved = false" @keydown.enter.prevent="saveCurrentStrategy" />
-            <button type="button" class="sc-btn sc-btn-ghost" :disabled="strategySaving || !strategyName.trim() || !hasBuilderConditions" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : strategySaved ? '已保存' : '保存版本' }}</button>
-            <button type="button" data-testid="screener-run" class="sc-btn sc-btn-primary" :disabled="running || !hasBuilderConditions" @click="run"><span class="btn-spin" :class="{ spin: running }"></span>{{ running ? '正在运行…' : ran ? '重新运行' : '运行筛选' }}</button>
+            <button type="button" class="ui-btn ui-btn--ghost" :disabled="strategySaving || !strategyName.trim() || !hasBuilderConditions" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : strategySaved ? '已保存' : '保存版本' }}</button>
+            <button type="button" data-testid="screener-run" class="ui-btn ui-btn--primary" :disabled="running || !hasBuilderConditions" @click="run"><span class="btn-spin" :class="{ spin: running }"></span>{{ running ? '正在运行…' : ran ? '重新运行' : '运行筛选' }}</button>
           </div>
           <div class="sc-strategy-chips">
             <button type="button" class="sc-rule-chip" @click="openRuleEditor">{{ market ? ({ SH: '沪市', SZ: '深市', BSE: '北交所' }[market] || market) : '全 A 股' }} <span>✎</span></button>
@@ -1538,8 +1538,8 @@ onBeforeUnmount(() => {
               <p v-if="backtestError" class="sc-action-error">快速回测失败：{{ backtestError }}</p>
             </template>
             <div v-else-if="running" class="sc-result-loading"><span class="btn-spin spin"></span><strong>正在按 {{ builderChips.length }} 项条件筛选</strong><p>完成后会生成排名、相对评分和标的解释。</p></div>
-            <div v-else-if="result" class="sc-result-empty"><strong>当前条件没有找到股票</strong><p>通常是条件组合过严，或量比、均线等指标在最新数据中缺失。</p><div class="sc-empty-actions"><button v-if="volumeRatioMin || aboveMa" type="button" class="sc-btn sc-btn-soft" @click="relaxDataSensitiveRules">去掉量比与均线条件</button><button type="button" class="sc-btn sc-btn-ghost" @click="openRuleEditor">调整条件</button></div></div>
-            <div v-else class="sc-result-ready"><strong>先设置规则并运行筛选</strong><p>左侧配置策略逻辑；运行后，中间展示真实候选集排名，右侧解释选中标的。</p><button type="button" class="sc-btn sc-btn-primary" @click="openRuleEditor">开始设置条件</button></div>
+            <div v-else-if="result" class="sc-result-empty"><strong>当前条件没有找到股票</strong><p>通常是条件组合过严，或量比、均线等指标在最新数据中缺失。</p><div class="sc-empty-actions"><button v-if="volumeRatioMin || aboveMa" type="button" class="ui-btn ui-btn--ghost" @click="relaxDataSensitiveRules">去掉量比与均线条件</button><button type="button" class="ui-btn ui-btn--ghost" @click="openRuleEditor">调整条件</button></div></div>
+            <div v-else class="sc-result-ready"><strong>先设置规则并运行筛选</strong><p>左侧配置策略逻辑；运行后，中间展示真实候选集排名，右侧解释选中标的。</p><button type="button" class="ui-btn ui-btn--primary" @click="openRuleEditor">开始设置条件</button></div>
           </section>
 
           <aside class="sc-explain-panel sc-panel">
@@ -1580,7 +1580,7 @@ onBeforeUnmount(() => {
                     <section><h4>趋势与输出</h4><label class="sc-field"><span>站上均线</span><select v-model="aboveMa" class="sc-input"><option value="">不限</option><option value="5">5 日均线</option><option value="10">10 日均线</option><option value="20">20 日均线</option></select></label><label class="sc-field"><span>选取数量</span><select v-model.number="resultLimit" class="sc-input"><option :value="20">Top 20</option><option :value="50">Top 50</option><option :value="100">Top 100</option></select></label></section>
                   </div>
                 </div>
-                <footer class="sc-rule-dialog-footer"><span>修改即时生效，完成后可重新运行策略。</span><div><button type="button" class="sc-btn sc-btn-ghost" :disabled="!hasBuilderConditions" @click="clearBuilderConditions">清空条件</button><button type="button" class="sc-btn sc-btn-primary" @click="closeRuleEditor">完成</button></div></footer>
+                <footer class="sc-rule-dialog-footer"><span>修改即时生效，完成后可重新运行策略。</span><div><button type="button" class="ui-btn ui-btn--ghost" :disabled="!hasBuilderConditions" @click="clearBuilderConditions">清空条件</button><button type="button" class="ui-btn ui-btn--primary" @click="closeRuleEditor">完成</button></div></footer>
               </section>
             </div>
           </Transition>
@@ -1590,7 +1590,7 @@ onBeforeUnmount(() => {
       <section v-else class="sc-saved-workspace">
         <header class="sc-panel sc-saved-hero">
           <div><h3>保存过的筛选条件</h3><p>可以直接运行，也可以打开后调整并覆盖保存。</p></div>
-          <button type="button" class="sc-btn sc-btn-primary" @click="openBuilder">新建策略</button>
+          <button type="button" class="ui-btn ui-btn--primary" @click="openBuilder">新建策略</button>
         </header>
         <div v-if="savedError" class="notice notice-danger"><strong>读取策略失败</strong><span>{{ savedError }}</span></div>
         <div v-if="savedLoading" class="sc-panel sc-saved-empty">正在读取策略…</div>
@@ -1598,10 +1598,10 @@ onBeforeUnmount(() => {
           <article v-for="item in savedStrategies" :key="item.id" class="sc-panel sc-saved-card">
             <header><div><h3>{{ item.name }}</h3><span>{{ item.updated_at ? `更新于 ${item.updated_at.replace('T', ' ')}` : '已保存' }}</span></div><strong>{{ item.last_result_count == null ? '未运行' : `${item.last_result_count} 只` }}</strong></header>
             <div class="sc-plan-chips"><span v-for="chip in queryToChips(item.query)" :key="chip">{{ chip }}</span></div>
-            <footer><button type="button" class="sc-text-btn sc-danger-text" @click="deleteSavedStrategy(item)">删除</button><div><button type="button" class="sc-btn sc-btn-ghost" @click="useSavedStrategy(item)">编辑条件</button><button type="button" class="sc-btn sc-btn-primary" @click="useSavedStrategy(item, true)">运行策略</button></div></footer>
+            <footer><button type="button" class="ui-btn--text sc-danger-text" @click="deleteSavedStrategy(item)">删除</button><div><button type="button" class="ui-btn ui-btn--ghost" @click="useSavedStrategy(item)">编辑条件</button><button type="button" class="ui-btn ui-btn--primary" @click="useSavedStrategy(item, true)">运行策略</button></div></footer>
           </article>
         </div>
-        <div v-else class="sc-panel sc-saved-empty"><strong>还没有保存的策略</strong><p>在“策略构建”中设置条件、填写名称并保存，之后可以从这里直接运行。</p><button type="button" class="sc-btn sc-btn-primary" @click="openBuilder">创建第一个策略</button></div>
+        <div v-else class="sc-panel sc-saved-empty"><strong>还没有保存的策略</strong><p>在“策略构建”中设置条件、填写名称并保存，之后可以从这里直接运行。</p><button type="button" class="ui-btn ui-btn--primary" @click="openBuilder">创建第一个策略</button></div>
       </section>
 
       <p v-if="parseSummary && !parsedQuery" class="sc-parse-warning">{{ parseSummary }}</p>
@@ -1645,7 +1645,7 @@ onBeforeUnmount(() => {
 .sc-title-mark {
   width: 3px;
   height: 34px;
-  border-radius: 2px;
+  border-radius: 4px;
   background: linear-gradient(180deg, var(--gold-2), var(--gold-dim));
   flex: none;
   margin-top: 2px;
@@ -1660,7 +1660,7 @@ onBeforeUnmount(() => {
 
 .sc-title p {
   margin: 4px 0 0;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
 }
 
@@ -1690,7 +1690,7 @@ onBeforeUnmount(() => {
 .sc-parse-line {
   position: relative;
   margin: 0 0 10px;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--gold-2);
 }
 
@@ -1714,11 +1714,11 @@ onBeforeUnmount(() => {
 
 .sc-chip {
   padding: 5px 12px;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text);
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s;
 }
@@ -1746,7 +1746,7 @@ onBeforeUnmount(() => {
 
 .sc-chip-count {
   margin-left: 6px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -1774,13 +1774,13 @@ onBeforeUnmount(() => {
 
 .sc-rec-basis {
   margin: 8px 0 0;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--gold-2);
 }
 
 .sc-rec-error {
   margin-top: 8px;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--danger);
 }
 
@@ -1823,9 +1823,9 @@ onBeforeUnmount(() => {
   min-width: 96px;
   background: var(--bg-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -1851,7 +1851,7 @@ select.sc-input {
 .sc-note {
   position: relative;
   margin: 0 0 12px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -1867,7 +1867,7 @@ select.sc-input {
 .sc-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .sc-table th {
@@ -1942,7 +1942,7 @@ select.sc-input {
 
 .sc-interpret-head strong {
   color: var(--text);
-  font-size: 13.5px;
+  font-size: 13px;
 }
 
 .sc-interpret-body {
@@ -1951,15 +1951,15 @@ select.sc-input {
 }
 
 .sc-interpret-model {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
   margin-bottom: 6px;
 }
 
 /* 快速选股 V2：信息密度优先，视觉层级与现有深色终端保持一致。 */
 .sc-wrap {
-  --sc-accent: #d7b76f;
-  --sc-accent-strong: #ead08f;
+  --sc-accent: var(--gold);
+  --sc-accent-strong: var(--gold-2);
   --sc-accent-soft: rgba(215, 183, 111, 0.1);
   --sc-panel: #121518;
   --sc-panel-raised: #171b1f;
@@ -1988,7 +1988,7 @@ select.sc-input {
   max-width: 760px;
   margin-top: 7px !important;
   color: var(--sc-text-3);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.65;
 }
 
@@ -2037,12 +2037,12 @@ select.sc-input {
   min-height: 34px;
   padding: 6px 10px;
   border: 1px solid var(--sc-line);
-  border-radius: 6px;
+  border-radius: 4px;
   outline: 0;
   background: #0c0f11;
   color: var(--sc-text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   box-sizing: border-box;
 }
 
@@ -2083,7 +2083,7 @@ select.sc-input {
 .sc-rule-editor-head > span,
 .sc-results-head > span {
   color: var(--sc-text-3);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
   text-align: right;
 }
@@ -2098,7 +2098,7 @@ select.sc-input {
 .sc-result-tools > span,
 .sc-result-tools label {
   color: var(--sc-text-3);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .sc-result-tools label {
@@ -2111,12 +2111,12 @@ select.sc-input {
   min-height: 30px;
   padding: 4px 26px 4px 8px;
   border: 1px solid var(--sc-line);
-  border-radius: 5px;
+  border-radius: 4px;
   outline: 0;
   background: #0c0f11;
   color: var(--sc-text-2);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .sc-rule-group {
@@ -2143,7 +2143,7 @@ select.sc-input {
 
 .sc-rule-group > header span {
   color: var(--sc-text-3);
-  font-size: 11px;
+  font-size: 12px;
   text-align: right;
 }
 
@@ -2176,7 +2176,7 @@ select.sc-input {
 
 .sc-range-field em {
   color: var(--sc-text-3);
-  font-size: 11px;
+  font-size: 12px;
   font-style: normal;
 }
 
@@ -2230,11 +2230,11 @@ select.sc-input {
   min-height: 30px;
   padding: 5px 9px;
   border: 1px solid var(--sc-line-strong);
-  border-radius: 5px;
+  border-radius: 4px;
   background: var(--sc-accent-soft);
   color: var(--sc-accent-strong);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -2270,7 +2270,7 @@ select.sc-input {
 
 .sc-results-workspace .sc-symbol {
   color: var(--sc-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .sc-result-error {
@@ -2304,7 +2304,7 @@ select.sc-input {
 .sc-result-empty p {
   max-width: 520px;
   color: var(--sc-text-3);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.65;
 }
 
@@ -2320,10 +2320,10 @@ select.sc-input {
 .sc-empty-rules span {
   padding: 5px 8px;
   border: 1px solid var(--sc-line);
-  border-radius: 999px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.02);
   color: var(--sc-text-2);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .sc-empty-actions {
@@ -2356,7 +2356,7 @@ select.sc-input {
 .sc-saved-hero p {
   margin-top: 6px !important;
   color: var(--sc-text-3);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .sc-saved-grid {
@@ -2382,14 +2382,14 @@ select.sc-input {
 }
 
 .sc-saved-card > header h3 {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .sc-saved-card > header span {
   display: block;
   margin-top: 5px;
   color: var(--sc-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .sc-saved-card > header > strong {
@@ -2433,7 +2433,7 @@ select.sc-input {
 .sc-saved-empty p {
   max-width: 480px;
   color: var(--sc-text-3);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.65;
 }
 
@@ -2458,7 +2458,7 @@ select.sc-input {
 }
 
 .sc-brand h2 {
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1.2;
   letter-spacing: 0.02em;
 }
@@ -2466,7 +2466,7 @@ select.sc-input {
 .sc-brand p {
   margin-top: 5px;
   color: var(--sc-text-3);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .sc-page-tabs {
@@ -2524,25 +2524,13 @@ select.sc-input {
   gap: 7px;
   margin-right: 4px;
   color: var(--sc-text-3);
-  font-size: 11.5px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
 .sc-data-status button,
-.sc-text-btn {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--sc-accent-strong);
-  font: inherit;
-  cursor: pointer;
-}
 
 .sc-data-status button:disabled,
-.sc-text-btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
 
 .sc-status-dot {
   width: 6px;
@@ -2561,58 +2549,12 @@ select.sc-input {
   box-shadow: 0 0 0 3px rgba(217, 181, 108, 0.15);
 }
 
-.sc-btn {
-  display: inline-flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 7px 14px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: var(--sc-text);
-  font: inherit;
-  font-size: 12.5px;
-  line-height: 1;
-  cursor: pointer;
-  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
-}
 
-.sc-btn:disabled {
-  opacity: 0.48;
-  cursor: default;
-}
 
-.sc-btn-primary {
-  border-color: var(--sc-accent);
-  background: var(--sc-accent);
-  color: #17140e;
-  font-weight: 700;
-}
 
-.sc-btn-primary:hover:not(:disabled) {
-  border-color: var(--sc-accent-strong);
-  background: var(--sc-accent-strong);
-}
 
-.sc-btn-ghost {
-  border-color: var(--sc-line);
-  background: transparent;
-  color: var(--sc-text-2);
-}
 
-.sc-btn-ghost:hover:not(:disabled) {
-  border-color: var(--sc-line-strong);
-  color: var(--sc-text);
-}
 
-.sc-btn-soft {
-  min-height: 30px;
-  padding: 6px 11px;
-  border-color: var(--sc-line-strong);
-  background: var(--sc-accent-soft);
-  color: var(--sc-accent-strong);
-}
 
 .sc-workspace {
   display: grid;
@@ -2670,16 +2612,16 @@ select.sc-input {
   flex: none;
   padding: 4px 8px;
   border: 1px solid var(--sc-line);
-  border-radius: 999px;
+  border-radius: 8px;
   color: var(--sc-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .sc-prompt-box {
   margin-top: 16px;
   overflow: hidden;
   border: 1px solid var(--sc-line-strong);
-  border-radius: 7px;
+  border-radius: 4px;
   background: #0c0f11;
 }
 
@@ -2720,7 +2662,7 @@ select.sc-input {
   padding: 0 14px;
   border-top: 1px solid var(--sc-line);
   color: var(--sc-text-3);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .sc-composer-actions {
@@ -2730,9 +2672,6 @@ select.sc-input {
   margin-top: 12px;
 }
 
-.sc-text-btn {
-  font-size: 12px;
-}
 
 .sc-generate {
   min-width: 146px;
@@ -2756,7 +2695,7 @@ select.sc-input {
   margin-top: 17px !important;
   overflow: hidden;
   color: var(--sc-text-2);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.7;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -2773,10 +2712,10 @@ select.sc-input {
 .sc-plan-chips span {
   padding: 5px 9px;
   border: 1px solid var(--sc-line-strong);
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--sc-accent-soft);
   color: var(--sc-accent-strong);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .sc-profile-facts {
@@ -2789,7 +2728,7 @@ select.sc-input {
 .sc-profile-facts div {
   padding: 9px 10px;
   border: 1px solid var(--sc-line);
-  border-radius: 6px;
+  border-radius: 4px;
   background: #0f1214;
 }
 
@@ -2800,20 +2739,20 @@ select.sc-input {
 
 .sc-profile-facts span {
   color: var(--sc-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .sc-profile-facts strong {
   margin-top: 4px;
   color: var(--sc-text-2);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .sc-profile-detail {
   margin: 0 0 8px !important;
   color: var(--sc-text-3);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -2821,14 +2760,14 @@ select.sc-input {
   margin-top: 22px;
   padding: 16px;
   border: 1px dashed var(--sc-line);
-  border-radius: 7px;
+  border-radius: 4px;
   color: var(--sc-text-2);
 }
 
 .sc-profile-empty p {
   margin-top: 7px;
   color: var(--sc-text-3);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -2844,7 +2783,7 @@ select.sc-input {
 
 .sc-section-head > span {
   color: var(--sc-text-3);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .sc-recommend-controls {
@@ -2853,7 +2792,7 @@ select.sc-input {
   flex-direction: column;
   gap: 8px;
   color: var(--sc-text-3);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .sc-recommend-switch-row {
@@ -2864,7 +2803,7 @@ select.sc-input {
 
 .sc-recommend-switch-row small {
   color: var(--sc-text-2);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .sc-recommend-switch {
@@ -2874,11 +2813,11 @@ select.sc-input {
   min-height: 30px;
   padding: 5px 9px;
   border: 1px solid var(--sc-line-strong);
-  border-radius: 5px;
+  border-radius: 4px;
   background: var(--sc-accent-soft);
   color: var(--sc-accent-strong);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -2903,7 +2842,7 @@ select.sc-input {
 
 .sc-recommend-switch em {
   color: var(--sc-text-3);
-  font-size: 9.5px;
+  font-size: 12px;
   font-style: normal;
 }
 
@@ -2919,20 +2858,20 @@ select.sc-input {
   flex-direction: column;
   padding: 15px;
   border: 1px solid var(--sc-line);
-  border-radius: 7px;
+  border-radius: 4px;
   background: var(--sc-panel-raised);
 }
 
 .sc-card-title h4 {
-  font-size: 13.5px;
+  font-size: 13px;
 }
 
 .sc-card-title span {
   padding: 3px 7px;
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--sc-accent-soft);
   color: var(--sc-accent-strong);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .sc-recommend-objective {
@@ -2956,7 +2895,7 @@ select.sc-input {
   border-radius: 4px;
   background: color-mix(in srgb, var(--sc-accent-soft) 60%, transparent);
   color: var(--sc-text-2);
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.2;
 }
 
@@ -2966,7 +2905,7 @@ select.sc-input {
   margin-top: 8px !important;
   overflow: hidden;
   color: var(--sc-text-3);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.55;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -2981,7 +2920,7 @@ select.sc-input {
 
 .sc-recommend-card footer > span {
   color: var(--sc-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .sc-library-grid {
@@ -3003,11 +2942,11 @@ select.sc-input {
   flex: none;
   padding: 5px 9px;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 4px;
   background: transparent;
   color: var(--sc-text-3);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -3047,7 +2986,7 @@ select.sc-input {
   height: 30px;
   place-items: center;
   border: 1px solid var(--sc-line-strong);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--sc-accent-strong);
   font-size: 12px;
 }
@@ -3091,14 +3030,14 @@ select.sc-input {
 }
 
 .sc-template-copy strong {
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .sc-template-copy small {
   margin-top: 4px;
   overflow: hidden;
   color: var(--sc-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3106,11 +3045,11 @@ select.sc-input {
 .sc-template-meta,
 .sc-row-arrow {
   color: var(--sc-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .sc-row-arrow {
-  font-size: 18px;
+  font-size: 20px;
 }
 
 .sc-history-search {
@@ -3120,7 +3059,7 @@ select.sc-input {
   margin-bottom: 10px;
   padding: 0 10px;
   border: 1px solid var(--sc-line);
-  border-radius: 6px;
+  border-radius: 4px;
   background: #0d1012;
   color: var(--sc-text-3);
 }
@@ -3137,7 +3076,7 @@ select.sc-input {
   background: transparent;
   color: var(--sc-text);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .sc-history-row {
@@ -3154,7 +3093,7 @@ select.sc-input {
   border: 0;
   background: transparent;
   color: var(--sc-text-3);
-  font-size: 17px;
+  font-size: 20px;
   cursor: pointer;
 }
 
@@ -3166,7 +3105,7 @@ select.sc-input {
   display: block;
   overflow: hidden;
   color: var(--sc-text-2);
-  font-size: 11.5px;
+  font-size: 12px;
   text-overflow: ellipsis;
   transition: color 140ms ease;
   white-space: nowrap;
@@ -3176,13 +3115,13 @@ select.sc-input {
   display: block;
   margin-top: 5px;
   color: var(--sc-text-3);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .sc-history-copy .sc-history-prompt {
   margin-top: 0;
   color: var(--sc-text-2);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .sc-builder-parse-notice {
@@ -3197,7 +3136,7 @@ select.sc-input {
   background: transparent;
   color: var(--sc-accent-strong);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -3209,7 +3148,7 @@ select.sc-input {
   text-align: center;
 }
 
-.sc-empty-line .sc-text-btn {
+.sc-empty-line .ui-btn--text {
   margin-left: 8px;
 }
 
@@ -3219,7 +3158,7 @@ select.sc-input {
 
 .sc-plan-summary {
   color: var(--sc-text-2);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.65;
 }
 
@@ -3264,10 +3203,10 @@ select.sc-input {
 .sc-sync-note {
   padding: 9px 11px;
   border: 1px solid rgba(94, 169, 120, 0.22);
-  border-radius: 6px;
+  border-radius: 4px;
   background: rgba(94, 169, 120, 0.06);
   color: #8fb99e;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .sc-result-error,
@@ -3292,14 +3231,14 @@ select.sc-input {
 .sc-hero-actions,
 .sc-strategy-chips { display: flex; align-items: center; gap: 10px; }
 .sc-strategy-heading h2 { margin: 3px 0 0; font-size: 24px; font-weight: 650; letter-spacing: .01em; }
-.sc-run-status { padding: 5px 11px; border: 1px solid rgba(215,183,111,.22); border-radius: 5px; background: rgba(215,183,111,.08); color: var(--sc-accent); font-size: 12px; }
+.sc-run-status { padding: 5px 11px; border: 1px solid rgba(215,183,111,.22); border-radius: 4px; background: rgba(215,183,111,.08); color: var(--sc-accent); font-size: 12px; }
 .sc-run-status.is-ready { border-color: rgba(70,181,123,.28); background: rgba(70,181,123,.09); color: #6dc794; }
 .sc-last-run { color: var(--sc-text-3); font-size: 12px; }
 .sc-hero-actions { justify-content: flex-end; }
-.sc-hero-actions input { width: 150px; min-height: 34px; padding: 0 10px; border: 1px solid var(--sc-line); border-radius: 5px; outline: none; background: #0b0e10; color: var(--sc-text); font: inherit; font-size: 12px; }
+.sc-hero-actions input { width: 150px; min-height: 34px; padding: 0 10px; border: 1px solid var(--sc-line); border-radius: 4px; outline: none; background: #0b0e10; color: var(--sc-text); font: inherit; font-size: 12px; }
 .sc-hero-actions input:focus { border-color: var(--sc-accent); }
 .sc-strategy-chips { grid-column: 1 / -1; flex-wrap: wrap; }
-.sc-rule-chip { min-height: 34px; padding: 6px 11px; border: 1px solid var(--sc-line); border-radius: 5px; background: #101417; color: var(--sc-text-2); font: inherit; font-size: 12px; cursor: pointer; }
+.sc-rule-chip { min-height: 34px; padding: 6px 11px; border: 1px solid var(--sc-line); border-radius: 4px; background: #101417; color: var(--sc-text-2); font: inherit; font-size: 12px; cursor: pointer; }
 .sc-rule-chip:hover { border-color: var(--sc-line-strong); color: var(--sc-text); }
 .sc-rule-chip span { margin-left: 5px; color: var(--sc-text-3); }
 .sc-rule-chip.is-empty { border-style: dashed; color: var(--sc-accent); }
@@ -3314,55 +3253,55 @@ select.sc-input {
 .sc-strategy-sidebar > header,
 .sc-explain-panel > header { display: flex; align-items: center; justify-content: space-between; min-height: 55px; padding: 0 14px; border-bottom: 1px solid var(--sc-line); }
 .sc-strategy-sidebar > header h3,
-.sc-explain-panel > header h3 { margin: 0; font-size: 15px; }
+.sc-explain-panel > header h3 { margin: 0; font-size: 16px; }
 .sc-strategy-sidebar > header span,
-.sc-explain-panel > header span { color: var(--sc-text-3); font-size: 10.5px; }
-.sc-logic-card { margin: 10px 10px 0; padding: 12px; border: 1px solid var(--sc-line); border-radius: 6px; background: rgba(255,255,255,.012); }
+.sc-explain-panel > header span { color: var(--sc-text-3); font-size: 12px; }
+.sc-logic-card { margin: 10px 10px 0; padding: 12px; border: 1px solid var(--sc-line); border-radius: 4px; background: rgba(255,255,255,.012); }
 .sc-logic-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
-.sc-logic-title strong { font-size: 12.5px; }
+.sc-logic-title strong { font-size: 13px; }
 .sc-logic-title > button { border: 0; background: transparent; color: var(--sc-text-3); cursor: pointer; }
-.sc-logic-title > span { color: var(--sc-text-3); font-size: 10px; }
+.sc-logic-title > span { color: var(--sc-text-3); font-size: 12px; }
 .sc-logic-card ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
-.sc-logic-card li { display: flex; gap: 7px; align-items: flex-start; color: var(--sc-text-2); font-size: 11.5px; line-height: 1.45; }
+.sc-logic-card li { display: flex; gap: 7px; align-items: flex-start; color: var(--sc-text-2); font-size: 12px; line-height: 1.45; }
 .sc-logic-card li i { min-width: 14px; color: var(--sc-text-3); font-style: normal; }
 .sc-logic-card li i.is-ok { color: #5db987; }
-.sc-logic-card li i.is-rule { width: 10px; min-width: 10px; height: 10px; margin-top: 2px; border: 1px solid var(--sc-line-strong); border-radius: 2px; background: #0c0f11; box-shadow: inset 0 0 0 2px #0c0f11; }
-.sc-no-rule { margin: 0; color: var(--sc-text-3); font-size: 11px; }
-.sc-score-weights label { display: grid; grid-template-columns: 64px minmax(0,1fr) 34px; align-items: center; gap: 7px; margin-top: 9px; color: var(--sc-text-2); font-size: 11px; }
+.sc-logic-card li i.is-rule { width: 10px; min-width: 10px; height: 10px; margin-top: 2px; border: 1px solid var(--sc-line-strong); border-radius: 4px; background: #0c0f11; box-shadow: inset 0 0 0 2px #0c0f11; }
+.sc-no-rule { margin: 0; color: var(--sc-text-3); font-size: 12px; }
+.sc-score-weights label { display: grid; grid-template-columns: 64px minmax(0,1fr) 34px; align-items: center; gap: 7px; margin-top: 9px; color: var(--sc-text-2); font-size: 12px; }
 .sc-score-weights input { width: 100%; accent-color: var(--sc-accent); }
-.sc-score-weights b { color: var(--sc-text-2); font-size: 10px; text-align: right; }
-.sc-score-weights small { display: block; margin-top: 9px; color: var(--sc-text-3); font-size: 9.5px; line-height: 1.5; }
-.sc-add-condition { width: calc(100% - 20px); min-height: 38px; margin: 12px 10px; border: 1px solid var(--sc-line-strong); border-radius: 5px; background: transparent; color: var(--sc-accent); font: inherit; font-size: 11.5px; cursor: pointer; }
+.sc-score-weights b { color: var(--sc-text-2); font-size: 12px; text-align: right; }
+.sc-score-weights small { display: block; margin-top: 9px; color: var(--sc-text-3); font-size: 12px; line-height: 1.5; }
+.sc-add-condition { width: calc(100% - 20px); min-height: 38px; margin: 12px 10px; border: 1px solid var(--sc-line-strong); border-radius: 4px; background: transparent; color: var(--sc-accent); font: inherit; font-size: 12px; cursor: pointer; }
 
 .sc-center-head { display: flex; align-items: center; justify-content: space-between; min-height: 63px; padding: 0 14px; border-bottom: 1px solid var(--sc-line); }
-.sc-center-head h3 { margin: 0 0 5px; font-size: 15px; }
+.sc-center-head h3 { margin: 0 0 5px; font-size: 16px; }
 .sc-center-head h3 b { margin-left: 5px; color: var(--sc-text-2); font-size: 12px; }
-.sc-center-head span { color: var(--sc-text-3); font-size: 10.5px; }
-.sc-center-tools label { display: flex; align-items: center; gap: 6px; color: var(--sc-text-3); font-size: 10.5px; }
+.sc-center-head span { color: var(--sc-text-3); font-size: 12px; }
+.sc-center-tools label { display: flex; align-items: center; gap: 6px; color: var(--sc-text-3); font-size: 12px; }
 .sc-result-tabs { display: flex; align-items: stretch; justify-content: space-between; gap: 18px; min-height: 43px; padding: 0 14px; border-bottom: 1px solid var(--sc-line); }
 .sc-result-tabset { display: flex; gap: 28px; }
-.sc-result-tabset button { position: relative; border: 0; background: transparent; color: var(--sc-text-3); font: inherit; font-size: 11.5px; cursor: pointer; }
+.sc-result-tabset button { position: relative; border: 0; background: transparent; color: var(--sc-text-3); font: inherit; font-size: 12px; cursor: pointer; }
 .sc-result-tabset button.active { color: var(--sc-accent); }
 .sc-result-tabset button.active::after { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: var(--sc-accent); content: ''; }
-.sc-result-tabs em { padding: 1px 4px; border-radius: 999px; background: rgba(215,183,111,.14); font-size: 9px; font-style: normal; }
+.sc-result-tabs em { padding: 1px 4px; border-radius: 8px; background: rgba(215,183,111,.14); font-size: 12px; font-style: normal; }
 .sc-result-toolbar { display: flex; align-items: center; gap: 7px; margin-left: auto; }
 .sc-result-toolbar button,
 .sc-result-toolbar input,
-.sc-result-toolbar .sc-result-sort { height: 30px; box-sizing: border-box; border: 1px solid var(--sc-line); border-radius: 4px; outline: 0; background: #0c0f11; color: var(--sc-text-2); font: inherit; font-size: 10.5px; }
+.sc-result-toolbar .sc-result-sort { height: 30px; box-sizing: border-box; border: 1px solid var(--sc-line); border-radius: 4px; outline: 0; background: #0c0f11; color: var(--sc-text-2); font: inherit; font-size: 12px; }
 .sc-result-toolbar button { padding: 0 10px; cursor: pointer; }
 .sc-result-toolbar button:hover,
 .sc-result-toolbar button[aria-expanded="true"] { border-color: var(--sc-line-strong); color: var(--sc-accent); }
 .sc-result-toolbar .sc-result-sort { min-height: 30px; padding: 0 28px 0 9px; }
 .sc-column-picker { position: relative; }
-.sc-column-menu { position: absolute; z-index: 12; top: calc(100% + 7px); right: 0; display: grid; min-width: 150px; padding: 7px; border: 1px solid var(--sc-line-strong); border-radius: 5px; background: #111619; box-shadow: 0 14px 32px rgba(0,0,0,.42); }
-.sc-column-menu label { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 7px; border-radius: 4px; color: var(--sc-text-2); font-size: 10.5px; cursor: pointer; }
+.sc-column-menu { position: absolute; z-index: 12; top: calc(100% + 7px); right: 0; display: grid; min-width: 150px; padding: 7px; border: 1px solid var(--sc-line-strong); border-radius: 4px; background: #111619; box-shadow: 0 14px 32px rgba(0,0,0,.42); }
+.sc-column-menu label { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 7px; border-radius: 4px; color: var(--sc-text-2); font-size: 12px; cursor: pointer; }
 .sc-column-menu label:hover { background: rgba(255,255,255,.035); }
 .sc-column-menu input { width: 14px; height: 14px; accent-color: var(--sc-accent); }
 .sc-result-search { display: flex; align-items: center; }
 .sc-result-search input { width: 132px; margin-right: 5px; padding: 0 8px; }
-.sc-result-search button { width: 32px; padding: 0; font-size: 18px; line-height: 1; }
+.sc-result-search button { width: 32px; padding: 0; font-size: 20px; line-height: 1; }
 .sc-ranking-table-wrap { min-height: 390px; flex: 1; overflow: auto; }
-.sc-ranking-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.sc-ranking-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .sc-ranking-table th { position: sticky; top: 0; z-index: 2; padding: 11px 8px; border-bottom: 1px solid var(--sc-line); background: var(--sc-panel-raised); color: var(--sc-text-3); font-weight: 500; text-align: left; white-space: nowrap; }
 .sc-ranking-table td { padding: 13px 8px; border-bottom: 1px solid rgba(255,255,255,.065); color: var(--sc-text-2); vertical-align: middle; }
 .sc-ranking-table tbody tr { cursor: pointer; transition: background .15s; }
@@ -3373,11 +3312,11 @@ select.sc-input {
 .sc-ranking-table .sc-symbol-cell strong,
 .sc-ranking-table .sc-symbol-cell span { display: block; white-space: nowrap; }
 .sc-ranking-table .sc-symbol-cell strong { color: var(--sc-text); }
-.sc-ranking-table .sc-symbol-cell span { margin-top: 3px; color: var(--sc-text-3); font-size: 10px; }
+.sc-ranking-table .sc-symbol-cell span { margin-top: 3px; color: var(--sc-text-3); font-size: 12px; }
 .sc-ranking-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sc-ranking-table td.pnl-up { color: #f0787c; }
 .sc-ranking-table td.pnl-down { color: #4ac69a; }
-.sc-factor-price { margin: 4px 0 10px; color: var(--sc-text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.sc-factor-price { margin: 4px 0 10px; color: var(--sc-text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 .sc-factor-price em { font-style: normal; }
 .sc-factor-price em.pnl-up { color: #f0787c; }
 .sc-factor-price em.pnl-down { color: #4ac69a; }
@@ -3388,24 +3327,24 @@ select.sc-input {
 .sc-reason-tags { display: flex; gap: 4px; white-space: nowrap; }
 .sc-reason-tags span { padding: 3px 6px; border: 1px solid var(--sc-line); border-radius: 4px; color: var(--sc-text-2); background: rgba(255,255,255,.015); }
 .sc-risk-cell { max-width: 110px; color: #b9aaa0 !important; }
-.sc-mini-ask { padding: 4px 7px; border: 1px solid var(--sc-line-strong); border-radius: 4px; background: rgba(215,183,111,.08); color: var(--sc-accent); font: inherit; font-size: 10px; cursor: pointer; }
-.sc-result-footer { display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 14px; border-top: 1px solid var(--sc-line); color: var(--sc-text-3); font-size: 11px; }
+.sc-mini-ask { padding: 4px 7px; border: 1px solid var(--sc-line-strong); border-radius: 4px; background: rgba(215,183,111,.08); color: var(--sc-accent); font: inherit; font-size: 12px; cursor: pointer; }
+.sc-result-footer { display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 14px; border-top: 1px solid var(--sc-line); color: var(--sc-text-3); font-size: 12px; }
 .sc-result-footer > div { display: flex; gap: 4px; }
 .sc-result-footer button { min-width: 26px; height: 26px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--sc-text-3); cursor: pointer; }
 .sc-result-footer button.active { border-color: var(--sc-line-strong); color: var(--sc-accent); }
 .sc-result-footer button:disabled { opacity: .3; }
 .sc-workbench-actions { display: grid; grid-template-columns: auto repeat(5, minmax(0,1fr)); gap: 8px; margin-top: auto; padding: 11px 14px; border-top: 1px solid var(--sc-line); }
-.sc-workbench-actions button { min-height: 38px; border: 1px solid var(--sc-line); border-radius: 5px; background: transparent; color: var(--sc-text-2); font: inherit; font-size: 11.5px; cursor: pointer; }
+.sc-workbench-actions button { min-height: 38px; border: 1px solid var(--sc-line); border-radius: 4px; background: transparent; color: var(--sc-text-2); font: inherit; font-size: 12px; cursor: pointer; }
 .sc-workbench-actions button:hover:not(:disabled) { border-color: var(--sc-line-strong); color: var(--sc-accent); }
 .sc-workbench-actions button.primary { border-color: var(--sc-accent); background: var(--sc-accent); color: #17130a; font-weight: 700; }
 .sc-workbench-actions button:disabled { cursor: default; opacity: .35; }
-.sc-selection-summary { display: flex; min-width: 88px; align-items: center; gap: 7px; color: var(--sc-text-2); font-size: 10.5px; white-space: nowrap; }
+.sc-selection-summary { display: flex; min-width: 88px; align-items: center; gap: 7px; color: var(--sc-text-2); font-size: 12px; white-space: nowrap; }
 .sc-selection-summary button { min-height: 0; padding: 0; border: 0; color: var(--sc-accent); }
-.sc-action-error { margin: 0; padding: 0 14px 10px; color: #e18a8a; font-size: 10.5px; }
+.sc-action-error { margin: 0; padding: 0 14px 10px; color: #e18a8a; font-size: 12px; }
 .sc-factor-board,
 .sc-compare-board { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; min-height: 390px; flex: 1; padding: 10px; box-sizing: border-box; align-content: start; }
 .sc-factor-board article,
-.sc-compare-board article { padding: 10px; border: 1px solid var(--sc-line); border-radius: 6px; background: rgba(255,255,255,.012); cursor: pointer; }
+.sc-compare-board article { padding: 10px; border: 1px solid var(--sc-line); border-radius: 4px; background: rgba(255,255,255,.012); cursor: pointer; }
 .sc-factor-board article { position: relative; padding-left: 34px; }
 .sc-factor-board article.selected { border-color: var(--sc-line-strong); background: rgba(215,183,111,.05); }
 .sc-factor-board article.is-checked { box-shadow: inset 2px 0 var(--sc-accent); }
@@ -3416,24 +3355,24 @@ select.sc-input {
 .sc-compare-board header > b { color: var(--sc-accent); }
 .sc-factor-board article > div,
 .sc-contribution > div,
-.sc-distribution > div { display: grid; grid-template-columns: 72px minmax(0,1fr) 34px; align-items: center; gap: 7px; margin-top: 8px; color: var(--sc-text-3); font-size: 10.5px; }
+.sc-distribution > div { display: grid; grid-template-columns: 72px minmax(0,1fr) 34px; align-items: center; gap: 7px; margin-top: 8px; color: var(--sc-text-3); font-size: 12px; }
 .sc-factor-board i,
 .sc-contribution i,
-.sc-distribution i { height: 5px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); }
+.sc-distribution i { height: 5px; overflow: hidden; border-radius: 8px; background: rgba(255,255,255,.08); }
 .sc-factor-board i em,
 .sc-contribution i em,
 .sc-distribution i em { display: block; height: 100%; border-radius: inherit; background: var(--sc-accent); }
-.sc-compare-board header span { display: block; margin-top: 3px; color: var(--sc-text-3); font-size: 9px; }
+.sc-compare-board header span { display: block; margin-top: 3px; color: var(--sc-text-3); font-size: 12px; }
 .sc-compare-board dl { margin: 0; }
-.sc-compare-board dl div { display: flex; justify-content: space-between; padding: 5px 0; border-top: 1px solid var(--sc-line); font-size: 10px; }
+.sc-compare-board dl div { display: flex; justify-content: space-between; padding: 5px 0; border-top: 1px solid var(--sc-line); font-size: 12px; }
 .sc-compare-board dt { color: var(--sc-text-3); }
 .sc-compare-board dd { margin: 0; color: var(--sc-text-2); }
-.sc-compare-board button { width: 100%; margin-top: 7px; border: 0; background: transparent; color: var(--sc-accent); font: inherit; font-size: 10px; cursor: pointer; }
+.sc-compare-board button { width: 100%; margin-top: 7px; border: 0; background: transparent; color: var(--sc-accent); font: inherit; font-size: 12px; cursor: pointer; }
 
 .sc-selected-stock { display: flex; align-items: center; justify-content: space-between; padding: 14px; border-bottom: 1px solid var(--sc-line); }
 .sc-selected-stock strong { display: block; font-size: 14px; }
-.sc-selected-stock span { display: block; margin-top: 5px; color: var(--sc-text-3); font-size: 10.5px; }
-.sc-selected-stock > b { color: var(--sc-accent); font-size: 25px; font-weight: 500; }
+.sc-selected-stock span { display: block; margin-top: 5px; color: var(--sc-text-3); font-size: 12px; }
+.sc-selected-stock > b { color: var(--sc-accent); font-size: 24px; font-weight: 500; }
 .sc-contribution,
 .sc-explain-list,
 .sc-completeness,
@@ -3443,18 +3382,18 @@ select.sc-input {
 .sc-distribution h4 { margin: 0 0 10px; color: var(--sc-text-2); font-size: 12px; }
 .sc-contribution > div,
 .sc-distribution > div { grid-template-columns: 96px minmax(0,1fr) 34px; }
-.sc-explain-list ul { display: grid; gap: 8px; margin: 0; padding-left: 16px; color: var(--sc-text-2); font-size: 11px; line-height: 1.5; }
+.sc-explain-list ul { display: grid; gap: 8px; margin: 0; padding-left: 16px; color: var(--sc-text-2); font-size: 12px; line-height: 1.5; }
 .sc-explain-list li::marker { color: var(--sc-accent); }
-.sc-completeness { display: flex; justify-content: space-between; color: var(--sc-text-2); font-size: 11px; }
+.sc-completeness { display: flex; justify-content: space-between; color: var(--sc-text-2); font-size: 12px; }
 .sc-completeness strong { color: #68c693; }
 .sc-explain-empty { display: flex; min-height: 560px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--sc-text-3); text-align: center; }
 .sc-explain-empty strong { color: var(--sc-text); font-size: 13px; }
-.sc-explain-empty p { font-size: 10.5px; line-height: 1.5; }
+.sc-explain-empty p { font-size: 12px; line-height: 1.5; }
 
 :global(body.sc-rule-dialog-open) { overflow: hidden; }
 .sc-rule-dialog-backdrop {
-  --sc-accent: #d7b76f;
-  --sc-accent-strong: #ead08f;
+  --sc-accent: var(--gold);
+  --sc-accent-strong: var(--gold-2);
   --sc-accent-soft: rgba(215, 183, 111, 0.1);
   --sc-panel: #121518;
   --sc-panel-raised: #171b1f;
@@ -3473,24 +3412,24 @@ select.sc-input {
   background: rgba(2, 4, 5, 0.78);
   backdrop-filter: blur(5px);
 }
-.sc-rule-config-dialog { display: flex; width: min(1180px, calc(100vw - 48px)); max-height: min(86dvh, 800px); flex-direction: column; overflow: hidden; border: 1px solid var(--sc-line-strong); border-radius: 10px; outline: 0; background: linear-gradient(180deg,#151a1e,#101417); color: var(--sc-text); box-shadow: 0 30px 100px rgba(0,0,0,.72), 0 0 0 1px rgba(255,255,255,.025); }
+.sc-rule-config-dialog { display: flex; width: min(1180px, calc(100vw - 48px)); max-height: min(86dvh, 800px); flex-direction: column; overflow: hidden; border: 1px solid var(--sc-line-strong); border-radius: 8px; outline: 0; background: linear-gradient(180deg,#151a1e,#101417); color: var(--sc-text); box-shadow: 0 30px 100px rgba(0,0,0,.72), 0 0 0 1px rgba(255,255,255,.025); }
 .sc-rule-dialog-header { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 18px 20px 16px; border-bottom: 1px solid var(--sc-line); }
-.sc-rule-dialog-header h3 { margin: 4px 0 0; font-size: 18px; font-weight: 650; }
-.sc-rule-dialog-header p { margin: 6px 0 0; color: var(--sc-text-3); font-size: 11.5px; }
-.sc-rule-dialog-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border: 1px solid var(--sc-line); border-radius: 6px; background: rgba(255,255,255,.015); color: var(--sc-text-3); cursor: pointer; }
+.sc-rule-dialog-header h3 { margin: 4px 0 0; font-size: 20px; font-weight: 650; }
+.sc-rule-dialog-header p { margin: 6px 0 0; color: var(--sc-text-3); font-size: 12px; }
+.sc-rule-dialog-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border: 1px solid var(--sc-line); border-radius: 4px; background: rgba(255,255,255,.015); color: var(--sc-text-3); cursor: pointer; }
 .sc-rule-dialog-close:hover { border-color: var(--sc-line-strong); color: var(--sc-text); }
 .sc-rule-dialog-close:focus-visible { outline: 2px solid var(--sc-accent); outline-offset: 2px; }
 .sc-rule-dialog-close svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .sc-rule-dialog-body { min-height: 0; flex: 1; overflow-y: auto; padding: 18px; scrollbar-color: rgba(215,183,111,.35) transparent; }
 .sc-config-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
-.sc-config-grid > section { display: grid; align-content: start; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--sc-line); border-radius: 7px; background: rgba(255,255,255,.014); }
+.sc-config-grid > section { display: grid; align-content: start; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--sc-line); border-radius: 4px; background: rgba(255,255,255,.014); }
 .sc-config-grid > section:nth-child(4) { grid-column: span 2; }
-.sc-config-grid h4 { margin: 0 0 2px; color: var(--sc-accent-strong); font-size: 12.5px; }
+.sc-config-grid h4 { margin: 0 0 2px; color: var(--sc-accent-strong); font-size: 13px; }
 .sc-config-grid .sc-input { width: 100%; min-width: 0; min-height: 39px; box-sizing: border-box; }
 .sc-rule-dialog-footer { display: flex; min-height: 62px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px; border-top: 1px solid var(--sc-line); background: rgba(6,8,9,.38); }
-.sc-rule-dialog-footer > span { color: var(--sc-text-3); font-size: 11px; }
+.sc-rule-dialog-footer > span { color: var(--sc-text-3); font-size: 12px; }
 .sc-rule-dialog-footer > div { display: flex; gap: 8px; }
-.sc-rule-dialog-footer .sc-btn { min-height: 36px; min-width: 88px; }
+.sc-rule-dialog-footer .ui-btn { min-height: 36px; min-width: 88px; }
 .sc-rule-dialog-enter-active,
 .sc-rule-dialog-leave-active { transition: opacity .18s ease; }
 .sc-rule-dialog-enter-active .sc-rule-config-dialog,
@@ -3634,7 +3573,7 @@ select.sc-input {
   }
 
   .sc-generate,
-  .sc-plan-actions .sc-btn {
+  .sc-plan-actions .ui-btn {
     width: 100%;
   }
 
@@ -3651,7 +3590,7 @@ select.sc-input {
     padding: 9px 0;
   }
 
-  .sc-history-row .sc-btn {
+  .sc-history-row .ui-btn {
     grid-column: 2;
     justify-self: start;
   }
@@ -3673,7 +3612,7 @@ select.sc-input {
     justify-content: stretch;
   }
 
-  .sc-builder-command-actions .sc-btn {
+  .sc-builder-command-actions .ui-btn {
     flex: 1;
     min-height: 42px;
   }
@@ -3700,7 +3639,7 @@ select.sc-input {
     padding: 15px;
   }
 
-  .sc-saved-hero .sc-btn {
+  .sc-saved-hero .ui-btn {
     width: 100%;
   }
 
@@ -3713,7 +3652,7 @@ select.sc-input {
     width: 100%;
   }
 
-  .sc-saved-card > footer > div .sc-btn {
+  .sc-saved-card > footer > div .ui-btn {
     flex: 1;
   }
 
@@ -3798,10 +3737,10 @@ select.sc-input {
   .sc-strategy-hero { padding: 12px 0; }
   .sc-strategy-heading { align-items: flex-start; flex-wrap: wrap; }
   .sc-strategy-heading > div { width: 100%; }
-  .sc-strategy-heading h2 { font-size: 19px; }
+  .sc-strategy-heading h2 { font-size: 20px; }
   .sc-hero-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
   .sc-hero-actions input { width: 100%; min-height: 42px; box-sizing: border-box; }
-  .sc-hero-actions .sc-btn { min-height: 42px; }
+  .sc-hero-actions .ui-btn { min-height: 42px; }
   .sc-strategy-layout { gap: 10px; }
   .sc-strategy-sidebar { order: 2; }
   .sc-results-center { order: 1; }
@@ -3817,13 +3756,13 @@ select.sc-input {
   .sc-rule-dialog-backdrop { align-items: end; padding: 0; }
   .sc-rule-config-dialog { width: 100%; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; }
   .sc-rule-dialog-header { padding: 15px 16px 13px; }
-  .sc-rule-dialog-header h3 { font-size: 17px; }
+  .sc-rule-dialog-header h3 { font-size: 20px; }
   .sc-rule-dialog-body { padding: 12px; }
   .sc-config-grid { grid-template-columns: 1fr; }
   .sc-config-grid > section { padding: 14px; }
   .sc-rule-dialog-footer { align-items: stretch; flex-direction: column; gap: 9px; padding: 11px 12px 12px; }
   .sc-rule-dialog-footer > div { display: grid; grid-template-columns: 1fr 1fr; }
-  .sc-rule-dialog-footer .sc-btn { min-height: 42px; }
+  .sc-rule-dialog-footer .ui-btn { min-height: 42px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

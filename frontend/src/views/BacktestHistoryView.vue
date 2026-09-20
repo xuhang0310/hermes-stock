@@ -27,18 +27,18 @@ const strategyNames: Record<string, string> = {
 }
 
 const strategyColors: Record<string, string> = {
-  macd_cross: '#eabf63',
-  signal_macd: '#eabf63',
-  signal_ma_cross: '#3bb2d6',
+  macd_cross: 'var(--gold)',
+  signal_macd: 'var(--gold)',
+  signal_ma_cross: 'var(--cyan)',
   signal_bollinger: '#a371f7',
-  signal_rsi: '#f0883e',
+  signal_rsi: 'var(--warning)',
   signal_momentum: '#7ee787',
   signal_turtle: '#e3b341',
-  factor_combination: '#20c997',
-  risk_parity: '#f25f64',
-  portfolio_risk_parity: '#f25f64',
+  factor_combination: 'var(--ok)',
+  risk_parity: 'var(--danger)',
+  portfolio_risk_parity: 'var(--danger)',
 }
-const FALLBACK_COLORS = ['#eabf63', '#3bb2d6', '#20c997', '#f0883e', '#f25f64', '#8b949e']
+const FALLBACK_COLORS = ['var(--gold)', 'var(--cyan)', 'var(--ok)', 'var(--warning)', 'var(--danger)', 'var(--muted)']
 
 const confidenceLabels: Record<string, string> = {
   insufficient: '数据不足',
@@ -350,8 +350,8 @@ onMounted(load)
   position: relative;
   padding: 28px 24px 48px;
   min-height: 100vh;
-  background: #0d1117;
-  color: #e6edf3;
+  background: var(--bg-2);
+  color: var(--text);
   overflow: hidden;
 }
 
@@ -381,21 +381,21 @@ onMounted(load)
 .bt-title-mark {
   width: 4px;
   height: 38px;
-  border-radius: 2px;
-  background: linear-gradient(180deg, #eabf63, #f0883e);
+  border-radius: 4px;
+  background: linear-gradient(180deg, var(--gold), var(--warning));
 }
 
 .bt-title h2 {
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 700;
   letter-spacing: -0.02em;
   margin: 0;
-  color: #f2f5f8;
+  color: var(--text);
 }
 
 .bt-title p {
-  font-size: 12.5px;
-  color: #8b949e;
+  font-size: 13px;
+  color: var(--muted);
   margin: 3px 0 0;
   letter-spacing: 0.01em;
 }
@@ -405,8 +405,8 @@ onMounted(load)
   align-items: center;
   gap: 7px;
   background: rgba(22, 27, 34, 0.7);
-  border: 1px solid #30363d;
-  color: #e6edf3;
+  border: 1px solid var(--line);
+  color: var(--text);
   padding: 8px 16px;
   border-radius: 8px;
   cursor: pointer;
@@ -415,8 +415,8 @@ onMounted(load)
 }
 
 .btn-outline:hover:not(:disabled) {
-  border-color: #eabf63;
-  color: #eabf63;
+  border-color: var(--gold);
+  color: var(--gold);
   transform: translateY(-1px);
 }
 
@@ -445,8 +445,8 @@ onMounted(load)
   position: relative;
   padding: 16px 18px;
   background: linear-gradient(180deg, rgba(22, 27, 34, 0.9), rgba(13, 17, 23, 0.6));
-  border: 1px solid #21262d;
-  border-radius: 12px;
+  border: 1px solid var(--surface-2);
+  border-radius: 8px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -461,33 +461,32 @@ onMounted(load)
   top: 0;
   bottom: 0;
   width: 3px;
-  background: var(--bar, #30363d);
+  background: var(--bar, var(--line));
   opacity: 0.8;
 }
 
-.stat:nth-child(1) { --bar: #3bb2d6; }
-.stat:nth-child(2) { --bar: #eabf63; }
-.stat:nth-child(3) { --bar: #8b949e; }
-.stat:nth-child(4) { --bar: #f25f64; }
+.stat:nth-child(1) { --bar: var(--cyan); }
+.stat:nth-child(2) { --bar: var(--gold); }
+.stat:nth-child(3) { --bar: var(--muted); }
+.stat:nth-child(4) { --bar: var(--danger); }
 
 .stat:hover {
-  border-color: #3a424d;
+  border-color: var(--line);
   transform: translateY(-2px);
 }
 
 .stat-num {
-  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
-  color: #f2f5f8;
+  color: var(--text);
   line-height: 1;
 }
 
 .stat-label {
   font-size: 12px;
-  color: #8b949e;
+  color: var(--muted);
 }
 
 .bt-filters {
@@ -508,7 +507,7 @@ onMounted(load)
 .search-icon {
   position: absolute;
   left: 12px;
-  color: #6e7681;
+  color: var(--muted);
   pointer-events: none;
 }
 
@@ -516,23 +515,23 @@ onMounted(load)
   width: 100%;
   padding: 10px 12px 10px 36px;
   background: rgba(22, 27, 34, 0.8);
-  border: 1px solid #30363d;
-  border-radius: 9px;
-  color: #e6edf3;
-  font-size: 13.5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
   outline: none;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .search-input:focus {
-  border-color: #eabf63;
+  border-color: var(--gold);
   box-shadow: 0 0 0 3px rgba(234, 191, 99, 0.12);
 }
 
 .result-count {
-  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
-  color: #6e7681;
+  color: var(--muted);
 }
 
 .bt-state {
@@ -542,23 +541,23 @@ onMounted(load)
   justify-content: center;
   gap: 10px;
   padding: 56px;
-  color: #8b949e;
+  color: var(--muted);
   font-size: 14px;
 }
 
 .loading-mark {
   width: 16px;
   height: 16px;
-  border: 2px solid #30363d;
-  border-top-color: #eabf63;
+  border: 2px solid var(--line);
+  border-top-color: var(--gold);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
 .bt-table-wrap {
   position: relative;
-  border: 1px solid #21262d;
-  border-radius: 14px;
+  border: 1px solid var(--surface-2);
+  border-radius: 8px;
   overflow: hidden;
   background: rgba(22, 27, 34, 0.55);
 }
@@ -573,13 +572,13 @@ onMounted(load)
 .bt-table thead th {
   text-align: left;
   padding: 13px 16px;
-  color: #7d8590;
+  color: var(--muted);
   font-weight: 600;
-  font-size: 11.5px;
+  font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   background: rgba(13, 17, 23, 0.6);
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid var(--surface-2);
   white-space: nowrap;
 }
 
@@ -602,7 +601,7 @@ onMounted(load)
 }
 
 .bt-row > td:first-child {
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent, #30363d) 55%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent, var(--line)) 55%, transparent);
   transition: box-shadow 0.16s;
 }
 
@@ -611,7 +610,7 @@ onMounted(load)
 }
 
 .bt-row:hover > td:first-child {
-  box-shadow: inset 5px 0 0 var(--accent, #30363d);
+  box-shadow: inset 5px 0 0 var(--accent, var(--line));
 }
 
 .bt-row:last-child td {
@@ -619,7 +618,6 @@ onMounted(load)
 }
 
 .mono {
-  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
 
@@ -633,12 +631,12 @@ onMounted(load)
 .inst-name {
   font-size: 14px;
   font-weight: 600;
-  color: #f2f5f8;
+  color: var(--text);
 }
 
 .inst-code {
-  font-size: 11px;
-  color: #6e7681;
+  font-size: 12px;
+  color: var(--muted);
   letter-spacing: 0.02em;
 }
 
@@ -648,10 +646,10 @@ onMounted(load)
   gap: 6px;
   font-size: 12px;
   padding: 3px 9px 3px 8px;
-  border-radius: 999px;
-  color: var(--c, #e6edf3);
-  background: color-mix(in srgb, var(--c, #8b949e) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--c, #8b949e) 32%, transparent);
+  border-radius: 8px;
+  color: var(--c, var(--text));
+  background: color-mix(in srgb, var(--c, var(--muted)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c, var(--muted)) 32%, transparent);
 }
 
 .chip::before {
@@ -659,12 +657,12 @@ onMounted(load)
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--c, #8b949e);
+  background: var(--c, var(--muted));
 }
 
 .range .tilde {
   margin: 0 5px;
-  color: #484f58;
+  color: var(--muted-2);
 }
 
 .num {
@@ -672,27 +670,26 @@ onMounted(load)
 }
 
 .big {
-  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
 }
 
 .caret {
-  font-size: 9px;
+  font-size: 12px;
   margin-right: 3px;
   opacity: 0.85;
 }
 
 .pos {
-  color: #f25f64;
+  color: var(--danger);
 }
 
 .neg {
-  color: #20c997;
+  color: var(--ok);
 }
 
 .muted {
-  color: #8b949e;
+  color: var(--muted);
 }
 
 .winrate {
@@ -705,50 +702,50 @@ onMounted(load)
 .wr-num {
   min-width: 48px;
   text-align: right;
-  color: #c9d1d9;
+  color: var(--muted);
 }
 
 .wr-meter {
   width: 46px;
   height: 4px;
-  border-radius: 2px;
-  background: #21262d;
+  border-radius: 4px;
+  background: var(--surface-2);
   overflow: hidden;
 }
 
 .wr-meter i {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, #eabf63, #f0883e);
-  border-radius: 2px;
+  background: linear-gradient(90deg, var(--gold), var(--warning));
+  border-radius: 4px;
 }
 
 .conf-tag {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: 8px;
   font-weight: 600;
 }
 
 .conf-high {
-  color: #20c997;
+  color: var(--ok);
   background: rgba(32, 201, 151, 0.12);
   border: 1px solid rgba(32, 201, 151, 0.3);
 }
 
 .conf-mid {
-  color: #eabf63;
+  color: var(--gold);
   background: rgba(234, 191, 99, 0.12);
   border: 1px solid rgba(234, 191, 99, 0.3);
 }
 
 .conf-low {
-  color: #8b949e;
-  background: #21262d;
+  color: var(--muted);
+  background: var(--surface-2);
 }
 
 .open-hint {
-  color: #6e7681;
+  color: var(--muted);
   font-size: 12px;
   transition: color 0.16s;
 }
@@ -760,12 +757,12 @@ onMounted(load)
   justify-content: space-between;
   gap: 16px;
   margin-top: 16px;
-  color: #8b949e;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .page-summary {
-  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .page-controls {
@@ -778,22 +775,22 @@ onMounted(load)
   min-width: 32px;
   height: 32px;
   padding: 0 9px;
-  border: 1px solid #30363d;
-  border-radius: 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
   background: rgba(22, 27, 34, 0.8);
-  color: #8b949e;
+  color: var(--muted);
   cursor: pointer;
   font: inherit;
   transition: border-color 0.16s, background 0.16s, color 0.16s;
 }
 
 .page-btn:hover:not(:disabled) {
-  border-color: #eabf63;
-  color: #eabf63;
+  border-color: var(--gold);
+  color: var(--gold);
 }
 
 .page-btn.active {
-  border-color: #eabf63;
+  border-color: var(--gold);
   background: rgba(234, 191, 99, 0.14);
   color: #f3d36b;
 }
@@ -804,12 +801,12 @@ onMounted(load)
 }
 
 .page-step {
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1;
 }
 
 .bt-row:hover .open-hint {
-  color: #eabf63;
+  color: var(--gold);
 }
 
 .chev {
@@ -830,8 +827,8 @@ onMounted(load)
 
 .notice-danger {
   background: rgba(242, 95, 100, 0.12);
-  border: 1px solid #f25f64;
-  color: #f25f64;
+  border: 1px solid var(--danger);
+  color: var(--danger);
 }
 
 .notice-danger strong {
