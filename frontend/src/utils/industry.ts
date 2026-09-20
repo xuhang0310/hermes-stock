@@ -131,3 +131,19 @@ export function leaderScores(members: import('../types').IndustryMember[], top =
     return { member, composite, factors }
   })
 }
+
+/** Min-max normalize avg_pct across industries into a relative 0-100 strength score. */
+export function industryStrength(rows: IndustryStat[]): Map<string, number> {
+  const values = rows
+    .map(row => row.avg_pct)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+  const map = new Map<string, number>()
+  if (!values.length) return map
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  for (const row of rows) {
+    if (row.avg_pct == null) continue
+    map.set(row.industry, max === min ? 60 : Math.round((row.avg_pct - min) / (max - min) * 100))
+  }
+  return map
+}
