@@ -41,6 +41,7 @@ _SYNC_DAYS_MIN = 5
 _SYNC_DAYS_MAX = 60
 _CAL_LOOKBACK_DAYS = 120  # 交易日历回看窗口，足够覆盖 60 个交易日
 _API_SLEEP_SECONDS = 0.25
+_REQUEST_RETRIES = 3
 _UPSERT_CHUNK = 1000
 # 全市场单日约 5400+ 只；某交易日 K 线数低于该值视为"未同步全市场"（按需缓存的
 # 零星历史也会写入这些日期，不能只按"日期存在"判断幂等）
@@ -767,19 +768,45 @@ def sync_market(days: int = 20) -> dict:
         for d in sorted(targets)
         if existing.get(d, 0) < minimum["bar" if d == latest else "history"]
     ]  # 旧 → 新
+
+    def _fetch_daily(trade_date: str) -> dict:
+        last_exc: RuntimeError | None = None
+        for attempt in range(_REQUEST_RETRIES):
+            response = _tushare_request("daily", {"trade_date": trade_date}, _DAILY_FIELDS)
+            try:
+                rows = _validated_market_rows(
+                    response, label=f"daily({trade_date})", trade_date=trade_date,
+                    minimum=minimum["bar" if trade_date == latest else "history"],
+                    listed_symbols=listed_symbols,
+                )
+            except RuntimeError as exc:
+                last_exc = exc
+                time.sleep(_API_SLEEP_SECONDS * (attempt + 1))
+                continue
+            return {"rows": rows, "validated": True}
+        # 重试全部失败后返回原始响应（可能为空/部分/带 error），交由后续统一判定
+        if last_exc is not None:
+            return {"rows": None, "error": str(last_exc)}
+        return {"rows": response.get("rows") if isinstance(response, dict) else None}
+
     latest_rows: list[dict] | None = None
     for trade_date in missing:
         day_start = time.monotonic()
-        result = _tushare_request("daily", {"trade_date": trade_date}, _DAILY_FIELDS)
-        try:
-            rows = _validated_market_rows(
-                result, label=f"daily({trade_date})", trade_date=trade_date,
-                minimum=minimum["bar" if trade_date == latest else "history"],
-                listed_symbols=listed_symbols,
-            )
-        except RuntimeError as exc:
-            stats["errors"].append(str(exc))
-            break  # 按日提交：已入库的保留；空/部分响应不得冒充完整交易日
+        result = _fetch_daily(trade_date)
+        if result.get("validated"):
+            rows = result["rows"]
+        else:
+            rows = result.get("rows")
+            try:
+                rows = _validated_market_rows(
+                    {"rows": rows} if isinstance(rows, list) else {},
+                    label=f"daily({trade_date})", trade_date=trade_date,
+                    minimum=minimum["bar" if trade_date == latest else "history"],
+                    listed_symbols=listed_symbols,
+                )
+            except RuntimeError as exc:
+                stats["errors"].append(str(exc))
+                break
         upserted = _upsert_daily_bars(rows)
         stats["bars_upserted"] += upserted
         stats["dates_fetched"] += 1
@@ -806,13 +833,21 @@ def sync_market(days: int = 20) -> dict:
     if latest_rows is None:
         # 最新交易日本地已有 K 线（本轮未拉），仍需一次调用刷新全市场最新价
         result = _tushare_request("daily", {"trade_date": latest}, _DAILY_FIELDS)
-        try:
-            latest_rows = _validated_market_rows(
-                result, label=f"latest({latest})", trade_date=latest,
-                minimum=minimum["bar"], listed_symbols=listed_symbols,
-            )
-        except RuntimeError as exc:
-            stats["errors"].append(str(exc))
+        last_exc: RuntimeError | None = None
+        for _attempt in range(_REQUEST_RETRIES):
+            try:
+                latest_rows = _validated_market_rows(
+                    result, label=f"latest({latest})", trade_date=latest,
+                    minimum=minimum["bar"], listed_symbols=listed_symbols,
+                )
+                break
+            except RuntimeError as exc:
+                last_exc = exc
+                time.sleep(_API_SLEEP_SECONDS * (_attempt + 1))
+                result = _tushare_request("daily", {"trade_date": latest}, _DAILY_FIELDS)
+        else:
+            if last_exc is not None:
+                stats["errors"].append(str(last_exc))
     stats["latest_prices_upserted"] = _upsert_latest_prices(latest_rows or [], names)
 
     stats["ready"] = not stats["errors"]
