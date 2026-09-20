@@ -2,6 +2,56 @@ import type { IndustryStat } from '../types'
 
 export type IndustryTile = { industry: IndustryStat; x: number; y: number; width: number; height: number }
 
+export const OTHER_INDUSTRY = '其他行业'
+
+/**
+ * Merge tail industries below `minShare` of the total metric into one bucket.
+ * Tail rows stay individually visible in the ranking view; aggregation only
+ * makes the heatmap legible without inventing a fake industry server-side.
+ */
+export function mergeSmallIndustries(
+  rows: IndustryStat[],
+  metric: 'count' | 'amount',
+  minShare = 0.004
+): IndustryStat[] {
+  const weightOf = (row: IndustryStat) => (metric === 'count' ? row.stock_count : row.amount_yi ?? 0)
+  const total = rows.reduce((sum, row) => sum + weightOf(row), 0)
+  if (total <= 0) return rows
+  const main: IndustryStat[] = []
+  const tail: IndustryStat[] = []
+  for (const row of rows) {
+    (weightOf(row) / total >= minShare ? main : tail).push(row)
+  }
+  if (tail.length < 2) return rows
+  const sumOf = (key: 'stock_count' | 'valid_count' | 'up_count' | 'down_count' | 'flat_count' | 'amount_count' | 'missing_count' | 'no_trade_count' | 'invalid_count') =>
+    tail.reduce((sum, row) => sum + row[key], 0)
+  const avgSources = tail.filter(row => row.avg_pct != null && row.valid_count > 0)
+  const avgWeight = avgSources.reduce((sum, row) => sum + row.valid_count, 0)
+  const stockCount = sumOf('stock_count')
+  const up = sumOf('up_count'), down = sumOf('down_count'), flat = sumOf('flat_count')
+  const amountRows = tail.filter(row => row.amount_yi != null)
+  return [...main, {
+    industry: OTHER_INDUSTRY,
+    stock_count: stockCount,
+    valid_count: sumOf('valid_count'),
+    coverage: stockCount ? sumOf('valid_count') / stockCount : 0,
+    avg_pct: avgWeight
+      ? avgSources.reduce((sum, row) => sum + (row.avg_pct as number) * row.valid_count, 0) / avgWeight
+      : null,
+    median_pct: null,
+    up_count: up,
+    down_count: down,
+    flat_count: flat,
+    up_ratio: up + down + flat > 0 ? up / (up + down + flat) : null,
+    amount_yi: amountRows.length ? amountRows.reduce((sum, row) => sum + (row.amount_yi as number), 0) : null,
+    amount_count: sumOf('amount_count'),
+    missing_count: sumOf('missing_count'),
+    no_trade_count: sumOf('no_trade_count'),
+    invalid_count: sumOf('invalid_count'),
+    leader: null,
+  }]
+}
+
 /** Binary treemap: non-overlapping area proportional to the chosen metric. */
 export function industryTiles(rows: IndustryStat[], metric: 'count' | 'amount'): IndustryTile[] {
   const weighted = rows.map(industry => ({ industry, weight: metric === 'count' ? industry.stock_count : industry.amount_yi ?? 0 }))

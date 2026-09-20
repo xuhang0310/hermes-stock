@@ -10,7 +10,7 @@ const server = await createServer({
   root: fileURLToPath(new URL('../', import.meta.url)), appType: 'custom',
   optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true, hmr: false }
 })
-const { industryTiles, industryQuestion } = await server.ssrLoadModule('/src/utils/industry.ts')
+const { industryTiles, industryQuestion, mergeSmallIndustries, OTHER_INDUSTRY } = await server.ssrLoadModule('/src/utils/industry.ts')
 await server.close()
 
 test('treemap is bounded, non-overlapping, and proportional for uneven industry sizes', () => {
@@ -37,6 +37,34 @@ test('treemap does not invent zero or missing turnover', () => {
   assert.deepEqual(industryTiles([], 'count'), [])
   assert.deepEqual(industryTiles([{ industry: '银行', amount_yi: null }, { industry: '软件', amount_yi: 0 }], 'amount'), [])
   assert.equal(industryTiles([{ industry: '银行', stock_count: 4, amount_yi: null }], 'count')[0].width, 1000)
+})
+
+test('small industries merge into an honest aggregate bucket with weighted stats', () => {
+  const stat = (industry, stock_count, avg_pct, valid_count = stock_count) => ({
+    industry, stock_count, valid_count, coverage: valid_count / stock_count,
+    avg_pct, median_pct: null, up_count: valid_count, down_count: 0, flat_count: 0,
+    up_ratio: 1, amount_yi: stock_count, amount_count: valid_count,
+    missing_count: 0, no_trade_count: 0, invalid_count: 0, leader: null,
+  })
+  const rows = [stat('银行', 4000, 1), stat('证券', 1000, 2), stat('微小A', 10, 5), stat('微小B', 6, -3)]
+  const merged = mergeSmallIndustries(rows, 'count', 0.004)
+  assert.equal(merged.length, 3)
+  const other = merged.find(row => row.industry === OTHER_INDUSTRY)
+  assert.ok(other, 'tail industries must collapse into the aggregate bucket')
+  assert.equal(other.stock_count, 16)
+  assert.equal(other.valid_count, 16)
+  assert.equal(other.up_count, 16)
+  assert.equal(other.amount_yi, 16)
+  assert.ok(Math.abs(other.avg_pct - (5 * 10 + -3 * 6) / 16) < 1e-12, 'avg_pct is valid-count weighted, not a simple mean')
+  assert.equal(other.leader, null)
+  // A single tail row must not be swallowed: merging it would hide a named industry.
+  assert.deepEqual(mergeSmallIndustries([stat('银行', 5000, 1), stat('独有行业', 1, 0)], 'count', 0.004).length, 2)
+  // Merged rows still produce valid bounded tiles.
+  const tiles = industryTiles(merged, 'count')
+  assert.equal(tiles.length, 3)
+  for (const tile of tiles) {
+    assert.ok(tile.x >= 0 && tile.y >= 0 && tile.x + tile.width <= 1000.00001 && tile.y + tile.height <= 660.00001)
+  }
 })
 
 test('research prompt keeps industry, date, genuine zero and missing values distinct', () => {
@@ -98,6 +126,34 @@ test('failed refresh clears previous statistics instead of presenting stale data
   assert.equal(state.data.value, null)
   assert.equal(state.members.value, null)
   assert.equal(state.error.value, 'offline')
+})
+
+test('refresh keeps existing content visible while the new section loads', async () => {
+  const pending = deferred()
+  const state = harness({ industryOverview: () => pending.promise })
+  const previous = { as_of: '2026-09-17', industries: [{ industry: '银行' }] }
+  state.data.value = previous
+  const request = state.refresh()
+  assert.equal(state.data.value, previous, 'old content must not blank out during refresh')
+  assert.equal(state.error.value, '')
+  pending.resolve({ as_of: '2026-09-18', industries: [{ industry: '银行' }] })
+  await request
+  assert.equal(state.data.value.as_of, '2026-09-18')
+  assert.equal(state.error.value, '')
+})
+
+test('page uses aggregate bucket, hover preview, stale badge, PE column and mobile ranking default', () => {
+  assert.match(viewSource, /mergeSmallIndustries/)
+  assert.match(viewSource, /OTHER_INDUSTRY/)
+  assert.match(viewSource, /data-testid="industry-hover-preview"/)
+  assert.match(viewSource, /hoverStat = tile\.industry/)
+  assert.match(viewSource, /早于最近收盘日/)
+  assert.match(viewSource, /as_of < data\.value\.expected_date/)
+  assert.match(viewSource, /value="pe_ttm"/)
+  assert.match(viewSource, /item\.pe_ttm/)
+  assert.match(viewSource, /window\.innerWidth < 980/)
+  assert.match(viewSource, /ia-content.ia-dim|class="ia-content" :class="\{ 'ia-dim': loading \}"/)
+  assert.match(viewSource, /点击固定选择/)
 })
 
 test('watchlist respects permission and suppresses repeated submissions while pending', async () => {
