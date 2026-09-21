@@ -94,17 +94,31 @@ export type LeaderFactorKey = 'pct_chg' | 'turnover_rate' | 'amount_yi' | 'volum
 export type LeaderFactor = { key: LeaderFactorKey; label: string; value: number | null; score: number }
 export type LeaderScore = { member: import('../types').IndustryMember; composite: number; factors: LeaderFactor[] }
 
-const LEADER_FACTORS: Array<{ key: LeaderFactorKey; label: string }> = [
-  { key: 'pct_chg', label: '涨幅' },
-  { key: 'turnover_rate', label: '换手' },
-  { key: 'amount_yi', label: '成交额' },
-  { key: 'volume_ratio', label: '量比' },
-  { key: 'total_mv_yi', label: '市值' },
+const LEADER_FACTORS: Array<{ key: LeaderFactorKey; label: string; group: 'momentum' | 'support' | 'capacity' }> = [
+  { key: 'pct_chg', label: '涨幅', group: 'momentum' },
+  { key: 'turnover_rate', label: '换手', group: 'support' },
+  { key: 'volume_ratio', label: '量比', group: 'support' },
+  { key: 'amount_yi', label: '成交额', group: 'capacity' },
+  { key: 'total_mv_yi', label: '市值', group: 'capacity' },
 ]
+const LEADER_GROUP_WEIGHTS = { momentum: 0.5, support: 0.3, capacity: 0.2 } as const
+
+/** Rank-percentile scores (0-100) per factor; outlier-robust in small industries. */
+function rankScores(values: Array<number | null>): number[] {
+  const present = values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+  const n = present.length
+  return values.map(value => {
+    if (value == null || !Number.isFinite(value)) return 0
+    if (n <= 1) return 60
+    const better = present.filter(other => other > (value as number)).length
+    return Math.round((n - 1 - better) / (n - 1) * 100)
+  })
+}
 
 /**
- * Equal-weight min-max normalized leader scores within the given member set.
- * Values are relative to the compared members only — a strength comparison,
+ * 涨幅动能 50% + 承接 30% + 容量 20% 的行业内相对排名加权。
+ * Rank-based normalization keeps the score consistent with the leader
+ * hierarchy and stable in tiny industries; it is a strength comparison,
  * not a return prediction. Missing factors score 0 and are disclosed as null.
  */
 export function leaderScores(members: import('../types').IndustryMember[], top = 5): LeaderScore[] {
@@ -113,21 +127,24 @@ export function leaderScores(members: import('../types').IndustryMember[], top =
     .sort((a, b) => (b.pct_chg ?? 0) - (a.pct_chg ?? 0) || a.symbol.localeCompare(b.symbol))
     .slice(0, top)
   if (!valid.length) return []
-  const ranges = LEADER_FACTORS.map(({ key }) => {
-    const values = valid
-      .map(item => item[key])
-      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
-    return { min: values.length ? Math.min(...values) : 0, max: values.length ? Math.max(...values) : 0 }
-  })
-  return valid.map(member => {
-    const factors = LEADER_FACTORS.map(({ key, label }, index) => {
-      const value = member[key]
-      const { min, max } = ranges[index]
-      const usable = typeof value === 'number' && Number.isFinite(value)
-      const score = usable ? (max === min ? 60 : Math.round(((value as number) - min) / (max - min) * 100)) : 0
-      return { key, label, value: usable ? (value as number) : null, score }
+  const perFactor = LEADER_FACTORS.map(({ key }) => rankScores(valid.map(item => item[key] ?? null)))
+  return valid.map((member, index) => {
+    const factors = LEADER_FACTORS.map((spec, factorIndex) => {
+      const raw = member[spec.key]
+      const usable = typeof raw === 'number' && Number.isFinite(raw)
+      return { key: spec.key, label: spec.label, value: usable ? (raw as number) : null, score: perFactor[factorIndex][index] }
     })
-    const composite = Math.round(factors.reduce((sum, factor) => sum + factor.score, 0) / factors.length)
+    const groupScore = (group: keyof typeof LEADER_GROUP_WEIGHTS) => {
+      const scores = LEADER_FACTORS
+        .map((spec, factorIndex) => (spec.group === group ? perFactor[factorIndex][index] : null))
+        .filter((score): score is number => score != null)
+      return scores.reduce((sum, score) => sum + score, 0) / scores.length
+    }
+    const composite = Math.round(
+      LEADER_GROUP_WEIGHTS.momentum * groupScore('momentum')
+      + LEADER_GROUP_WEIGHTS.support * groupScore('support')
+      + LEADER_GROUP_WEIGHTS.capacity * groupScore('capacity')
+    )
     return { member, composite, factors }
   })
 }
