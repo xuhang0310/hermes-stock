@@ -76,7 +76,7 @@ test('research prompt keeps industry, date, genuine zero and missing values dist
   assert.match(prompt, /先核对最新行情/)
 })
 
-test('leader scores are min-max normalized, equal-weighted, and honest about missing factors', () => {
+test('leader scores are rank-normalized with momentum-weighted groups and honest missing factors', () => {
   const member = (symbol, pct_chg, extras = {}) => ({
     symbol, name: symbol, market: 'SH', price: 10, trade_date: '2026-09-18',
     volume_ratio: 1, turnover_rate: 1, total_mv_yi: 100, pe_ttm: 10, ma_value: null,
@@ -89,18 +89,28 @@ test('leader scores are min-max normalized, equal-weighted, and honest about mis
     member('600004.SH', 99, { status: 'no_trade' }),
   ])
   assert.equal(rows.length, 3, 'non-trading members must not enter the leader board')
+  // 排名百分位：涨幅最高者动能满分，最低者 0 分（不再是 min-max 的极端值挤压）
   assert.equal(rows[0].member.symbol, '600001.SH')
-  const top = rows[0]
-  assert.equal(top.factors.find(factor => factor.key === 'pct_chg').score, 100)
+  assert.equal(rows[0].factors.find(factor => factor.key === 'pct_chg').score, 100)
   assert.equal(rows[2].member.symbol, '600002.SH')
   assert.equal(rows[2].factors.find(factor => factor.key === 'pct_chg').score, 0)
+  // 缺失因子显示 null 且计 0 分
   const missing = rows[1].factors.find(factor => factor.key === 'turnover_rate')
   assert.equal(missing.value, null)
   assert.equal(missing.score, 0)
+  // 复合分 = 动能 50% + 承接 30% + 容量 20%（组内均值再加权）
   for (const row of rows) {
-    const expected = Math.round(row.factors.reduce((sum, factor) => sum + factor.score, 0) / row.factors.length)
+    const byGroup = (group) => {
+      const keys = { momentum: ['pct_chg'], support: ['turnover_rate', 'volume_ratio'], capacity: ['amount_yi', 'total_mv_yi'] }[group]
+      const scores = row.factors.filter(factor => keys.includes(factor.key)).map(factor => factor.score)
+      return scores.reduce((sum, score) => sum + score, 0) / scores.length
+    }
+    const expected = Math.round(0.5 * byGroup('momentum') + 0.3 * byGroup('support') + 0.2 * byGroup('capacity'))
     assert.equal(row.composite, expected)
   }
+  // 动能主导：涨幅第一的成员复合分必须最高，龙头层级不再倒挂
+  const byComposite = [...rows].sort((a, b) => b.composite - a.composite)
+  assert.equal(byComposite[0].member.symbol, '600001.SH')
   assert.equal(leaderScores([], 5).length, 0)
 })
 

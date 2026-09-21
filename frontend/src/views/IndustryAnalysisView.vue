@@ -246,7 +246,7 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
                     </div>
                   </div>
                 </article>
-                <p class="ia-note">五项因子在行业内等权归一，仅表示成分股相对强弱，不代表收益预测。</p>
+                <p class="ia-note">涨幅动能 50% · 承接（换手/量比）30% · 容量（成交额/市值）20%，行业内相对排名加权，仅表示成分股相对强弱，不代表收益预测。</p>
               </section>
               <div class="ia-toolbar ia-member-toolbar"><h4>成分股排名</h4><select v-model="sortBy" aria-label="成分股排序" @change="page = 0"><option value="pct_chg">涨跌幅</option><option value="amount_yi">成交额</option><option value="turnover_rate">换手率</option><option value="volume_ratio">量比</option><option value="pe_ttm">PE（TTM）</option><option value="total_mv_yi">市值</option></select><button type="button" :aria-label="order === 'desc' ? '切换为升序' : '切换为降序'" @click="order = order === 'desc' ? 'asc' : 'desc'; page = 0">{{ order === 'desc' ? '↓ 降序' : '↑ 升序' }}</button></div>
               <p v-if="actionMessage" class="ia-action-message" role="status">{{ actionMessage }}</p>
