@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, ApiError } from '../api'
 import type { IndustryMember, IndustryMembers, IndustryOverview, IndustryStat, UserPayload, WatchlistItem } from '../types'
-import { industryTiles, mergeSmallIndustries, OTHER_INDUSTRY, leaderScores, industryStrength } from '../utils/industry'
+import { industryTiles, mergeSmallIndustries, OTHER_INDUSTRY, leaderScores, industryStrength, type LeaderFactor } from '../utils/industry'
 
 const props = defineProps<{ user: UserPayload }>()
 const emit = defineEmits<{
@@ -50,6 +50,8 @@ const laggards = computed(() => [...rankedIndustries.value]
 const memberScoreRows = computed(() => leaderScores(members.value?.items ?? [], 30))
 const memberScoreMap = computed(() => new Map(memberScoreRows.value.map(row => [row.member.symbol, row.composite])))
 const leaderScoreRows = computed(() => memberScoreRows.value.slice(0, 5))
+const activeLeaderIndex = ref(0)
+const activeLeaderScore = computed(() => leaderScoreRows.value[Math.min(activeLeaderIndex.value, Math.max(leaderScoreRows.value.length - 1, 0))] ?? null)
 const strengthMap = computed(() => industryStrength(all.value))
 const strengthOf = (industry: string) => strengthMap.value.get(industry)
 const worst = computed(() => [...rankedIndustries.value].sort((a, b) => (a.avg_pct ?? 0) - (b.avg_pct ?? 0))[0] ?? null)
@@ -59,11 +61,18 @@ function boardBarWidth(value: number | null, rows: IndustryStat[]): string {
 }
 const leading = computed(() => all.value.find(row => row.avg_pct != null))
 const active = computed(() => all.value.filter(row => row.amount_yi != null).slice().sort((a, b) => b.amount_yi! - a.amount_yi!)[0])
+const leadersOf = (row: IndustryStat) => row.leaders?.length ? row.leaders : row.leader ? [row.leader] : []
 const up = computed(() => all.value.filter(row => (row.avg_pct ?? 0) > 0).length)
 const down = computed(() => all.value.filter(row => (row.avg_pct ?? 0) < 0).length)
 const pct = (value: number | null | undefined) => value == null ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
 const number = (value: number | null | undefined, digits = 2) => value == null ? '—' : value.toLocaleString('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits })
 const direction = (value: number | null | undefined) => value == null || value === 0 ? 'neutral' : value > 0 ? 'rise' : 'fall'
+const factorValue = (factor: LeaderFactor) => {
+  if (factor.value == null) return '—'
+  if (factor.key === 'pct_chg' || factor.key === 'turnover_rate') return `${number(factor.value)}%`
+  if (factor.key === 'volume_ratio') return `${number(factor.value)}x`
+  return `${number(factor.value, 1)}亿`
+}
 const statusLabel = { valid: '', missing: '缺少当日日线', no_trade: '当日无成交', invalid: '行情字段不完整' }
 function tileColor(row: IndustryStat) {
   if (row.avg_pct == null) return '#25272a'
@@ -78,6 +87,10 @@ function choose(industry: string) {
     return
   }
   selected.value = industry; page.value = 0; actionMessage.value = ''
+}
+
+function selectLeader(index: number) {
+  activeLeaderIndex.value = index
 }
 
 async function refresh() {
@@ -128,7 +141,10 @@ async function addWatchlist(item: IndustryMember) {
   } catch (err) { actionMessage.value = err instanceof Error ? err.message : '加入自选失败' }
   finally { adding.value.delete(item.symbol) }
 }
-watch([selected, page, sortBy, order, () => data.value?.snapshot_id], () => void loadMembers())
+watch([selected, page, sortBy, order, () => data.value?.snapshot_id], () => {
+  activeLeaderIndex.value = 0
+  void loadMembers()
+})
 onMounted(() => {
   if (typeof window !== 'undefined' && window.innerWidth < 980) view.value = 'ranking'
   void refresh()
@@ -222,10 +238,10 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
               <div class="ia-detail-summary"><div><small>等权涨跌幅</small><strong :class="direction(current.avg_pct)">{{ pct(current.avg_pct) }}</strong></div><div><small>中位涨跌幅</small><strong :class="direction(current.median_pct)">{{ pct(current.median_pct) }}</strong></div><div><small>强势</small><strong class="rise">{{ current.up_count }}</strong></div><div><small>弱势</small><strong class="fall">{{ current.down_count }}</strong></div><div><small>上涨占比</small><strong :class="direction(current.up_ratio != null && current.up_ratio >= 0.5 ? 1 : -1)">{{ current.up_ratio == null ? '—' : `${(current.up_ratio * 100).toFixed(0)}%` }}</strong></div></div>
               <div class="ia-breadth" aria-hidden="true" :title="`上涨 ${current.up_count} · 平盘 ${current.flat_count} · 下跌 ${current.down_count}`"><span class="ia-up-bar" :style="{ width: `${current.valid_count ? current.up_count / current.valid_count * 100 : 0}%` }" /><span class="ia-flat-bar" :style="{ width: `${current.valid_count ? current.flat_count / current.valid_count * 100 : 0}%` }" /><span class="ia-down-bar" :style="{ width: `${current.valid_count ? current.down_count / current.valid_count * 100 : 0}%` }" /></div>
               <p class="ia-note">有效 {{ current.valid_count }}/{{ current.stock_count }} · 缺日线 {{ current.missing_count }} · 无成交 {{ current.no_trade_count }} · 成交额覆盖 {{ current.amount_count }} 只</p>
-              <section v-if="current.leaders.length" class="ia-leader-cards" aria-label="本行业三龙头">
+              <section v-if="leadersOf(current).length" class="ia-leader-cards" aria-label="本行业三龙头">
                 <h4>本行业龙头</h4>
                 <div>
-                  <article v-for="(lead, index) in current.leaders" :key="lead.symbol" :class="{ 'is-main': index === 0 }">
+                  <article v-for="(lead, index) in leadersOf(current)" :key="lead.symbol" :class="{ 'is-main': index === 0 }">
                     <small>{{ index === 0 ? '👑 主龙头' : `辅龙 ${index}` }}</small>
                     <strong>{{ lead.name }}</strong>
                     <span>{{ lead.symbol }}</span>
@@ -234,19 +250,26 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
                   </article>
                 </div>
               </section>
-              <section v-if="leaderScoreRows.length" class="ia-leader-board" data-testid="industry-leader-scores" aria-label="龙头评分拆解">
-                <h4>龙头评分拆解</h4>
-                <article v-for="row in leaderScoreRows" :key="row.member.symbol">
-                  <header><strong>{{ row.member.name }}</strong><span>{{ row.member.symbol }}</span><b>{{ row.composite }}</b></header>
-                  <div class="ia-leader-factors">
-                    <div v-for="factor in row.factors" :key="factor.key">
-                      <span>{{ factor.label }}</span>
-                      <i><em :class="`f-${factor.key}`" :style="{ width: `${factor.score}%` }"></em></i>
-                      <b>{{ factor.value == null ? '—' : factor.score }}</b>
-                    </div>
+              <section v-if="leaderScoreRows.length" class="ia-leader-analysis" data-testid="industry-leader-scores" aria-label="龙头评分拆解">
+                <div class="ia-analysis-heading">
+                  <div>
+                    <span class="ia-analysis-kicker">龙头评分拆解</span>
+                    <h4>{{ activeLeaderScore?.member.name || '—' }} <small>{{ activeLeaderScore?.member.symbol }}</small></h4>
                   </div>
-                </article>
-                <p class="ia-note">涨幅动能 50% · 承接（换手/量比）30% · 容量（成交额/市值）20%，行业内相对排名加权，仅表示成分股相对强弱，不代表收益预测。</p>
+                  <div class="ia-analysis-total"><strong>{{ activeLeaderScore?.composite ?? '—' }}</strong><span>龙头分</span></div>
+                </div>
+                <div class="ia-leader-switcher" role="tablist" aria-label="切换龙头">
+                  <button v-for="(row, index) in leaderScoreRows.slice(0, 3)" :key="row.member.symbol" type="button" role="tab" :aria-selected="activeLeaderIndex === index" :class="{ 'is-active': activeLeaderIndex === index }" @click="selectLeader(index)">
+                    <span>{{ index === 0 ? '主龙头' : `辅龙 ${index}` }}</span><b>{{ row.member.name }}</b><em>{{ row.composite }}</em>
+                  </button>
+                </div>
+                <div v-if="activeLeaderScore" class="ia-analysis-factors">
+                  <div v-for="factor in activeLeaderScore.factors" :key="factor.key" class="ia-factor-card">
+                    <div class="ia-factor-caption"><span>{{ factor.label }}</span><b>{{ factorValue(factor) }}</b><em>{{ factor.score }}</em></div>
+                    <i class="ia-factor-track"><em :class="`f-${factor.key}`" :style="{ width: `${factor.score}%` }"></em></i>
+                  </div>
+                </div>
+                <p class="ia-note">涨幅动能 50% · 承接（换手/量比）30% · 容量（成交额/市值）20%，按行业内相对排名加权，仅表示成分股相对强弱，不代表收益预测。</p>
               </section>
               <div class="ia-toolbar ia-member-toolbar"><h4>成分股排名</h4><select v-model="sortBy" aria-label="成分股排序" @change="page = 0"><option value="pct_chg">涨跌幅</option><option value="amount_yi">成交额</option><option value="turnover_rate">换手率</option><option value="volume_ratio">量比</option><option value="pe_ttm">PE（TTM）</option><option value="total_mv_yi">市值</option></select><button type="button" :aria-label="order === 'desc' ? '切换为升序' : '切换为降序'" @click="order = order === 'desc' ? 'asc' : 'desc'; page = 0">{{ order === 'desc' ? '↓ 降序' : '↑ 升序' }}</button></div>
               <p v-if="actionMessage" class="ia-action-message" role="status">{{ actionMessage }}</p>
@@ -322,24 +345,34 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
 .ia-row-track em { display: block; height: 100%; border-radius: 999px; }
 .ia-row-track em.up { background: linear-gradient(90deg, #e96467, #d9a13d); }
 .ia-row-track em.down { background: linear-gradient(90deg, #37ad86, #4ac69a); }
-.ia-leader-board { padding: 14px 18px 2px; border-top: 1px solid var(--line); }
-.ia-leader-board > h4 { margin: 0 0 10px; font-size: 13px; font-weight: 500; }
-.ia-leader-board article { margin-bottom: 12px; }
-.ia-leader-board article > header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-.ia-leader-board article > header strong { font-size: 13px; }
-.ia-leader-board article > header span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.ia-leader-board article > header b { margin-left: auto; color: var(--gold-2); font-size: 16px; font-variant-numeric: tabular-nums; }
-.ia-leader-factors { display: grid; gap: 4px; }
-.ia-leader-factors > div { display: grid; grid-template-columns: 46px 1fr 30px; align-items: center; gap: 8px; }
-.ia-leader-factors span { color: var(--muted); font-size: 12px; }
-.ia-leader-factors i { height: 3px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
-.ia-leader-factors em { display: block; height: 100%; border-radius: 999px; }
-.ia-leader-factors em.f-pct_chg { background: #e96467; }
-.ia-leader-factors em.f-turnover_rate { background: #d9a13d; }
-.ia-leader-factors em.f-amount_yi { background: #3bb2d6; }
-.ia-leader-factors em.f-volume_ratio { background: #8b6fd8; }
-.ia-leader-factors em.f-total_mv_yi { background: #37ad86; }
-.ia-leader-factors b { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+.ia-leader-analysis { padding: 16px 18px 2px; border-top: 1px solid var(--line); }
+.ia-analysis-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ia-analysis-kicker { color: var(--muted); font-size: 12px; }
+.ia-analysis-heading h4 { margin: 5px 0 0; font-size: 16px; font-weight: 600; }
+.ia-analysis-heading h4 small { margin-left: 7px; color: var(--muted-2); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.ia-analysis-total { display: flex; align-items: baseline; gap: 5px; color: var(--gold-2); }
+.ia-analysis-total strong { font-size: 24px; line-height: 1; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ia-analysis-total span { color: var(--muted); font-size: 12px; }
+.ia-leader-switcher { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 13px; }
+.ia-leader-switcher button { display: grid; grid-template-columns: 1fr auto; gap: 2px 5px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); text-align: left; }
+.ia-leader-switcher button:hover:not(:disabled) { border-color: var(--gold-dim); color: var(--text); }
+.ia-leader-switcher button.is-active { border-color: var(--gold-dim); background: linear-gradient(135deg, rgba(213, 180, 106, .14), var(--surface-2) 70%); box-shadow: inset 0 0 0 1px rgba(213, 180, 106, .12); }
+.ia-leader-switcher span { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+.ia-leader-switcher b { overflow: hidden; font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.ia-leader-switcher em { color: var(--gold-2); font-size: 12px; font-style: normal; font-variant-numeric: tabular-nums; }
+.ia-analysis-factors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin-top: 14px; }
+.ia-factor-card { min-width: 0; padding: 8px 10px 9px; border-radius: 8px; background: rgba(255, 255, 255, .025); }
+.ia-factor-caption { display: grid; grid-template-columns: 1fr auto auto; align-items: baseline; gap: 6px; }
+.ia-factor-caption span { color: var(--muted); font-size: 12px; }
+.ia-factor-caption b { color: var(--text); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.ia-factor-caption em { color: var(--gold-2); font-size: 12px; font-style: normal; font-variant-numeric: tabular-nums; }
+.ia-factor-track { display: block; height: 4px; margin-top: 7px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.ia-factor-track em { display: block; height: 100%; border-radius: 999px; }
+.ia-factor-track em.f-pct_chg { background: #e96467; }
+.ia-factor-track em.f-turnover_rate { background: #d9a13d; }
+.ia-factor-track em.f-amount_yi { background: #3bb2d6; }
+.ia-factor-track em.f-volume_ratio { background: #8b6fd8; }
+.ia-factor-track em.f-total_mv_yi { background: #37ad86; }
 .ia-score-cell { display: inline-flex; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
 .ia-score-cell i { display: block; width: 46px; height: 4px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
 .ia-score-cell em { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--gold-dim), var(--gold-2)); }
@@ -378,6 +411,6 @@ onBeforeUnmount(() => { disposed = true; ++overviewRequest; ++memberRequest; ove
 .ia-footer { display: flex; justify-content: space-between; gap: 12px; color: var(--muted-2); font-size: 12px; margin-top: 16px; }.rise { color: #f0787c; }.fall { color: #4ac69a; }.neutral { color: var(--muted); }
 .ia-loading,.ia-empty { padding: 90px 20px; text-align: center; color: var(--muted); }.ia-empty h3 { color: var(--text); font-weight: 500; }.ia-empty p { font-size: 12px; margin-bottom: 22px; }.ia-empty-mark { font-size: 32px; color: var(--gold-dim); }.ia-inline-empty { padding: 45px 16px; text-align: center; color: var(--muted); font-size: 12px; }.ia-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--gold); border-radius: 50%; vertical-align: middle; margin-right: 8px; animation: ia-spin 1s linear infinite; }@keyframes ia-spin { to { transform: rotate(360deg); } }
 @media (max-width: 1200px) { .ia-workspace { grid-template-columns: 1fr; }.ia-dual-board { grid-template-columns: 1fr; }.ia-treemap { max-height: 540px; }.ia-metrics article { padding-inline: 14px; }.ia-metrics strong { font-size: 24px; } }
-@media (max-width: 680px) { .ia-heading { align-items: start; flex-direction: column; gap: 16px; }.ia-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px 0; }.ia-metrics article:nth-child(3) { border: 0; padding-left: 0; }.ia-meta { gap: 10px; }.ia-meta button { margin-left: 0; }.ia-panel-head { padding-inline: 12px; }.ia-detail-summary { gap: 7px; padding-inline: 12px; }.ia-detail-summary strong { font-size: 16px; }.ia-footer { flex-direction: column; }.ia-rank-list { max-height: 440px; } }
+@media (max-width: 680px) { .ia-heading { align-items: start; flex-direction: column; gap: 16px; }.ia-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px 0; }.ia-metrics article:nth-child(3) { border: 0; padding-left: 0; }.ia-meta { gap: 10px; }.ia-meta button { margin-left: 0; }.ia-panel-head { padding-inline: 12px; }.ia-detail-summary { gap: 7px; padding-inline: 12px; }.ia-detail-summary strong { font-size: 16px; }.ia-leader-switcher { grid-template-columns: 1fr; }.ia-analysis-factors { grid-template-columns: 1fr; }.ia-footer { flex-direction: column; }.ia-rank-list { max-height: 440px; } }
 @media (prefers-reduced-motion: reduce) { .ia-spinner { animation: none; } }
 </style>
