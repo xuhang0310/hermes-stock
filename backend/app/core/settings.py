@@ -96,7 +96,9 @@ class Settings:
     # Durable Agent runtime. The legacy engine remains an explicit rollback
     # switch, while new installations use AgentScope directly.
     agent_runtime_mode: str = os.getenv("STOCK_AGENT_RUNTIME_MODE", "agentscope").strip().lower()
-    # AgentScope 的 OpenAI 线路统一使用 Responses API。
+    # AgentScope 的 OpenAI 线路：responses（默认）或 chat_completions（回退）。
+    # Responses 模式要求模型服务商实现 OpenAI Responses API；不支持时可通过
+    # STOCK_AGENT_LLM_WIRE_API=chat_completions 保留旧协议。
     agent_llm_wire_api: str = os.getenv(
         "STOCK_AGENT_LLM_WIRE_API", "responses"
     ).strip().lower()

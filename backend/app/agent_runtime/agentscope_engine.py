@@ -225,13 +225,18 @@ def select_engine(chat_mode: str, configured_mode: str) -> str:
 def agent_llm_wire_api(llm_config: dict[str, Any] | None = None) -> str:
     """Resolve the AgentScope OpenAI wire protocol.
 
-    The model config may provide ``wire_api`` in the future; all values resolve
-    to Responses so a stale setting cannot silently re-enable the old API.
+    The model config may provide ``wire_api`` in the future; the deployment
+    setting remains the current public switch. Unknown values intentionally
+    fall back to Responses so a typo cannot silently regress to the old API.
     """
 
-    # Keep the arguments for compatibility with runtime status callers. The
-    # legacy setting is intentionally ignored so it cannot re-enable Chat API.
-    del llm_config
+    configured = str(
+        (llm_config or {}).get("wire_api")
+        or getattr(settings, "agent_llm_wire_api", "responses")
+        or "responses"
+    ).strip().lower()
+    if configured in {"chat", "chat_completion", "chat_completions", "completions"}:
+        return "chat_completions"
     return "responses"
 
 
@@ -1202,7 +1207,7 @@ async def run_agentscope(
         ToolResultTextDeltaEvent,
     )
     from agentscope.message import UserMsg
-    from agentscope.model import OpenAIResponseModel
+    from agentscope.model import OpenAIChatModel, OpenAIResponseModel
     from agentscope.state import AgentState
     from agentscope.tool import Toolkit
 
@@ -1234,23 +1239,48 @@ async def run_agentscope(
     llm = active_llm_config(request_payload.get("model_config_id"))
     if not llm.get("base_url") or not llm.get("api_key"):
         raise RuntimeError("当前模型未配置 API Key 或 Base URL。")
+    # Responses 模式由 AgentScope 映射为 reasoning.effort；Chat Completions
+    # 模式继续沿用旧的 reasoning_effort / extra_body 线路。
     reasoning = reasoning_params(llm)
+    wire_api = agent_llm_wire_api(llm)
     base_url = normalize_agent_base_url(str(llm["base_url"]))
-    response_reasoning_effort = responses_reasoning_effort(llm, reasoning)
-    parameters = OpenAIResponseModel.Parameters(
-        temperature=float(llm.get("temperature", 0.2)),
-        thinking_enable=bool(response_reasoning_effort),
-        reasoning_effort=response_reasoning_effort,
-    )
-    model = OpenAIResponseModel(
-        credential=OpenAICredential(api_key=llm["api_key"], base_url=base_url),
-        model=llm["model"],
-        parameters=parameters,
-        stream=True,
-        max_retries=2,
-        retry_delay=1.0,
-        client_kwargs={"timeout": 180.0},
-    )
+    if wire_api == "responses":
+        response_reasoning_effort = responses_reasoning_effort(llm, reasoning)
+        parameters = OpenAIResponseModel.Parameters(
+            temperature=float(llm.get("temperature", 0.2)),
+            thinking_enable=bool(response_reasoning_effort),
+            reasoning_effort=response_reasoning_effort,
+        )
+        model = OpenAIResponseModel(
+            credential=OpenAICredential(api_key=llm["api_key"], base_url=base_url),
+            model=llm["model"],
+            parameters=parameters,
+            stream=True,
+            max_retries=2,
+            retry_delay=1.0,
+            client_kwargs={"timeout": 180.0},
+        )
+    else:
+        parameters = OpenAIChatModel.Parameters(
+            temperature=float(llm.get("temperature", 0.2)),
+            thinking_enable=bool(reasoning["reasoning_effort"]),
+            reasoning_effort=reasoning["reasoning_effort"],
+        )
+        extra_body = (
+            {"enable_thinking": reasoning["enable_thinking"]}
+            if reasoning["enable_thinking"] is not None
+            else None
+        )
+        model = OpenAIChatModel(
+            credential=OpenAICredential(api_key=llm["api_key"], base_url=base_url),
+            model=llm["model"],
+            parameters=parameters,
+            stream=True,
+            max_retries=2,
+            retry_delay=1.0,
+            client_kwargs={"timeout": 180.0},
+            extra_body=extra_body,
+        )
     state = AgentState.model_validate_json(checkpoint_json) if checkpoint_json else _history_state(request_payload)
     agent = Agent(
         name=str(request_payload.get("digital_human_code") or "ask_stock"),

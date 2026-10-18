@@ -38,7 +38,7 @@ class LlmClientPayloadTests(unittest.TestCase):
             enable_thinking=False,
         )
 
-        self.assertEqual(payload["reasoning"], {"effort": "none"})
+        self.assertIs(payload["enable_thinking"], False)
         self.assertEqual(payload["tool_choice"], "required")
 
     def test_thinking_can_be_enabled_for_one_call(self) -> None:
@@ -52,9 +52,9 @@ class LlmClientPayloadTests(unittest.TestCase):
             enable_thinking=True,
         )
 
-        self.assertNotIn("reasoning", payload)
+        self.assertIs(payload["enable_thinking"], True)
 
-    def test_reasoning_effort_is_nested_for_responses(self) -> None:
+    def test_reasoning_effort_is_passed_top_level(self) -> None:
         _, payload, _ = _build_payload(
             self.config,
             [{"role": "user", "content": "深度推理"}],
@@ -65,32 +65,8 @@ class LlmClientPayloadTests(unittest.TestCase):
             reasoning_effort="high",
         )
 
-        self.assertEqual(payload["reasoning"], {"effort": "high"})
-        self.assertNotIn("reasoning_effort", payload)
-
-    def test_endpoint_and_input_are_responses_compatible(self) -> None:
-        url, payload, _ = _build_payload(
-            self.config,
-            [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
-            tools=[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "description": "查行情",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ],
-            tool_choice="auto",
-            temperature=None,
-            stream=False,
-        )
-
-        self.assertEqual(url, "https://example.invalid/v1/responses")
-        self.assertEqual(payload["input"][0]["content"][0]["type"], "input_text")
-        self.assertEqual(payload["tools"][0]["name"], "lookup")
-        self.assertNotIn("messages", payload)
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertNotIn("enable_thinking", payload)
 
 
 if __name__ == "__main__":

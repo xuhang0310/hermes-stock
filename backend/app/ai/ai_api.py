@@ -54,7 +54,6 @@ from backend.app.core.models import (
 from backend.app.ai import memory as memory_module
 from backend.app.ai import rag_ingest
 from backend.app.ai.memory import retrieve_memories, schedule_memory_digestion
-from backend.app.ai.llm_client import chat_completion
 from backend.app.ai.session_compact import load_and_compact_history
 from backend.app.ai.experience_store import retrieve_experiences
 from backend.app.ai.retrieval import retrieve_chunks
@@ -284,20 +283,32 @@ def _test_openai_chat(base_url: str, api_key: str | None, model_name: str, tempe
         return _connection_error("API Key 不能为空", started_at)
     if not model_name.strip():
         return _connection_error("模型名称不能为空", started_at)
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model_name.strip(),
+        "messages": [{"role": "user", "content": "请只回复 ok，用来测试模型连通性。"}],
+        "temperature": temperature,
+        "max_tokens": 16,
+        "stream": False,
+    }
     try:
-        data = chat_completion(
-            [{"role": "user", "content": "请只回复 ok，用来测试模型连通性。"}],
-            {
-                "base_url": base_url,
-                "api_key": api_key,
-                "model": model_name.strip(),
-                "temperature": temperature,
-            },
-            timeout=35.0,
-        )
+        with httpx.Client(timeout=httpx.Timeout(35.0, connect=8.0)) as client:
+            response = client.post(url, json=payload, headers=headers)
     except Exception as exc:  # noqa: BLE001
         return _connection_error(f"连接失败: {str(exc)[:300]}", started_at)
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "status_code": response.status_code,
+            "latency_ms": elapsed_ms,
+            "error": response.text[:600],
+        }
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        data = {}
     content = ""
     choices = data.get("choices") or []
     if choices:
@@ -305,7 +316,7 @@ def _test_openai_chat(base_url: str, api_key: str | None, model_name: str, tempe
         content = str(message.get("content") or "").strip()
     return {
         "ok": True,
-        "status_code": 200,
+        "status_code": response.status_code,
         "latency_ms": elapsed_ms,
         "message": "模型调用正常",
         "response_preview": content[:120],
