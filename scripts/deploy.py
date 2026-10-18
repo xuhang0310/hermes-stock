@@ -129,10 +129,12 @@ class Deployer:
 
     def _wait_health(self, port: int) -> bool:
         health = f"http://127.0.0.1:{port}/api/health"
-        for _ in range(30):
+        # 后台实例启动时会预热行情/缓存，首次启动可能超过 30 秒。
+        # 给滚动发布留出 3 分钟，避免健康实例已能启动却被误判回滚。
+        for _ in range(90):
             if self.http_code(health) == "200":
                 return True
-            time.sleep(1)
+            time.sleep(2)
         return False
 
     def _set_api_upstream(self, ports: list[int]) -> None:
