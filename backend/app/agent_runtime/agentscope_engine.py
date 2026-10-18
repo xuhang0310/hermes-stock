@@ -54,6 +54,81 @@ Cancelled = Callable[[], Awaitable[bool]]
 AGENT_LOOP_HARD_MAX_ITERATIONS = 50
 
 
+_DETAILED_RESEARCH_TERMS = (
+    "分析",
+    "研究",
+    "技术",
+    "基本面",
+    "估值",
+    "风险",
+    "消息",
+    "催化",
+    "报告",
+    "解读",
+    "趋势",
+    "资金",
+    "筹码",
+    "财务",
+    "持仓",
+    "组合",
+    "自选",
+    "选股",
+)
+
+
+def _needs_detailed_research_completion(request_payload: dict[str, Any]) -> bool:
+    """Whether the user asked for a report rather than a short lookup.
+
+    AgentScope considers any text-only model response a completed turn. A
+    reasoning model can therefore stop after a progress sentence such as
+    ``已读取底稿，下面输出报告``. We only apply the continuation guard to
+    clearly research-oriented requests; greetings and one-field lookups keep
+    their normal concise behavior.
+    """
+
+    texts = [
+        str(request_payload.get("question") or ""),
+        str(request_payload.get("user_text") or ""),
+    ]
+    # “继续” and similar follow-ups inherit the intent of the preceding
+    # research request. The web client sends the recent transcript in history.
+    for item in request_payload.get("history") or []:
+        if isinstance(item, dict) and item.get("role") == "user":
+            texts.append(str(item.get("content") or ""))
+    return any(
+        term in text
+        for text in texts
+        for term in _DETAILED_RESEARCH_TERMS
+    )
+
+
+def _needs_report_continuation(
+    request_payload: dict[str, Any],
+    answer: str,
+    tool_names: dict[str, str],
+    waiting: list[dict[str, Any]],
+) -> bool:
+    if waiting or not _needs_detailed_research_completion(request_payload):
+        return False
+    if not tool_names:
+        return False
+    # A complete Chinese stock report normally contains several sections. A
+    # short progress paragraph is usually below this threshold; avoid forcing
+    # continuations for concise factual answers that did not use tools.
+    return len((answer or "").strip()) < 800
+
+
+def _continuation_prompt() -> str:
+    return (
+        "上一段只是执行进度，不是本轮最终答案。请现在直接完成用户要求的专业分析，"
+        "复用已经获得的工具结果，只有确有数据缺口时才补充查询。请输出完整中文 Markdown，"
+        "至少包含：标的识别与数据截止、事实证据、技术/价格结构、基本面与估值、"
+        "消息或催化、主要风险、反方证据、关键观察位和后续跟踪清单；明确区分事实、"
+        "推断、风险与数据缺口，不要再写“下面继续”“我再补充”或让用户手动回复继续。"
+        "正文不少于 800 字；数据不足时如实标注，不要编造。"
+    )
+
+
 def _agent_loop_max_iterations() -> int:
     """Return the bounded AgentScope loop budget."""
 
@@ -1228,7 +1303,10 @@ async def run_agentscope(
         f"- 本轮最多允许 {max_iterations} 次推理迭代；这是复杂任务预算，不是必须消耗的轮数。\n"
         "- 能直接回答时立即收敛，不得为消耗轮数继续调用工具。\n"
         "- 已获得的工具结果必须复用；不要使用完全相同的参数重复调用同一只读工具。\n"
-        "- 工具返回的信息足以支持结论后，立即输出最终答案；证据不足则明确数据缺口。"
+        "- 工具返回的信息足以支持结论后，立即输出最终答案；证据不足则明确数据缺口。\n"
+        "- 专业研究问题不能把进度说明当最终答案：不要停在‘已读取底稿’、‘下面输出报告’、"
+        "‘我再补充’等句子。完成工具查询后，必须在本轮直接给出完整中文 Markdown 报告，"
+        "覆盖用户要求的各个维度，并区分事实、推断、风险和数据缺口。"
     )
     request_payload["write_tool_names"] = sorted(write_names)
     llm = active_llm_config(request_payload.get("model_config_id"))
@@ -1238,6 +1316,9 @@ async def run_agentscope(
     base_url = normalize_agent_base_url(str(llm["base_url"]))
     response_reasoning_effort = responses_reasoning_effort(llm, reasoning)
     parameters = OpenAIResponseModel.Parameters(
+        # Responses 网关若未收到显式上限，部分模型会使用很小的默认输出预算，
+        # 使模型只返回“下面输出报告”等进度句。研究 Agent 需要留出完整报告空间。
+        max_tokens=12000,
         temperature=float(llm.get("temperature", 0.2)),
         thinking_enable=bool(response_reasoning_effort),
         reasoning_effort=response_reasoning_effort,
@@ -1338,373 +1419,395 @@ async def run_agentscope(
         text_buffer.clear()
         text_block_open = False
 
-    async for event in agent.reply_stream(inputs):
-        if await is_cancelled():
-            outcome.status = "cancelled"
-            break
-        if isinstance(event, TextBlockStartEvent):
-            text_block_open = True
-        elif isinstance(event, TextBlockDeltaEvent):
-            text_block_open = True
-            text_buffer.append(event.delta)
-            if not verified_schedule_receipts:
-                await emit({"type": "content_delta", "content": event.delta})
-        elif isinstance(event, TextBlockEndEvent):
-            # The next event tells us whether this text precedes a tool call
-            # (thought) or terminates the reply (answer).
-            pass
-        elif isinstance(event, ThinkingBlockDeltaEvent):
-            loop_reason = reasoning_guard.observe(event.delta)
-            if loop_reason:
-                outcome.status = "failed"
-                outcome.error = _reasoning_loop_error(
-                    request_payload,
-                    completed_business_write=completed_business_write,
-                    transaction_agent=transaction_agent,
-                )
-                await emit(
-                    {
-                        "type": "agent_loop_guard_triggered",
-                        "reason": loop_reason,
-                        "reasoning_chars": reasoning_guard.total_chars,
-                        "iteration": iteration_count,
-                        "max_iterations": max_iterations,
-                    }
-                )
+    reply_inputs = inputs
+    continuation_attempts = 0
+    while True:
+        async for event in agent.reply_stream(reply_inputs):
+            if await is_cancelled():
+                outcome.status = "cancelled"
                 break
-            await emit({"type": "reasoning_delta", "content": event.delta})
-        elif isinstance(event, ToolCallStartEvent):
-            await close_text("thought")
-            tool_names[event.tool_call_id] = event.tool_call_name
-            tool_args[event.tool_call_id] = []
-        elif isinstance(event, ToolCallDeltaEvent):
-            tool_args.setdefault(event.tool_call_id, []).append(event.delta)
-            await emit(
-                {
-                    "type": "tool_progress",
-                    "tool_call_id": event.tool_call_id,
-                    "tool": tool_names.get(event.tool_call_id, ""),
-                    "display_name": _tool_display_name(tool_names.get(event.tool_call_id, "")),
-                    "delta": event.delta,
-                    "chars": sum(len(part) for part in tool_args.get(event.tool_call_id, [])),
-                }
-            )
-        elif isinstance(event, ToolCallEndEvent):
-            name = tool_names.get(event.tool_call_id, "")
-            raw_args = "".join(tool_args.get(event.tool_call_id, []))
-            try:
-                parsed_args = json.loads(raw_args or "{}")
-            except json.JSONDecodeError:
-                parsed_args = {}
-            canonical_args = json.dumps(
-                parsed_args,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            )
-            risk_level = classify_tool_risk(name, parsed_args, write_names)
-            await emit(
-                {
-                    "type": "action",
-                    "tool_call_id": event.tool_call_id,
-                    "tool": name,
-                    "display_name": _tool_display_name(name),
-                    "content": raw_args,
-                    "arguments_sha256": hashlib.sha256(canonical_args.encode("utf-8")).hexdigest(),
-                    "risk_level": risk_level,
-                    "has_side_effects": risk_level in {"medium", "high"},
-                }
-            )
-        elif isinstance(event, ToolResultTextDeltaEvent):
-            tool_results.setdefault(event.tool_call_id, []).append(event.delta)
-        elif isinstance(event, ToolResultEndEvent):
-            name = tool_names.get(event.tool_call_id, "")
-            raw_result = event.metadata.get("result") if isinstance(event.metadata, dict) else None
-            execution_id = event.metadata.get("execution_id") if isinstance(event.metadata, dict) else None
-            if not isinstance(raw_result, dict):
-                text_result = "".join(tool_results.get(event.tool_call_id, []))
-                try:
-                    raw_result = json.loads(text_result)
-                except (TypeError, json.JSONDecodeError):
-                    raw_result = {"result": text_result}
-            tool_succeeded = str(event.state) == "success" and not raw_result.get("error")
-            if (
-                name in write_names
-                and tool_succeeded
-                and int(raw_result.get("saved_count") or raw_result.get("changed_count") or 0) > 0
-            ):
-                completed_business_write = True
-            await emit({"type": "observation", "content": _tool_preview(name, raw_result)})
-            for artifact in raw_result.get("artifacts") or []:
-                if isinstance(artifact, dict) and artifact.get("path"):
-                    await emit({"type": "artifact", **artifact})
-            tool_done_event = {
-                "type": "tool_done",
-                "tool_call_id": event.tool_call_id,
-                "tool": name,
-                "display_name": _tool_display_name(name),
-                "success": tool_succeeded,
-                "execution_id": execution_id,
-            }
-            if name in {"run_macd_backtest", "run_portfolio_backtest", "run_signal_backtest", "run_factor_backtest"} and raw_result.get("run_id"):
-                tool_done_event["report_run_id"] = str(raw_result["run_id"])
-                tool_done_event["report_url"] = str(
-                    raw_result.get("report_url") or f"/backtests/{raw_result['run_id']}"
-                )
-            await emit(tool_done_event)
-            await save_checkpoint(agent.state.model_dump_json(), None)
-            if name in SCHEDULE_MUTATION_TOOL_NAMES:
-                receipt, receipt_error = _verified_schedule_receipt(name, raw_result)
-                if receipt_error:
+            if isinstance(event, TextBlockStartEvent):
+                text_block_open = True
+            elif isinstance(event, TextBlockDeltaEvent):
+                text_block_open = True
+                text_buffer.append(event.delta)
+                if not verified_schedule_receipts:
+                    await emit({"type": "content_delta", "content": event.delta})
+            elif isinstance(event, TextBlockEndEvent):
+                # The next event tells us whether this text precedes a tool call
+                # (thought) or terminates the reply (answer).
+                pass
+            elif isinstance(event, ThinkingBlockDeltaEvent):
+                loop_reason = reasoning_guard.observe(event.delta)
+                if loop_reason:
                     outcome.status = "failed"
-                    outcome.error = (
-                        f"{_tool_display_name(name)}未成功，系统已禁止生成成功回执："
-                        f"{receipt_error}"
+                    outcome.error = _reasoning_loop_error(
+                        request_payload,
+                        completed_business_write=completed_business_write,
+                        transaction_agent=transaction_agent,
                     )
                     await emit(
                         {
-                            "type": "schedule_mutation_rejected",
-                            "tool": name,
-                            "execution_id": execution_id,
-                            "reason": receipt_error,
+                            "type": "agent_loop_guard_triggered",
+                            "reason": loop_reason,
+                            "reasoning_chars": reasoning_guard.total_chars,
+                            "iteration": iteration_count,
+                            "max_iterations": max_iterations,
                         }
                     )
                     break
-                verified_schedule_receipts.append(receipt)
-                completed_business_write = True
-                # A verified schedule mutation has a complete server-owned
-                # receipt. End the loop here so model prose can neither replace
-                # the real job key nor turn a failed follow-up into ambiguity.
-                break
-            if raw_result.get("duplicate_tool_call_blocked"):
-                outcome.status = "failed"
-                outcome.error = (
-                    "检测到相同工具和参数在本轮被重复调用，系统已自动停止本轮任务。"
-                    "请复用已有结果，或调整查询条件后重试。"
-                )
+                await emit({"type": "reasoning_delta", "content": event.delta})
+            elif isinstance(event, ToolCallStartEvent):
+                await close_text("thought")
+                tool_names[event.tool_call_id] = event.tool_call_name
+                tool_args[event.tool_call_id] = []
+            elif isinstance(event, ToolCallDeltaEvent):
+                tool_args.setdefault(event.tool_call_id, []).append(event.delta)
                 await emit(
                     {
-                        "type": "agent_loop_guard_triggered",
-                        "reason": "duplicate_tool_call",
-                        "tool": name,
-                        "iteration": iteration_count,
-                        "max_iterations": max_iterations,
+                        "type": "tool_progress",
+                        "tool_call_id": event.tool_call_id,
+                        "tool": tool_names.get(event.tool_call_id, ""),
+                        "display_name": _tool_display_name(tool_names.get(event.tool_call_id, "")),
+                        "delta": event.delta,
+                        "chars": sum(len(part) for part in tool_args.get(event.tool_call_id, [])),
                     }
                 )
-                break
-        elif isinstance(event, RequireUserConfirmEvent):
-            await close_text("thought")
-            for tool_call in event.tool_calls:
+            elif isinstance(event, ToolCallEndEvent):
+                name = tool_names.get(event.tool_call_id, "")
+                raw_args = "".join(tool_args.get(event.tool_call_id, []))
                 try:
-                    args = json.loads(tool_call.input or "{}")
+                    parsed_args = json.loads(raw_args or "{}")
                 except json.JSONDecodeError:
-                    args = {}
-                risk = classify_tool_risk(tool_call.name, args, write_names)
-                approval = create_tool_approval(
-                    session_id=int(request_payload["session_id"]),
-                    user_id=int(request_payload["user_id"]),
-                    tool_name=tool_call.name,
-                    display_name=_tool_display_name(tool_call.name),
-                    risk_level=risk,
-                    args=args,
-                    run_id=run_id,
-                    tool_call_id=tool_call.id,
+                    parsed_args = {}
+                canonical_args = json.dumps(
+                    parsed_args,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
                 )
-                waiting.append({**approval, "tool_call_id": tool_call.id})
-                await emit({"type": "approval_required", "tool_call_id": tool_call.id, **approval})
-            await save_checkpoint(agent.state.model_dump_json(), waiting)
-            outcome.status = "waiting_approval"
-            outcome.waiting = waiting
-        elif isinstance(event, RequireExternalExecutionEvent):
-            from backend.app.agent_runtime.redis_broker import redis_broker
-            from backend.app.agent_runtime.team_service import agent_team_service
-            from backend.app.agent_runtime.workflow_service import agent_workflow_service
+                risk_level = classify_tool_risk(name, parsed_args, write_names)
+                await emit(
+                    {
+                        "type": "action",
+                        "tool_call_id": event.tool_call_id,
+                        "tool": name,
+                        "display_name": _tool_display_name(name),
+                        "content": raw_args,
+                        "arguments_sha256": hashlib.sha256(canonical_args.encode("utf-8")).hexdigest(),
+                        "risk_level": risk_level,
+                        "has_side_effects": risk_level in {"medium", "high"},
+                    }
+                )
+            elif isinstance(event, ToolResultTextDeltaEvent):
+                tool_results.setdefault(event.tool_call_id, []).append(event.delta)
+            elif isinstance(event, ToolResultEndEvent):
+                name = tool_names.get(event.tool_call_id, "")
+                raw_result = event.metadata.get("result") if isinstance(event.metadata, dict) else None
+                execution_id = event.metadata.get("execution_id") if isinstance(event.metadata, dict) else None
+                if not isinstance(raw_result, dict):
+                    text_result = "".join(tool_results.get(event.tool_call_id, []))
+                    try:
+                        raw_result = json.loads(text_result)
+                    except (TypeError, json.JSONDecodeError):
+                        raw_result = {"result": text_result}
+                tool_succeeded = str(event.state) == "success" and not raw_result.get("error")
+                if (
+                    name in write_names
+                    and tool_succeeded
+                    and int(raw_result.get("saved_count") or raw_result.get("changed_count") or 0) > 0
+                ):
+                    completed_business_write = True
+                await emit({"type": "observation", "content": _tool_preview(name, raw_result)})
+                for artifact in raw_result.get("artifacts") or []:
+                    if isinstance(artifact, dict) and artifact.get("path"):
+                        await emit({"type": "artifact", **artifact})
+                tool_done_event = {
+                    "type": "tool_done",
+                    "tool_call_id": event.tool_call_id,
+                    "tool": name,
+                    "display_name": _tool_display_name(name),
+                    "success": tool_succeeded,
+                    "execution_id": execution_id,
+                }
+                if name in {"run_macd_backtest", "run_portfolio_backtest", "run_signal_backtest", "run_factor_backtest"} and raw_result.get("run_id"):
+                    tool_done_event["report_run_id"] = str(raw_result["run_id"])
+                    tool_done_event["report_url"] = str(
+                        raw_result.get("report_url") or f"/backtests/{raw_result['run_id']}"
+                    )
+                await emit(tool_done_event)
+                await save_checkpoint(agent.state.model_dump_json(), None)
+                if name in SCHEDULE_MUTATION_TOOL_NAMES:
+                    receipt, receipt_error = _verified_schedule_receipt(name, raw_result)
+                    if receipt_error:
+                        outcome.status = "failed"
+                        outcome.error = (
+                            f"{_tool_display_name(name)}未成功，系统已禁止生成成功回执："
+                            f"{receipt_error}"
+                        )
+                        await emit(
+                            {
+                                "type": "schedule_mutation_rejected",
+                                "tool": name,
+                                "execution_id": execution_id,
+                                "reason": receipt_error,
+                            }
+                        )
+                        break
+                    verified_schedule_receipts.append(receipt)
+                    completed_business_write = True
+                    # A verified schedule mutation has a complete server-owned
+                    # receipt. End the loop here so model prose can neither replace
+                    # the real job key nor turn a failed follow-up into ambiguity.
+                    break
+                if raw_result.get("duplicate_tool_call_blocked"):
+                    outcome.status = "failed"
+                    outcome.error = (
+                        "检测到相同工具和参数在本轮被重复调用，系统已自动停止本轮任务。"
+                        "请复用已有结果，或调整查询条件后重试。"
+                    )
+                    await emit(
+                        {
+                            "type": "agent_loop_guard_triggered",
+                            "reason": "duplicate_tool_call",
+                            "tool": name,
+                            "iteration": iteration_count,
+                            "max_iterations": max_iterations,
+                        }
+                    )
+                    break
+            elif isinstance(event, RequireUserConfirmEvent):
+                await close_text("thought")
+                for tool_call in event.tool_calls:
+                    try:
+                        args = json.loads(tool_call.input or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    risk = classify_tool_risk(tool_call.name, args, write_names)
+                    approval = create_tool_approval(
+                        session_id=int(request_payload["session_id"]),
+                        user_id=int(request_payload["user_id"]),
+                        tool_name=tool_call.name,
+                        display_name=_tool_display_name(tool_call.name),
+                        risk_level=risk,
+                        args=args,
+                        run_id=run_id,
+                        tool_call_id=tool_call.id,
+                    )
+                    waiting.append({**approval, "tool_call_id": tool_call.id})
+                    await emit({"type": "approval_required", "tool_call_id": tool_call.id, **approval})
+                await save_checkpoint(agent.state.model_dump_json(), waiting)
+                outcome.status = "waiting_approval"
+                outcome.waiting = waiting
+            elif isinstance(event, RequireExternalExecutionEvent):
+                from backend.app.agent_runtime.redis_broker import redis_broker
+                from backend.app.agent_runtime.team_service import agent_team_service
+                from backend.app.agent_runtime.workflow_service import agent_workflow_service
 
-            await close_text("thought")
-            for tool_call in event.tool_calls:
-                if tool_call.name not in {"dispatch_agent_tasks", "run_agent_workflow", "create_agent_task_batch"}:
-                    raise RuntimeError(f"不支持的外部编排工具：{tool_call.name}")
-                try:
-                    args = json.loads(tool_call.input or "{}")
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError("Agent Team 参数不是有效 JSON。") from exc
-                await save_checkpoint(
-                    agent.state.model_dump_json(),
-                    [{"type": "team", "tool_call_id": tool_call.id, "status": "creating"}],
-                )
-                if tool_call.name == "run_agent_workflow":
-                    workflow = await asyncio.to_thread(
-                        agent_workflow_service.start_workflow,
+                await close_text("thought")
+                for tool_call in event.tool_calls:
+                    if tool_call.name not in {"dispatch_agent_tasks", "run_agent_workflow", "create_agent_task_batch"}:
+                        raise RuntimeError(f"不支持的外部编排工具：{tool_call.name}")
+                    try:
+                        args = json.loads(tool_call.input or "{}")
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError("Agent Team 参数不是有效 JSON。") from exc
+                    await save_checkpoint(
+                        agent.state.model_dump_json(),
+                        [{"type": "team", "tool_call_id": tool_call.id, "status": "creating"}],
+                    )
+                    if tool_call.name == "run_agent_workflow":
+                        workflow = await asyncio.to_thread(
+                            agent_workflow_service.start_workflow,
+                            leader_run_id=run_id,
+                            tool_call_id=tool_call.id,
+                            arguments=args,
+                        )
+                        waiting.append(
+                            {
+                                "type": "workflow",
+                                "workflow_run_id": workflow["workflow_run_id"],
+                                "tool_call_id": tool_call.id,
+                                "status": workflow["status"],
+                                "deadline_at": workflow["deadline_at"],
+                            }
+                        )
+                        await emit(
+                            {
+                                "type": "workflow_created",
+                                "workflow_run_id": workflow["workflow_run_id"],
+                                "template_code": workflow["template_code"],
+                                "template_version": workflow["template_version"],
+                                "objective": workflow["objective"],
+                                "node_count": len(workflow["nodes"]),
+                                "deadline_at": workflow["deadline_at"],
+                            }
+                        )
+                        for node in workflow["nodes"]:
+                            await emit(
+                                {
+                                    "type": "workflow_node_status",
+                                    "workflow_run_id": workflow["workflow_run_id"],
+                                    "node_key": node["node_key"],
+                                    "role_name": node["role_name"],
+                                    "agent_code": node["agent_code"],
+                                    "status": node["status"],
+                                    "depends_on": node["depends_on"],
+                                    "child_run_id": node["child_run_id"],
+                                }
+                            )
+                        for child_run_id in workflow.get("queued_run_ids") or []:
+                            await redis_broker.enqueue(child_run_id)
+                        continue
+                    if tool_call.name == "create_agent_task_batch":
+                        from backend.app.quant.agent_board_service import TaskBatchSpec, TaskSpec, create_task_batch
+
+                        tasks = [
+                            TaskSpec(
+                                action_key=str(t["action_key"]),
+                                title=str(t["title"]),
+                                agent_code=str(t["agent_code"]),
+                                instruction=str(t["instruction"]),
+                                expected_output=str(t.get("expected_output") or ""),
+                                required=bool(t.get("required", True)),
+                                priority=int(t.get("priority", 100)),
+                            )
+                            for t in args.get("tasks", [])
+                        ]
+                        batch = TaskBatchSpec(
+                            objective=str(args.get("objective", "")),
+                            execution_mode=str(args.get("execution_mode", "serial_items")),
+                            completion_policy=str(args.get("completion_policy", "all_required")),
+                            child_timeout_seconds=int(args.get("child_timeout_seconds", 600)),
+                            tasks=tasks,
+                        )
+                        board_result = await asyncio.to_thread(
+                            create_task_batch,
+                            batch,
+                            leader_run_id=run_id,
+                            user_id=int(request_payload.get("user_id", 0)),
+                            job_run_id=(
+                                str(request_payload.get("source_ref") or "") or None
+                                if request_payload.get("source_type") == "scheduler"
+                                else None
+                            ),
+                            tool_call_id=tool_call.id,
+                        )
+                        waiting.append(
+                            {
+                                "type": "task_batch",
+                                "team_id": board_result["team_id"],
+                                "tool_call_id": tool_call.id,
+                                "created_count": board_result["created_count"],
+                                "status": "running",
+                            }
+                        )
+                        await emit(
+                            {
+                                "type": "task_batch_created",
+                                "team_id": board_result["team_id"],
+                                "objective": batch.objective,
+                                "created_count": board_result["created_count"],
+                                "task_ids": board_result["task_ids"],
+                            }
+                        )
+                        for task_id in board_result["task_ids"]:
+                            await redis_broker.enqueue(task_id)
+                        continue
+                    team = await asyncio.to_thread(
+                        agent_team_service.start_team,
                         leader_run_id=run_id,
                         tool_call_id=tool_call.id,
                         arguments=args,
                     )
-                    waiting.append(
-                        {
-                            "type": "workflow",
-                            "workflow_run_id": workflow["workflow_run_id"],
-                            "tool_call_id": tool_call.id,
-                            "status": workflow["status"],
-                            "deadline_at": workflow["deadline_at"],
-                        }
-                    )
-                    await emit(
-                        {
-                            "type": "workflow_created",
-                            "workflow_run_id": workflow["workflow_run_id"],
-                            "template_code": workflow["template_code"],
-                            "template_version": workflow["template_version"],
-                            "objective": workflow["objective"],
-                            "node_count": len(workflow["nodes"]),
-                            "deadline_at": workflow["deadline_at"],
-                        }
-                    )
-                    for node in workflow["nodes"]:
-                        await emit(
-                            {
-                                "type": "workflow_node_status",
-                                "workflow_run_id": workflow["workflow_run_id"],
-                                "node_key": node["node_key"],
-                                "role_name": node["role_name"],
-                                "agent_code": node["agent_code"],
-                                "status": node["status"],
-                                "depends_on": node["depends_on"],
-                                "child_run_id": node["child_run_id"],
-                            }
-                        )
-                    for child_run_id in workflow.get("queued_run_ids") or []:
-                        await redis_broker.enqueue(child_run_id)
-                    continue
-                if tool_call.name == "create_agent_task_batch":
-                    from backend.app.quant.agent_board_service import TaskBatchSpec, TaskSpec, create_task_batch
-
-                    tasks = [
-                        TaskSpec(
-                            action_key=str(t["action_key"]),
-                            title=str(t["title"]),
-                            agent_code=str(t["agent_code"]),
-                            instruction=str(t["instruction"]),
-                            expected_output=str(t.get("expected_output") or ""),
-                            required=bool(t.get("required", True)),
-                            priority=int(t.get("priority", 100)),
-                        )
-                        for t in args.get("tasks", [])
-                    ]
-                    batch = TaskBatchSpec(
-                        objective=str(args.get("objective", "")),
-                        execution_mode=str(args.get("execution_mode", "serial_items")),
-                        completion_policy=str(args.get("completion_policy", "all_required")),
-                        child_timeout_seconds=int(args.get("child_timeout_seconds", 600)),
-                        tasks=tasks,
-                    )
-                    board_result = await asyncio.to_thread(
-                        create_task_batch,
-                        batch,
-                        leader_run_id=run_id,
-                        user_id=int(request_payload.get("user_id", 0)),
-                        job_run_id=(
-                            str(request_payload.get("source_ref") or "") or None
-                            if request_payload.get("source_type") == "scheduler"
-                            else None
-                        ),
-                        tool_call_id=tool_call.id,
-                    )
-                    waiting.append(
-                        {
-                            "type": "task_batch",
-                            "team_id": board_result["team_id"],
-                            "tool_call_id": tool_call.id,
-                            "created_count": board_result["created_count"],
-                            "status": "running",
-                        }
-                    )
-                    await emit(
-                        {
-                            "type": "task_batch_created",
-                            "team_id": board_result["team_id"],
-                            "objective": batch.objective,
-                            "created_count": board_result["created_count"],
-                            "task_ids": board_result["task_ids"],
-                        }
-                    )
-                    for task_id in board_result["task_ids"]:
-                        await redis_broker.enqueue(task_id)
-                    continue
-                team = await asyncio.to_thread(
-                    agent_team_service.start_team,
-                    leader_run_id=run_id,
-                    tool_call_id=tool_call.id,
-                    arguments=args,
-                )
-                waiting_item = {
-                    "type": "team",
-                    "team_id": team["team_id"],
-                    "tool_call_id": tool_call.id,
-                    "status": team["status"],
-                    "deadline_at": team["deadline_at"],
-                }
-                waiting.append(waiting_item)
-                await emit(
-                    {
-                        "type": "team_created",
+                    waiting_item = {
+                        "type": "team",
                         "team_id": team["team_id"],
-                        "objective": team["objective"],
-                        "member_count": len(team["members"]),
-                        "rejected_count": len(team.get("rejected_tasks", [])),
-                        **team.get("dispatch_stats", {}),
+                        "tool_call_id": tool_call.id,
+                        "status": team["status"],
                         "deadline_at": team["deadline_at"],
                     }
-                )
-                for rejected in team.get("rejected_tasks", []):
-                    await emit({"type": "team_member_rejected", "team_id": team["team_id"], **rejected})
-                for member in team["members"]:
+                    waiting.append(waiting_item)
                     await emit(
                         {
-                            "type": "team_member_queued",
+                            "type": "team_created",
                             "team_id": team["team_id"],
-                            "child_run_id": member["run_id"],
-                            "agent_code": member["agent_code"],
-                            "agent_name": member["agent_name"],
-                            "status": member["status"],
+                            "objective": team["objective"],
+                            "member_count": len(team["members"]),
+                            "rejected_count": len(team.get("rejected_tasks", [])),
+                            **team.get("dispatch_stats", {}),
+                            "deadline_at": team["deadline_at"],
                         }
                     )
-                    await redis_broker.enqueue(member["run_id"])
-            await save_checkpoint(agent.state.model_dump_json(), waiting)
-            outcome.status = "waiting_children"
-            outcome.waiting = waiting
-        elif isinstance(event, ModelCallEndEvent):
-            iteration_count += 1
-            await emit(
-                {
-                    "type": "agent_loop_progress",
-                    "iteration": iteration_count,
-                    "max_iterations": max_iterations,
-                }
-            )
-            await save_checkpoint(agent.state.model_dump_json(), waiting or None)
-        elif isinstance(event, ExceedMaxItersEvent):
-            outcome.status = "failed"
-            outcome.error = (
-                f"Agent 已达到 {max_iterations} 次最大推理迭代上限，"
-                "系统已停止本轮任务。请拆分任务或补充更明确的目标后重试。"
-            )
-            await emit(
-                {
-                    "type": "agent_loop_guard_triggered",
-                    "reason": "max_iterations",
-                    "iteration": max(iteration_count, max_iterations),
-                    "max_iterations": max_iterations,
-                }
-            )
-        elif isinstance(event, ReplyEndEvent):
-            await close_text("answer")
-            reason = str(event.finished_reason)
-            if reason not in {"completed", "interrupted"}:
+                    for rejected in team.get("rejected_tasks", []):
+                        await emit({"type": "team_member_rejected", "team_id": team["team_id"], **rejected})
+                    for member in team["members"]:
+                        await emit(
+                            {
+                                "type": "team_member_queued",
+                                "team_id": team["team_id"],
+                                "child_run_id": member["run_id"],
+                                "agent_code": member["agent_code"],
+                                "agent_name": member["agent_name"],
+                                "status": member["status"],
+                            }
+                        )
+                        await redis_broker.enqueue(member["run_id"])
+                await save_checkpoint(agent.state.model_dump_json(), waiting)
+                outcome.status = "waiting_children"
+                outcome.waiting = waiting
+            elif isinstance(event, ModelCallEndEvent):
+                iteration_count += 1
+                await emit(
+                    {
+                        "type": "agent_loop_progress",
+                        "iteration": iteration_count,
+                        "max_iterations": max_iterations,
+                    }
+                )
+                await save_checkpoint(agent.state.model_dump_json(), waiting or None)
+            elif isinstance(event, ExceedMaxItersEvent):
                 outcome.status = "failed"
-                error_info = getattr(event, "error", None)
-                outcome.error = getattr(error_info, "message", None) or f"AgentScope ended: {reason}"
+                outcome.error = (
+                    f"Agent 已达到 {max_iterations} 次最大推理迭代上限，"
+                    "系统已停止本轮任务。请拆分任务或补充更明确的目标后重试。"
+                )
+                await emit(
+                    {
+                        "type": "agent_loop_guard_triggered",
+                        "reason": "max_iterations",
+                        "iteration": max(iteration_count, max_iterations),
+                        "max_iterations": max_iterations,
+                    }
+                )
+            elif isinstance(event, ReplyEndEvent):
+                await close_text("answer")
+                reason = str(event.finished_reason)
+                if reason not in {"completed", "interrupted"}:
+                    outcome.status = "failed"
+                    error_info = getattr(event, "error", None)
+                    outcome.error = getattr(error_info, "message", None) or f"AgentScope ended: {reason}"
 
+        if (
+            outcome.status == "completed"
+            and continuation_attempts < 2
+            and _needs_report_continuation(
+                request_payload, outcome.final_answer, tool_names, waiting
+            )
+        ):
+            continuation_attempts += 1
+            await emit(
+                {
+                    "type": "continuation_started",
+                    "attempt": continuation_attempts,
+                    "reason": "research_answer_too_short",
+                }
+            )
+            reply_inputs = UserMsg("user", _continuation_prompt())
+            outcome.final_answer = ""
+            continue
+        break
     if text_block_open:
         await close_text("thought" if waiting else "answer")
     if outcome.status == "completed" and verified_schedule_receipts:
