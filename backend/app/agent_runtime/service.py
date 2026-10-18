@@ -120,7 +120,6 @@ class AgentRuntimeService:
         available, version = agentscope_available()
         return {
             "mode": settings.agent_runtime_mode,
-            "llm_wire_api": settings.agent_llm_wire_api,
             "worker_enabled": settings.agent_runtime_worker_enabled,
             "agentscope": {"available": available, "version": version},
             "redis": await self.broker.health(),

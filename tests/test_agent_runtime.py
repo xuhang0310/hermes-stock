@@ -15,10 +15,7 @@ from backend.app.agent_runtime.agentscope_engine import (
     _build_tools,
     _reasoning_loop_error,
     _resume_event,
-    agent_llm_wire_api,
     agentscope_available,
-    normalize_agent_base_url,
-    responses_reasoning_effort,
     run_agentscope,
     select_engine,
 )
@@ -78,47 +75,6 @@ class ReasoningLoopErrorTests(unittest.TestCase):
             reason = guard.observe("Let me write the report now.\n")
 
         self.assertEqual(reason, "repeated_reasoning")
-
-
-class AgentScopeWireApiTests(unittest.TestCase):
-    def test_responses_is_the_default_wire_protocol(self) -> None:
-        with patch("backend.app.agent_runtime.agentscope_engine.settings") as settings:
-            settings.agent_llm_wire_api = "responses"
-            self.assertEqual(agent_llm_wire_api({}), "responses")
-
-    def test_chat_completions_is_an_explicit_rollback(self) -> None:
-        self.assertEqual(
-            agent_llm_wire_api({"wire_api": "chat_completions"}),
-            "chat_completions",
-        )
-
-    def test_unknown_wire_protocol_does_not_regress_to_chat(self) -> None:
-        self.assertEqual(agent_llm_wire_api({"wire_api": "typo"}), "responses")
-
-    def test_base_url_is_normalized_from_an_old_endpoint_config(self) -> None:
-        self.assertEqual(
-            normalize_agent_base_url("https://example.invalid/v1/chat/completions"),
-            "https://example.invalid/v1",
-        )
-
-    def test_qwen_thinking_setting_maps_to_responses_reasoning(self) -> None:
-        self.assertEqual(
-            responses_reasoning_effort(
-                {"reasoning_effort": "high"},
-                {"reasoning_effort": None, "enable_thinking": True},
-            ),
-            "high",
-        )
-        self.assertIsNone(
-            responses_reasoning_effort(
-                {"reasoning_effort": "off"},
-                {"reasoning_effort": None, "enable_thinking": False},
-            )
-        )
-        self.assertEqual(
-            normalize_agent_base_url("https://example.invalid/v1/responses"),
-            "https://example.invalid/v1",
-        )
 
 
 class ChannelRunWaitTests(unittest.TestCase):
@@ -747,7 +703,7 @@ class AgentRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 "backend.app.agent_runtime.agentscope_engine._build_tools",
                 return_value=[],
             ),
-            patch("agentscope.model.OpenAIResponseModel", FakeModel),
+            patch("agentscope.model.OpenAIChatModel", FakeModel),
             patch("agentscope.agent.Agent", FakeAgent),
         ):
             outcome = await run_agentscope(
@@ -869,7 +825,7 @@ class AgentRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
                 "backend.app.agent_runtime.agentscope_engine._build_tools",
                 return_value=[],
             ),
-            patch("agentscope.model.OpenAIResponseModel", FakeModel),
+            patch("agentscope.model.OpenAIChatModel", FakeModel),
             patch("agentscope.agent.Agent", FakeAgent),
         ):
             outcome = await run_agentscope(
