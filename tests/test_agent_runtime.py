@@ -13,8 +13,6 @@ from sqlalchemy.pool import StaticPool
 from backend.app.agent_runtime.agentscope_engine import (
     ReasoningLoopGuard,
     _build_tools,
-    _needs_detailed_research_completion,
-    _needs_report_continuation,
     _reasoning_loop_error,
     _resume_event,
     agent_llm_wire_api,
@@ -61,29 +59,6 @@ class ReasoningLoopErrorTests(unittest.TestCase):
 
         self.assertIn("未生成有效报告", message)
         self.assertNotIn("上传截图", message)
-
-
-class ResearchCompletionGuardTests(unittest.TestCase):
-    def test_follow_up_inherits_research_intent_from_history(self) -> None:
-        self.assertTrue(
-            _needs_detailed_research_completion(
-                {
-                    "question": "继续",
-                    "history": [{"role": "user", "content": "分析一下浪潮信息"}],
-                }
-            )
-        )
-        self.assertFalse(
-            _needs_detailed_research_completion(
-                {"question": "你好", "history": []}
-            )
-        )
-
-    def test_short_tool_answer_requests_continuation(self) -> None:
-        payload = {"question": "分析一下浪潮信息", "history": []}
-        self.assertTrue(_needs_report_continuation(payload, "下面输出报告", {"call": "tool"}, []))
-        self.assertFalse(_needs_report_continuation(payload, "下面输出报告", {}, []))
-        self.assertFalse(_needs_report_continuation({"question": "最新价格"}, "56.53 元", {"call": "tool"}, []))
 
     def test_repeated_portfolio_facts_far_apart_do_not_look_like_a_loop(self) -> None:
         guard = ReasoningLoopGuard(repeat_limit=5, max_chars=120_000)
