@@ -263,33 +263,22 @@ class ScheduledTaskExtractor:
 
     def _call_llm(self, prompt: str) -> dict[str, Any]:
         """调用 LLM 提取任务"""
-        import httpx
+        from backend.app.ai.llm_client import chat_completion
 
         config = active_llm_config()
         if config is None:
             raise RuntimeError("没有可用的 LLM 配置")
 
-        url = f"{config['base_url'].rstrip('/')}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": config["model"],
-            "messages": [
+        data = chat_completion(
+            [
                 {"role": "system", "content": "你是任务提取器，严格输出 JSON。"},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.1,
-            "max_tokens": 2000,
-        }
-
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-
-        content = data["choices"][0]["message"]["content"].strip()
+            config,
+            temperature=0.1,
+            timeout=60.0,
+        )
+        content = str((data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
         # 提取 JSON（可能被 ```json ``` 包裹）
         json_match = re.search(r"\{[\s\S]*\}", content)
         if not json_match:

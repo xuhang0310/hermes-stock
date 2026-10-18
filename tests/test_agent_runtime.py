@@ -86,10 +86,10 @@ class AgentScopeWireApiTests(unittest.TestCase):
             settings.agent_llm_wire_api = "responses"
             self.assertEqual(agent_llm_wire_api({}), "responses")
 
-    def test_chat_completions_is_an_explicit_rollback(self) -> None:
+    def test_legacy_chat_setting_is_forced_to_responses(self) -> None:
         self.assertEqual(
             agent_llm_wire_api({"wire_api": "chat_completions"}),
-            "chat_completions",
+            "responses",
         )
 
     def test_unknown_wire_protocol_does_not_regress_to_chat(self) -> None:

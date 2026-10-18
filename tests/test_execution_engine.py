@@ -409,8 +409,8 @@ class TaskExtractorExtractTests(unittest.TestCase):
         self.assertTrue(any("LLM 调用失败" in w for w in result["warnings"]))
 
     @patch("backend.app.quant.task_extractor.active_llm_config")
-    @patch("httpx.Client")
-    def test_call_llm_uses_mapping_model_config(self, client_cls, active_config) -> None:
+    @patch("backend.app.ai.llm_client.chat_completion")
+    def test_call_llm_uses_mapping_model_config(self, completion, active_config) -> None:
         """active_llm_config returning a dict remains compatible with extraction."""
         from backend.app.quant.task_extractor import ScheduledTaskExtractor
 
@@ -419,8 +419,7 @@ class TaskExtractorExtractTests(unittest.TestCase):
             "api_key": "secret",
             "model": "test-model",
         }
-        response = client_cls.return_value.__enter__.return_value.post.return_value
-        response.json.return_value = {
+        completion.return_value = {
             "choices": [
                 {
                     "message": {
@@ -433,10 +432,9 @@ class TaskExtractorExtractTests(unittest.TestCase):
         result = ScheduledTaskExtractor()._call_llm("extract tasks")
 
         self.assertFalse(result["has_tasks"])
-        response.raise_for_status.assert_called_once_with()
-        post_call = client_cls.return_value.__enter__.return_value.post.call_args
-        self.assertEqual(post_call.args[0], "https://example.invalid/v1/chat/completions")
-        self.assertEqual(post_call.kwargs["json"]["model"], "test-model")
+        completion.assert_called_once()
+        self.assertEqual(completion.call_args.args[1]["model"], "test-model")
+        self.assertEqual(completion.call_args.kwargs["timeout"], 60.0)
 
     def test_save_extraction_plan_finds_job_run_by_public_run_id(self) -> None:
         from backend.app.quant.task_extractor import ScheduledTaskExtractor

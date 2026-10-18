@@ -1,6 +1,6 @@
 """Pydantic AI v2 试点 —— 持仓录入的结构化输出 + 校验重试。
 
-独立于 position_import.py（旧路径 chat_completion 不动），通过 env
+独立于 position_import.py，通过 env
 ``STOCK_POSITION_AGENT_V2=true`` 开启。失败随时关回旧路径，零风险回退。
 
 收益对照（旧 vs 新）：
@@ -83,13 +83,16 @@ def parse_with_pydantic_ai(
     """用 Pydantic AI v2 Agent 跑结构化提取。返回与旧路径同构的 dict。"""
     from pydantic_ai import Agent
     from pydantic_ai.messages import BinaryContent
-    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.models.openai import OpenAIResponsesModel
     from pydantic_ai.providers.openai import OpenAIProvider
 
-    provider = OpenAIProvider(
-        base_url=llm_config["base_url"], api_key=llm_config["api_key"]
-    )
-    model = OpenAIChatModel(llm_config["model"], provider=provider)
+    base_url = str(llm_config["base_url"]).rstrip("/")
+    for suffix in ("/chat/completions", "/chat/completion", "/responses"):
+        if base_url.lower().endswith(suffix):
+            base_url = base_url[: -len(suffix)].rstrip("/")
+            break
+    provider = OpenAIProvider(base_url=base_url, api_key=llm_config["api_key"])
+    model = OpenAIResponsesModel(llm_config["model"], provider=provider)
     agent = Agent(model, result_type=PositionParseResult, retries=2, system_prompt=_SYSTEM_PROMPT)
 
     user_content: list[Any] = [{"type": "text", "text": instruction}]
