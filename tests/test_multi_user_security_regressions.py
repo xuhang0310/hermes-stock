@@ -37,11 +37,13 @@ class MultiUserSecurityRegressionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.engine.dispose()
 
-    def test_arbitrary_agent_sql_and_private_schema_are_disabled(self) -> None:
-        self.assertIn("禁用任意 SQL", stock_agent.validate_sql("SELECT * FROM positions"))
-        self.assertIn("禁用任意 SQL", stock_agent.run_sql("SELECT * FROM positions")["error"])
-        self.assertIn("个人或敏感数据", stock_agent.get_schema("positions")["error"])
-        self.assertNotIn("run_sql", {item["function"]["name"] for item in stock_agent.TOOLS})
+    def test_agent_sql_is_user_scoped_and_sensitive_schema_stays_closed(self) -> None:
+        # 完整的隔离与绕过用例见 tests/test_agent_sql_sandbox.py。
+        self.assertIn("没有用户身份", stock_agent.run_sql("SELECT * FROM positions")["error"])
+        self.assertIn("不在可查询范围", stock_agent.validate_sql("SELECT password_hash FROM users", owner_user_id=1))
+        self.assertIn("不开放查询", stock_agent.get_schema("users")["error"])
+        self.assertEqual(stock_agent.get_schema("positions")["scope"], "personal")
+        self.assertIn("run_sql", {item["function"]["name"] for item in stock_agent.TOOLS})
 
     def test_reports_and_risks_are_private_to_repository_owner(self) -> None:
         with self.SessionFactory() as db:

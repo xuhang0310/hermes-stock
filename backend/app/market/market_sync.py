@@ -1,10 +1,12 @@
-"""全市场行情同步：把最近 N 个交易日的全市场 K 线与最新 daily_basic 落到本地表。
+"""全市场行情同步：把最近 N 个交易日的全市场 K 线、复权因子与最新 daily_basic 落到本地表。
 
 单一职责：只负责"数据入库"，不做筛选/解读（那是 quant/screener_*）。
 
 数据边界（诚实声明）：
 - 走 TuShare 原始通道 ``_tushare_request``（不经 tushare_query 的 300 行截断，
   全市场单日约 5000+ 行）；每次调用间 sleep 防限频。
+- daily_bars 为不复权价；同窗口的 adj_factor 落 stock_adj_factors，供下游换算
+  后复权价。复权因子覆盖不足同样计入 selection 缓存完整性检查。
 - 增量幂等：按日提交，只补本地缺失的交易日；重跑不会重复拉取。
 - 批量写统一 ``INSERT … ON DUPLICATE KEY UPDATE`` + executemany（分块 1000），
   不做逐股票循环。本项目仅支持 MySQL（core/database.py 硬校验），故此处直接写
@@ -16,8 +18,8 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta
-from math import ceil
-from typing import Any
+from math import ceil, isfinite
+from typing import Any, Iterable
 
 from sqlalchemy import func, select, text
 
@@ -26,6 +28,7 @@ from backend.app.core.models import (
     DailyBar,
     Instrument,
     MarketTradingCalendar,
+    StockAdjFactor,
     StockDailyBasic,
     StockLatestPrice,
 )
@@ -52,6 +55,7 @@ _CATALOG_SYMBOL_RE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
 _DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
 _BASIC_FIELDS = "ts_code,trade_date,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv"
+_ADJ_FIELDS = "ts_code,trade_date,adj_factor"
 
 
 def _float(value: Any) -> float | None:
@@ -311,6 +315,11 @@ def _bar_date_counts(trade_dates: list[str], *, listed_only: bool = False) -> di
     return _date_symbol_counts(DailyBar, trade_dates, listed_only=listed_only)
 
 
+def _adj_factor_date_counts(trade_dates: list[str], *, listed_only: bool = False) -> dict[str, int]:
+    """各目标日已落库复权因子的不同标的数。"""
+    return _date_symbol_counts(StockAdjFactor, trade_dates, listed_only=listed_only)
+
+
 def _latest_local_date(db: Any, model: Any, through: str) -> str | None:
     """分别走两种原始日期格式的范围，避免 REPLACE(date) 全表谓词扫描。"""
     dates = []
@@ -408,6 +417,34 @@ def _upsert_daily_basic(rows: list[dict]) -> int:
                         "circ_mv": _float(row.get("circ_mv")),
                     }
                 )
+            if params:
+                conn.execute(stmt, params)
+                count += len(params)
+    return count
+
+
+def _upsert_adj_factors(rows: list[dict]) -> int:
+    """复权因子按 (symbol, trade_date) 幂等写入；非正或非有限值不落库，按缺失处理。"""
+    if not rows:
+        return 0
+    stmt = text(
+        "INSERT INTO stock_adj_factors (symbol, trade_date, adj_factor) "
+        "VALUES (:symbol, :trade_date, :adj_factor) "
+        "ON DUPLICATE KEY UPDATE adj_factor=VALUES(adj_factor)"
+    )
+    count = 0
+    with engine.begin() as conn:
+        for chunk in _chunked(rows):
+            params = []
+            for row in chunk:
+                symbol = normalize_a_share_symbol(str(row.get("ts_code") or ""))
+                trade_date = _compact_date(row.get("trade_date"))
+                adj_factor = _float(row.get("adj_factor"))
+                if "." not in symbol or not trade_date or adj_factor is None:
+                    continue
+                if not isfinite(adj_factor) or adj_factor <= 0:
+                    continue
+                params.append({"symbol": symbol, "trade_date": trade_date, "adj_factor": adj_factor})
             if params:
                 conn.execute(stmt, params)
                 count += len(params)
@@ -544,6 +581,29 @@ def load_local_history_trade_dates(
     return sorted(str(day) for day in dates)
 
 
+def load_local_adj_factors(
+    db: Any, symbols: Iterable[str], trade_dates: Iterable[str],
+) -> dict[tuple[str, str], float]:
+    """本地复权因子 {(symbol, YYYYMMDD): adj_factor}；缺失即缺失，不用前值填充。"""
+    symbol_list = sorted({str(symbol) for symbol in symbols if symbol})
+    dates = sorted({_compact_date(day) for day in trade_dates} - {""})
+    factors: dict[tuple[str, str], float] = {}
+    if not symbol_list or not dates:
+        return factors
+    for start in range(0, len(symbol_list), 500):
+        rows = db.execute(
+            select(StockAdjFactor.symbol, StockAdjFactor.trade_date, StockAdjFactor.adj_factor).where(
+                StockAdjFactor.symbol.in_(symbol_list[start : start + 500]),
+                StockAdjFactor.trade_date.in_(dates),
+            )
+        ).all()
+        for symbol, trade_date, adj_factor in rows:
+            value = _float(adj_factor)
+            if value is not None and isfinite(value) and value > 0:
+                factors[(str(symbol), str(trade_date))] = value
+    return factors
+
+
 def _calendar_gaps(dates: set[str], start: str, end: str) -> list[str]:
     missing = []
     day = date.fromisoformat(_iso_date(start))
@@ -644,6 +704,12 @@ def local_selection_cache_status(history_days: int = 20) -> dict[str, Any]:
     for day, count in history_counts.items():
         if count < minimum["history"]:
             errors.append(f"历史日线 {day} 覆盖不足：{count}/{catalog_count}，至少需 {minimum['history']}")
+    # 动量/波动按后复权价计算，窗口内任一日缺复权因子都会让除权缺口混进特征。
+    adj_counts = _adj_factor_date_counts(history_dates, listed_only=True)
+    adj_factor_counts = {day: adj_counts.get(day, 0) for day in history_dates}
+    for day, count in adj_factor_counts.items():
+        if count < minimum["history"]:
+            errors.append(f"复权因子 {day} 覆盖不足：{count}/{catalog_count}，至少需 {minimum['history']}")
     return {
         "ready": not errors,
         "expected_trade_date": expected_date,
@@ -665,6 +731,7 @@ def local_selection_cache_status(history_days: int = 20) -> dict[str, Any]:
             day: count / catalog_count if catalog_count else 0.0
             for day, count in history_counts.items()
         },
+        "adj_factor_date_counts": adj_factor_counts,
         "minimum_counts": minimum,
         "errors": errors,
     }
@@ -690,11 +757,31 @@ def _validated_market_rows(
     return rows
 
 
+def _fetch_market_rows(
+    api_name: str, fields: str, *, trade_date: str, minimum: int, listed_symbols: set[str],
+) -> tuple[list[dict] | None, str | None]:
+    """按交易日拉全市场截面并校验完整性；重试耗尽后返回最后一次校验错误原文。"""
+    error: str | None = None
+    for attempt in range(_REQUEST_RETRIES):
+        response = _tushare_request(api_name, {"trade_date": trade_date}, fields)
+        try:
+            rows = _validated_market_rows(
+                response, label=f"{api_name}({trade_date})", trade_date=trade_date,
+                minimum=minimum, listed_symbols=listed_symbols,
+            )
+        except RuntimeError as exc:
+            error = str(exc)
+            time.sleep(_API_SLEEP_SECONDS * (attempt + 1))
+            continue
+        return rows, None
+    return None, error or f"{api_name}({trade_date}): 行情响应格式无效"
+
+
 def sync_market(days: int = 20) -> dict:
     """增量同步最近 ``days`` 个交易日的全市场行情（5-60 天）。
 
     流程：交易日历 → instruments 目录（FK 父表先行）→ 逐缺失日拉 daily →
-    最新一日 daily_basic → 全市场最新价。按日提交，错误记入 errors；
+    逐缺失日拉 adj_factor → 最新一日 daily_basic → 全市场最新价。按日提交，错误记入 errors；
     日历/目录失败是硬错误（RuntimeError，上游原文透出）。
     """
     if not _SYNC_DAYS_MIN <= int(days or 0) <= _SYNC_DAYS_MAX:
@@ -706,6 +793,8 @@ def sync_market(days: int = 20) -> dict:
         "calendar_rows_upserted": 0,
         "dates_fetched": 0,
         "bars_upserted": 0,
+        "adj_dates_fetched": 0,
+        "adj_factors_upserted": 0,
         "basic_upserted": 0,
         "latest_prices_upserted": 0,
         "instruments_upserted": 0,
@@ -769,44 +858,17 @@ def sync_market(days: int = 20) -> dict:
         if existing.get(d, 0) < minimum["bar" if d == latest else "history"]
     ]  # 旧 → 新
 
-    def _fetch_daily(trade_date: str) -> dict:
-        last_exc: RuntimeError | None = None
-        for attempt in range(_REQUEST_RETRIES):
-            response = _tushare_request("daily", {"trade_date": trade_date}, _DAILY_FIELDS)
-            try:
-                rows = _validated_market_rows(
-                    response, label=f"daily({trade_date})", trade_date=trade_date,
-                    minimum=minimum["bar" if trade_date == latest else "history"],
-                    listed_symbols=listed_symbols,
-                )
-            except RuntimeError as exc:
-                last_exc = exc
-                time.sleep(_API_SLEEP_SECONDS * (attempt + 1))
-                continue
-            return {"rows": rows, "validated": True}
-        # 重试全部失败后返回原始响应（可能为空/部分/带 error），交由后续统一判定
-        if last_exc is not None:
-            return {"rows": None, "error": str(last_exc)}
-        return {"rows": response.get("rows") if isinstance(response, dict) else None}
-
     latest_rows: list[dict] | None = None
     for trade_date in missing:
         day_start = time.monotonic()
-        result = _fetch_daily(trade_date)
-        if result.get("validated"):
-            rows = result["rows"]
-        else:
-            rows = result.get("rows")
-            try:
-                rows = _validated_market_rows(
-                    {"rows": rows} if isinstance(rows, list) else {},
-                    label=f"daily({trade_date})", trade_date=trade_date,
-                    minimum=minimum["bar" if trade_date == latest else "history"],
-                    listed_symbols=listed_symbols,
-                )
-            except RuntimeError as exc:
-                stats["errors"].append(str(exc))
-                break
+        rows, error = _fetch_market_rows(
+            "daily", _DAILY_FIELDS, trade_date=trade_date,
+            minimum=minimum["bar" if trade_date == latest else "history"],
+            listed_symbols=listed_symbols,
+        )
+        if rows is None:
+            stats["errors"].append(error)
+            break
         upserted = _upsert_daily_bars(rows)
         stats["bars_upserted"] += upserted
         stats["dates_fetched"] += 1
@@ -816,6 +878,22 @@ def sync_market(days: int = 20) -> dict:
         )
         if trade_date == latest:
             latest_rows = rows
+        time.sleep(_API_SLEEP_SECONDS)
+
+    # 复权因子与 K 线同窗口、同完整性门槛；只补本地覆盖不足的交易日。
+    existing_adj = _adj_factor_date_counts(targets, listed_only=True)
+    for trade_date in sorted(targets):
+        if existing_adj.get(trade_date, 0) >= minimum["history"]:
+            continue
+        rows, error = _fetch_market_rows(
+            "adj_factor", _ADJ_FIELDS, trade_date=trade_date,
+            minimum=minimum["history"], listed_symbols=listed_symbols,
+        )
+        if rows is None:
+            stats["errors"].append(error)
+            break
+        stats["adj_factors_upserted"] += _upsert_adj_factors(rows)
+        stats["adj_dates_fetched"] += 1
         time.sleep(_API_SLEEP_SECONDS)
 
     result = _tushare_request("daily_basic", {"trade_date": latest}, _BASIC_FIELDS)
@@ -853,10 +931,11 @@ def sync_market(days: int = 20) -> dict:
     stats["ready"] = not stats["errors"]
     stats["elapsed_seconds"] = round(time.monotonic() - started, 1)
     logger.info(
-        "market sync done: latest=%s dates_fetched=%d bars=%d basic=%d prices=%d elapsed=%.1fs",
+        "market sync done: latest=%s dates_fetched=%d bars=%d adj=%d basic=%d prices=%d elapsed=%.1fs",
         latest,
         stats["dates_fetched"],
         stats["bars_upserted"],
+        stats["adj_factors_upserted"],
         stats["basic_upserted"],
         stats["latest_prices_upserted"],
         stats["elapsed_seconds"],

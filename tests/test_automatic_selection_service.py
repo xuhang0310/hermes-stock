@@ -16,6 +16,7 @@ from backend.app.core.models import (
     Instrument,
     MarketTradingCalendar,
     PaperOrder,
+    StockAdjFactor,
     StockDailyBasic,
 )
 from backend.app.paper import paper_service
@@ -52,7 +53,7 @@ def _config(*, top_n: int = 2):
 
 def _history(start: float = 10.0, *, target_trade_date: str = TARGET_DATE):
     return [
-        {"trade_date": trade_date, "close": start + index * 0.1, "amount": 100_000.0}
+        {"trade_date": trade_date, "close": start + index * 0.1, "adj_factor": 1.0, "amount": 100_000.0}
         for index, trade_date in enumerate(history_dates(target_trade_date))
     ]
 
@@ -305,6 +306,7 @@ class AutomaticSelectionServiceTests(unittest.TestCase):
         dates = history_dates(TARGET_DATE)
         with self.SessionFactory() as db:
             db.add(Instrument(symbol=symbol, name="测试一", market="CN", type="stock"))
+            db.flush()  # 无 relationship 时 UoW 不保证先插父表，MySQL 会拒绝 daily_bars 外键
             for index, trade_date in enumerate(dates):
                 db.add(
                     DailyBar(
@@ -317,6 +319,8 @@ class AutomaticSelectionServiceTests(unittest.TestCase):
                         source="tushare",
                     )
                 )
+                if index != 3:
+                    db.add(StockAdjFactor(symbol=symbol, trade_date=trade_date, adj_factor=1.0 + index / 100))
             db.add(
                 StockDailyBasic(
                     symbol=symbol,
@@ -349,6 +353,9 @@ class AutomaticSelectionServiceTests(unittest.TestCase):
         self.assertEqual(rows[0]["close_price"], 30.5)
         self.assertEqual(rows[0]["pe_ttm"], 9.0)
         self.assertEqual(rows[0]["factor_values"], {"tushare:roe_ttm": 0.2})
+        factors = [item["adj_factor"] for item in rows[0]["history"]]
+        self.assertIsNone(factors[3])
+        self.assertAlmostEqual(factors[-1], 1.2)
 
     def test_due_evaluation_updates_five_day_window_and_leaves_longer_windows_pending(self) -> None:
         run = service.run_strategy_from_rows(
@@ -361,6 +368,7 @@ class AutomaticSelectionServiceTests(unittest.TestCase):
         future_dates = ["20260831", "20260901", "20260902", "20260903", "20260904"]
         with self.SessionFactory() as db:
             db.add(Instrument(symbol="600001.SH", name="测试一", market="CN", type="stock"))
+            db.flush()
             for day, is_open in [(TARGET_DATE, True), ("20260829", False), ("20260830", False)]:
                 db.add(MarketTradingCalendar(exchange="SSE", cal_date=day, is_open=is_open))
             for index, trade_date in enumerate(future_dates):
@@ -375,6 +383,7 @@ class AutomaticSelectionServiceTests(unittest.TestCase):
                         source="tushare",
                     )
                 )
+                db.add(StockAdjFactor(symbol="600001.SH", trade_date=trade_date, adj_factor=1.0))
             db.commit()
 
         class EvaluationDate(date):
@@ -400,6 +409,7 @@ class AutomaticSelectionServiceTests(unittest.TestCase):
         dates = history_dates(TARGET_DATE)
         with self.SessionFactory() as db:
             db.add(Instrument(symbol=symbol, name="测试一", market="CN", type="stock"))
+            db.flush()
             for index, trade_date in enumerate(dates):
                 db.add(
                     DailyBar(
@@ -412,6 +422,7 @@ class AutomaticSelectionServiceTests(unittest.TestCase):
                         source="tushare",
                     )
                 )
+                db.add(StockAdjFactor(symbol=symbol, trade_date=trade_date, adj_factor=1.0))
             db.add(
                 StockDailyBasic(
                     symbol=symbol,

@@ -1543,6 +1543,16 @@ export type ScreenerQuery = {
   factor_min?: number
   factor_max?: number
   limit?: number
+  sort_by?: ScreenerSort
+  score_weights?: ScreenerScoreWeights
+}
+
+export type ScreenerSort = 'score_desc' | 'pct_desc' | 'turnover_desc' | 'mv_asc' | 'pe_asc'
+
+export type ScreenerScoreWeights = {
+  value: number
+  momentum: number
+  liquidity: number
 }
 
 export type ScreenerItem = {
@@ -1557,7 +1567,12 @@ export type ScreenerItem = {
   total_mv_yi: number | null
   pe_ttm: number | null
   ma_value: number | null
+  ma_adjusted?: boolean
   factor_value?: number | null
+  value_score?: number
+  momentum_score?: number
+  liquidity_score?: number
+  composite_score?: number
 }
 
 export type IndustryMember = ScreenerItem & {
@@ -1612,10 +1627,14 @@ export type IndustryMembers = {
 }
 
 export type ScreenerResult = {
+  /** 候选池：最近截面上可交易的非 ST 股票数 */
   universe: number
+  /** 命中数：满足全部条件的股票数（items 只是排序后的前 limit 只） */
   total: number
   items: ScreenerItem[]
   factor_as_of?: string | null
+  as_of?: string | null
+  excluded_count?: number
 }
 
 export type ScreenerSyncStats = {

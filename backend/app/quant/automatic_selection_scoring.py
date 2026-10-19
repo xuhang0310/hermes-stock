@@ -15,7 +15,7 @@ import pandas as pd
 from backend.app.quant.factor_signal_engine import _zscore_cross_section
 
 BUILTIN_STRATEGY_KEY = "forward-multifactor"
-SCORING_IMPLEMENTATION_VERSION = "forward-selection-v2"
+SCORING_IMPLEMENTATION_VERSION = "forward-selection-v3"  # v3：动量/波动改用后复权价
 RESEARCH_LIMITATIONS = (
     "仅用于上线后的研究观察。未完整模拟复权、涨跌停、停牌成交失败、整手与真实容量，"
     "不构成投资建议或交易指令。"
@@ -258,6 +258,7 @@ def build_candidates(
                 {
                     "trade_date": str(item.get("trade_date") or "").replace("-", ""),
                     "close": _finite(item.get("close")),
+                    "adj_factor": _finite(item.get("adj_factor")),
                     "amount": _finite(item.get("amount")),
                 }
                 for item in row.get("history") or []
@@ -266,19 +267,23 @@ def build_candidates(
             key=lambda item: item["trade_date"],
         )[-required_history_bars:]
         closes = [item["close"] for item in history]
+        adj_factors = [item["adj_factor"] for item in history]
         liquidity_amounts = [item["amount"] for item in history[-history_days:]]
-        history_complete = (
+        bars_complete = (
             calendar_valid
             and [item["trade_date"] for item in history] == expected_dates
             and all(value is not None and value > 0 for value in closes)
             and len(liquidity_amounts) == history_days
             and all(value is not None and value >= 0 for value in liquidity_amounts)
         )
+        # daily_bars 是不复权价：没有同日复权因子就无法区分除权缺口与真实涨跌。
+        adjustment_complete = all(value is not None and value > 0 for value in adj_factors)
+        history_complete = bars_complete and adjustment_complete
         if not history_complete:
-            exclusions.append("history_insufficient")
+            exclusions.append("history_insufficient" if not bars_complete else "adj_factor_missing")
             avg_amount = momentum = volatility = None
         else:
-            close_array = np.asarray(closes, dtype=float)
+            close_array = np.asarray(closes, dtype=float) * np.asarray(adj_factors, dtype=float)
             valid_amounts = [
                 value
                 for value in liquidity_amounts

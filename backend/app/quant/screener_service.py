@@ -4,23 +4,27 @@
 全市场数据由 market/market_sync.py 同步（选股页"同步全市场"按钮触发）。
 
 数据边界（诚实声明）：
-- 候选池 = stock_latest_prices（同步后为最近交易日的全市场股票），返回体带
-  universe（候选池大小）便于前端如实展示。
+- 候选池 = stock_latest_prices 中最近一次全市场截面上仍在交易的非 ST 股票：
+  最新价日期早于截面日（停牌/退市）或名称带 ST 标记的不进入候选池。返回体
+  universe 为候选池大小、total 为真实命中数，items 只是排序后的前 limit 只。
 - 基础条件（市场/类型/价格区间/涨跌幅区间/关键词）与量能估值条件（换手率/官方
   量比/总市值/PE）纯 SQL 完成；量能估值列来自 stock_daily_basic（最新一日快照），
   设了该类条件而快照缺失的股票会被排除。总市值入参单位为**亿元**（表内存万元）。
-- 技术条件（站上均线）需要 K 线：先在基础条件候选中按涨跌幅取前 _TECH_POOL_MAX
-  名，再用窗口查询一次取回所需 K 线在 Python 内计算，控制成本。
+- 技术条件（站上均线）对全部命中股票逐批取 K 线在 Python 内计算，不预先截断；
+  均线按复权因子换算到最新价口径，避免除权缺口把股票误判为跌破均线。
+- 排序与综合分在服务端对全部命中股票计算（分位数相对分），不是只在返回的
+  前 N 只里重排。
 """
 from __future__ import annotations
 
 import hashlib
 import json
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from statistics import median
 
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, desc, func, not_, or_, select
 
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import (
@@ -34,9 +38,22 @@ from backend.app.core.models import (
     StockLatestPrice,
     TushareFactorValue,
 )
+from backend.app.market.market_sync import load_local_adj_factors
 from backend.app.quant import tushare_factor_service
 
-_TECH_POOL_MAX = 300  # 技术条件二次筛选的候选上限，防止全表 K 线扫描
+_BAR_BATCH = 500  # K 线按标的分批取，避免超长 IN 列表
+_BAR_LOOKBACK_DAYS = 90  # 均线窗口最多 20 根，90 个自然日足以跨过长假
+_ST_NAME_PREFIXES = ("ST", "*ST", "S*ST", "SST")
+# 排序方式 -> (字段, 是否降序)；与选股页结果表的排序选项一一对应
+_SORT_FIELDS = {
+    "score_desc": ("composite_score", True),
+    "pct_desc": ("pct_chg", True),
+    "turnover_desc": ("turnover_rate", True),
+    "mv_asc": ("total_mv_yi", False),
+    "pe_asc": ("pe_ttm", False),
+}
+_DEFAULT_SCORE_WEIGHTS = {"value": 40.0, "momentum": 40.0, "liquidity": 20.0}
+_MISSING_SCORE = 45.0  # 字段缺失的分项按略低于中位处理，不让缺数据的股票占优
 _LIST_LIMIT_MAX = 100
 _VOLUME_RATIO_WINDOW = 5  # 量比 = 当日成交量 / 前 5 日均量
 _ALLOWED_MA = (5, 10, 20)
@@ -45,11 +62,37 @@ _TEMPLATE_TARGET_MIN = 20
 _TEMPLATE_TARGET_MAX = 120
 
 
-def _base_query(filters: dict):
+def _market_snapshot_date(db) -> str | None:
+    """最近一次全市场截面日：stock_latest_prices 中出现次数最多的 trade_date。
+
+    全市场同步一次写入 5000+ 行同日价格；盘中按需刷新只会把少数标的推到更新的
+    日期，停牌股则停在更早的日期，所以取众数而不是 MAX。
+    """
+    row_count = func.count()
+    row = db.execute(
+        select(StockLatestPrice.trade_date, row_count)
+        .where(StockLatestPrice.trade_date.isnot(None))
+        .group_by(StockLatestPrice.trade_date)
+        .order_by(row_count.desc(), StockLatestPrice.trade_date.desc())
+        .limit(1)
+    ).first()
+    return str(row[0]) if row and row[0] else None
+
+
+def _tradable_pool(stmt, snapshot_date: str | None):
+    """候选池规则：剔除停牌/退市（最新价早于截面日）与 ST 类标的。"""
+    if snapshot_date:
+        stmt = stmt.where(StockLatestPrice.trade_date >= snapshot_date)
+    name = func.coalesce(StockLatestPrice.name, "")
+    return stmt.where(not_(or_(*(name.like(f"{prefix}%") for prefix in _ST_NAME_PREFIXES))))
+
+
+def _base_query(filters: dict, snapshot_date: str | None, *, tradable_only: bool = True):
     """基础 + 量能估值条件：最新价 JOIN instruments LEFT JOIN daily_basic 最新快照。
 
     设了 ``factor_name`` 时再 INNER JOIN 该因子最新缓存截面（无缓存值的股票被剔除），
-    并把 ``factor_value`` 追加进 select 列（行变为 5 元组）。
+    并把 ``factor_value`` 追加进 select 列（行变为 5 元组）。``tradable_only`` 为假时
+    不套候选池规则，仅用于统计被剔除的标的数。
     """
     has_factor = bool(filters.get("factor_name"))
     columns = [StockLatestPrice, Instrument.market, Instrument.type, StockDailyBasic]
@@ -68,6 +111,8 @@ def _base_query(filters: dict):
         )
         .where(StockLatestPrice.price.isnot(None))
     )
+    if tradable_only:
+        stmt = _tradable_pool(stmt, snapshot_date)
     if has_factor:
         latest_factor_date = (
             select(func.max(TushareFactorValue.trade_date))
@@ -123,16 +168,21 @@ def _base_query(filters: dict):
     return stmt
 
 
-def _fetch_recent_bars(db, symbols: list[str], bars_per_symbol: int) -> dict[str, list[dict]]:
-    """一次窗口查询取回各标的最近 bars_per_symbol 根 K 线（按交易日去重，新源优先）。
+def _fetch_recent_bars(
+    db, symbols: list[str], bars_per_symbol: int, *, since: str | None = None,
+) -> dict[str, list[dict]]:
+    """分批窗口查询取回各标的最近 bars_per_symbol 根 K 线（按交易日去重，新源优先）。
 
     trade_date 存在 20260805 / 2026-08-05 混存，排序与去重都先归一化成纯数字。
+    ``since``（YYYYMMDD）限定回看起点，避免对长历史标的整段开窗。每根 K 线附带
+    同日复权因子 ``adj_factor``（本地缺失为 None）。
     """
     if not symbols:
         return {}
     normalized = func.replace(DailyBar.trade_date, "-", "").label("norm_date")
-    ranked = (
-        select(
+    rows = []
+    for start in range(0, len(symbols), _BAR_BATCH):
+        query = select(
             DailyBar.symbol.label("symbol"),
             normalized.label("norm_date"),
             DailyBar.close.label("close"),
@@ -143,15 +193,15 @@ def _fetch_recent_bars(db, symbols: list[str], bars_per_symbol: int) -> dict[str
                 order_by=(desc(normalized), desc(DailyBar.id)),
             )
             .label("rank"),
+        ).where(DailyBar.symbol.in_(symbols[start : start + _BAR_BATCH]))
+        if since:
+            query = query.where(func.replace(DailyBar.trade_date, "-", "") >= since)
+        ranked = query.subquery()
+        rows.extend(
+            db.execute(select(ranked).where(ranked.c.rank <= bars_per_symbol))
+            .mappings()
+            .all()
         )
-        .where(DailyBar.symbol.in_(symbols))
-        .subquery()
-    )
-    rows = (
-        db.execute(select(ranked).where(ranked.c.rank <= bars_per_symbol))
-        .mappings()
-        .all()
-    )
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         symbol = str(row["symbol"])
@@ -172,6 +222,12 @@ def _fetch_recent_bars(db, symbols: list[str], bars_per_symbol: int) -> dict[str
             seen.add(bar["norm_date"])
             deduped.append(bar)
         grouped[symbol] = deduped
+    factors = load_local_adj_factors(
+        db, list(grouped), {bar["norm_date"] for bars in grouped.values() for bar in bars},
+    )
+    for symbol, bars in grouped.items():
+        for bar in bars:
+            bar["adj_factor"] = factors.get((symbol, bar["norm_date"]))
     return grouped
 
 
@@ -192,11 +248,25 @@ def _volume_ratio(bars: list[dict]) -> float | None:
     return round(latest / avg, 3)
 
 
+def _ma_adjusted(bars: list[dict], n: int) -> bool:
+    """最近 n 根 K 线是否都有复权因子（均线可换算到同一价格口径）。"""
+    window = bars[:n]
+    return len(window) == n and all(bar.get("adj_factor") for bar in window)
+
+
 def _ma_value(bars: list[dict], n: int) -> float | None:
-    """最近 n 根收盘价均值（含当日）；不足 n 根返回 None。"""
-    closes = [bar["close"] for bar in bars[:n]]
+    """最近 n 根收盘价均值（含当日），按最新一根的价格口径；不足 n 根返回 None。
+
+    窗口内都有复权因子时用 close × 因子 / 最新因子（前复权）计算，避免送转除权后
+    的旧高价把均线抬高；缺因子时退回不复权收盘价（由 _ma_adjusted 标明）。
+    """
+    window = bars[:n]
+    closes = [bar["close"] for bar in window]
     if len(closes) < n or any(close is None for close in closes):
         return None
+    if _ma_adjusted(bars, n):
+        latest_factor = window[0]["adj_factor"]
+        closes = [close * bar["adj_factor"] / latest_factor for close, bar in zip(closes, window)]
     return round(sum(closes) / n, 3)
 
 
@@ -239,14 +309,20 @@ def run_screener(
     factor_min: float | None = None,
     factor_max: float | None = None,
     limit: int = 50,
+    sort_by: str = "score_desc",
+    score_weights: dict[str, float] | None = None,
 ) -> dict:
-    """执行选股，返回 {universe, total, items, factor_as_of}。
+    """执行选股，返回 {universe, total, items, factor_as_of, as_of, excluded_count}。
 
     市值入参单位为亿元；above_ma 仅支持 5/10/20；技术条件以"满足则保留、
     数据不足则剔除"处理。因子条件作用于 TuShare 因子库最新缓存截面。
+    全部命中股票先算综合分再按 ``sort_by`` 排序，items 取前 limit 只。
     """
     if above_ma is not None and above_ma not in _ALLOWED_MA:
         raise ValueError(f"均线周期只支持 {_ALLOWED_MA}")
+    if sort_by not in _SORT_FIELDS:
+        raise ValueError(f"排序方式只支持 {tuple(_SORT_FIELDS)}")
+    weights = _normalized_score_weights(score_weights)
     limit = max(1, min(int(limit or 50), _LIST_LIMIT_MAX))
     need_tech = above_ma is not None
     has_factor = bool((factor_name or "").strip())
@@ -273,13 +349,11 @@ def run_screener(
 
     with SessionLocal() as db:
         factor_as_of = _validate_factor_filter(db, filters)
-        stmt = _base_query(filters).order_by(
-            desc(StockLatestPrice.pct_chg), StockLatestPrice.symbol
-        )
-        universe = db.execute(
-            select(func.count()).select_from(stmt.subquery())
-        ).scalar() or 0
-        rows = db.execute(stmt.limit(_TECH_POOL_MAX if need_tech else limit)).all()
+        snapshot_date = _market_snapshot_date(db)
+        pool_filters = {"stock_type": stock_type}
+        universe = _count(db, _base_query(pool_filters, snapshot_date))
+        excluded_count = _count(db, _base_query(pool_filters, snapshot_date, tradable_only=False)) - universe
+        rows = db.execute(_base_query(filters, snapshot_date)).all()
 
         items = []
         for row in rows:
@@ -304,7 +378,10 @@ def run_screener(
 
         if need_tech and items:
             bars_needed = max(_VOLUME_RATIO_WINDOW + 1, above_ma or 0)
-            bars_by_symbol = _fetch_recent_bars(db, [item["symbol"] for item in items], bars_needed)
+            bars_by_symbol = _fetch_recent_bars(
+                db, [item["symbol"] for item in items], bars_needed,
+                since=_lookback_start(snapshot_date),
+            )
             kept = []
             for item in items:
                 bars = bars_by_symbol.get(item["symbol"], [])
@@ -314,17 +391,109 @@ def run_screener(
                     if ma is None or latest_close is None or latest_close <= ma:
                         continue
                     item["ma_value"] = ma
+                    item["ma_adjusted"] = _ma_adjusted(bars, above_ma)
                 if item["volume_ratio"] is None:
                     item["volume_ratio"] = _volume_ratio(bars)  # 官方缺失时的展示回退
                 kept.append(item)
-            items = kept[:limit]
+            items = kept
 
+    _score_items(items, weights)
+    _sort_items(items, sort_by)
     return {
-        "universe": int(universe),
+        "universe": universe,
         "total": len(items),
-        "items": items,
+        "items": items[:limit],
         "factor_as_of": factor_as_of,
+        "as_of": snapshot_date,
+        "excluded_count": excluded_count,
     }
+
+
+def _count(db, stmt) -> int:
+    return int(db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0)
+
+
+def _lookback_start(snapshot_date: str | None) -> str | None:
+    try:
+        anchor = datetime.strptime(str(snapshot_date), "%Y%m%d")
+    except ValueError:
+        return None
+    return (anchor - timedelta(days=_BAR_LOOKBACK_DAYS)).strftime("%Y%m%d")
+
+
+def _normalized_score_weights(score_weights: dict[str, float] | None) -> dict[str, float]:
+    weights = dict(_DEFAULT_SCORE_WEIGHTS)
+    for key, value in (score_weights or {}).items():
+        if key not in weights:
+            raise ValueError(f"未知评分维度：{key}")
+        number = float(value)
+        if not 0 <= number <= 100:
+            raise ValueError("评分权重必须介于 0 和 100")
+        weights[key] = number
+    return weights
+
+
+def _percentile_scores(values: list[float | None], *, inverse: bool = False) -> list[float]:
+    """全部命中股票内的分位相对分（0-100，并列取平均名次）；缺失记 _MISSING_SCORE。
+
+    用分位而不是 min-max：全市场 PE/市值的极端值会把 min-max 分数压成一团。
+    """
+    present = sorted(value for value in values if value is not None)
+    span = len(present) - 1
+    scores = []
+    for value in values:
+        if value is None:
+            scores.append(_MISSING_SCORE)
+        elif span == 0 or present[0] == present[-1]:
+            scores.append(75.0)
+        else:
+            rank = (bisect_left(present, value) + bisect_right(present, value) - 1) / 2
+            score = rank / span * 100
+            scores.append(100 - score if inverse else score)
+    return scores
+
+
+def _score_items(items: list[dict], weights: dict[str, float]) -> None:
+    """估值规模 / 动量 / 流动性三维相对分与加权综合分（口径与选股页评分卡一致）。"""
+
+    def column(key: str, *, positive_only: bool = False) -> list[float | None]:
+        values = []
+        for item in items:
+            value = item.get(key)
+            values.append(None if value is None or (positive_only and value <= 0) else float(value))
+        return values
+
+    pe = _percentile_scores(column("pe_ttm", positive_only=True), inverse=True)
+    size = _percentile_scores(column("total_mv_yi", positive_only=True), inverse=True)
+    momentum = _percentile_scores(column("pct_chg"))
+    volume = _percentile_scores(column("volume_ratio"))
+    turnover = _percentile_scores(column("turnover_rate"))
+    total_weight = sum(weights.values()) or 100.0
+    for index, item in enumerate(items):
+        value_score = pe[index] * 0.55 + size[index] * 0.45
+        liquidity_score = volume[index] * 0.45 + turnover[index] * 0.55
+        composite = (
+            value_score * weights["value"]
+            + momentum[index] * weights["momentum"]
+            + liquidity_score * weights["liquidity"]
+        ) / total_weight
+        item["value_score"] = round(value_score, 1)
+        item["momentum_score"] = round(momentum[index], 1)
+        item["liquidity_score"] = round(liquidity_score, 1)
+        item["composite_score"] = round(composite, 1)
+
+
+def _sort_items(items: list[dict], sort_by: str) -> None:
+    """缺值排在最后；PE 升序时亏损股（PE≤0）同样视为缺值；并列按代码。"""
+    field, descending = _SORT_FIELDS[sort_by]
+
+    def key(item: dict) -> tuple:
+        value = item.get(field)
+        if value is None or (sort_by == "pe_asc" and value <= 0):
+            return (1, 0.0, item["symbol"])
+        return (0, -float(value) if descending else float(value), item["symbol"])
+
+    items.sort(key=key)
 
 
 def count_screener_candidates(query: dict) -> int:
@@ -333,7 +502,7 @@ def count_screener_candidates(query: dict) -> int:
     ``above_ma`` is intentionally excluded here. The returned value is an upper
     bound before the moving-average check, so a template kept below the target
     can never expand beyond it after technical filtering. Factor conditions are
-    pure SQL, so they ARE included.
+    pure SQL, so they ARE included, and so are the ST / suspension pool rules.
     """
     filters = {
         "market": query.get("market"),
@@ -357,10 +526,7 @@ def count_screener_candidates(query: dict) -> int:
     }
     with SessionLocal() as db:
         _validate_factor_filter(db, filters)
-        stmt = _base_query(filters)
-        return int(
-            db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
-        )
+        return _count(db, _base_query(filters, _market_snapshot_date(db)))
 
 
 def _band(values: list) -> dict | None:

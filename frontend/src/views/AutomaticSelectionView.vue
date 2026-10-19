@@ -150,6 +150,7 @@ const exclusionLabels: Record<string, string> = {
   daily_basic_missing: '基础指标缺失',
   valuation_invalid: '估值指标非法',
   history_insufficient: '历史行情不足',
+  adj_factor_missing: '复权因子缺失',
   liquidity_low: '流动性不足',
   required_factor_missing: '必需因子缺失',
   not_in_current_catalog: '不在本期目录',

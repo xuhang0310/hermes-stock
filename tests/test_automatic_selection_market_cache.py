@@ -48,6 +48,13 @@ class StockDailyBasic(Base):
     trade_date = Column(String)
 
 
+class StockAdjFactor(Base):
+    __tablename__ = "stock_adj_factors"
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String)
+    trade_date = Column(String)
+
+
 class StockLatestPrice(Base):
     __tablename__ = "stock_latest_prices"
     symbol = Column(String, primary_key=True)
@@ -94,7 +101,7 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
             "backend.app.core.models": _module(
                 "models", Instrument=Instrument, DailyBar=DailyBar,
                 StockDailyBasic=StockDailyBasic, StockLatestPrice=StockLatestPrice,
-                MarketTradingCalendar=MarketTradingCalendar,
+                MarketTradingCalendar=MarketTradingCalendar, StockAdjFactor=StockAdjFactor,
             ),
             "backend.app.market.stock_tools": _module(
                 "stock_tools", _tushare_request=blocked, get_trade_cal=blocked,
@@ -125,7 +132,7 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
 
     def cache(self, *, calendar_today=True, calendar_date=None, bar_date=None,
               basic_date=None, catalog_count=5000, bar_counts=None, basic_count=4700,
-              history=None, calendar_dates=None):
+              history=None, calendar_dates=None, adj_counts=None):
         db = MagicMock()
         self.market.SessionLocal = MagicMock()
         self.market.SessionLocal.return_value.__enter__.return_value = db
@@ -140,7 +147,12 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
         dates = [row["cal_date"] for row in self.calendar] if calendar_dates is None else calendar_dates
         db.scalars.side_effect = [_result(list(reversed(expected_history))), _result(dates)]
         counts = {day: 4900 for day in expected_history} if bar_counts is None else bar_counts
-        db.execute.side_effect = [_result(list(counts.items())), _result([(self.latest, basic_count)])]
+        adj = {day: 4900 for day in expected_history} if adj_counts is None else adj_counts
+        db.execute.side_effect = [
+            _result(list(counts.items())),
+            _result([(self.latest, basic_count)]),
+            _result(list(adj.items())),
+        ]
         return db
 
     def catalog_responses(self):
@@ -151,7 +163,7 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
     def mock_catalog(self, responses):
         self.market._tushare_request = Mock(side_effect=lambda api, params, fields: responses[params["list_status"]])
 
-    def sync(self, *, partial=None, missing_bars=False, catalog_error=None, calendar=None):
+    def sync(self, *, partial=None, missing_bars=False, missing_adj=False, catalog_error=None, calendar=None):
         events = []
         responses = self.catalog_responses()
         if catalog_error:
@@ -168,9 +180,12 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
 
         self.market._tushare_request = Mock(side_effect=request)
         self.market._bar_date_counts = Mock(return_value={} if missing_bars else {day: 5000 for day in self.history})
+        self.market._adj_factor_date_counts = Mock(
+            return_value={} if missing_adj else {day: 5000 for day in self.history}
+        )
         writers = {}
         for name in ("_upsert_trading_calendar", "_upsert_instruments", "_upsert_daily_bars",
-                     "_upsert_daily_basic", "_upsert_latest_prices"):
+                     "_upsert_adj_factors", "_upsert_daily_basic", "_upsert_latest_prices"):
             def write(rows, *args, _name=name):
                 events.append((_name, len(rows)))
                 return len(rows)
@@ -202,6 +217,15 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
         self.assertEqual(status["basic_count"], 1)
         self.assertTrue(any("目标日日线覆盖不足" in error for error in status["errors"]))
         self.assertTrue(any("daily_basic 覆盖不足" in error for error in status["errors"]))
+
+    def test_each_history_day_needs_adjustment_factor_coverage(self):
+        adj = {day: 4900 for day in self.history}
+        adj[self.history[7]] = 0
+        self.cache(adj_counts=adj)
+        status = self.market.local_selection_cache_status()
+        self.assertFalse(status["ready"])
+        self.assertEqual(status["adj_factor_date_counts"][self.history[7]], 0)
+        self.assertTrue(any("复权因子" in error and self.history[7] in error for error in status["errors"]))
 
     def test_each_expected_history_day_needs_full_coverage(self):
         for missing_count in (0, 1, 4249):
@@ -454,6 +478,49 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
         self.assertTrue(any("daily(" in error and "不完整" in error for error in status["errors"]))
         writers["_upsert_daily_bars"].assert_not_called()
         self.assertEqual(status["dates_fetched"], 0)
+
+    def test_sync_backfills_adjustment_factors_for_every_missing_session(self):
+        events, writers = self.sync(missing_adj=True)
+        status = self.market.sync_market(days=5)
+        self.assertTrue(status["ready"], status["errors"])
+        adj_calls = [params["trade_date"] for api, params in events if api == "adj_factor"]
+        self.assertEqual(adj_calls, self.history[-5:])
+        self.assertEqual(status["adj_dates_fetched"], 5)
+        self.assertEqual(status["adj_factors_upserted"], 25000)
+        self.assertEqual(writers["_upsert_adj_factors"].call_count, 5)
+
+    def test_sync_skips_sessions_whose_adjustment_factors_are_complete(self):
+        events, writers = self.sync()
+        status = self.market.sync_market(days=5)
+        self.assertTrue(status["ready"], status["errors"])
+        self.assertNotIn("adj_factor", [api for api, _ in events])
+        writers["_upsert_adj_factors"].assert_not_called()
+
+    def test_sync_partial_adjustment_factor_response_returns_errors_not_ready(self):
+        _, writers = self.sync(partial="adj_factor", missing_adj=True)
+        status = self.market.sync_market(days=5)
+        self.assertFalse(status["ready"])
+        self.assertTrue(any("adj_factor(" in error and "不完整" in error for error in status["errors"]))
+        writers["_upsert_adj_factors"].assert_not_called()
+
+    def test_adjustment_factor_upsert_drops_invalid_values(self):
+        engine = MagicMock()
+        conn = engine.begin.return_value.__enter__.return_value
+        self.market.engine = engine
+        rows = [
+            {"ts_code": "600001.SH", "trade_date": "20260904", "adj_factor": 2.5},
+            {"ts_code": "600002.SH", "trade_date": "2026-09-04", "adj_factor": "1.25"},
+            {"ts_code": "600003.SH", "trade_date": "20260904", "adj_factor": 0},
+            {"ts_code": "600004.SH", "trade_date": "20260904", "adj_factor": None},
+            {"ts_code": "600005.SH", "trade_date": "20260904", "adj_factor": float("nan")},
+            {"ts_code": "600006.SH", "trade_date": "bad", "adj_factor": 1.0},
+        ]
+        self.assertEqual(self.market._upsert_adj_factors(rows), 2)
+        _, params = conn.execute.call_args.args
+        self.assertEqual(params, [
+            {"symbol": "600001.SH", "trade_date": "20260904", "adj_factor": 2.5},
+            {"symbol": "600002.SH", "trade_date": "20260904", "adj_factor": 1.25},
+        ])
 
     def test_sync_partial_basic_response_returns_errors_not_ready(self):
         _, writers = self.sync(partial="daily_basic")

@@ -353,6 +353,28 @@ class StockDailyBasic(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class StockAdjFactor(Base):
+    """全市场复权因子（TuShare adj_factor 落库）：后复权价 = 不复权价 × adj_factor。
+
+    唯一写入方是 market/market_sync.py（trade_date 恒为 YYYYMMDD）。daily_bars 存的是
+    不复权价，凡跨交易日比较价格（动量、波动、均线、前瞻收益）都必须先乘同日因子，
+    否则送转/分红的除权缺口会被当成真实涨跌。不加外键：因子行与标的生命周期解耦。
+    """
+
+    __tablename__ = "stock_adj_factors"
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_stock_adj_factor_symbol_date"),
+        Index("ix_stock_adj_factors_trade_date", "trade_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    adj_factor: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class ScreenerTemplateRecommendation(Base):
     """每用户一份的智能选股模板推荐：LLM 依据持仓风格生成，「换一批」整行覆盖。
 

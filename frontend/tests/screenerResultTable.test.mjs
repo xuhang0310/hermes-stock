@@ -30,8 +30,15 @@ test('result rows are keyboard selectable and expose selection state', () => {
 })
 
 test('result header honestly describes the daily snapshot instead of realtime results', () => {
-  assert.match(viewSource, /展示 Top \{\{ resultLimit \}\}（最近同步快照）/)
+  assert.match(viewSource, /最近同步截面 \{\{ fmtDate\(result\.as_of\) \}\}/)
   assert.doesNotMatch(viewSource, /实时结果/)
+})
+
+test('result header reports the real hit count and the server-side ranking', () => {
+  assert.match(viewSource, /命中 \{\{ result\.total\.toLocaleString\('zh-CN'\) \}\} 只/)
+  assert.match(viewSource, /按\{\{ SORT_LABELS\[resultSort\] \}\}展示前 \{\{ result\.items\.length \}\} 只/)
+  assert.doesNotMatch(viewSource, /function relativeScore/)
+  assert.match(viewSource, /watch\(\[resultSort, scoreValueWeight, scoreMomentumWeight, scoreLiquidityWeight\], scheduleRerank\)/)
 })
 
 test('sync status marks stale market data instead of staying silently green', () => {

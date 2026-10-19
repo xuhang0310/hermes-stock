@@ -61,11 +61,14 @@ def evaluate_forward_window(
             continue
         open_price = _positive(source.get("open"))
         close_price = _positive(source.get("close"))
-        if close_price is None:
+        adj_factor = _positive(source.get("adj_factor"))
+        # 不复权价跨除权日相除会把送转/分红缺口算成亏损；缺因子按当日缺失处理。
+        if close_price is None or adj_factor is None:
             continue
         by_symbol[symbol][trade_date] = {
             "open": open_price,
             "close": close_price,
+            "adj_factor": adj_factor,
         }
 
     cost = _rate(commission_rate, "佣金率") + _rate(slippage_rate, "滑点率")
@@ -181,11 +184,18 @@ def _build_paths(
                 }
             )
             continue
-        closes = [float(symbol_bars[date]["close"]) for date in dates]
+        # 收益按后复权价（原价 × 同日复权因子）计算；明细保留原始成交价与因子便于复核。
+        entry_adj_factor = float(symbol_bars[dates[0]]["adj_factor"])
+        exit_adj_factor = float(symbol_bars[dates[-1]]["adj_factor"])
+        adjusted_closes = [
+            float(symbol_bars[date]["close"]) * float(symbol_bars[date]["adj_factor"])
+            for date in dates
+        ]
+        adjusted_entry = float(entry_open) * entry_adj_factor
         values: list[float] = []
         wealth = 1.0 - one_way_cost
-        previous_price = float(entry_open)
-        for close_price in closes:
+        previous_price = adjusted_entry
+        for close_price in adjusted_closes:
             wealth *= close_price / previous_price
             values.append(wealth)
             previous_price = close_price
@@ -197,8 +207,10 @@ def _build_paths(
                 "covered": True,
                 "missing_trade_dates": [],
                 "entry_price": float(entry_open),
-                "exit_price": closes[-1],
-                "gross_return": float(closes[-1] / float(entry_open) - 1.0),
+                "exit_price": float(symbol_bars[dates[-1]]["close"]),
+                "entry_adj_factor": entry_adj_factor,
+                "exit_adj_factor": exit_adj_factor,
+                "gross_return": float(adjusted_closes[-1] / adjusted_entry - 1.0),
                 "net_return": float(values[-1] - 1.0),
             }
         )

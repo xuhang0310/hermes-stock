@@ -275,9 +275,14 @@ def _apply_builtin_backtest_route(
     return system_prompt, routed_tools
 
 
+_SQL_TOOL_DISPLAY_NAMES = {"run_sql": "只读数据查询", "get_schema": "查看数据结构"}
+
+
 def _tool_display_name(name: str) -> str:
     if name in ORCHESTRATION_DISPLAY_NAMES:
         return ORCHESTRATION_DISPLAY_NAMES[name]
+    if name in _SQL_TOOL_DISPLAY_NAMES:
+        return _SQL_TOOL_DISPLAY_NAMES[name]
     label = digital_human_tool_display_name(name)
     return label if label != name else stock_tool_display_name(name)
 
@@ -285,6 +290,10 @@ def _tool_display_name(name: str) -> str:
 def _tool_preview(name: str, result: dict[str, Any]) -> str:
     if "error" in result:
         return str(result["error"])
+    if name == "run_sql":
+        from backend.app.agents.stock_agent import _observation_preview
+
+        return _observation_preview(result)
     if name == "list_workflow_templates":
         return f"可用 Swarm 工作流模板 {len(result.get('templates', []))} 套。"
     if name == "run_agent_workflow":
@@ -623,7 +632,7 @@ def _execute_tool(
         return result
 
     if name == "run_sql":
-        return run_sql(str(args.get("sql") or ""))
+        return run_sql(str(args.get("sql") or ""), owner_user_id=int(request_payload["user_id"]))
     if name == "get_schema":
         return get_schema(str(args.get("table_name") or ""))
     if name == "search_knowledge":

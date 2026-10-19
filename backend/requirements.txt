@@ -18,6 +18,8 @@ redis==6.4.0
 PyYAML==6.0.2
 numpy==2.4.4
 pandas==3.0.2
+# 数字人 run_sql 沙箱：把 SQL 解析成语法树后做表级校验与按用户改写
+sqlglot==30.20.0
 # 降级新闻搜索源：Tavily/Brave 不可用时走 akshare 免密钥国内财经新闻
 akshare==1.18.81
 # Keep AgentScope telemetry compatible with pydantic-ai/logfire used by the

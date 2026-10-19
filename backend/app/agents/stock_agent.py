@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.app.core.applog import log_event
-from backend.app.core.database import SessionLocal
+from backend.app.core.database import Base, SessionLocal
+from backend.app.agents import sql_sandbox
 from backend.app.ai.llm_client import stream_chat as _stream_chat
+from backend.app.data.user_scope import current_data_owner_user_id
 from backend.app.ai.tool_progress import ToolArgsProgressTracker
 from backend.app.market.digital_human_tools import (
     digital_human_skill_prompt,
@@ -105,6 +107,42 @@ SCHEMA_DICTIONARY: dict[str, dict[str, Any]] = {
         "label": "A股标的基础表",
         "fields": ["symbol", "name", "market", "type", "status", "list_date"],
     },
+    "daily_bars": {
+        "label": "A股日线行情（不复权价；跨交易日比较价格要乘同日 stock_adj_factors.adj_factor）",
+        "fields": ["symbol", "trade_date", "open", "high", "low", "close", "pre_close", "change_pct", "volume", "amount"],
+    },
+    "stock_adj_factors": {
+        "label": "全市场复权因子，后复权价 = close × adj_factor",
+        "fields": ["symbol", "trade_date", "adj_factor"],
+    },
+    "stock_daily_basic": {
+        "label": "全市场每日指标快照（市值单位万元）",
+        "fields": ["symbol", "trade_date", "turnover_rate", "volume_ratio", "pe_ttm", "pb", "total_mv", "circ_mv"],
+    },
+    "stock_latest_prices": {
+        "label": "全市场最新价缓存",
+        "fields": ["symbol", "name", "price", "pre_close", "pct_chg", "trade_date"],
+    },
+    "market_trading_calendar": {
+        "label": "交易所交易日历",
+        "fields": ["exchange", "cal_date", "is_open", "pretrade_date"],
+    },
+    "tushare_factor_values": {
+        "label": "TuShare 因子值截面",
+        "fields": ["factor_name", "symbol", "trade_date", "factor_value"],
+    },
+    "automatic_selection_runs": {
+        "label": "自动选股每日运行记录",
+        "fields": ["run_id", "strategy_key", "strategy_version", "target_trade_date", "status", "selected_count", "llm_explanation"],
+    },
+    "automatic_selection_candidates": {
+        "label": "自动选股候选与排名",
+        "fields": ["run_id", "symbol", "name", "industry", "eligible", "composite_score", "rank", "selected", "momentum_20", "volatility_20"],
+    },
+    "watchlist_groups": {
+        "label": "自选池分组",
+        "fields": ["name", "description", "status"],
+    },
     "watchlist_items": {
         "label": "自选池成员",
         "fields": ["symbol", "group_id", "reason", "status", "added_at", "updated_at"],
@@ -151,9 +189,17 @@ SCHEMA_DICTIONARY: dict[str, dict[str, Any]] = {
         "label": "风控检查记录",
         "fields": ["symbol", "risk_level", "risk_type", "finding", "required_action", "cool_down_required", "created_at"],
     },
-    "system_logs": {
-        "label": "系统运行日志",
-        "fields": ["level", "module", "message", "context_json", "created_at"],
+    "event_evidence": {
+        "label": "事件证据，event_id 关联 events.id",
+        "fields": ["event_id", "evidence_type", "source_table", "source_id", "content", "created_at"],
+    },
+    "position_trades": {
+        "label": "持仓成交流水",
+        "fields": ["symbol", "name", "action", "quantity", "price", "amount", "source_type", "created_at"],
+    },
+    "backtest_runs": {
+        "label": "策略回测结果",
+        "fields": ["run_id", "symbol", "strategy_code", "start_date", "end_date", "status", "metrics_json", "summary_markdown", "created_at"],
     },
     # 知识库表（检索 agent 可探索）
     "documents": {
@@ -168,21 +214,35 @@ SCHEMA_DICTIONARY: dict[str, dict[str, Any]] = {
         "label": "文档-标的关联表（多对多）",
         "fields": ["doc_id", "symbol", "relevance"],
     },
-    "knowledge_uploads": {
-        "label": "知识库上传批次表，记录文件上传与解析状态",
-        "fields": ["filename", "mime_type", "size", "doc_id", "status"],
-    },
 }
 
 TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_schema",
-            "description": "查看 A 股研究系统的共享研究表结构。不传 table_name 返回可公开表名清单；传 table_name 返回业务含义和常用字段。个人数据请使用带用户隔离的结构化工具。",
+            "name": "run_sql",
+            "description": (
+                "执行一条只读 MySQL SELECT 查询（可用 JOIN、子查询、WITH、UNION、窗口函数），最多返回 100 行。"
+                "持仓、自选、事件、报告等个人数据表会自动只返回当前用户自己的记录；"
+                "用户、密钥、日志与系统运行表不可查询。先用 get_schema 确认表名和字段。"
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"table_name": {"type": "string", "description": "可选共享研究表名，如 daily_bars。留空返回公开表名清单。"}},
+                "properties": {
+                    "sql": {"type": "string", "description": "单条 SELECT 语句，不要使用写入语句、变量或带库名的表。"}
+                },
+                "required": ["sql"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_schema",
+            "description": "查看 run_sql 可查询的数据表结构。不传 table_name 返回可查询表清单（scope=personal 的表自动只返回当前用户的记录）；传 table_name 返回业务含义和常用字段。",
+            "parameters": {
+                "type": "object",
+                "properties": {"table_name": {"type": "string", "description": "可选表名，如 daily_bars、positions。留空返回可查询表清单。"}},
                 "required": [],
             },
         },
@@ -216,13 +276,20 @@ TOOLS = [
 ]
 
 
+def _schema_prompt_lines() -> list[str]:
+    lines = []
+    for table, meta in SCHEMA_DICTIONARY.items():
+        if not sql_sandbox.is_queryable(table):
+            continue
+        label = sql_sandbox.scope_label(table)
+        scope = f"（个人数据，{label}）" if label else ""
+        lines.append(f"- {table}{scope}: {meta['label']}，常用字段 {', '.join(meta['fields'])}")
+    return lines
+
+
 def _knowledge_system_prompt(memory_context: str = "") -> str:
     """System prompt for chat_mode='knowledge': 知识库检索专家，核心工具 search_knowledge。"""
-    schema_lines = [
-        f"- {table}: {meta['label']}，常用字段 {', '.join(meta['fields'])}"
-        for table, meta in SCHEMA_DICTIONARY.items()
-        if table not in _SCHEMA_HIDDEN_TABLES
-    ]
+    schema_lines = _schema_prompt_lines()
     memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
     return f"""你是 SixRabbits Stock 的知识库检索专家，采用 ReAct 方式工作。
 今天日期: {date.today().isoformat()}
@@ -235,18 +302,14 @@ def _knowledge_system_prompt(memory_context: str = "") -> str:
 工作规则:
 1. 核心工具是 search_knowledge —— 在已索引的文档切块中做混合检索（向量+关键词召回→RRF融合→重排精排），支持按标的(symbol)、文档类型(doc_types)、可信度(trust_levels)过滤。
 2. search_knowledge 返回的每条结果包含 doc_type（news/report/notice/research/upload）、title、source、content 和四路评分（vector/keyword/fused/rerank），要引用相关片段作答，标注来源。
-3. 必要时用 get_schema 了解共享研究数据的实体关系；个人数据必须通过结构化工具访问。
+3. 必要时用 get_schema 了解实体关系（如 documents 与 document_chunks 的关联），再用 run_sql 做只读 SELECT 精确查询聚合统计或关联记录；个人数据表自动只返回当前用户的记录。
 4. 所有结论必须标注来源（文档标题、类型、可信度）；不得编造信息。
 5. 对于简单的招呼、闲聊或与知识库搜索无关的话题，简短友好地直接回应，不查数据、不调用工具。
 6. 最终回答使用中文 Markdown，条理清晰、引用准确。"""
 
 
 def _system_prompt(extra_context: str | None = None, digital_human_code: str | None = None, memory_context: str = "") -> str:
-    schema_lines = [
-        f"- {table}: {meta['label']}，常用字段 {', '.join(meta['fields'])}"
-        for table, meta in SCHEMA_DICTIONARY.items()
-        if table not in _SCHEMA_HIDDEN_TABLES
-    ]
+    schema_lines = _schema_prompt_lines()
     context = f"\n\n当前数字人职责:\n{extra_context.strip()}" if extra_context and extra_context.strip() else ""
     memory_block = f"\n\n{memory_context.strip()}" if memory_context.strip() else ""
     skill_block = digital_human_skill_prompt(digital_human_code)
@@ -274,7 +337,7 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 1. 默认研究范围是系统自己的 open positions 和 active watchlist_items；问题未指定标的时，先分析持仓，再分析自选。用户明确问其它标的、行业或话题时，直接就其问题作答，不必强行绕回持仓。
 2. 【必做】凡回答涉及具体股票的行情、判断、风控问题，先调用 get_latest_price 获取该标的最新价格（数据库缓存，开盘时段自动刷新、收盘后走缓存不外呼），回答中标注价格与所属交易日；绝不引用记忆里的旧价。
 3. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
-4. 探索共享研究数据结构用 get_schema；持仓、自选、报告等个人数据只能通过带用户隔离的结构化工具访问。
+4. 结构化工具覆盖不到的统计、筛选和关联查询，先用 get_schema 确认表和字段，再用 run_sql 执行只读 SELECT；持仓、自选、事件、报告等个人数据表会自动只返回当前用户自己的记录，用户、密钥、日志与系统运行表不可查询，被拒绝时按提示改写，不要反复重试同一语句。
 5. 系统内没有的信息——外部个股、行业、政策、新闻、宏观、突发事件等——用 search_market_intel / search_stock_news 联网搜索补充，再结合内部数据作答；不要以"不在持仓/自选池"为由拒绝，你本职专业之外但用户确实需要的问题也尽力帮忙。
 6. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
 7. 用户询问“今日/当前涨停、跌停、炸板、连板或异动”时，必须调用 get_limit_list，并同时传 symbol 与目标 trade_date。不能用上一交易日收盘价否定用户描述的当日盘中事件。
@@ -283,10 +346,13 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 10. 最终回答使用中文 Markdown，长度与任务匹配：简单事实问题保持简短；持仓、换仓、完整研究必须严格执行已激活技能的专业报告结构，不得为了缩短而省略财务、估值、事件、技术、资金、风险、方案触发条件或证据缺口。禁止用 ASCII 字符画模拟结论卡片。{skill_rules_block}{context}"""
 
 
-def validate_sql(sql: str) -> str | None:
-    # 多用户模式下，任意 SQL 无法可靠注入用户边界（子查询、CTE、视图均可绕过
-    # 简单表名过滤），因此彻底关闭，个人数据统一走结构化工具。
-    return "多用户模式已禁用任意 SQL，请使用带用户隔离的结构化工具。"
+def validate_sql(sql: str, *, owner_user_id: int | None = None) -> str | None:
+    """仅做沙箱静态校验（不连库）：返回拒绝原因，通过返回 None。"""
+    try:
+        sql_sandbox.prepare_query(sql, owner_user_id=owner_user_id, max_rows=MAX_ROWS)
+    except sql_sandbox.SqlRejected as exc:
+        return str(exc)
+    return None
 
 
 def _audit(record: dict) -> None:
@@ -299,33 +365,54 @@ def _audit(record: dict) -> None:
     try:  # 同时并入统一日志文件（agent_sql 高频，仅落文件不入库）
         from backend.app.core.applog import get_logger
 
-        summary = {k: record.get(k) for k in ("tool", "rows", "ms", "error", "rejected") if record.get(k) is not None}
+        summary = {
+            k: record.get(k)
+            for k in ("tool", "user_id", "scoped_tables", "rows", "ms", "error", "rejected")
+            if record.get(k) is not None
+        }
         get_logger("agent_sql").info(json.dumps(summary, ensure_ascii=False))
     except Exception:  # noqa: BLE001
         pass
 
 
-def run_sql(sql: str) -> dict:
-    error = validate_sql(sql)
-    _audit({"tool": "run_sql", "sql": sql, "rejected": error})
-    return {"error": error}
+def run_sql(sql: str, *, owner_user_id: int | None = None) -> dict:
+    """数字人只读 SQL：经 sql_sandbox 校验、按用户改写后在只读会话执行。
 
-
-# 表名本身非密文，但这几张表存有 webhook / 飞书 App Secret 等，不在 get_schema 列表里暴露
-_SCHEMA_HIDDEN_TABLES: frozenset[str] = frozenset({
-    "users",
-    "watchlist_groups", "watchlist_items",
-    "positions", "position_accounts", "position_import_batches",
-    "position_holding_snapshots", "position_trades",
-    "ai_chat_sessions", "ai_chat_messages",
-    "agent_tasks", "agent_reports", "risk_checks",
-    "notify_channels", "scheduled_jobs", "job_runs", "digital_human_profiles",
-})
+    owner_user_id 为本次 Agent run 的用户；个人数据表只返回该用户的行。调用方未传时
+    退回 data_user_scope 上下文，两者都没有则个人数据表一律拒绝。
+    """
+    if owner_user_id is None:
+        owner_user_id = current_data_owner_user_id()
+    try:
+        result = sql_sandbox.execute_query(sql, owner_user_id=owner_user_id, max_rows=MAX_ROWS)
+    except sql_sandbox.SqlRejected as exc:
+        _audit({"tool": "run_sql", "user_id": owner_user_id, "sql": sql, "rejected": str(exc)})
+        return {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        message = str(getattr(exc, "orig", None) or exc)[:500]
+        _audit({"tool": "run_sql", "user_id": owner_user_id, "sql": sql, "error": message})
+        return {"error": f"SQL 执行失败: {message}"}
+    _audit(
+        {
+            "tool": "run_sql",
+            "user_id": owner_user_id,
+            "sql": sql,
+            "executed_sql": result.pop("executed_sql"),
+            "scoped_tables": result["scoped_tables"] or None,
+            "rows": result["row_count"],
+            "ms": result["ms"],
+        }
+    )
+    if result["scoped_tables"]:
+        result["scope_note"] = "；".join(
+            f"{table} {sql_sandbox.scope_label(table)}" for table in result["scoped_tables"]
+        ) + "。"
+    return result
 
 
 def get_schema(table_name: str = "") -> dict:
-    """查看共享研究表结构。不传 table_name 返回可公开表名清单；
-    传 table_name 返回业务含义与常用字段。个人数据通过结构化工具访问。
+    """查看 run_sql 可查询的表结构。不传 table_name 返回可查询表清单；
+    传 table_name 返回业务含义与常用字段。账号、密钥、日志等表不在清单内。
     """
     key = (table_name or "").strip()
     if not key:
@@ -334,25 +421,29 @@ def get_schema(table_name: str = "") -> dict:
                 "name": t,
                 "label": meta["label"],
                 "documented": True,
+                "scope": "personal" if sql_sandbox.is_personal(t) else "shared",
             }
             for t, meta in SCHEMA_DICTIONARY.items()
-            if t not in _SCHEMA_HIDDEN_TABLES
+            if sql_sandbox.is_queryable(t)
         ]
         return {
             "tables": tables,
             "count": len(tables),
-            "hint": "传 table_name 查共享研究表的字段含义；个人数据请使用结构化工具。",
+            "hint": "传 table_name 查字段含义；scope=personal 的表在 run_sql 中自动只返回当前用户的记录。",
         }
-    if key in _SCHEMA_HIDDEN_TABLES:
-        return {"error": "该表包含个人或敏感数据，请使用带用户隔离的结构化工具。"}
+    if not sql_sandbox.is_queryable(key):
+        return {"error": f"表 {key} 包含账号、密钥或系统运行数据，不开放查询。请用 get_schema() 查看可查询的表。"}
     meta = SCHEMA_DICTIONARY.get(key)
-    if not meta:
-        return {
-            "error": (
-                f"表 {key} 未在可公开的字段字典中。请使用 get_schema() 查看共享研究表清单。"
-            )
-        }
-    return {"table": key, **meta}
+    if meta is None:
+        table = Base.metadata.tables.get(key)
+        if table is None:
+            return {"error": f"表 {key} 不存在。请用 get_schema() 查看可查询的表。"}
+        meta = {"label": "未文档化", "fields": [column.name for column in table.columns]}
+    result = {"table": key, **meta}
+    if sql_sandbox.is_personal(key):
+        result["scope"] = "personal"
+        result["note"] = f"run_sql 查询时自动{sql_sandbox.scope_label(key)}。"
+    return result
 
 
 def search_knowledge(
@@ -421,6 +512,8 @@ def _observation_preview(result: dict) -> str:
     parts = [f"返回 {result['row_count']} 行（{result['ms']}ms）"]
     if result.get("truncated"):
         parts.append(f"已截断至 {MAX_ROWS} 行")
+    if result.get("scope_note"):
+        parts.append(result["scope_note"])
     if result.get("rows"):
         sample = dict(zip(result["columns"], result["rows"][0]))
         parts.append("示例: " + json.dumps(sample, ensure_ascii=False)[:400])
@@ -842,7 +935,7 @@ def run_agent_events(
             elif name == "run_sql":
                 sql = str(args.get("sql", ""))
                 yield {"type": "action", "tool": "run_sql", "content": sql}
-                result = run_sql(sql)
+                result = run_sql(sql, owner_user_id=user_id)
                 yield {"type": "observation", "content": _observation_preview(result)}
             elif name == "get_schema":
                 table = str(args.get("table_name") or "")

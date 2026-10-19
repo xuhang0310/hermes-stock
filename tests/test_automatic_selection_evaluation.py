@@ -11,15 +11,17 @@ TARGET_DATE = "20260828"
 DATES = ["20260831", "20260901", "20260902", "20260903", "20260904"]
 
 
-def _bars(symbol: str, *, entry: float, closes: list[float]):
+def _bars(symbol: str, *, entry: float, closes: list[float], adj_factors: list[float] | None = None):
+    factors = adj_factors or [1.0] * len(closes)
     return [
         {
             "symbol": symbol,
             "trade_date": trade_date,
             "open": entry if index == 0 else closes[index - 1],
             "close": close,
+            "adj_factor": factor,
         }
-        for index, (trade_date, close) in enumerate(zip(DATES, closes))
+        for index, (trade_date, close, factor) in enumerate(zip(DATES, closes, factors))
     ]
 
 
@@ -117,6 +119,55 @@ class AutomaticSelectionEvaluationTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "insufficient_data")
         self.assertEqual(result["per_symbol"][0]["missing_trade_dates"], [DATES[2]])
+
+    def test_ex_rights_inside_window_uses_adjusted_prices(self) -> None:
+        # 第 3 个交易日 10 送 10：原始价从 11 跳到 5.6，后复权价 11.2 才是真实的 +1.8%。
+        bars = _bars(
+            "600001.SH", entry=10.0, closes=[10.5, 11.0, 5.6, 5.8, 6.0],
+            adj_factors=[1.0, 1.0, 2.0, 2.0, 2.0],
+        )
+        bars[2]["open"] = 5.5
+
+        result = evaluate_forward_window(
+            target_trade_date=TARGET_DATE,
+            horizon=5,
+            selected_symbols=["600001.SH"],
+            benchmark_symbols=["600001.SH"],
+            bars=bars,
+            trading_dates=DATES,
+            min_coverage=1.0,
+            commission_rate=0.0,
+            slippage_rate=0.0,
+            turnover=1.0,
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertAlmostEqual(result["basket_return"], 12.0 / 10.0 - 1)
+        self.assertAlmostEqual(result["max_drawdown"], 0.0)
+        detail = result["per_symbol"][0]
+        self.assertEqual((detail["entry_price"], detail["exit_price"]), (10.0, 6.0))
+        self.assertEqual((detail["entry_adj_factor"], detail["exit_adj_factor"]), (1.0, 2.0))
+        self.assertAlmostEqual(detail["gross_return"], 0.2)
+
+    def test_missing_adjustment_factor_counts_as_missing_day(self) -> None:
+        bars = _bars("600001.SH", entry=10.0, closes=[10.0, 10.1, 10.2, 10.3, 10.4])
+        bars[3]["adj_factor"] = None
+
+        result = evaluate_forward_window(
+            target_trade_date=TARGET_DATE,
+            horizon=5,
+            selected_symbols=["600001.SH"],
+            benchmark_symbols=["600001.SH"],
+            bars=bars,
+            trading_dates=DATES,
+            min_coverage=1.0,
+            commission_rate=0.0,
+            slippage_rate=0.0,
+            turnover=0.0,
+        )
+
+        self.assertEqual(result["status"], "insufficient_data")
+        self.assertEqual(result["per_symbol"][0]["missing_trade_dates"], [DATES[3]])
 
     def test_turnover_compares_adjacent_top_n_memberships(self) -> None:
         self.assertEqual(calculate_turnover([], []), 0.0)

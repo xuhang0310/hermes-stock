@@ -15,6 +15,7 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.llm_config import active_llm_config, reasoning_params
 from backend.app.core.models import DailyBar, StockDailyBasic
 from backend.app.market.market_sync import (
+    load_local_adj_factors,
     load_local_history_trade_dates,
     load_local_open_trade_dates,
     load_local_stock_catalog_snapshot,
@@ -344,6 +345,10 @@ def load_candidate_input_rows(
                     "total_mv": total_mv,
                     "circ_mv": circ_mv,
                 }
+        adj_factors = load_local_adj_factors(db, symbols, [*expected_dates, target_trade_date])
+    for symbol_key, bars in histories.items():
+        for date_key, bar in bars.items():
+            bar["adj_factor"] = adj_factors.get((symbol_key, date_key))
 
     supplied = factor_values or {}
     result: list[dict[str, Any]] = []
@@ -454,6 +459,9 @@ def update_due_evaluations(*, limit: int = 500) -> dict[str, int]:
                         "open": open_price,
                         "close": close_price,
                     }
+            adj_factors = load_local_adj_factors(db, symbols, evaluation_dates)
+        for key, bar in bars_by_key.items():
+            bar["adj_factor"] = adj_factors.get(key)
         bar_payload = list(bars_by_key.values())
 
         for context in due_contexts:

@@ -104,14 +104,16 @@ class ScreenerFactorTests(unittest.TestCase):
     def test_factor_condition_filters_and_shapes_rows(self) -> None:
         result = screener_service.run_screener(factor_name="roe_ttm", factor_min=0.12, factor_max=0.25)
         self.assertEqual(result["factor_as_of"], LATEST_DATE)
-        self.assertEqual(result["universe"], 2)
+        self.assertEqual(result["universe"], 6)  # 候选池：全部可交易股票
+        self.assertEqual(result["total"], 2)  # 命中数：满足因子区间的股票
         got = {item["symbol"]: item["factor_value"] for item in result["items"]}
         self.assertEqual(got, {"600003.SH": 0.15, "600004.SH": 0.20})
 
     def test_factor_without_range_returns_latest_cross_section(self) -> None:
         result = screener_service.run_screener(factor_name="roe_ttm")
         # 600006.SH 最新截面无值，被 inner join 剔除；旧截面的 0.99 不得出现
-        self.assertEqual(result["universe"], 5)
+        self.assertEqual(result["universe"], 6)
+        self.assertEqual(result["total"], 5)
         self.assertNotIn("600006.SH", {item["symbol"] for item in result["items"]})
         self.assertTrue(all("factor_value" in item for item in result["items"]))
         self.assertFalse(any(abs(item["factor_value"] - 0.99) < 1e-9 for item in result["items"]))

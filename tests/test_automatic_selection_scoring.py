@@ -50,6 +50,7 @@ def _history(*, start: float = 10.0, step: float = 0.1, amount: float = 100_000.
         {
             "trade_date": trade_date,
             "close": start + index * step,
+            "adj_factor": 1.0,
             "amount": amount,
         }
         for index, trade_date in enumerate(history_dates(TARGET_DATE))
@@ -242,6 +243,42 @@ class AutomaticSelectionScoringTests(unittest.TestCase):
         self.assertAlmostEqual(candidate["momentum_20"], closes[-1] / closes[0] - 1)
         self.assertAlmostEqual(candidate["volatility_20"], np.std(np.diff(closes) / closes[:-1], ddof=1))
         self.assertEqual(candidate["avg_amount_20"], 100_000.0)
+
+    def test_ex_rights_gap_is_not_scored_as_a_price_drop(self) -> None:
+        # 第 11 个交易日 10 送 10：不复权收盘价腰斩，复权因子同步翻倍，真实走势仍是平滑上涨。
+        history = _history()
+        for item in history[10:]:
+            item["close"] /= 2
+            item["adj_factor"] = 2.0
+        candidate = build_candidates([_row("600001.SH", history=history)], _config(), target_trade_date=TARGET_DATE)[0]
+        smooth = np.asarray([item["close"] for item in _history()])
+        self.assertTrue(candidate["eligible"])
+        self.assertAlmostEqual(candidate["momentum_20"], smooth[-1] / smooth[0] - 1)
+        self.assertAlmostEqual(candidate["volatility_20"], np.std(np.diff(smooth) / smooth[:-1], ddof=1))
+        self.assertGreater(candidate["momentum_20"], 0)
+
+    def test_missing_adjustment_factor_excludes_instead_of_using_raw_prices(self) -> None:
+        for missing in (None, 0.0, float("nan")):
+            with self.subTest(missing=missing):
+                history = _history()
+                history[5]["adj_factor"] = missing
+                candidate = build_candidates([_row("600001.SH", history=history)], _config(), target_trade_date=TARGET_DATE)[0]
+                self.assertFalse(candidate["eligible"])
+                self.assertFalse(candidate["history_complete"])
+                self.assertEqual(candidate["exclusion_codes"], ["adj_factor_missing"])
+                self.assertIsNone(candidate["momentum_20"])
+        rows = [_row("600001.SH"), _row("600002.SH", history=[{**item, "adj_factor": None} for item in _history()])]
+        gate = quality_gate(build_candidates(rows, _config(), target_trade_date=TARGET_DATE), _config())
+        self.assertEqual(gate["metrics"]["history_coverage"], 0.5)
+
+    def test_adjustment_factor_changes_run_identity(self) -> None:
+        candidates = build_candidates([_row("600001.SH")], _config(), target_trade_date=TARGET_DATE)
+        changed = copy.deepcopy(candidates)
+        changed[0]["input_evidence"]["history"][3]["adj_factor"] = 1.5
+        self.assertNotEqual(
+            fingerprint_payload(candidates, _config(), TARGET_DATE),
+            fingerprint_payload(changed, _config(), TARGET_DATE),
+        )
 
     def test_missing_exchange_session_is_not_replaced_with_an_older_bar(self) -> None:
         history = _history()

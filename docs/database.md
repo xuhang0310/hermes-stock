@@ -46,7 +46,8 @@ STOCK_DB_NAME=hermes-stock
 ### 数据与情报
 
 - `market_snapshots`: 分钟/实时快照
-- `daily_bars`: 日线行情
+- `daily_bars`: 日线行情（不复权价）
+- `stock_adj_factors`: 全市场复权因子（TuShare `adj_factor`，`market_sync` 与日线同窗口落库）；跨日比较价格时用 `close × adj_factor` 得到后复权价
 - `documents`: 新闻、公告、研报、政策、互动问答
 - `document_symbols`: 文档和标的关联
 

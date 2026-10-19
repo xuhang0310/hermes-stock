@@ -7,6 +7,8 @@ import type {
   ScreenerQuery,
   ScreenerResult,
   ScreenerSavedStrategy,
+  ScreenerScoreWeights,
+  ScreenerSort,
   ScreenerSyncStats,
   ScreenerSyncStatus,
   ScreenerTemplateItem,
@@ -72,7 +74,14 @@ const draftSaved = ref(false)
 const activeWorkspace = ref<ScreenerWorkspace>('quick')
 const resultSection = ref<HTMLElement | null>(null)
 const ruleEditor = ref<HTMLElement | null>(null)
-type ResultSort = 'score_desc' | 'pct_desc' | 'turnover_desc' | 'mv_asc' | 'pe_asc'
+type ResultSort = ScreenerSort
+const SORT_LABELS: Record<ResultSort, string> = {
+  score_desc: '综合分',
+  pct_desc: '涨幅',
+  turnover_desc: '换手率',
+  mv_asc: '市值从小到大',
+  pe_asc: 'PE 从低到高',
+}
 type ResultView = 'ranking' | 'factors' | 'compare'
 type ResultColumn = 'value' | 'momentum' | 'liquidity' | 'reasons' | 'risks'
 type ScoredScreenerItem = ScreenerItem & {
@@ -297,20 +306,12 @@ const activeStrategyName = computed(() => {
   return `${traits.slice(0, 3).join('·') || '多因子'}选股策略`
 })
 
-function relativeScore(
-  items: ScreenerItem[],
-  item: ScreenerItem,
-  pick: (row: ScreenerItem) => number | null,
-  inverse = false
-): number {
-  const values = items.map(pick).filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
-  const current = pick(item)
-  if (current == null || !Number.isFinite(current) || !values.length) return 45
-  const min = Math.min(...values)
-  const max = Math.max(...values)
-  if (max === min) return 75
-  const normalized = ((current - min) / (max - min)) * 100
-  return inverse ? 100 - normalized : normalized
+function currentScoreWeights(): ScreenerScoreWeights {
+  return {
+    value: scoreValueWeight.value,
+    momentum: scoreMomentumWeight.value,
+    liquidity: scoreLiquidityWeight.value,
+  }
 }
 
 function explainItem(item: ScreenerItem): { reasons: string[]; risks: string[]; completeness: number } {
@@ -336,17 +337,15 @@ function explainItem(item: ScreenerItem): { reasons: string[]; risks: string[]; 
   return { reasons: reasons.slice(0, 3), risks: risks.slice(0, 3), completeness }
 }
 
+// 分项分由服务端在全部命中股票上按分位计算；这里只用当前权重即时合成综合分，
+// 拖动权重后会按新权重重新请求排序（见 scheduleRerank）。
 const scoredResultItems = computed<ScoredScreenerItem[]>(() => {
   const items = result.value?.items || []
   const rawWeights = scoreValueWeight.value + scoreMomentumWeight.value + scoreLiquidityWeight.value || 100
   return items.map((item) => {
-    const peScore = relativeScore(items, item, (row) => row.pe_ttm && row.pe_ttm > 0 ? row.pe_ttm : null, true)
-    const sizeScore = relativeScore(items, item, (row) => row.total_mv_yi, true)
-    const valueScore = peScore * 0.55 + sizeScore * 0.45
-    const momentumScore = relativeScore(items, item, (row) => row.pct_chg)
-    const volumeScore = relativeScore(items, item, (row) => row.volume_ratio)
-    const turnoverScore = relativeScore(items, item, (row) => row.turnover_rate)
-    const liquidityScore = volumeScore * 0.45 + turnoverScore * 0.55
+    const valueScore = item.value_score ?? 45
+    const momentumScore = item.momentum_score ?? 45
+    const liquidityScore = item.liquidity_score ?? 45
     const compositeScore = (
       valueScore * scoreValueWeight.value +
       momentumScore * scoreMomentumWeight.value +
@@ -372,7 +371,10 @@ const allSortedResultItems = computed(() => {
     if (resultSort.value === 'score_desc') return b.compositeScore - a.compositeScore
     if (resultSort.value === 'turnover_desc') return numberOr(b.turnover_rate, -Infinity) - numberOr(a.turnover_rate, -Infinity)
     if (resultSort.value === 'mv_asc') return numberOr(a.total_mv_yi, Infinity) - numberOr(b.total_mv_yi, Infinity)
-    if (resultSort.value === 'pe_asc') return numberOr(a.pe_ttm, Infinity) - numberOr(b.pe_ttm, Infinity)
+    if (resultSort.value === 'pe_asc') {
+      const positivePe = (value: number | null) => (value != null && value > 0 ? value : null)
+      return numberOr(positivePe(a.pe_ttm), Infinity) - numberOr(positivePe(b.pe_ttm), Infinity)
+    }
     return numberOr(b.pct_chg, -Infinity) - numberOr(a.pct_chg, -Infinity)
   })
   const search = resultSearch.value.trim().toLowerCase()
@@ -686,6 +688,12 @@ function applyQuery(query: ScreenerQuery) {
   keyword.value = query.keyword ?? ''
   industry.value = query.industry ?? ''
   resultLimit.value = query.limit ?? 20
+  if (query.sort_by) resultSort.value = query.sort_by
+  if (query.score_weights) {
+    scoreValueWeight.value = query.score_weights.value
+    scoreMomentumWeight.value = query.score_weights.momentum
+    scoreLiquidityWeight.value = query.score_weights.liquidity
+  }
 }
 
 function buildQuery(): ScreenerQuery {
@@ -709,6 +717,8 @@ function buildQuery(): ScreenerQuery {
     keyword: String(keyword.value).trim() || undefined,
     industry: industry.value.trim() || undefined,
     limit: resultLimit.value,
+    sort_by: resultSort.value,
+    score_weights: currentScoreWeights(),
   }
 }
 
@@ -1089,6 +1099,40 @@ async function run() {
   }
 }
 
+// 排序方式/评分权重决定"全部命中里取哪 Top N"，变化后沿用上次运行的筛选条件重新请求，
+// 而不是只在已返回的 N 只里重排。
+let rerankTimer: number | undefined
+function scheduleRerank() {
+  if (!ran.value || !result.value) return
+  window.clearTimeout(rerankTimer)
+  rerankTimer = window.setTimeout(() => void rerank(), 350)
+}
+
+async function rerank() {
+  if (running.value) {
+    scheduleRerank()
+    return
+  }
+  const query: ScreenerQuery = { ...lastQuery.value, sort_by: resultSort.value, score_weights: currentScoreWeights() }
+  running.value = true
+  error.value = ''
+  try {
+    result.value = await api.runScreener(query)
+    lastQuery.value = query
+    resultPage.value = 1
+    selectedSymbol.value = result.value.items[0]?.symbol || ''
+    interpretation.value = ''
+    interpretModel.value = ''
+    interpretError.value = ''
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    running.value = false
+  }
+}
+
+watch([resultSort, scoreValueWeight, scoreMomentumWeight, scoreLiquidityWeight], scheduleRerank)
+
 async function interpret() {
   if (!result.value || !result.value.items.length || interpretLoading.value) return
   interpretLoading.value = true
@@ -1142,6 +1186,7 @@ watch(ruleEditorOpen, (open) => {
 })
 
 onBeforeUnmount(() => {
+  window.clearTimeout(rerankTimer)
   document.removeEventListener('keydown', handleRuleEditorDocumentKeydown)
   document.body.classList.remove('sc-rule-dialog-open')
 })
@@ -1469,14 +1514,14 @@ onBeforeUnmount(() => {
             </section>
             <section class="sc-logic-card">
               <div class="sc-logic-title"><strong>4. 输出设置</strong><span>当前快照</span></div>
-              <ul><li><i>→</i>选取 Top {{ resultLimit }}</li><li><i>→</i>按综合分优先排序</li></ul>
+              <ul><li><i>→</i>全部命中按{{ SORT_LABELS[resultSort] }}排序</li><li><i>→</i>选取 Top {{ resultLimit }}</li><li><i>→</i>已排除 ST 与停牌股</li></ul>
             </section>
             <button type="button" class="sc-add-condition" @click="openRuleEditor">＋ 添加 / 修改条件</button>
           </aside>
 
           <section ref="resultSection" class="sc-results-center sc-panel">
             <header class="sc-center-head">
-              <div><h3>筛选结果 <b v-if="result">{{ allSortedResultItems.length }} / {{ result.universe.toLocaleString('zh-CN') }}</b></h3><span v-if="result">已按当前规则筛选 · 展示 Top {{ resultLimit }}（最近同步快照）<template v-if="result.factor_as_of"> · 因子值截至 {{ fmtDate(result.factor_as_of) }}</template></span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
+              <div><h3>筛选结果 <b v-if="result" title="命中数 / 候选池">{{ result.total.toLocaleString('zh-CN') }} / {{ result.universe.toLocaleString('zh-CN') }}</b></h3><span v-if="result">命中 {{ result.total.toLocaleString('zh-CN') }} 只 · 按{{ SORT_LABELS[resultSort] }}展示前 {{ result.items.length }} 只<template v-if="result.as_of"> · 最近同步截面 {{ fmtDate(result.as_of) }}</template><template v-if="result.excluded_count"> · 已排除 ST/停牌 {{ result.excluded_count.toLocaleString('zh-CN') }} 只</template><template v-if="result.factor_as_of"> · 因子值截至 {{ fmtDate(result.factor_as_of) }}</template></span><span v-else>{{ statusLine || '使用最近一次同步的市场数据' }}</span></div>
             </header>
             <nav class="sc-result-tabs" aria-label="结果视图">
               <div class="sc-result-tabset"><button type="button" :class="{ active: resultView === 'ranking' }" @click="resultView = 'ranking'">排名表</button><button type="button" :class="{ active: resultView === 'factors' }" @click="resultView = 'factors'">图表</button><button type="button" :class="{ active: resultView === 'compare' }" @click="resultView = 'compare'">对比 <em v-if="comparisonSymbols.length">{{ comparisonSymbols.length }}</em></button></div>

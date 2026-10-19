@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -15,6 +17,12 @@ from backend.app.market import market_sync
 from backend.app.quant import screener_ai, screener_service
 
 router = APIRouter(prefix="/api/screener", tags=["screener"])
+
+
+class ScoreWeightsIn(BaseModel):
+    value: float = Field(default=40, ge=0, le=100, description="估值规模（低 PE、小市值）")
+    momentum: float = Field(default=40, ge=0, le=100, description="当日涨跌幅")
+    liquidity: float = Field(default=20, ge=0, le=100, description="量比与换手率")
 
 
 class ScreenerQueryIn(BaseModel):
@@ -38,6 +46,10 @@ class ScreenerQueryIn(BaseModel):
     factor_min: float | None = Field(default=None, description="因子值下限（含；因子值可为负）")
     factor_max: float | None = Field(default=None, description="因子值上限（含；因子值可为负）")
     limit: int = Field(default=50, ge=1, le=100, description="返回条数上限")
+    sort_by: Literal["score_desc", "pct_desc", "turnover_desc", "mv_asc", "pe_asc"] = Field(
+        default="score_desc", description="全部命中股票的排序方式，items 取排序后的前 limit 只",
+    )
+    score_weights: ScoreWeightsIn | None = Field(default=None, description="综合分三维权重，缺省 40/40/20")
 
 
 @router.post("/run")
@@ -67,6 +79,8 @@ def screener_run(
             factor_min=payload.factor_min,
             factor_max=payload.factor_max,
             limit=payload.limit,
+            sort_by=payload.sort_by,
+            score_weights=payload.score_weights.model_dump() if payload.score_weights else None,
         )
     except ValueError as exc:
         return JSONResponse(status_code=400, content=fail(str(exc), code="bad_request"))

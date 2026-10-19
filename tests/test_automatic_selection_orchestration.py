@@ -256,7 +256,7 @@ class AutomaticSelectionOrchestrationTests(unittest.TestCase):
 
         self.mock(repository, "persist_run", side_effect=persist)
         row = {**CATALOG[0], "close_price": 12.0, "pe_ttm": 10.0, "pb": 1.0, "total_mv": 1000.0,
-               "history": [{"trade_date": day, "close": 10.0 + i / 10, "amount": 100_000.0}
+               "history": [{"trade_date": day, "close": 10.0 + i / 10, "adj_factor": 1.0, "amount": 100_000.0}
                            for i, day in enumerate(history_dates(TARGET))],
                "expected_history_dates": history_dates(TARGET)}
         args = dict(target_trade_date=TARGET, trigger_type="test", generate_explanation=False)
