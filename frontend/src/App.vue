@@ -37,6 +37,7 @@ import type {
   PositionItem,
   PositionSymbolValidation,
   ScreenerItem,
+  AutomaticSelectionPick,
   IndustryMember,
   UserPayload,
   WatchlistItem
@@ -284,7 +285,7 @@ const pageTitle = computed(() => {
 const pageSubtitle = computed(() => {
   if (activePage.value === 'industryAnalysis') return '行业强弱、市场广度与成分股研究'
   if (activePage.value === 'automaticSelection') {
-    return '确定性排名、质量门禁、不可变证据与前瞻评估'
+    return '每个交易日收盘后按固定规则选出观察股，并持续跟踪之后的表现'
   }
   if (activePage.value !== 'workbench' || !dashboard.value) {
     return '问股、数字人、持仓、自选池和模型配置统一入口'
@@ -1136,6 +1137,22 @@ function openScreenerStockAnalysis(item: ScreenerItem) {
   activePage.value = 'digitalHumans'
 }
 
+function openAutomaticSelectionStockAnalysis(pick: AutomaticSelectionPick, tradeDate: string) {
+  const risks = pick.risks.slice(0, 3).map((risk) => risk.text).join('；')
+  const dateText = /^\d{8}$/.test(tradeDate)
+    ? `${tradeDate.slice(0, 4)}-${tradeDate.slice(4, 6)}-${tradeDate.slice(6, 8)}`
+    : tradeDate
+  digitalHumanInitialTab.value = 'chat'
+  digitalHumanInitialSession.value = null
+  digitalHumanInitialQuestion.value = [
+    `请对 ${pick.name}（${pick.symbol}）进行专项解读。`,
+    `该股票来自每日自动选股（${dateText} 收盘后第 ${pick.rank} 名）：${pick.headline}。`,
+    risks ? `规则提示的注意点：${risks}。` : '',
+    '请先调用可用的行情与研究工具核对最新数据，再从趋势与量价、基本面与估值、近期催化、主要风险、关键观察位五个方面分析，并给出后续跟踪清单。请明确区分事实与推断，不构成投资建议。'
+  ].filter(Boolean).join('\n')
+  activePage.value = 'digitalHumans'
+}
+
 function createScreenerAgentTask(items: ScreenerItem[]) {
   const pool = items.slice(0, 20).map((item) => `${item.name}（${item.symbol}）`).join('、')
   digitalHumanInitialTab.value = 'chat'
@@ -1223,6 +1240,8 @@ onBeforeUnmount(() => {
       <AutomaticSelectionView
         v-else-if="activePage === 'automaticSelection'"
         :user="currentUser"
+        @watchlist-added="applyWatchlistItem"
+        @ask-stock="openAutomaticSelectionStockAnalysis"
       />
       <IndustryAnalysisView
         v-else-if="activePage === 'industryAnalysis'"

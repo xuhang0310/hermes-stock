@@ -24,6 +24,7 @@ from backend.app.market.market_sync import (
 )
 from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant.automatic_selection_evaluation import calculate_turnover
+from backend.app.quant.automatic_selection_presentation import explanation_evidence
 from backend.app.quant.automatic_selection_scoring import (
     RESEARCH_LIMITATIONS,
     SCORING_IMPLEMENTATION_VERSION,
@@ -1044,45 +1045,44 @@ def _generate_explanation(
     try:
         llm_config = active_llm_config()
         params = reasoning_params(llm_config)
-        selected = [
-            {
-                "rank": item.get("rank"),
-                "symbol": item.get("symbol"),
-                "name": item.get("name"),
-                "industry": item.get("industry"),
-                "score": item.get("composite_score"),
-                "percentile": item.get("percentile"),
-                "factor_values": item.get("factor_values"),
-                "z_scores": item.get("z_scores"),
-                "change_state": item.get("change_state"),
+        candidates = list(candidates)
+        try:
+            evidence = explanation_evidence(run, candidates)
+        except Exception:
+            logger.warning("自动选股白话证据生成失败，退回原始证据 run_id=%s", run_id, exc_info=True)
+            evidence = {
+                "target_trade_date": run.get("target_trade_date"),
+                "quality_gate": gate,
+                "selected": [
+                    {
+                        "rank": item.get("rank"),
+                        "symbol": item.get("symbol"),
+                        "name": item.get("name"),
+                        "industry": item.get("industry"),
+                        "percentile": item.get("percentile"),
+                        "change_state": item.get("change_state"),
+                    }
+                    for item in candidates
+                    if item.get("selected")
+                ],
+                "limitations": RESEARCH_LIMITATIONS,
             }
-            for item in candidates
-            if item.get("selected")
-        ]
-        evidence = {
-            "target_trade_date": run.get("target_trade_date"),
-            "strategy": {
-                "key": run.get("strategy_key"),
-                "version": run.get("strategy_version"),
-                "config_hash": run.get("config_hash"),
-                "data_fingerprint": run.get("data_fingerprint"),
-            },
-            "quality_gate": gate,
-            "selected": selected,
-            "limitations": RESEARCH_LIMITATIONS,
-        }
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "你是自动选股研究解释员。排名和分数已经由确定性规则完成并落库。"
-                    "你只能解释给定证据、数据覆盖和风险，不得新增事实、改分、重排、给出买卖指令，"
-                    "不得声称收益可预测。必须用中文，并明确这是研究观察而非投资建议。"
+                    "你是自动选股点评员，读者是没有量化背景的普通投资者。排名和分数已经由确定性规则完成并落库，"
+                    "你只能解释给定证据和风险，不得新增事实、改分、重排、给出买卖指令或目标价，"
+                    "不得声称收益可预测。用中文白话，不要出现 z 值、因子、哈希等术语。"
+                    "维度分数表示这只股票超过了百分之多少的合格股票。输出 Markdown，格式固定：\n"
+                    "1. 第一行以“**今日要点**：”开头，用一句话（不超过 60 字）概括这批股票的共同特点；\n"
+                    "2. 然后每只股票一行：“- 名称（代码）：入选原因，最需要注意的一点”，不超过 40 字；\n"
+                    "3. 最后一行写：以上为规则选股的研究观察，不构成投资建议。"
                 ),
             },
             {
                 "role": "user",
-                "content": f"请解释以下已落库证据：\n{canonical_json(evidence)}",
+                "content": f"请点评以下已落库的选股结果：\n{canonical_json(evidence)}",
             },
         ]
         response = chat_completion(

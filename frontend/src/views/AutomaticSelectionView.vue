@@ -1,215 +1,132 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
+import AutomaticSelectionAudit from '../components/AutomaticSelectionAudit.vue'
 import type {
-  AutomaticSelectionCandidate,
-  AutomaticSelectionLifecycle,
-  AutomaticSelectionOverview,
-  AutomaticSelectionRun,
-  AutomaticSelectionRunDetail,
-  AutomaticSelectionStrategy,
-  AutomaticSelectionStrategyConfig,
+  AutomaticSelectionDaily,
+  AutomaticSelectionPeriodCell,
+  AutomaticSelectionPick,
+  AutomaticSelectionTrackRecord,
   UserPayload,
 } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { beijingFromDb } from '../utils/datetime'
 
 const props = defineProps<{ user: UserPayload }>()
+const emit = defineEmits<{
+  askStock: [pick: AutomaticSelectionPick, tradeDate: string]
+  watchlistAdded: [item: Awaited<ReturnType<typeof api.addWatchlist>>]
+}>()
 
-const CANDIDATE_PAGE_SIZE = 50
-let evidenceRequestSequence = 0
+type TabKey = 'today' | 'history' | 'method' | 'advanced'
+type WatchState = 'adding' | 'added' | 'error'
 
-type CandidateScope = 'top' | 'eligible' | 'excluded'
-const candidateScopeOrder: CandidateScope[] = ['top', 'eligible', 'excluded']
-type StrategyAction = 'create' | 'promote' | 'retire' | null
-
+const activeTab = ref<TabKey>('today')
+const daily = ref<AutomaticSelectionDaily | null>(null)
+const track = ref<AutomaticSelectionTrackRecord | null>(null)
 const loading = ref(true)
-const detailLoading = ref(false)
-const actionLoading = ref(false)
+const trackLoading = ref(false)
+const dispatching = ref(false)
 const error = ref('')
+const trackError = ref('')
 const notice = ref('')
-const overview = ref<AutomaticSelectionOverview | null>(null)
-const strategies = ref<AutomaticSelectionStrategy[]>([])
-const runDetail = ref<AutomaticSelectionRunDetail | null>(null)
-const selectedRunId = ref('')
-const selectedCandidateSymbol = ref('')
-const candidateScope = ref<CandidateScope>('top')
-const strategyAction = ref<StrategyAction>(null)
-const actionStrategy = ref<AutomaticSelectionStrategy | null>(null)
-const confirmationNote = ref('')
-const dialogEl = ref<HTMLElement | null>(null)
-let dialogTrigger: HTMLElement | null = null
+const showExplanation = ref(false)
+const detailSymbol = ref('')
+const drawerEl = ref<HTMLElement | null>(null)
+const watchlistState = ref<Record<string, WatchState>>({})
+let dailySequence = 0
+let trackSequence = 0
+let drawerTrigger: HTMLElement | null = null
 let previousBodyOverflow = ''
-const createForm = ref({
-  strategyKey: '',
-  name: '',
-  lifecycleState: 'challenger' as Exclude<AutomaticSelectionLifecycle, 'official' | 'retired'>,
-  parentStrategyId: null as number | null,
-  configText: '',
+
+const permissions = computed(() => props.user.permissions || [])
+const hasPermission = (name: string) => permissions.value.includes('all') || permissions.value.includes(name)
+const canDispatch = computed(() => hasPermission('schedule:manage'))
+const canSeeAdvanced = computed(() => hasPermission('model:manage') || hasPermission('schedule:manage'))
+const canWrite = computed(() => hasPermission('data:write'))
+const canAsk = computed(() => hasPermission('agent:use'))
+
+const tabs = computed<Array<{ key: TabKey; label: string }>>(() => [
+  { key: 'today', label: '今日选股' },
+  { key: 'history', label: '历史战绩' },
+  { key: 'method', label: '选股方法' },
+  ...(canSeeAdvanced.value ? [{ key: 'advanced' as TabKey, label: '高级' }] : []),
+])
+
+const status = computed(() => daily.value?.status || null)
+const picks = computed<AutomaticSelectionPick[]>(() => daily.value?.picks || [])
+const detailPick = computed<AutomaticSelectionPick | null>(
+  () => picks.value.find((pick) => pick.symbol === detailSymbol.value) || null
+)
+const dateOptions = computed(() => daily.value?.available_dates || [])
+const since = computed(() => daily.value?.performance.since_selection || null)
+const explanationHtml = computed(() => renderMarkdown(daily.value?.run?.llm_explanation || ''))
+const trackLine = computed(() => {
+  const brief = daily.value?.track_brief
+  if (!brief) return '还没有到期的 5 日表现，选出后第 5 个交易日起开始统计。'
+  const average = brief.avg_excess_return
+  const direction = average == null ? '' : average >= 0 ? `，平均每期跑赢 ${fmtPct(average, false)}` : `，平均每期跑输 ${fmtPct(-average, false)}`
+  return `最近 ${brief.periods} 期的 5 日表现：${brief.wins} 期跑赢合格股票平均${direction}。`
+})
+const trackSummary = computed(() => track.value?.summary || [])
+const trackPeriods = computed(() => track.value?.periods || [])
+const trackBars = computed(() => {
+  const points = [...trackPeriods.value]
+    .reverse()
+    .map((period) => ({ date: period.trade_date, value: period.horizons['5']?.excess_return ?? null }))
+    .filter((point): point is { date: string; value: number } => point.value != null)
+  const peak = Math.max(0.01, ...points.map((point) => Math.abs(point.value)))
+  const width = Math.max(points.length, 1)
+  return points.map((point, index) => {
+    const height = Math.max(1, (Math.abs(point.value) / peak) * 46)
+    return {
+      ...point,
+      x: (index / width) * 100,
+      width: Math.max(0.6, 100 / width - 0.6),
+      y: point.value >= 0 ? 50 - height : 50,
+      height,
+    }
+  })
 })
 
-const canManageStrategies = computed(
-  () => props.user.permissions.includes('all') || props.user.permissions.includes('model:manage')
-)
-const canDispatch = computed(
-  () => props.user.permissions.includes('all') || props.user.permissions.includes('schedule:manage')
-)
-const selectedRunDetail = computed<AutomaticSelectionRunDetail | null>(() =>
-  runDetail.value?.run_id === selectedRunId.value ? runDetail.value : null
-)
-const selectedOverviewRun = computed<AutomaticSelectionRun | null>(() =>
-  overview.value?.latest_run?.run_id === selectedRunId.value ? overview.value.latest_run : null
-)
-const currentRun = computed<AutomaticSelectionRun | null>(
-  () => selectedRunDetail.value || selectedOverviewRun.value
-)
-const isSelectedLatestRun = computed(
-  () => Boolean(selectedRunId.value && overview.value?.latest_run?.run_id === selectedRunId.value)
-)
-const runContextLabel = computed(() => isSelectedLatestRun.value ? '最新运行' : '历史运行')
-const qualityGate = computed(() => currentRun.value?.quality_gate || null)
-const candidates = computed<AutomaticSelectionCandidate[]>(() => {
-  if (selectedRunDetail.value) return selectedRunDetail.value.candidates
-  if (candidateScope.value === 'top' && selectedOverviewRun.value) {
-    return overview.value?.top_candidates || []
-  }
-  return []
-})
-const selectedCandidate = computed<AutomaticSelectionCandidate | null>(() =>
-  candidates.value.find((candidate) => candidate.symbol === selectedCandidateSymbol.value) || null
-)
-const sortedStrategies = computed(() => [...strategies.value].sort((left, right) => {
-  if (left.is_official !== right.is_official) return left.is_official ? -1 : 1
-  return left.strategy_key.localeCompare(right.strategy_key) || right.version - left.version
-}))
-const selectableRuns = computed<AutomaticSelectionRun[]>(() => {
-  const result: AutomaticSelectionRun[] = []
-  const seen = new Set<string>()
-  const latest = overview.value?.latest_run
-  if (latest) {
-    result.push(latest)
-    seen.add(latest.run_id)
-  }
-  for (const run of overview.value?.recent_runs || []) {
-    if (!seen.has(run.run_id)) result.push(run)
-    seen.add(run.run_id)
-  }
-  return result
-})
-const explanationHtml = computed(() => renderMarkdown(currentRun.value?.llm_explanation || ''))
-const factorCoverage = computed(() => Object.entries(qualityGate.value?.metrics.factor_coverage || {}))
-const exclusionEvidence = computed(() => Object.entries(currentRun.value?.exclusion_summary || {})
-  .filter(([, count]) => count > 0)
-  .sort((left, right) => right[1] - left[1]))
-const evaluations = computed(() => {
-  if (selectedRunDetail.value) return selectedRunDetail.value.evaluations
-  return selectedOverviewRun.value ? overview.value?.evaluations || [] : []
-})
-const candidateTotal = computed(() => selectedRunDetail.value?.candidate_total ?? candidates.value.length)
-const candidateLimit = computed(() => selectedRunDetail.value?.candidate_limit || CANDIDATE_PAGE_SIZE)
-const candidateOffset = computed(() => selectedRunDetail.value?.candidate_offset || 0)
-const candidatePage = computed(() => Math.floor(candidateOffset.value / candidateLimit.value) + 1)
-const candidatePageCount = computed(() => Math.max(1, Math.ceil(candidateTotal.value / candidateLimit.value)))
-const candidateRange = computed(() => {
-  if (!candidateTotal.value) return '0'
-  const start = candidateOffset.value + 1
-  const end = Math.min(candidateOffset.value + candidates.value.length, candidateTotal.value)
-  return `${start}–${end}`
-})
+const EMPTY_PERIOD_CELL: AutomaticSelectionPeriodCell = { status: 'missing', status_label: '—' }
 
-const lifecycleLabels: Record<AutomaticSelectionLifecycle, string> = {
-  official: '正式',
-  challenger: '挑战者',
-  shadow: '影子',
-  retired: '已退役',
-}
-const statusLabels: Record<string, string> = {
-  running: '运行中',
-  completed: '已完成',
-  blocked: '质量阻断',
-  failed: '运行失败',
-  pending: '待到期',
-  insufficient_data: '覆盖不足',
-}
-const stageLabels: Record<string, string> = {
-  quality_gate: '质量门禁',
-  ranked: '排名已落库',
-  failed: '执行失败',
-}
-const changeLabels: Record<string, string> = {
-  added: '新增',
-  retained: '保留',
-  removed: '移除',
-  unchanged: '未变化',
-}
-const exclusionLabels: Record<string, string> = {
-  not_listed: '非当前上市状态',
-  st: 'ST 类标的',
-  listing_too_short: '上市时间不足',
-  target_bar_missing: '目标日行情缺失',
-  daily_basic_missing: '基础指标缺失',
-  valuation_invalid: '估值指标非法',
-  history_insufficient: '历史行情不足',
-  adj_factor_missing: '复权因子缺失',
-  liquidity_low: '流动性不足',
-  required_factor_missing: '必需因子缺失',
-  not_in_current_catalog: '不在本期目录',
-}
-const constraintLabels: Record<string, string> = {
-  industry_missing: '行业信息缺失',
-  industry_limit: '行业集中度约束',
-  market_cap_bucket_limit: '市值集中度约束',
-}
-const qualityLabels: Record<string, string> = {
-  bar_coverage: '目标日行情覆盖',
-  basic_coverage: '基础指标覆盖',
-  industry_coverage: '行业信息覆盖',
-  history_coverage: '历史行情覆盖',
-  eligible_count: '最终合格池',
-  strategy_error: '策略执行异常',
-}
-const featureLabels: Record<string, string> = {
-  value_pe: 'PE 价值',
-  value_pb: 'PB 价值',
-  momentum_20: '20 日动量',
-  liquidity_20: '20 日流动性',
-  low_volatility_20: '低波动',
+function periodCells(period: AutomaticSelectionTrackRecord['periods'][number]): AutomaticSelectionPeriodCell[] {
+  return ['5', '20', '60'].map((key) => period.horizons[key] || EMPTY_PERIOD_CELL)
 }
 
 function apiMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason)
 }
 
-function fmtTradeDate(value: string | null | undefined): string {
+function fmtDate(value: string | null | undefined): string {
   if (!value) return '—'
   const digits = value.replace(/-/g, '')
-  if (digits.length === 8) return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
-  return value
+  if (digits.length !== 8) return value
+  return `${Number(digits.slice(4, 6))} 月 ${Number(digits.slice(6, 8))} 日`
 }
 
-function fmtNumber(value: number | null | undefined, digits = 2): string {
+function fmtFullDate(value: string | null | undefined): string {
+  if (!value) return '—'
+  const digits = value.replace(/-/g, '')
+  if (digits.length !== 8) return value
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
+}
+
+function fmtPct(value: number | null | undefined, signed = true, digits = 2): string {
+  if (value == null || !Number.isFinite(value)) return '—'
+  const text = `${(value * 100).toFixed(digits)}%`
+  return signed && value > 0 ? `+${text}` : text
+}
+
+function fmtNum(value: number | null | undefined, digits = 2): string {
   if (value == null || !Number.isFinite(value)) return '—'
   return value.toLocaleString('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits })
 }
 
-function fmtPercent(value: number | null | undefined, digits = 2): string {
+function fmtCount(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '—'
-  return `${(value * 100).toFixed(digits)}%`
-}
-
-function fmtCoverage(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return `${(value * 100).toFixed(1)}%`
-}
-
-function fmtMarketCap(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return `${fmtNumber(value / 10_000, 1)} 亿`
-}
-
-function fmtAmount(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return `${fmtNumber(value / 100_000, 2)} 亿元`
+  return value.toLocaleString('zh-CN')
 }
 
 function toneForReturn(value: number | null | undefined): string {
@@ -217,246 +134,149 @@ function toneForReturn(value: number | null | undefined): string {
   return value > 0 ? 'pnl-up' : 'pnl-down'
 }
 
-function toneForDrawdown(value: number | null | undefined): string {
-  if (value == null) return ''
-  const magnitude = Math.abs(value)
-  if (magnitude >= 0.2) return 'risk-critical'
-  if (magnitude >= 0.1) return 'risk-watch'
-  return 'risk-contained'
+function scoreTone(score: number | null | undefined): string {
+  if (score == null) return 'score-unknown'
+  if (score >= 70) return 'score-strong'
+  if (score < 30) return 'score-weak'
+  return 'score-medium'
 }
 
-function toneForStatus(status: string): string {
-  if (status === 'completed') return 'tone-ok'
-  if (status === 'blocked' || status === 'insufficient_data') return 'tone-warning'
-  if (status === 'failed') return 'tone-danger'
-  return 'tone-muted'
+function sparkPoints(path: AutomaticSelectionPick['price_path']): string {
+  if (path.length < 2) return ''
+  const values = path.map((point) => point.value)
+  const low = Math.min(...values)
+  const high = Math.max(...values)
+  const span = high - low || 1
+  return values
+    .map((value, index) => `${((index / (values.length - 1)) * 96 + 2).toFixed(1)},${(26 - ((value - low) / span) * 22).toFixed(1)}`)
+    .join(' ')
 }
 
-function lifecycleLabel(state: string): string {
-  return lifecycleLabels[state as AutomaticSelectionLifecycle] || state
+function pathChange(path: AutomaticSelectionPick['price_path']): number | null {
+  return path.length >= 2 ? path[path.length - 1].value / path[0].value - 1 : null
 }
 
-function codeLabel(code: string): string {
-  return exclusionLabels[code] || constraintLabels[code] || code
+function funnelWidth(count: number): string {
+  const universe = daily.value?.funnel?.steps[0]?.count || 0
+  if (!universe) return '0%'
+  return `${Math.max(4, (count / universe) * 100).toFixed(1)}%`
 }
 
-function featureLabel(feature: string): string {
-  return featureLabels[feature] || feature.replace(/^tushare:/, '')
-}
-
-function metricActual(code: string): number | undefined {
-  const metrics = qualityGate.value?.metrics
-  if (!metrics) return undefined
-  if (code.startsWith('factor_coverage:')) {
-    return metrics.factor_coverage?.[code.slice('factor_coverage:'.length)]
-  }
-  const value = metrics[code as keyof typeof metrics]
-  return typeof value === 'number' ? value : undefined
-}
-
-function metricRequired(code: string): number | undefined {
-  const thresholds = qualityGate.value?.thresholds || {}
-  const thresholdKey: Record<string, string> = {
-    bar_coverage: 'min_bar_coverage',
-    basic_coverage: 'min_basic_coverage',
-    industry_coverage: 'min_industry_coverage',
-    history_coverage: 'min_history_coverage',
-    eligible_count: 'min_eligible_count',
-  }
-  if (code.startsWith('factor_coverage:')) return thresholds.min_factor_coverage
-  return thresholds[thresholdKey[code] || code]
-}
-
-const qualityCountCodes = new Set([
-  'eligible_count',
-  'catalog_count',
-  'bar_count',
-  'basic_count',
-  'industry_count',
-  'history_count',
-])
-
-function fmtQualityValue(code: string, value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return qualityCountCodes.has(code) ? fmtNumber(value, 0) : fmtCoverage(value)
-}
-
-function clearCandidateSelection() {
-  selectedCandidateSymbol.value = ''
-}
-
-function seedCurrentCandidate() {
-  selectedCandidateSymbol.value = candidates.value[0]?.symbol || ''
-}
-
-function selectCandidate(symbol: string) {
-  if (candidates.value.some((candidate) => candidate.symbol === symbol)) {
-    selectedCandidateSymbol.value = symbol
-  }
-}
-
-async function loadDashboard(preferredRunId?: string) {
-  const requestSequence = ++evidenceRequestSequence
+async function loadDaily(tradeDate = '') {
+  const sequence = ++dailySequence
   loading.value = true
-  detailLoading.value = false
   error.value = ''
-  runDetail.value = null
-  clearCandidateSelection()
-  if (preferredRunId !== undefined) selectedRunId.value = preferredRunId
+  closeDetail(false)
   try {
-    const [nextOverview, nextStrategies] = await Promise.all([
-      api.automaticSelectionOverview(),
-      api.automaticSelectionStrategies(true),
-    ])
-    if (requestSequence !== evidenceRequestSequence) return
-    overview.value = nextOverview
-    strategies.value = nextStrategies
-    loading.value = false
-    const runId = preferredRunId ?? nextOverview.latest_run?.run_id ?? ''
-    if (runId) {
-      await loadRun(runId, candidateScope.value, 0, true, requestSequence)
-    } else {
-      selectedRunId.value = ''
-      runDetail.value = null
-      clearCandidateSelection()
-    }
+    const next = await api.automaticSelectionDaily(tradeDate || null)
+    if (sequence !== dailySequence) return
+    daily.value = next
+    showExplanation.value = false
   } catch (reason) {
-    if (requestSequence === evidenceRequestSequence) error.value = apiMessage(reason)
+    if (sequence === dailySequence) error.value = apiMessage(reason)
   } finally {
-    if (requestSequence === evidenceRequestSequence) loading.value = false
+    if (sequence === dailySequence) loading.value = false
   }
 }
 
-async function loadRun(
-  runId: string,
-  scope: CandidateScope = candidateScope.value,
-  offset = 0,
-  showSpinner = true,
-  requestSequence?: number
-) {
-  if (!runId) return
-  const activeRequestSequence = requestSequence ?? ++evidenceRequestSequence
-  runDetail.value = null
-  selectedRunId.value = runId
-  candidateScope.value = scope
-  clearCandidateSelection()
-  if (showSpinner) detailLoading.value = true
-  error.value = ''
+async function loadTrack(force = false) {
+  if ((track.value || trackLoading.value) && !force) return
+  const sequence = ++trackSequence
+  trackLoading.value = true
+  trackError.value = ''
   try {
-    const detail = await api.automaticSelectionRunDetail(
-      runId,
-      scope,
-      CANDIDATE_PAGE_SIZE,
-      offset
-    )
-    if (activeRequestSequence !== evidenceRequestSequence) return
-    runDetail.value = detail
-    seedCurrentCandidate()
+    const next = await api.automaticSelectionTrackRecord(120)
+    if (sequence !== trackSequence) return
+    track.value = next
   } catch (reason) {
-    if (activeRequestSequence === evidenceRequestSequence) error.value = apiMessage(reason)
+    if (sequence === trackSequence) trackError.value = apiMessage(reason)
   } finally {
-    if (activeRequestSequence === evidenceRequestSequence) detailLoading.value = false
+    if (sequence === trackSequence) trackLoading.value = false
   }
 }
 
-async function selectScope(scope: CandidateScope) {
-  if (scope === candidateScope.value || !selectedRunId.value) return
-  await loadRun(selectedRunId.value, scope, 0)
+function selectDate(tradeDate: string) {
+  const latest = dateOptions.value[0]?.trade_date
+  void loadDaily(tradeDate === latest ? '' : tradeDate)
 }
 
-async function handleScopeKeydown(event: KeyboardEvent) {
-  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-  event.preventDefault()
-  const currentIndex = candidateScopeOrder.indexOf(candidateScope.value)
-  const nextIndex = event.key === 'Home'
-    ? 0
-    : event.key === 'End'
-      ? candidateScopeOrder.length - 1
-      : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + candidateScopeOrder.length)
-        % candidateScopeOrder.length
-  const nextScope = candidateScopeOrder[nextIndex]
-  await selectScope(nextScope)
-  if (candidateScope.value !== nextScope) return
-  await nextTick()
-  if (typeof document !== 'undefined') {
-    document.getElementById(`candidate-scope-${nextScope}`)?.focus()
-  }
+function openDate(tradeDate: string) {
+  activeTab.value = 'today'
+  selectDate(tradeDate)
 }
 
-async function previousCandidatePage() {
-  if (!selectedRunId.value || candidateOffset.value <= 0) return
-  await loadRun(
-    selectedRunId.value,
-    candidateScope.value,
-    Math.max(0, candidateOffset.value - candidateLimit.value)
-  )
-}
-
-async function nextCandidatePage() {
-  const nextOffset = candidateOffset.value + candidateLimit.value
-  if (!selectedRunId.value || nextOffset >= candidateTotal.value) return
-  await loadRun(selectedRunId.value, candidateScope.value, nextOffset)
+async function refresh() {
+  notice.value = ''
+  const current = daily.value && !daily.value.is_latest ? daily.value.trade_date || '' : ''
+  await loadDaily(current)
+  if (track.value) await loadTrack(true)
 }
 
 async function dispatchRun() {
-  if (!canDispatch.value || actionLoading.value || loading.value || detailLoading.value) return
-  actionLoading.value = true
+  if (!canDispatch.value || dispatching.value) return
+  dispatching.value = true
   error.value = ''
   notice.value = ''
   try {
-    const result = await api.automaticSelectionDispatch()
-    evidenceRequestSequence += 1
-    selectedRunId.value = ''
-    runDetail.value = null
-    clearCandidateSelection()
-    candidateScope.value = 'top'
-    detailLoading.value = false
-    loading.value = false
-    notice.value = `任务已投递，运行编号 ${result.job_run_id}。完成后可刷新查看不可变证据。`
+    await api.automaticSelectionDispatch()
+    notice.value = '已开始重新同步数据并计算，通常几分钟内完成，稍后点击“刷新”查看。'
   } catch (reason) {
     error.value = apiMessage(reason)
   } finally {
-    actionLoading.value = false
+    dispatching.value = false
   }
 }
 
-function openActionDialog(action: Exclude<StrategyAction, null>) {
-  if (actionLoading.value) return
-  if (typeof document !== 'undefined') {
-    dialogTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    previousBodyOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-  }
-  strategyAction.value = action
-  void nextTick(() => dialogEl.value?.focus())
+function selectTab(key: TabKey) {
+  activeTab.value = key
+  if (key === 'history') void loadTrack()
 }
 
-function dismissActionDialog(restoreFocus = true) {
-  strategyAction.value = null
-  actionStrategy.value = null
-  confirmationNote.value = ''
+async function handleTabKeydown(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const keys = tabs.value.map((tab) => tab.key)
+  const index = keys.indexOf(activeTab.value)
+  const nextIndex = event.key === 'Home'
+    ? 0
+    : event.key === 'End'
+      ? keys.length - 1
+      : (index + (event.key === 'ArrowRight' ? 1 : -1) + keys.length) % keys.length
+  selectTab(keys[nextIndex])
+  await nextTick()
+  if (typeof document !== 'undefined') document.getElementById(`auto-tab-${keys[nextIndex]}`)?.focus()
+}
+
+function openDetail(symbol: string) {
+  if (!picks.value.some((pick) => pick.symbol === symbol)) return
   if (typeof document !== 'undefined') {
-    document.body.style.overflow = previousBodyOverflow
+    drawerTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!detailSymbol.value) {
+      previousBodyOverflow = document.body.style.overflow
+      document.body.style.overflow = 'hidden'
+    }
   }
-  const trigger = dialogTrigger
-  dialogTrigger = null
+  detailSymbol.value = symbol
+  void nextTick(() => drawerEl.value?.focus())
+}
+
+function closeDetail(restoreFocus = true) {
+  if (!detailSymbol.value) return
+  detailSymbol.value = ''
+  if (typeof document !== 'undefined') document.body.style.overflow = previousBodyOverflow
+  const trigger = drawerTrigger
+  drawerTrigger = null
   if (restoreFocus) void nextTick(() => trigger?.focus())
 }
 
-function trapDialogFocus(event: KeyboardEvent) {
-  const dialog = dialogEl.value
-  if (!dialog || typeof document === 'undefined') return
-  const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
-  ))
-  if (!focusable.length) {
-    event.preventDefault()
-    dialog.focus()
-    return
-  }
+function trapDrawerFocus(event: KeyboardEvent) {
+  const drawer = drawerEl.value
+  if (!drawer || typeof document === 'undefined') return
+  const focusable = Array.from(drawer.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])'))
+  if (!focusable.length) return
   const first = focusable[0]
   const last = focusable[focusable.length - 1]
-  if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === drawer)) {
     event.preventDefault()
     last.focus()
   } else if (!event.shiftKey && document.activeElement === last) {
@@ -465,1100 +285,843 @@ function trapDialogFocus(event: KeyboardEvent) {
   }
 }
 
-function openCreate(strategy?: AutomaticSelectionStrategy) {
-  if (!canManageStrategies.value || actionLoading.value) return
-  const source = strategy || overview.value?.official_strategy || strategies.value[0]
-  createForm.value = {
-    strategyKey: source?.strategy_key || '',
-    name: source ? `${source.name}（新版本）` : '',
-    lifecycleState: 'challenger',
-    parentStrategyId: source?.id || null,
-    configText: JSON.stringify(source?.config || {}, null, 2),
-  }
-  actionStrategy.value = source || null
-  confirmationNote.value = ''
-  openActionDialog('create')
-}
-
-function openPromote(strategy: AutomaticSelectionStrategy) {
-  if (actionLoading.value) return
-  actionStrategy.value = strategy
-  confirmationNote.value = ''
-  openActionDialog('promote')
-}
-
-function openRetire(strategy: AutomaticSelectionStrategy) {
-  if (actionLoading.value) return
-  actionStrategy.value = strategy
-  confirmationNote.value = ''
-  openActionDialog('retire')
-}
-
-function closeAction() {
-  if (actionLoading.value) return
-  dismissActionDialog()
-}
-
-async function submitStrategyAction() {
-  if (!strategyAction.value || actionLoading.value) return
-  actionLoading.value = true
-  error.value = ''
-  notice.value = ''
+async function addToWatchlist(pick: AutomaticSelectionPick) {
+  const state = watchlistState.value[pick.symbol]
+  if (!canWrite.value || state === 'adding' || state === 'added') return
+  watchlistState.value = { ...watchlistState.value, [pick.symbol]: 'adding' }
   try {
-    if (strategyAction.value === 'create') {
-      const parsed = JSON.parse(createForm.value.configText) as AutomaticSelectionStrategyConfig
-      const created = await api.automaticSelectionCreateStrategy({
-        strategy_key: createForm.value.strategyKey.trim(),
-        name: createForm.value.name.trim(),
-        config: parsed,
-        lifecycle_state: createForm.value.lifecycleState,
-        parent_strategy_id: createForm.value.parentStrategyId,
-      })
-      notice.value = `已创建 ${created.name} v${created.version}，原版本保持不变。`
-    } else if (strategyAction.value === 'promote' && actionStrategy.value) {
-      const promoted = await api.automaticSelectionPromoteStrategy(
-        actionStrategy.value.id,
-        confirmationNote.value.trim()
-      )
-      notice.value = `已人工晋升 ${promoted.name} v${promoted.version}。`
-    } else if (strategyAction.value === 'retire' && actionStrategy.value) {
-      const retired = await api.automaticSelectionRetireStrategy(
-        actionStrategy.value.id,
-        confirmationNote.value.trim() || null
-      )
-      notice.value = `已退役 ${retired.name} v${retired.version}，历史证据仍保留。`
-    }
-    dismissActionDialog(false)
-    await loadDashboard(selectedRunId.value)
-    await nextTick()
-    if (typeof document !== 'undefined') {
-      document.querySelector<HTMLElement>(
-        '[data-testid="automatic-selection-dispatch"], [data-testid="automatic-selection-command"] button'
-      )?.focus()
-    }
-  } catch (reason) {
-    error.value = reason instanceof SyntaxError ? '策略配置不是有效 JSON' : apiMessage(reason)
-  } finally {
-    actionLoading.value = false
+    const item = await api.addWatchlist({
+      symbol: pick.symbol,
+      group_name: '自动选股',
+      reason: `自动选股 ${fmtFullDate(daily.value?.trade_date)} 入选：${pick.headline}`.slice(0, 500),
+    })
+    watchlistState.value = { ...watchlistState.value, [pick.symbol]: 'added' }
+    emit('watchlistAdded', item)
+  } catch {
+    watchlistState.value = { ...watchlistState.value, [pick.symbol]: 'error' }
   }
 }
 
-onMounted(() => void loadDashboard())
+function askStock(pick: AutomaticSelectionPick) {
+  if (!canAsk.value) return
+  closeDetail(false)
+  emit('askStock', pick, daily.value?.trade_date || '')
+}
+
+function watchLabel(symbol: string): string {
+  const state = watchlistState.value[symbol]
+  if (state === 'adding') return '添加中...'
+  if (state === 'added') return '已加入自选'
+  if (state === 'error') return '加入失败，重试'
+  return '加入自选'
+}
+
+onMounted(() => void loadDaily())
 onBeforeUnmount(() => {
-  if (typeof document !== 'undefined') document.body.style.overflow = previousBodyOverflow
+  if (detailSymbol.value && typeof document !== 'undefined') document.body.style.overflow = previousBodyOverflow
 })
 </script>
 
 <template>
-  <section
-    class="automatic-selection-page"
-    aria-labelledby="automatic-selection-title"
-    :aria-busy="loading || detailLoading"
-    :inert="strategyAction ? true : undefined"
-  >
-    <header class="cockpit-command" data-testid="automatic-selection-command">
-      <div class="command-identity">
-        <div class="command-title-line">
-          <h1 id="automatic-selection-title">自动选股研究驾驶舱</h1>
-          <span v-if="currentRun" class="run-context" :class="{ historical: !isSelectedLatestRun }">
-            {{ runContextLabel }}
-          </span>
-        </div>
-        <p>确定性筛选、质量门禁与前瞻验证的一体化研究台</p>
-      </div>
-
-      <div v-if="currentRun" class="command-run" aria-label="当前运行摘要">
-        <div>
-          <span>目标交易日</span>
-          <strong>{{ fmtTradeDate(currentRun.target_trade_date) }}</strong>
-        </div>
-        <div>
-          <span>策略版本</span>
-          <strong>{{ currentRun.strategy_name }} · v{{ currentRun.strategy_version }}</strong>
-        </div>
-        <div>
-          <span>运行状态</span>
-          <span class="status-pill" :class="toneForStatus(currentRun.status)">
-            {{ statusLabels[currentRun.status] || currentRun.status }}
-          </span>
+  <section class="auto-page" aria-label="每日自动选股" :aria-busy="loading">
+    <header class="auto-command" data-testid="automatic-selection-command">
+      <div class="auto-context">
+        <label class="date-picker">
+          <span>交易日</span>
+          <select
+            :value="daily?.trade_date || ''"
+            :disabled="loading || !dateOptions.length"
+            aria-label="选择交易日"
+            data-testid="automatic-selection-date"
+            @change="selectDate(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-if="!dateOptions.length" value="">暂无结果</option>
+            <option v-for="(option, index) in dateOptions" :key="option.trade_date" :value="option.trade_date">
+              {{ fmtFullDate(option.trade_date) }}{{ index === 0 ? '（最新）' : '' }}{{ option.status === 'completed' ? '' : ` · ${option.status_label}` }}
+            </option>
+          </select>
+        </label>
+        <div v-if="daily?.strategy" class="strategy-chip">
+          <span>选股方案</span>
+          <strong>{{ daily.strategy.name }}</strong>
         </div>
       </div>
-
-      <div class="command-actions">
-        <button class="ui-btn ui-btn--ghost" type="button" @click="loadDashboard()">
-          刷新证据
-        </button>
+      <div class="auto-actions">
+        <button class="ui-btn ui-btn--ghost" type="button" :disabled="loading" @click="refresh">刷新</button>
         <button
           v-if="canDispatch"
           class="ui-btn ui-btn--primary"
           type="button"
-          :disabled="actionLoading || loading || detailLoading"
+          :disabled="dispatching"
           data-testid="automatic-selection-dispatch"
           @click="dispatchRun"
         >
-          {{ actionLoading ? '正在投递...' : '运行研究流水线' }}
+          {{ dispatching ? '正在提交...' : '重新计算' }}
         </button>
       </div>
     </header>
 
-    <div class="research-boundary" role="note">
-      <span class="boundary-mark">研究边界</span>
-      <strong>只做确定性选股与前瞻观察</strong>
-      <span>{{ overview?.limitations || '仅用于上线后的研究观察，不构成投资建议或交易指令。' }}</span>
-    </div>
+    <p class="auto-disclaimer" role="note">
+      每个交易日收盘后，系统按固定规则从全市场挑出一批观察股，并持续跟踪它们之后的表现。{{ daily?.disclaimer || '这是按固定规则打分排序的研究结果，不是对未来涨跌的预测，也不构成投资建议。' }}
+    </p>
 
     <div class="message-stack" aria-live="polite" aria-atomic="true">
       <div v-if="error" class="auto-notice auto-notice--danger" role="alert">{{ error }}</div>
       <div v-if="notice" class="auto-notice auto-notice--success" role="status">{{ notice }}</div>
-      <div v-if="currentRun?.error" class="run-error" role="alert">
-        <strong>当前运行错误</strong>
-        <span>{{ currentRun.error }}</span>
+    </div>
+
+    <div class="ui-tabs auto-tabs" role="tablist" aria-label="自动选股内容" @keydown="handleTabKeydown">
+      <button
+        v-for="tab in tabs"
+        :id="`auto-tab-${tab.key}`"
+        :key="tab.key"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === tab.key"
+        :aria-controls="`auto-panel-${tab.key}`"
+        :tabindex="activeTab === tab.key ? 0 : -1"
+        @click="selectTab(tab.key)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
+    <!-- 今日选股 -->
+    <section
+      v-if="activeTab === 'today'"
+      id="auto-panel-today"
+      class="tab-panel"
+      role="tabpanel"
+      aria-labelledby="auto-tab-today"
+      data-testid="automatic-selection-today"
+    >
+      <div v-if="loading && !daily" class="ui-empty" role="status">
+        <strong>正在读取选股结果...</strong>
       </div>
-    </div>
 
-    <div v-if="loading" class="page-section auto-loading" role="status" aria-live="polite">
-      正在读取自动选股研究账本...
-    </div>
-
-    <template v-else>
-      <section class="kpi-strip" aria-label="运行关键指标" data-testid="automatic-selection-kpis">
-        <div>
-          <span>研究池</span>
-          <strong>{{ currentRun?.universe_count ?? '—' }}</strong>
-          <small>全量输入标的</small>
-        </div>
-        <div>
-          <span>合格池</span>
-          <strong>{{ currentRun?.eligible_count ?? '—' }}</strong>
-          <small>通过硬性规则</small>
-        </div>
-        <div>
-          <span>Top-N</span>
-          <strong>{{ currentRun?.selected_count ?? '—' }}</strong>
-          <small>研究观察集</small>
-        </div>
-        <div>
-          <span>质量门禁</span>
-          <strong :class="qualityGate?.passed ? 'kpi-ok' : qualityGate ? 'kpi-warning' : ''">
-            {{ qualityGate ? (qualityGate.passed ? '通过' : '阻断') : '—' }}
-          </strong>
-          <small>{{ qualityGate?.failures.length ?? 0 }} 项阻断证据</small>
-        </div>
-        <div>
-          <span>入选换手</span>
-          <strong>{{ fmtPercent(currentRun?.selected_turnover) }}</strong>
-          <small>相邻观察集变化</small>
-        </div>
-        <div>
-          <span>运行阶段</span>
-          <strong class="kpi-stage">{{ currentRun ? (stageLabels[currentRun.stage] || currentRun.stage) : '—' }}</strong>
-          <small>{{ currentRun ? beijingFromDb(currentRun.finished_at || currentRun.started_at) : '等待首轮运行' }}</small>
-        </div>
-      </section>
-
-      <section class="cockpit-workspace" data-testid="automatic-selection-workspace">
-        <aside class="run-rail cockpit-panel" aria-labelledby="run-selector-title">
-          <header class="panel-heading">
-            <div>
-              <h2 id="run-selector-title">运行选择</h2>
-            </div>
-            <span>{{ selectableRuns.length }}</span>
-          </header>
-
-          <div v-if="selectableRuns.length" class="run-selector" role="listbox" aria-label="近期研究运行">
-            <button
-              v-for="run in selectableRuns"
-              :key="run.run_id"
-              type="button"
-              role="option"
-              class="run-option"
-              :class="{ selected: selectedRunId === run.run_id }"
-              :aria-selected="selectedRunId === run.run_id"
-              @click="loadRun(run.run_id)"
-            >
-              <span class="run-option-top">
-                <b>{{ fmtTradeDate(run.target_trade_date) }}</b>
-                <em :class="{ historical: overview?.latest_run?.run_id !== run.run_id }">
-                  {{ overview?.latest_run?.run_id === run.run_id ? '最新运行' : '历史运行' }}
-                </em>
-              </span>
-              <span>{{ run.strategy_name }} · v{{ run.strategy_version }}</span>
-              <span class="run-option-bottom">
-                <i :class="toneForStatus(run.status)">{{ statusLabels[run.status] || run.status }}</i>
-                <code>{{ run.run_id.slice(0, 8) }}</code>
-              </span>
-            </button>
-          </div>
-          <div v-else class="empty-state compact-empty">暂无运行账本</div>
-
-          <section class="rail-evidence" data-testid="automatic-selection-quality-gate" aria-labelledby="quality-gate-title">
-            <header class="rail-section-title">
-              <div>
-                <h3 id="quality-gate-title">质量与排除证据</h3>
-              </div>
-              <span v-if="qualityGate" class="gate-dot" :class="qualityGate.passed ? 'gate-pass' : 'gate-blocked'">
-                {{ qualityGate.passed ? '通过' : '阻断' }}
-              </span>
-            </header>
-            <p class="gate-policy">覆盖率不足时整条策略被阻断，不会静默删除缺失因子后继续排名。</p>
-
-            <dl v-if="qualityGate" class="quality-ledger">
-              <div>
-                <dt>目标日行情覆盖</dt>
-                <dd>{{ fmtCoverage(qualityGate.metrics.bar_coverage) }} <small>/ {{ fmtCoverage(qualityGate.thresholds.min_bar_coverage) }}</small></dd>
-              </div>
-              <div>
-                <dt>基础指标覆盖</dt>
-                <dd>{{ fmtCoverage(qualityGate.metrics.basic_coverage) }} <small>/ {{ fmtCoverage(qualityGate.thresholds.min_basic_coverage) }}</small></dd>
-              </div>
-              <div>
-                <dt>行业信息覆盖</dt>
-                <dd>{{ fmtCoverage(qualityGate.metrics.industry_coverage) }} <small>/ {{ fmtCoverage(qualityGate.thresholds.min_industry_coverage) }}</small></dd>
-              </div>
-              <div>
-                <dt>历史行情覆盖</dt>
-                <dd>
-                  {{ fmtCoverage(qualityGate.metrics.history_coverage) }} <small>/ {{ fmtCoverage(qualityGate.thresholds.min_history_coverage) }}</small>
-                  <small class="quality-detail">{{ qualityGate.metrics.history_count ?? 0 }} 只历史完整</small>
-                </dd>
-              </div>
-              <div>
-                <dt>最终合格池</dt>
-                <dd>{{ qualityGate.metrics.eligible_count ?? 0 }} <small>/ {{ qualityGate.thresholds.min_eligible_count ?? 0 }}</small></dd>
-              </div>
-              <div v-for="[factor, coverage] in factorCoverage" :key="factor">
-                <dt>{{ featureLabel(factor) }} 覆盖</dt>
-                <dd>{{ fmtCoverage(coverage) }} <small>/ {{ fmtCoverage(qualityGate.thresholds.min_factor_coverage) }}</small></dd>
-              </div>
-            </dl>
-            <div v-else class="empty-state compact-empty">首轮运行后展示数据完整性判定。</div>
-
-            <div v-if="qualityGate?.failures.length" class="gate-failures">
-              <strong>阻断证据</strong>
-              <span v-for="failure in qualityGate.failures" :key="failure.code">
-                {{ qualityLabels[failure.code] || featureLabel(failure.code.replace('factor_coverage:', '')) }}：
-                实际 {{ fmtQualityValue(failure.code, failure.actual ?? metricActual(failure.code)) }}，要求 {{ fmtQualityValue(failure.code, failure.required ?? metricRequired(failure.code)) }}
-                {{ failure.message || '' }}
-              </span>
-            </div>
-
-            <div class="exclusion-ledger">
-              <h4>排除分布</h4>
-              <div v-if="exclusionEvidence.length">
-                <span v-for="[code, count] in exclusionEvidence" :key="code">
-                  <b>{{ codeLabel(code) }}</b><strong>{{ count }}</strong>
-                </span>
-              </div>
-              <p v-else>当前运行没有可展示的排除汇总。</p>
-            </div>
-          </section>
-        </aside>
-
+      <template v-else-if="daily && status">
         <section
-          class="ranking-console cockpit-panel"
-          data-testid="automatic-selection-ranking"
-          aria-labelledby="ranking-title"
-          :aria-busy="detailLoading"
+          v-if="status.code === 'ok'"
+          class="conclusion ui-panel"
+          aria-labelledby="conclusion-title"
+          data-testid="automatic-selection-conclusion"
         >
-          <header class="ranking-toolbar">
-            <div>
-              <h2 id="ranking-title">候选排名</h2>
-              <p>按服务端名次与入选状态稳定呈现，页面不做二次排序。</p>
-            </div>
-            <div class="ranking-page-token" aria-label="当前服务端分页范围">
-              <span>当前页</span>
-              <strong>{{ candidateRange }}</strong>
-              <small>/ {{ candidateTotal }}</small>
-            </div>
-          </header>
-
-          <div class="scope-tabs" role="tablist" aria-label="候选范围" @keydown="handleScopeKeydown">
-            <button
-              id="candidate-scope-top"
-              type="button"
-              role="tab"
-              aria-controls="candidate-ranking-panel"
-              :aria-selected="candidateScope === 'top'"
-              :tabindex="candidateScope === 'top' ? 0 : -1"
-              :class="{ active: candidateScope === 'top' }"
-              @click="selectScope('top')"
-            >Top-N</button>
-            <button
-              id="candidate-scope-eligible"
-              type="button"
-              role="tab"
-              aria-controls="candidate-ranking-panel"
-              :aria-selected="candidateScope === 'eligible'"
-              :tabindex="candidateScope === 'eligible' ? 0 : -1"
-              :class="{ active: candidateScope === 'eligible' }"
-              @click="selectScope('eligible')"
-            >全量合格</button>
-            <button
-              id="candidate-scope-excluded"
-              type="button"
-              role="tab"
-              aria-controls="candidate-ranking-panel"
-              :aria-selected="candidateScope === 'excluded'"
-              :tabindex="candidateScope === 'excluded' ? 0 : -1"
-              :class="{ active: candidateScope === 'excluded' }"
-              @click="selectScope('excluded')"
-            >排除项</button>
+          <div class="conclusion-main">
+            <h2 id="conclusion-title">{{ status.title }}</h2>
+            <p class="conclusion-headline">{{ daily.summary?.headline }}</p>
+            <ul class="conclusion-facts">
+              <li>
+                <span>全市场</span><strong>{{ fmtCount(daily.summary?.universe_count) }}</strong>
+                <i aria-hidden="true">→</i>
+                <span>通过基础筛选</span><strong>{{ fmtCount(daily.summary?.eligible_count) }}</strong>
+                <i aria-hidden="true">→</i>
+                <span>入选</span><strong>{{ fmtCount(daily.summary?.selected_count) }}</strong>
+              </li>
+              <li>
+                <span>比上期</span>
+                <b class="change-added">新进 {{ daily.summary?.added ?? 0 }}</b>
+                <b>保留 {{ daily.summary?.retained ?? 0 }}</b>
+                <b>移出 {{ daily.summary?.removed ?? 0 }}</b>
+              </li>
+            </ul>
           </div>
-
-          <div
-            id="candidate-ranking-panel"
-            class="ranking-panel"
-            role="tabpanel"
-            :aria-labelledby="`candidate-scope-${candidateScope}`"
-          >
-            <div class="rank-boundary" role="note">
-              {{ selectedRunDetail
-                ? '固定 50 行服务端分页；仅选择当前页标的，不在本地跨页重排。'
-                : '运行详情暂不可用，当前仅展示首页摘要候选，不在本地重排。' }}
+          <div class="conclusion-side">
+            <div class="since-card" data-testid="automatic-selection-since">
+              <span>选出后至今</span>
+              <template v-if="since?.status === 'observing'">
+                <strong :class="toneForReturn(since.basket_return)">{{ fmtPct(since.basket_return) }}</strong>
+                <small>
+                  第 {{ since.trading_days }} 个交易日 · 合格股票平均
+                  <em :class="toneForReturn(since.benchmark_return)">{{ fmtPct(since.benchmark_return) }}</em>
+                </small>
+                <small>{{ since.note }}，截至 {{ fmtDate(since.as_of) }}</small>
+              </template>
+              <template v-else>
+                <strong class="muted-value">观察中</strong>
+                <small>{{ since?.note || '下一个交易日开盘后开始观察' }}</small>
+              </template>
             </div>
-            <div v-if="detailLoading" class="auto-loading auto-loading--inline" role="status" aria-live="polite">
-              正在切换证据范围...
-            </div>
-            <div v-else-if="candidates.length" class="candidate-table-wrap">
-              <table class="candidate-table">
-                <thead>
-                  <tr>
-                    <th class="rank-column">{{ candidateScope === 'excluded' ? '序号' : '排名' }}</th>
-                    <th>标的</th>
-                    <th class="num">目标日收盘 / 涨跌</th>
-                    <th>行业 / 市值</th>
-                    <template v-if="candidateScope === 'excluded'">
-                      <th colspan="2" class="exclusion-column">主要排除原因</th>
-                    </template>
-                    <template v-else>
-                      <th class="num">综合分</th>
-                      <th class="num">百分位</th>
-                    </template>
-                    <th class="status-column">状态</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="(item, itemIndex) in candidates"
-                    :key="item.symbol"
-                    v-memo="[item, selectedCandidateSymbol === item.symbol, candidateScope]"
-                    class="candidate-row"
-                    :class="{
-                      selected: selectedCandidateSymbol === item.symbol,
-                      'candidate-excluded': !item.eligible,
-                    }"
-                  >
-                    <td class="rank-cell"><strong>{{ candidateScope === 'excluded' ? candidateOffset + itemIndex + 1 : (item.rank ?? '—') }}</strong></td>
-                    <td>
-                      <button
-                        type="button"
-                        class="candidate-button"
-                        :aria-pressed="selectedCandidateSymbol === item.symbol"
-                        :aria-controls="selectedCandidateSymbol === item.symbol ? 'candidate-evidence-inspector' : undefined"
-                        @click="selectCandidate(item.symbol)"
-                      >
-                        <strong>{{ item.name || item.symbol }}</strong>
-                        <small>{{ item.symbol }}</small>
-                      </button>
-                    </td>
-                    <td class="num">
-                      <strong>{{ fmtNumber(item.close_price) }}</strong>
-                      <small :class="toneForReturn(item.pct_chg)">{{ item.pct_chg == null ? '—' : `${fmtNumber(item.pct_chg)}%` }}</small>
-                    </td>
-                    <td>
-                      {{ item.industry || '未知' }}
-                      <small>{{ item.market_cap_bucket || '—' }} · {{ fmtMarketCap(item.total_mv) }}</small>
-                    </td>
-                    <td v-if="candidateScope === 'excluded'" colspan="2" class="exclusion-cell">
-                      <span v-for="code in item.exclusion_codes.slice(0, 2)" :key="code">{{ codeLabel(code) }}</span>
-                      <small v-if="item.exclusion_codes.length > 2">另有 {{ item.exclusion_codes.length - 2 }} 项</small>
-                    </td>
-                    <template v-else>
-                      <td class="num score-cell">{{ fmtNumber(item.composite_score, 4) }}</td>
-                      <td class="num">{{ fmtPercent(item.percentile) }}</td>
-                    </template>
-                    <td>
-                      <span class="change-pill" :class="`change-${item.change_state}`">
-                        {{ changeLabels[item.change_state] || item.change_state }}
-                      </span>
-                      <small>{{ item.eligible ? (item.selected ? '入选观察集' : '合格未入选') : '规则排除' }}</small>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-else class="empty-state">当前范围暂无候选证据。</div>
+            <p class="track-line">{{ trackLine }}</p>
           </div>
-
-          <nav
-            v-if="!detailLoading && selectedRunDetail && candidateTotal > 0"
-            class="candidate-pagination"
-            aria-label="候选证据服务端分页"
-            data-testid="automatic-selection-pagination"
-          >
-            <span>共 {{ candidateTotal }} 条 · 第 {{ candidatePage }} / {{ candidatePageCount }} 页</span>
-            <div>
-              <button
-                class="ui-btn ui-btn--ghost"
-                type="button"
-                :disabled="candidateOffset <= 0"
-                @click="previousCandidatePage"
-              >
-                上一页
-              </button>
-              <button
-                class="ui-btn ui-btn--ghost"
-                type="button"
-                :disabled="candidateOffset + candidateLimit >= candidateTotal"
-                @click="nextCandidatePage"
-              >
-                下一页
-              </button>
-            </div>
-          </nav>
+          <div v-if="explanationHtml" class="explanation">
+            <button
+              class="ui-btn ui-btn--text"
+              type="button"
+              :aria-expanded="showExplanation"
+              aria-controls="auto-explanation"
+              @click="showExplanation = !showExplanation"
+            >
+              {{ showExplanation ? '收起 AI 点评' : '展开 AI 点评' }}
+            </button>
+            <div v-if="showExplanation" id="auto-explanation" class="explanation-body" v-html="explanationHtml"></div>
+          </div>
         </section>
 
-        <aside
-          id="candidate-evidence-inspector"
-          class="candidate-inspector cockpit-panel"
-          aria-labelledby="candidate-inspector-title"
-          aria-live="polite"
+        <section
+          v-else
+          class="status-panel ui-panel"
+          :class="`status-${status.code}`"
+          role="status"
+          data-testid="automatic-selection-status"
         >
-          <header class="panel-heading">
+          <h2>{{ status.title }}</h2>
+          <p>{{ status.message }}</p>
+          <ul v-if="status.issues.length">
+            <li v-for="issue in status.issues" :key="issue">{{ issue }}</li>
+          </ul>
+          <div class="status-actions">
+            <button
+              v-if="status.fallback_trade_date"
+              class="ui-btn ui-btn--ghost"
+              type="button"
+              @click="selectDate(status.fallback_trade_date)"
+            >
+              查看最近一次结果（{{ fmtDate(status.fallback_trade_date) }}）
+            </button>
+            <button
+              v-if="canDispatch && status.code !== 'running'"
+              class="ui-btn ui-btn--ghost"
+              type="button"
+              :disabled="dispatching"
+              @click="dispatchRun"
+            >
+              立即重新计算
+            </button>
+          </div>
+        </section>
+
+        <section v-if="picks.length" class="picks ui-panel" aria-labelledby="picks-title" data-testid="automatic-selection-picks">
+          <header class="ui-panel-head">
             <div>
-              <h2 id="candidate-inspector-title">标的证据检查器</h2>
+              <h3 id="picks-title">入选股票</h3>
+              <p>按综合得分从高到低排列；条形表示这一项超过了百分之多少的合格股票。点击查看详情。</p>
             </div>
-            <span v-if="selectedCandidate">#{{ selectedCandidate.rank ?? '—' }}</span>
           </header>
-
-          <template v-if="selectedCandidate">
-            <section class="inspector-identity">
-              <div>
-                <strong>{{ selectedCandidate.name || selectedCandidate.symbol }}</strong>
-                <code>{{ selectedCandidate.symbol }}</code>
-              </div>
-              <span class="change-pill" :class="`change-${selectedCandidate.change_state}`">
-                {{ changeLabels[selectedCandidate.change_state] || selectedCandidate.change_state }}
-              </span>
-              <dl>
-                <div><dt>综合分</dt><dd>{{ fmtNumber(selectedCandidate.composite_score, 4) }}</dd></div>
-                <div><dt>百分位</dt><dd>{{ fmtPercent(selectedCandidate.percentile) }}</dd></div>
-                <div><dt>研究权重</dt><dd>{{ fmtPercent(selectedCandidate.research_weight) }}</dd></div>
-                <div><dt>20 日动量</dt><dd :class="toneForReturn(selectedCandidate.momentum_20)">{{ fmtPercent(selectedCandidate.momentum_20) }}</dd></div>
-              </dl>
-            </section>
-
-            <section class="inspector-block rule-evidence">
-              <h3>规则判定</h3>
-              <div v-if="selectedCandidate.exclusion_codes.length || selectedCandidate.constraint_codes.length" class="code-list">
-                <span v-for="code in [...selectedCandidate.exclusion_codes, ...selectedCandidate.constraint_codes]" :key="code">
-                  {{ codeLabel(code) }}
-                </span>
-              </div>
-              <p v-else class="positive-evidence">未记录排除项或组合约束。</p>
-            </section>
-
-            <section class="inspector-block factor-evidence">
-              <h3>原始值 / z-score</h3>
-              <div v-if="Object.keys(selectedCandidate.factor_values).length || Object.keys(selectedCandidate.z_scores).length" class="factor-ledger">
-                <div v-for="(value, key) in selectedCandidate.factor_values" :key="`raw-${key}`">
-                  <span>{{ featureLabel(String(key)) }}</span><strong>{{ fmtNumber(value, 4) }}</strong><small>raw</small>
-                </div>
-                <div v-for="(value, key) in selectedCandidate.z_scores" :key="`z-${key}`">
-                  <span>{{ featureLabel(String(key)) }}</span><strong>{{ fmtNumber(value, 4) }}</strong><small>z</small>
-                </div>
-              </div>
-              <p v-else>暂无扩展因子证据。</p>
-            </section>
-
-            <section class="inspector-block market-evidence">
-              <h3>行情与输入快照</h3>
-              <dl>
-                <div><dt>收盘价</dt><dd>{{ fmtNumber(selectedCandidate.close_price) }}</dd></div>
-                <div><dt>PE / PB</dt><dd>{{ fmtNumber(selectedCandidate.pe_ttm) }} / {{ fmtNumber(selectedCandidate.pb) }}</dd></div>
-                <div><dt>总市值</dt><dd>{{ fmtMarketCap(selectedCandidate.total_mv) }}</dd></div>
-                <div><dt>20 日均成交额</dt><dd>{{ fmtAmount(selectedCandidate.avg_amount_20) }}</dd></div>
-                <div><dt>20 日波动</dt><dd>{{ fmtPercent(selectedCandidate.volatility_20) }}</dd></div>
-                <div><dt>历史点位</dt><dd>{{ selectedCandidate.input_evidence?.history?.length ?? 0 }} / {{ selectedCandidate.input_evidence?.expected_history_dates?.length ?? 0 }}</dd></div>
-              </dl>
-            </section>
-          </template>
-          <div v-else class="empty-state inspector-empty">
-            <strong>未选择当前页标的</strong>
-            <span>运行、范围或分页切换时会清空旧选择；新证据到达后自动选择当前页首项。</span>
-          </div>
-        </aside>
-      </section>
-
-      <section class="validation-section" aria-labelledby="validation-title" data-testid="automatic-selection-validation">
-        <header class="governance-heading">
-          <div>
-            <h2 id="validation-title">前瞻验证与落库后解释</h2>
-          </div>
-          <p>确定性排名先落库，统计观察与模型解释均不能回写排名。</p>
-        </header>
-
-        <div class="validation-grid">
-          <article class="validation-panel evaluation-section" data-testid="automatic-selection-evaluations">
-            <header class="validation-panel-header">
-              <div>
-                <h3>5 / 20 / 60 交易日前瞻评估</h3>
-                <p>T 日收盘后选择，下一交易日开盘进入观察窗口。</p>
-              </div>
-            </header>
-            <div v-if="evaluations.length" class="evaluation-grid">
-              <article v-for="evaluation in evaluations" :key="evaluation.horizon">
-                <header>
-                  <strong>{{ evaluation.horizon }} 日</strong>
-                  <span class="status-pill" :class="toneForStatus(evaluation.status)">{{ statusLabels[evaluation.status] || evaluation.status }}</span>
-                </header>
-                <dl>
-                  <div><dt>组合收益</dt><dd :class="toneForReturn(evaluation.basket_return)">{{ fmtPercent(evaluation.basket_return) }}</dd></div>
-                  <div><dt>基准收益</dt><dd :class="toneForReturn(evaluation.benchmark_return)">{{ fmtPercent(evaluation.benchmark_return) }}</dd></div>
-                  <div><dt>超额收益</dt><dd :class="toneForReturn(evaluation.excess_return)">{{ fmtPercent(evaluation.excess_return) }}</dd></div>
-                  <div><dt>覆盖率</dt><dd>{{ fmtCoverage(evaluation.coverage_ratio) }}</dd></div>
-                  <div><dt>最大回撤</dt><dd :class="toneForDrawdown(evaluation.max_drawdown)">{{ fmtPercent(evaluation.max_drawdown) }}</dd></div>
-                  <div><dt>Sharpe / IR</dt><dd>{{ fmtNumber(evaluation.sharpe) }} / {{ fmtNumber(evaluation.information_ratio) }}</dd></div>
-                </dl>
-                <small>{{ fmtTradeDate(evaluation.entry_trade_date) }} → {{ fmtTradeDate(evaluation.exit_trade_date) }}</small>
-                <p v-if="evaluation.error" class="evaluation-error">{{ evaluation.error }}</p>
-              </article>
-            </div>
-            <div v-else class="empty-state">运行完成后创建 5 / 20 / 60 日评估窗口。</div>
-          </article>
-
-          <article class="validation-panel explanation-section">
-            <header class="validation-panel-header">
-              <div>
-                <h3>落库后模型解释</h3>
-                <p>模型仅解释已落库内容，不参与评分、排名或策略晋升。</p>
-              </div>
-              <span v-if="currentRun" class="status-pill" :class="currentRun.llm_status === 'completed' ? 'tone-ok' : currentRun.llm_status === 'failed' ? 'tone-warning' : 'tone-muted'">
-                {{ currentRun.llm_status || '未生成' }}
-              </span>
-            </header>
-            <div v-if="explanationHtml" class="explanation-body" v-html="explanationHtml"></div>
-            <div v-else-if="currentRun?.llm_error" class="explanation-error">解释生成失败：{{ currentRun.llm_error }}</div>
-            <div v-else class="empty-state">暂无模型解释；确定性排名仍可独立使用和复核。</div>
-            <footer v-if="currentRun?.llm_model">模型：{{ currentRun.llm_model }}</footer>
-          </article>
-        </div>
-      </section>
-
-      <section class="governance-section" aria-labelledby="governance-title" data-testid="automatic-selection-governance">
-        <header class="governance-heading">
-          <div>
-            <h2 id="governance-title">策略治理与运行审计</h2>
-          </div>
-          <p>生命周期动作由人确认；不可变版本与运行证据长期保留。</p>
-        </header>
-
-        <div class="governance-grid">
-          <article class="governance-panel strategy-section" data-testid="automatic-selection-strategies">
-            <header class="governance-panel-header">
-              <div>
-                <h3>策略版本与生命周期</h3>
-                <p v-if="overview?.official_strategy">
-                  当前正式：{{ overview.official_strategy.name }} · v{{ overview.official_strategy.version }}
-                </p>
-                <p v-else>当前暂无正式策略</p>
-              </div>
-              <button v-if="canManageStrategies" class="ui-btn ui-btn--primary" type="button" @click="openCreate()">新建策略版本</button>
-            </header>
-            <div class="strategy-list">
-              <article v-for="strategy in sortedStrategies" :key="strategy.id" :class="{ official: strategy.is_official }">
-                <header>
-                  <div>
-                    <span class="lifecycle-pill" :class="`lifecycle-${strategy.lifecycle_state}`">{{ lifecycleLabel(strategy.lifecycle_state) }}</span>
-                    <strong>{{ strategy.name }} <small>v{{ strategy.version }}</small></strong>
-                  </div>
-                  <div v-if="canManageStrategies" class="strategy-actions">
-                    <button type="button" @click="openCreate(strategy)">基于此版本新建</button>
-                    <button v-if="!strategy.is_official && strategy.lifecycle_state !== 'retired'" type="button" @click="openPromote(strategy)">人工晋升</button>
-                    <button v-if="!strategy.is_official && strategy.lifecycle_state !== 'retired'" type="button" class="danger-link" @click="openRetire(strategy)">退役</button>
-                  </div>
-                </header>
-                <div class="strategy-meta">
-                  <span>{{ strategy.strategy_key }}</span>
-                  <span>Top-N {{ strategy.config?.top_n ?? '—' }}</span>
-                  <span>{{ strategy.enabled ? '运行中' : '已停用' }}</span>
-                  <span>{{ beijingFromDb(strategy.created_at) }}</span>
-                </div>
-                <code>{{ strategy.config_hash }}</code>
-                <p v-if="strategy.promotion_note">晋升说明：{{ strategy.promotion_note }}</p>
-              </article>
-            </div>
-          </article>
-
-          <article class="governance-panel run-audit-section">
-            <header class="governance-panel-header">
-              <div>
-                <h3>运行审计账本</h3>
-                <p>相同输入复用同一运行；修订通过 supersede 链追溯。</p>
-              </div>
-            </header>
-            <div v-if="overview?.recent_runs.length" class="audit-list">
+          <ol class="pick-list">
+            <li v-for="pick in picks" :key="pick.symbol">
               <button
-                v-for="run in overview.recent_runs"
-                :key="run.run_id"
                 type="button"
-                :aria-selected="selectedRunId === run.run_id"
-                :class="{ selected: selectedRunId === run.run_id }"
-                @click="loadRun(run.run_id)"
+                class="pick-row"
+                :aria-label="`${pick.name} 第 ${pick.rank} 名，查看详情`"
+                @click="openDetail(pick.symbol)"
               >
-                <span><strong>{{ fmtTradeDate(run.target_trade_date) }}</strong><small>{{ run.strategy_name }} · v{{ run.strategy_version }}</small></span>
-                <span><b>{{ run.universe_count }} / {{ run.eligible_count }} / {{ run.selected_count }}</b><small>研究池 / 合格 / Top-N</small></span>
-                <span><code>{{ run.data_fingerprint.slice(0, 14) }}…</code><small>{{ run.supersedes_run_id ? '修订运行' : '原始运行' }}</small></span>
-                <span class="status-pill" :class="toneForStatus(run.status)">{{ statusLabels[run.status] || run.status }}</span>
+                <span class="pick-rank">{{ pick.rank }}</span>
+                <span class="pick-identity">
+                  <strong>{{ pick.name }}</strong>
+                  <small>{{ pick.symbol }} · {{ pick.industry || '未分类' }}{{ pick.market_cap_label ? ` · ${pick.market_cap_label}` : '' }}</small>
+                  <span class="pick-tags">
+                    <em v-if="pick.change_state === 'added'" class="tag-new">新进</em>
+                    <em v-if="pick.risks.some((risk) => risk.level === 'warning')" class="tag-risk">需留意</em>
+                  </span>
+                </span>
+                <span class="pick-reason">{{ pick.headline }}</span>
+                <span class="pick-dims" aria-hidden="true">
+                  <span v-for="dim in pick.dimensions" :key="dim.key" class="dim-bar" :class="scoreTone(dim.score)">
+                    <b>{{ dim.label }}</b>
+                    <i><s :style="{ width: `${dim.score ?? 0}%` }"></s></i>
+                    <em>{{ dim.score ?? '—' }}</em>
+                  </span>
+                </span>
+                <span class="pick-perf">
+                  <small>选出后</small>
+                  <strong :class="toneForReturn(pick.performance.since_selection)">
+                    {{ pick.performance.since_selection == null ? '观察中' : fmtPct(pick.performance.since_selection) }}
+                  </strong>
+                </span>
+                <svg v-if="pick.price_path.length" class="pick-spark" viewBox="0 0 100 28" preserveAspectRatio="none" role="img" :aria-label="`选出前 20 个交易日走势 ${fmtPct(pathChange(pick.price_path))}`">
+                  <polyline :points="sparkPoints(pick.price_path)" :class="toneForReturn(pathChange(pick.price_path))" />
+                </svg>
+                <span v-else class="pick-spark"></span>
               </button>
+            </li>
+          </ol>
+          <p v-if="daily.removed.length" class="removed-line">
+            本期移出 {{ daily.removed.length }} 只：{{ daily.removed.slice(0, 12).map((item) => item.name).join('、') }}{{ daily.removed.length > 12 ? ' 等' : '' }}
+          </p>
+        </section>
+
+        <section v-if="daily.performance.horizons.length" class="horizons ui-panel" aria-labelledby="horizons-title">
+          <header class="ui-panel-head">
+            <div>
+              <h3 id="horizons-title">这一批股票之后的表现</h3>
+              <p>以下一个交易日开盘价为起点，扣除佣金和滑点，和同一天所有合格股票的平均表现对比。</p>
             </div>
-            <div v-else class="empty-state">暂无运行账本。</div>
+          </header>
+          <div class="horizon-grid">
+            <article v-for="item in daily.performance.horizons" :key="item.horizon">
+              <header>
+                <strong>{{ item.horizon }} 个交易日</strong>
+                <span class="ui-pill" :class="item.status === 'completed' ? 'ui-pill--ok' : item.status === 'pending' ? 'ui-pill--muted' : 'ui-pill--warning'">{{ item.status_label }}</span>
+              </header>
+              <template v-if="item.status === 'completed'">
+                <dl>
+                  <div><dt>入选组合</dt><dd :class="toneForReturn(item.basket_return)">{{ fmtPct(item.basket_return) }}</dd></div>
+                  <div><dt>合格股票平均</dt><dd :class="toneForReturn(item.benchmark_return)">{{ fmtPct(item.benchmark_return) }}</dd></div>
+                  <div>
+                    <dt>{{ (item.excess_return ?? 0) >= 0 ? '跑赢' : '跑输' }}</dt>
+                    <dd :class="toneForReturn(item.excess_return)">{{ fmtPct(item.excess_return == null ? null : Math.abs(item.excess_return), false) }}</dd>
+                  </div>
+                </dl>
+                <small>{{ fmtDate(item.entry_trade_date) }} → {{ fmtDate(item.exit_trade_date) }}</small>
+              </template>
+              <p v-else>{{ item.status === 'pending' ? '还没到期，到期后自动统计。' : item.note || '这一期数据不足，系统会继续重试。' }}</p>
+            </article>
+          </div>
+        </section>
+      </template>
+
+      <div v-else-if="!loading" class="ui-empty">
+        <strong>暂时读不到选股结果</strong>
+        <p>请稍后点击“刷新”重试。</p>
+      </div>
+    </section>
+
+    <!-- 历史战绩 -->
+    <section
+      v-else-if="activeTab === 'history'"
+      id="auto-panel-history"
+      class="tab-panel"
+      role="tabpanel"
+      aria-labelledby="auto-tab-history"
+      data-testid="automatic-selection-history"
+    >
+      <div v-if="trackLoading && !track" class="ui-empty" role="status"><strong>正在读取历史战绩...</strong></div>
+      <div v-else-if="trackError" class="auto-notice auto-notice--danger" role="alert">{{ trackError }}</div>
+      <template v-else-if="track">
+        <div class="summary-grid">
+          <article v-for="item in trackSummary" :key="item.horizon" class="ui-panel summary-card">
+            <header>
+              <h3>{{ item.horizon }} 个交易日后</h3>
+              <span>{{ item.completed }} 期已到期<template v-if="item.pending"> · {{ item.pending }} 期观察中</template></span>
+            </header>
+            <template v-if="item.completed">
+              <strong class="summary-rate">{{ item.wins }} / {{ item.completed }}</strong>
+              <small>期跑赢合格股票平均（胜率 {{ fmtPct(item.win_rate, false, 0) }}）</small>
+              <dl>
+                <div><dt>平均每期{{ (item.avg_excess_return ?? 0) >= 0 ? '跑赢' : '跑输' }}</dt><dd :class="toneForReturn(item.avg_excess_return)">{{ fmtPct(item.avg_excess_return == null ? null : Math.abs(item.avg_excess_return), false) }}</dd></div>
+                <div><dt>入选组合平均</dt><dd :class="toneForReturn(item.avg_basket_return)">{{ fmtPct(item.avg_basket_return) }}</dd></div>
+                <div><dt>最好 / 最差一期</dt><dd><span :class="toneForReturn(item.best_excess_return)">{{ fmtPct(item.best_excess_return) }}</span> / <span :class="toneForReturn(item.worst_excess_return)">{{ fmtPct(item.worst_excess_return) }}</span></dd></div>
+              </dl>
+            </template>
+            <p v-else class="summary-empty">还没有到期的结果。</p>
           </article>
         </div>
+
+        <section v-if="trackBars.length" class="ui-panel chart-panel" aria-labelledby="track-chart-title">
+          <header class="ui-panel-head">
+            <div>
+              <h3 id="track-chart-title">每期 5 日表现：跑赢（红）/ 跑输（绿）合格股票平均</h3>
+              <p>从左到右按时间排列；柱子越高，差距越大。</p>
+            </div>
+          </header>
+          <svg class="track-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="每期 5 日超额表现柱状图">
+            <line x1="0" y1="50" x2="100" y2="50" class="zero-line" />
+            <rect
+              v-for="bar in trackBars"
+              :key="bar.date"
+              :x="bar.x"
+              :y="bar.y"
+              :width="bar.width"
+              :height="bar.height"
+              :class="toneForReturn(bar.value)"
+            >
+              <title>{{ fmtFullDate(bar.date) }}：{{ fmtPct(bar.value) }}</title>
+            </rect>
+          </svg>
+        </section>
+
+        <section class="ui-panel" aria-labelledby="track-table-title">
+          <header class="ui-panel-head">
+            <div>
+              <h3 id="track-table-title">每期明细</h3>
+              <p>点击日期查看当天选出的股票。</p>
+            </div>
+          </header>
+          <div v-if="trackPeriods.length" class="ui-table-wrap track-table-wrap">
+            <table class="ui-table track-table">
+              <thead>
+                <tr>
+                  <th>选出日期</th>
+                  <th class="num">入选</th>
+                  <th v-for="horizon in [5, 20, 60]" :key="horizon" class="num">{{ horizon }} 日：组合 / 平均 / 差距</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="period in trackPeriods" :key="period.run_id">
+                  <td>
+                    <button class="ui-btn ui-btn--text" type="button" @click="openDate(period.trade_date)">{{ fmtFullDate(period.trade_date) }}</button>
+                  </td>
+                  <td class="num">{{ period.selected_count }}</td>
+                  <td v-for="(cell, index) in periodCells(period)" :key="index" class="num">
+                    <template v-if="cell.status === 'completed'">
+                      <span :class="toneForReturn(cell.basket_return)">{{ fmtPct(cell.basket_return) }}</span>
+                      / {{ fmtPct(cell.benchmark_return) }} /
+                      <strong :class="toneForReturn(cell.excess_return)">{{ fmtPct(cell.excess_return) }}</strong>
+                    </template>
+                    <span v-else class="muted-value">{{ cell.status_label }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="ui-empty">
+            <strong>还没有完成的选股记录</strong>
+            <p>每个交易日收盘后自动生成，之后在这里累积战绩。</p>
+          </div>
+        </section>
+
+        <ul class="notes">
+          <li v-for="note in track.notes" :key="note">{{ note }}</li>
+        </ul>
+      </template>
+    </section>
+
+    <!-- 选股方法 -->
+    <section
+      v-else-if="activeTab === 'method'"
+      id="auto-panel-method"
+      class="tab-panel method-panel"
+      role="tabpanel"
+      aria-labelledby="auto-tab-method"
+      data-testid="automatic-selection-method"
+    >
+      <section v-if="daily?.funnel" class="ui-panel" aria-labelledby="funnel-title">
+        <header class="ui-panel-head">
+          <div>
+            <h3 id="funnel-title">{{ fmtDate(daily.trade_date) }}：从全市场到入选</h3>
+            <p>{{ daily.funnel.overlap_note }}</p>
+          </div>
+        </header>
+        <div class="ui-panel-body funnel">
+          <div v-for="step in daily.funnel.steps" :key="step.key" class="funnel-step">
+            <div class="funnel-bar" :style="{ width: funnelWidth(step.count) }">
+              <strong>{{ fmtCount(step.count) }}</strong>
+              <span>{{ step.label }}</span>
+            </div>
+            <p>{{ step.note }}</p>
+          </div>
+          <div v-if="daily.funnel.exclusions.length" class="exclusion-list">
+            <h4>剔除原因</h4>
+            <ul>
+              <li v-for="item in daily.funnel.exclusions" :key="item.code"><span>{{ item.label }}</span><b>{{ fmtCount(item.count) }}</b></li>
+            </ul>
+          </div>
+        </div>
       </section>
-    </template>
+
+      <div v-if="daily" class="method-grid">
+        <section class="ui-panel">
+          <header class="ui-panel-head"><h3>第一步：基础筛选</h3></header>
+          <ul class="ui-panel-body rule-list">
+            <li v-for="rule in daily.method.filters" :key="rule">{{ rule }}</li>
+          </ul>
+        </section>
+        <section class="ui-panel">
+          <header class="ui-panel-head"><h3>第二步：打分</h3></header>
+          <div class="ui-panel-body">
+            <ul class="weight-list">
+              <li v-for="dim in daily.method.dimensions" :key="dim.key">
+                <span><b>{{ dim.label }}</b><em>{{ dim.weight_percent }}%</em></span>
+                <i><s :style="{ width: `${dim.weight_percent}%` }"></s></i>
+                <small>{{ dim.description }}</small>
+              </li>
+            </ul>
+            <p class="method-note">{{ daily.method.scoring }}</p>
+          </div>
+        </section>
+        <section class="ui-panel">
+          <header class="ui-panel-head"><h3>第三步：挑选</h3></header>
+          <ul class="ui-panel-body rule-list">
+            <li v-for="rule in daily.method.selection" :key="rule">{{ rule }}</li>
+          </ul>
+        </section>
+        <section class="ui-panel">
+          <header class="ui-panel-head"><h3>怎么检验效果</h3></header>
+          <ul class="ui-panel-body rule-list">
+            <li v-for="rule in daily.method.evaluation" :key="rule">{{ rule }}</li>
+            <li>{{ daily.method.schedule }}</li>
+          </ul>
+        </section>
+      </div>
+      <p v-if="daily" class="method-limit">{{ daily.method.disclaimer }}{{ daily.method.limitations }}</p>
+    </section>
+
+    <!-- 高级：运行记录与策略管理 -->
+    <section
+      v-else-if="activeTab === 'advanced' && canSeeAdvanced"
+      id="auto-panel-advanced"
+      class="tab-panel"
+      role="tabpanel"
+      aria-labelledby="auto-tab-advanced"
+    >
+      <AutomaticSelectionAudit :user="user" />
+    </section>
 
     <Teleport to="body">
-      <div v-if="strategyAction" class="auto-dialog-backdrop" @mousedown.self="closeAction">
-        <form
-          ref="dialogEl"
-          class="auto-dialog"
+      <div v-if="detailPick" class="drawer-backdrop" @mousedown.self="closeDetail()">
+        <aside
+          ref="drawerEl"
+          class="pick-drawer"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="strategy-dialog-title"
+          aria-labelledby="pick-drawer-title"
           tabindex="-1"
-          @keydown.esc.stop.prevent="closeAction"
-          @keydown.tab="trapDialogFocus"
-          @submit.prevent="submitStrategyAction"
+          data-testid="automatic-selection-detail"
+          @keydown.esc.stop.prevent="closeDetail()"
+          @keydown.tab="trapDrawerFocus"
         >
-          <header>
+          <header class="drawer-head">
             <div>
-              <h2 v-if="strategyAction === 'create'" id="strategy-dialog-title">创建不可变策略版本</h2>
-              <h2 v-else-if="strategyAction === 'promote'" id="strategy-dialog-title">人工晋升策略</h2>
-              <h2 v-else id="strategy-dialog-title">退役策略</h2>
+              <h2 id="pick-drawer-title">{{ detailPick.name }} <small>{{ detailPick.symbol }}</small></h2>
+              <p>
+                第 {{ detailPick.rank }} 名 / {{ fmtCount(detailPick.eligible_count) }} 只合格股票
+                <template v-if="detailPick.top_percent != null">（前 {{ detailPick.top_percent }}%）</template>
+                · {{ detailPick.industry || '未分类' }}<template v-if="detailPick.change_label !== '—'"> · {{ detailPick.change_label }}</template>
+              </p>
             </div>
-            <button type="button" aria-label="关闭策略治理对话框" @click="closeAction">×</button>
+            <button type="button" class="drawer-close" aria-label="关闭详情" @click="closeDetail()">×</button>
           </header>
 
-          <div v-if="strategyAction === 'create'" class="auto-dialog-body">
-            <label>策略标识<input v-model="createForm.strategyKey" required pattern="[a-z][a-z0-9-]{2,63}" /></label>
-            <label>版本名称<input v-model="createForm.name" required maxlength="160" /></label>
-            <label>初始状态<select v-model="createForm.lifecycleState"><option value="challenger">挑战者</option><option value="shadow">影子</option></select></label>
-            <label class="dialog-span">版本化配置 JSON<textarea v-model="createForm.configText" rows="18" required spellcheck="false"></textarea></label>
-            <p class="dialog-span">父版本：{{ actionStrategy ? `${actionStrategy.name} v${actionStrategy.version}` : '无' }}。提交后只能继续创建新版本，不能原地修改。</p>
-          </div>
-          <div v-else class="auto-dialog-body single-column">
-            <div class="action-target"><strong>{{ actionStrategy?.name }} v{{ actionStrategy?.version }}</strong><code>{{ actionStrategy?.config_hash }}</code></div>
-            <label v-if="strategyAction === 'promote'">人工核验说明<textarea v-model="confirmationNote" rows="5" minlength="4" maxlength="1000" required placeholder="说明已核验的前瞻证据、质量门禁与风险边界"></textarea></label>
-            <label v-else>退役说明<textarea v-model="confirmationNote" rows="4" maxlength="1000" placeholder="可选：说明退役原因"></textarea></label>
-            <p v-if="strategyAction === 'promote'" class="promotion-evidence-notice" role="note">
-              最低晋升证据：至少 1 个已到期且覆盖达标的 5 日前瞻窗口；这只是最低观察证据，不代表统计显著或策略已通过统计验证。
-            </p>
-            <p>{{ strategyAction === 'promote' ? '该动作会将当前正式策略降为挑战者，并追加不可变审计事件。' : '退役后不再参与每日运行，但历史运行、候选和评估证据仍保留。' }}</p>
-          </div>
+          <section class="drawer-block">
+            <h3>为什么入选</h3>
+            <ul class="reason-list">
+              <li v-for="dim in detailPick.dimensions" :key="dim.key" :class="scoreTone(dim.score)">
+                <div class="reason-head">
+                  <b>{{ dim.label }}</b>
+                  <span>{{ dim.score ?? '—' }} 分 · 权重 {{ dim.weight_percent }}%</span>
+                </div>
+                <i><s :style="{ width: `${dim.score ?? 0}%` }"></s></i>
+                <p>{{ dim.detail }}</p>
+              </li>
+            </ul>
+          </section>
 
-          <footer>
-            <button class="ui-btn ui-btn--ghost" type="button" :disabled="actionLoading" @click="closeAction">取消</button>
-            <button class="ui-btn" :class="strategyAction === 'retire' ? 'ui-btn--danger' : 'ui-btn--primary'" type="submit" :disabled="actionLoading">
-              {{ actionLoading ? '正在提交...' : strategyAction === 'create' ? '创建新版本' : strategyAction === 'promote' ? '确认人工晋升' : '确认退役' }}
+          <section class="drawer-block">
+            <h3>需要注意</h3>
+            <ul v-if="detailPick.risks.length" class="risk-list">
+              <li v-for="risk in detailPick.risks" :key="risk.text" :class="`risk-${risk.level}`">{{ risk.text }}</li>
+            </ul>
+            <p v-else class="muted-value">按规则检查没有发现明显风险点，但这不代表没有风险。</p>
+          </section>
+
+          <section class="drawer-block">
+            <h3>关键数据</h3>
+            <dl class="fact-grid">
+              <div><dt>收盘价</dt><dd>{{ fmtNum(detailPick.close_price) }} 元</dd></div>
+              <div><dt>当天涨跌</dt><dd :class="toneForReturn(detailPick.pct_chg)">{{ detailPick.pct_chg == null ? '—' : `${fmtNum(detailPick.pct_chg)}%` }}</dd></div>
+              <div><dt>总市值</dt><dd>{{ fmtNum(detailPick.total_mv_yi, 1) }} 亿元</dd></div>
+              <div><dt>市盈率 / 市净率</dt><dd>{{ fmtNum(detailPick.pe_ttm, 1) }} / {{ fmtNum(detailPick.pb) }}</dd></div>
+              <div><dt>近 20 日涨跌</dt><dd :class="toneForReturn(detailPick.momentum_20)">{{ fmtPct(detailPick.momentum_20) }}</dd></div>
+              <div><dt>日均成交额</dt><dd>{{ fmtNum(detailPick.avg_amount_yi) }} 亿元</dd></div>
+            </dl>
+          </section>
+
+          <section class="drawer-block">
+            <h3>选出后表现</h3>
+            <dl class="fact-grid">
+              <div>
+                <dt>至今</dt>
+                <dd :class="toneForReturn(detailPick.performance.since_selection)">
+                  {{ detailPick.performance.since_selection == null ? '观察中' : fmtPct(detailPick.performance.since_selection) }}
+                </dd>
+              </div>
+              <div v-for="item in detailPick.performance.horizons" :key="item.horizon">
+                <dt>{{ item.horizon }} 个交易日</dt>
+                <dd :class="toneForReturn(item.net_return)">{{ item.net_return == null ? item.status_label : fmtPct(item.net_return) }}</dd>
+              </div>
+            </dl>
+            <p v-if="since?.note" class="muted-value">“至今”{{ since.note }}。</p>
+          </section>
+
+          <footer class="drawer-actions">
+            <button v-if="canAsk" class="ui-btn ui-btn--primary" type="button" @click="askStock(detailPick)">问股：深入分析</button>
+            <button
+              v-if="canWrite"
+              class="ui-btn ui-btn--ghost"
+              type="button"
+              :disabled="watchlistState[detailPick.symbol] === 'adding' || watchlistState[detailPick.symbol] === 'added'"
+              @click="addToWatchlist(detailPick)"
+            >
+              {{ watchLabel(detailPick.symbol) }}
             </button>
           </footer>
-        </form>
+          <p class="drawer-foot">数据日期 {{ fmtFullDate(daily?.trade_date) }}<template v-if="daily?.run?.finished_at"> · 计算完成于 {{ beijingFromDb(daily.run.finished_at) }}</template></p>
+        </aside>
       </div>
     </Teleport>
   </section>
 </template>
 
 <style scoped>
-.automatic-selection-page {
-  display: grid;
-  gap: 12px;
-  color: var(--text);
-}
+.auto-page { display: grid; gap: 12px; color: var(--text); }
 
-.boundary-mark {
-  color: var(--gold);
-  font-size: 12px;
-}
-
-.cockpit-command {
-  display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(420px, auto) auto;
-  align-items: center;
-  gap: 20px;
-  min-height: 78px;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  padding: 12px 14px;
-  background:
-    linear-gradient(100deg, rgba(213, 180, 106, .08), transparent 38%),
-    #0e0e10;
-  box-shadow: inset 3px 0 var(--gold-dim);
-}
-
-.command-identity { min-width: 0; }
-.command-title-line { display: flex; align-items: center; gap: 10px; margin-top: 3px; }
-.command-title-line h1 { margin: 0; color: #f1e4bd; font-size: 20px; letter-spacing: -.02em; }
-.command-identity p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
-.run-context { border: 1px solid var(--gold-dim); border-radius: 4px; padding: 2px 6px; background: rgba(213, 180, 106, .1); color: var(--gold-2); font-size: 12px; white-space: nowrap; }
-.run-context.historical { border-color: var(--line-strong); background: var(--surface-2); color: #b9b4a8; }
-.command-run { display: grid; grid-template-columns: repeat(3, minmax(112px, auto)); border-left: 1px solid var(--line); }
-.command-run > div { display: grid; align-content: center; gap: 4px; min-height: 48px; padding: 0 14px; border-right: 1px solid var(--line); }
-.command-run span { color: var(--muted); font-size: 12px; }
-.command-run strong { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.command-run > div:first-child strong { color: var(--gold-2); font-size: 16px; font-variant-numeric: tabular-nums; }
-.command-actions { display: flex; gap: 7px; justify-content: flex-end; }
-
-.research-boundary {
+.auto-command {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
-  min-height: 34px;
-  border: 1px solid #4b4026;
-  border-radius: 4px;
-  padding: 6px 10px;
-  background: rgba(213, 180, 106, .035);
-  color: #bdb6a3;
-  font-size: 12px;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--surface);
 }
-.research-boundary strong { color: var(--gold-2); white-space: nowrap; }
-.boundary-mark { border: 1px solid var(--gold-dim); border-radius: 4px; padding: 2px 5px; }
+.auto-context { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.date-picker { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.date-picker select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 8px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.strategy-chip { display: grid; gap: 2px; }
+.strategy-chip span { color: var(--muted); font-size: 12px; }
+.strategy-chip strong { font-size: 13px; font-weight: 500; }
+.auto-actions { display: flex; gap: 8px; }
+.auto-disclaimer { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
 .message-stack:empty { display: none; }
-.message-stack { display: grid; gap: 6px; }
-.auto-notice,
-.run-error { border: 1px solid; border-radius: 4px; padding: 9px 12px; font-size: 12px; }
-.auto-notice--danger,
-.run-error { border-color: rgba(255, 93, 93, .4); background: rgba(255, 93, 93, .07); color: #ff9b9b; }
+.message-stack { display: grid; gap: 8px; }
+.auto-notice { border: 1px solid; border-radius: 4px; padding: 8px 12px; font-size: 13px; }
+.auto-notice--danger { border-color: rgba(255, 93, 93, .4); background: rgba(255, 93, 93, .07); color: #ff9b9b; }
 .auto-notice--success { border-color: rgba(39, 197, 138, .35); background: rgba(39, 197, 138, .07); color: #78dbb8; }
-.run-error { display: flex; gap: 9px; }
-.run-error strong { color: #ffc1c1; white-space: nowrap; }
 
-.auto-loading,
-.empty-state { display: grid; min-height: 116px; place-content: center; gap: 6px; padding: 20px; color: var(--muted); text-align: center; }
-.auto-loading--inline { min-height: 84px; }
-.empty-state strong { color: var(--text); font-size: 13px; }
-.empty-state span { max-width: 260px; font-size: 12px; line-height: 1.55; }
-.compact-empty { min-height: 68px; padding: 12px; font-size: 12px; }
+.auto-tabs [role="tab"] { min-height: 40px; font-size: 14px; }
+.tab-panel { display: grid; gap: 12px; }
 
-.kpi-strip {
+.conclusion {
   display: grid;
-  grid-template-columns: repeat(5, minmax(100px, 1fr)) minmax(170px, 1.35fr);
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  background: var(--line);
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  gap: 16px 24px;
+  padding: 20px;
+  background: linear-gradient(110deg, rgba(213, 180, 106, .07), transparent 45%), var(--surface);
 }
-.kpi-strip > div { display: grid; gap: 3px; min-width: 0; min-height: 68px; align-content: center; padding: 9px 13px; background: #121214; }
-.kpi-strip span,
-.kpi-strip small { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.kpi-strip strong { overflow: hidden; color: #e8dfc9; font-size: 20px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.kpi-strip .kpi-stage { font-size: 13px; }
-.kpi-strip .kpi-ok { color: #69d4ae; }
-.kpi-strip .kpi-warning { color: #e5bd61; }
+.conclusion-main h2 { margin: 0; font-size: 20px; font-weight: 500; }
+.conclusion-headline { margin: 8px 0 0; color: var(--gold-2); font-size: 16px; line-height: 1.6; }
+.conclusion-facts { display: grid; gap: 8px; margin: 16px 0 0; padding: 0; list-style: none; }
+.conclusion-facts li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; color: var(--muted); font-size: 13px; }
+.conclusion-facts strong { color: var(--text); font-size: 16px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.conclusion-facts i { color: var(--muted-2); font-style: normal; }
+.conclusion-facts b { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--text); font-size: 12px; font-weight: 400; }
+.conclusion-facts b.change-added { border-color: rgba(242, 84, 184, .35); color: #ef9dce; }
+.conclusion-side { display: grid; align-content: start; gap: 12px; }
+.since-card { display: grid; gap: 4px; border: 1px solid var(--line); border-radius: 4px; padding: 12px 16px; background: var(--surface-2); }
+.since-card span { color: var(--muted); font-size: 12px; }
+.since-card strong { font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.since-card small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.since-card em { font-style: normal; font-variant-numeric: tabular-nums; }
+.track-line { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.explanation { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 12px; }
+.explanation-body { margin-top: 8px; color: #d4cfc2; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 
-.cockpit-workspace {
+.status-panel { display: grid; gap: 8px; padding: 20px; border-left: 2px solid var(--warning); }
+.status-panel.status-failed { border-left-color: var(--danger); }
+.status-panel.status-running,
+.status-panel.status-empty { border-left-color: var(--gold-dim); }
+.status-panel h2 { margin: 0; font-size: 20px; font-weight: 500; }
+.status-panel p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.status-panel ul { margin: 0; padding-left: 20px; color: #e6c36f; font-size: 13px; line-height: 1.7; }
+.status-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
+.ui-panel-head p { line-height: 1.5; }
+.ui-panel-head h3 { margin: 0; font-size: 16px; font-weight: 500; }
+.ui-panel-head { padding: 12px 16px; }
+
+.pick-list { margin: 0; padding: 0; list-style: none; }
+.pick-list li + li { border-top: 1px solid var(--line); }
+.pick-row {
   display: grid;
-  grid-template-columns: 240px minmax(520px, 1fr) 320px;
-  min-height: 650px;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  background: #0d0d0f;
+  grid-template-columns: 32px minmax(150px, 1.1fr) minmax(180px, 1.4fr) minmax(220px, 1.3fr) 84px 100px;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  min-height: 64px;
+  border: 0;
+  border-radius: 0;
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
 }
-.cockpit-panel { min-width: 0; background: var(--surface); }
-.run-rail { border-right: 1px solid var(--line-strong); }
-.ranking-console { display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--line-strong); background: #101012; }
-.candidate-inspector { min-height: 0; background: #111113; }
-.panel-heading,
-.ranking-toolbar,
-.governance-heading,
-.governance-panel-header,
-.validation-panel-header {
+.pick-row:hover { background: rgba(213, 180, 106, .04); }
+.pick-rank { color: var(--gold); font-size: 16px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: center; }
+.pick-identity { display: grid; gap: 2px; min-width: 0; }
+.pick-identity strong { overflow: hidden; font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.pick-identity small { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.pick-tags { display: flex; gap: 4px; }
+.pick-tags em { border: 1px solid; border-radius: 999px; padding: 0 8px; font-size: 12px; font-style: normal; }
+.tag-new { border-color: rgba(242, 84, 184, .35); color: #ef9dce; }
+.tag-risk { border-color: rgba(213, 166, 66, .4); color: #e6c36f; }
+.pick-reason { color: #d8d2c2; font-size: 13px; line-height: 1.5; }
+.pick-dims { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
+.dim-bar { display: grid; grid-template-columns: 40px minmax(0, 1fr) 24px; align-items: center; gap: 4px; font-size: 12px; }
+.dim-bar b { color: var(--muted); font-weight: 400; }
+.dim-bar i { height: 6px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.dim-bar s,
+.reason-list s,
+.weight-list s { display: block; height: 100%; border-radius: 999px; background: var(--gold-dim); text-decoration: none; }
+.dim-bar em { color: var(--muted); font-style: normal; font-variant-numeric: tabular-nums; text-align: right; }
+.score-strong s { background: var(--gold); }
+.score-strong em { color: var(--gold-2); }
+.score-weak s { background: var(--muted-2); }
+.pick-perf { display: grid; justify-items: end; gap: 2px; }
+.pick-perf small { color: var(--muted); font-size: 12px; }
+.pick-perf strong { font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.pick-spark { width: 100px; height: 28px; }
+.pick-spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.pick-spark polyline.pnl-up { stroke: var(--up); }
+.pick-spark polyline.pnl-down { stroke: var(--down); }
+.removed-line { margin: 0; border-top: 1px solid var(--line); padding: 12px 16px; color: var(--muted); font-size: 12px; }
+
+.horizon-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.horizon-grid article { display: grid; align-content: start; gap: 8px; padding: 16px; }
+.horizon-grid article + article { border-left: 1px solid var(--line); }
+.horizon-grid header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.horizon-grid header strong { font-size: 14px; font-weight: 500; }
+.horizon-grid dl,
+.summary-card dl,
+.fact-grid { display: grid; gap: 8px; margin: 0; }
+.horizon-grid dl div,
+.summary-card dl div { display: flex; justify-content: space-between; gap: 8px; }
+.horizon-grid dt,
+.summary-card dt,
+.fact-grid dt { color: var(--muted); font-size: 12px; }
+.horizon-grid dd,
+.summary-card dd,
+.fact-grid dd { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.horizon-grid small,
+.horizon-grid p { margin: 0; color: var(--muted); font-size: 12px; }
+
+.summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.summary-card { display: grid; align-content: start; gap: 8px; padding: 16px; }
+.summary-card header { display: grid; gap: 4px; }
+.summary-card h3 { margin: 0; font-size: 16px; font-weight: 500; }
+.summary-card header span,
+.summary-card small,
+.summary-empty { margin: 0; color: var(--muted); font-size: 12px; }
+.summary-rate { color: var(--gold-2); font-size: 32px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.chart-panel { overflow: hidden; }
+.track-chart { display: block; width: 100%; height: 160px; padding: 8px 16px 16px; }
+.track-chart rect { fill: var(--muted-2); }
+.track-chart rect.pnl-up { fill: var(--up); }
+.track-chart rect.pnl-down { fill: var(--down); }
+.zero-line { stroke: var(--line-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.track-table-wrap { max-height: 520px; }
+.track-table th.num,
+.track-table td.num { text-align: right; }
+.notes { margin: 0; padding-left: 20px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+
+.funnel { display: grid; gap: 12px; }
+.funnel-step { display: grid; gap: 4px; }
+.funnel-bar {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 180px;
+  border-radius: 4px;
+  padding: 8px 12px;
+  background: linear-gradient(90deg, rgba(213, 180, 106, .22), rgba(213, 180, 106, .08));
 }
-.panel-heading { min-height: 55px; padding: 11px 12px; border-bottom: 1px solid var(--line); background: rgba(213, 180, 106, .025); }
-.panel-heading h2,
-.ranking-toolbar h2,
-.governance-heading h2 { margin: 3px 0 0; color: #eee2c0; font-size: 14px; }
-.panel-heading > span { border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; color: var(--muted); font-size: 12px; }
+.funnel-bar strong { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.funnel-bar span { color: var(--muted); font-size: 13px; }
+.funnel-step p { margin: 0; color: var(--muted); font-size: 12px; }
+.exclusion-list h4 { margin: 0 0 8px; color: var(--muted); font-size: 13px; font-weight: 500; }
+.exclusion-list ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 4px 24px; margin: 0; padding: 0; list-style: none; }
+.exclusion-list li { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--line); padding: 4px 0; font-size: 13px; }
+.exclusion-list b { font-weight: 500; font-variant-numeric: tabular-nums; }
+.method-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.rule-list { display: grid; gap: 8px; margin: 0; padding-left: 32px; color: #d8d2c2; font-size: 14px; line-height: 1.6; }
+.weight-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.weight-list li { display: grid; gap: 4px; }
+.weight-list span { display: flex; justify-content: space-between; font-size: 14px; }
+.weight-list b { font-weight: 500; }
+.weight-list em { color: var(--gold-2); font-style: normal; font-variant-numeric: tabular-nums; }
+.weight-list i { height: 6px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.weight-list small { color: var(--muted); font-size: 12px; }
+.method-note,
+.method-limit { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.method-limit { margin: 0; }
 
-.run-selector { max-height: 245px; overflow: auto; border-bottom: 1px solid var(--line-strong); scrollbar-width: thin; }
-.run-option { display: grid; gap: 5px; width: 100%; min-height: 72px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 9px 11px; background: transparent; color: var(--muted); text-align: left; }
-.run-option:hover { background: rgba(213, 180, 106, .04); }
-.run-option.selected { background: linear-gradient(90deg, rgba(213, 180, 106, .11), transparent); box-shadow: inset 2px 0 var(--gold); }
-.run-option-top,
-.run-option-bottom { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.run-option-top b { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
-.run-option-top em { color: var(--gold-2); font-size: 12px; font-style: normal; }
-.run-option-top em.historical { color: var(--muted-2); }
-.run-option > span:nth-child(2) { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.run-option-bottom i { border: 0; background: transparent; font-size: 12px; font-style: normal; }
-.run-option-bottom code { color: var(--muted-2); font-size: 12px; }
+.drawer-backdrop { position: fixed; z-index: var(--z-dialog); inset: 0; display: flex; justify-content: flex-end; background: rgba(0, 0, 0, .72); }
+.pick-drawer {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  width: min(480px, 100vw);
+  height: 100%;
+  overflow-y: auto;
+  border-left: 1px solid var(--line-strong);
+  outline: 0;
+  background: var(--surface);
+}
+.drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding: 16px 20px; }
+.drawer-head h2 { margin: 0; font-size: 20px; font-weight: 500; }
+.drawer-head h2 small { color: var(--muted); font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.drawer-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.drawer-close { min-width: 44px; min-height: 44px; border: 0; background: transparent; color: var(--muted); font-size: 24px; cursor: pointer; }
+.drawer-block { display: grid; gap: 12px; border-bottom: 1px solid var(--line); padding: 16px 20px; }
+.drawer-block h3 { margin: 0; font-size: 14px; font-weight: 500; }
+.reason-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.reason-list li { display: grid; gap: 4px; }
+.reason-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.reason-head b { font-weight: 500; }
+.reason-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.reason-list i { height: 6px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.reason-list p { margin: 0; color: #d8d2c2; font-size: 13px; line-height: 1.6; }
+.risk-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.risk-list li { border-left: 2px solid var(--line-strong); padding: 4px 8px; color: #d8d2c2; font-size: 13px; line-height: 1.5; }
+.risk-list li.risk-warning { border-left-color: var(--warning); background: rgba(213, 166, 66, .06); color: #e6c36f; }
+.fact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fact-grid div { display: grid; gap: 2px; }
+.drawer-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 20px 8px; }
+.drawer-foot { margin: 0; padding: 0 20px 20px; color: var(--muted-2); font-size: 12px; }
 
-.rail-evidence { padding-bottom: 10px; }
-.rail-section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 12px 7px; }
-.rail-section-title h3 { margin: 3px 0 0; color: #ddd4bc; font-size: 12px; }
-.gate-dot { border: 1px solid; border-radius: 4px; padding: 3px 5px; font-size: 12px; }
-.gate-pass { border-color: rgba(39, 197, 138, .4); background: rgba(39, 197, 138, .08); color: #6fd8b2; }
-.gate-blocked { border-color: rgba(213, 166, 66, .45); background: rgba(213, 166, 66, .09); color: #e8c66f; }
-.gate-policy { margin: 0 12px 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.quality-ledger { display: grid; margin: 0; border-top: 1px solid var(--line); }
-.quality-ledger > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 6px 12px; border-bottom: 1px solid rgba(255, 255, 255, .035); }
-.quality-ledger dt { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.quality-ledger dd { margin: 0; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
-.quality-ledger dd small { color: var(--muted-2); font-size: 12px; }
-.quality-ledger .quality-detail { display: block; margin-top: 3px; white-space: nowrap; }
-.gate-failures { display: grid; gap: 4px; margin: 8px; border-left: 2px solid var(--warning); padding: 7px 8px; background: rgba(213, 166, 66, .055); color: #d8c697; font-size: 12px; line-height: 1.45; }
-.gate-failures strong { color: var(--warning); }
-.exclusion-ledger { padding: 8px 12px 0; }
-.exclusion-ledger h4 { margin: 0 0 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-.exclusion-ledger > div { display: grid; gap: 4px; }
-.exclusion-ledger span { display: flex; align-items: center; justify-content: space-between; gap: 7px; color: var(--muted); font-size: 12px; }
-.exclusion-ledger b { overflow: hidden; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-.exclusion-ledger strong { color: #d9b9a3; font-variant-numeric: tabular-nums; }
-.exclusion-ledger p { margin: 0; color: var(--muted-2); font-size: 12px; }
-
-.ranking-toolbar { min-height: 62px; padding: 11px 13px; border-bottom: 1px solid var(--line); }
-.ranking-toolbar p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
-.ranking-page-token { display: grid; grid-template-columns: auto auto auto; align-items: baseline; gap: 4px; color: var(--muted); font-size: 12px; }
-.ranking-page-token strong { color: var(--gold-2); font-size: 16px; font-variant-numeric: tabular-nums; }
-.ranking-page-token small { font-size: 12px; }
-.scope-tabs { display: grid; grid-template-columns: repeat(3, 1fr); padding: 6px 8px; border-bottom: 1px solid var(--line); background: #0d0d0f; }
-.scope-tabs button { min-height: 29px; border: 1px solid var(--line); border-right: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 12px; }
-.scope-tabs button:first-child { border-radius: 4px 0 0 3px; }
-.scope-tabs button:last-child { border-right: 1px solid var(--line); border-radius: 0 3px 3px 0; }
-.scope-tabs button.active { border-color: var(--gold-dim); background: rgba(213, 180, 106, .1); color: var(--gold-2); }
-.scope-tabs button.active + button { border-left-color: var(--gold-dim); }
-.ranking-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; }
-.rank-boundary { padding: 6px 10px; border-bottom: 1px solid var(--line); background: rgba(84, 117, 135, .06); color: #8f9da3; font-size: 12px; letter-spacing: .02em; }
-.candidate-table-wrap { min-height: 0; max-height: 505px; overflow: auto; scrollbar-width: thin; }
-.candidate-table { width: 100%; min-width: 680px; border-collapse: collapse; table-layout: fixed; }
-.candidate-table th { position: sticky; z-index: 2; top: 0; height: 34px; border-bottom: 1px solid var(--line-strong); padding: 7px 8px; background: #151517; color: #958f82; font-size: 12px; font-weight: 600; letter-spacing: .05em; text-align: left; white-space: nowrap; }
-.candidate-table th:nth-child(1) { width: 48px; }
-.candidate-table th:nth-child(2) { width: 126px; }
-.candidate-table th:nth-child(3) { width: 105px; }
-.candidate-table th:nth-child(4) { width: 132px; }
-.candidate-table th:nth-child(5),
-.candidate-table th:nth-child(6) { width: 82px; }
-.candidate-table th:nth-child(7) { width: 100px; }
-.candidate-table .status-column { width: 108px; }
-.candidate-table .exclusion-column { width: 164px; }
-.candidate-table td { height: 58px; border-bottom: 1px solid rgba(255, 255, 255, .04); padding: 6px 8px; color: #cbc6ba; font-size: 12px; vertical-align: middle; }
-.candidate-table td small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
-.candidate-row:hover { background: rgba(213, 180, 106, .03); }
-.candidate-row.selected { background: linear-gradient(90deg, rgba(213, 180, 106, .1), rgba(213, 180, 106, .025)); box-shadow: inset 2px 0 var(--gold); }
-.candidate-row.candidate-excluded { background-color: rgba(255, 93, 93, .022); }
-.rank-cell strong { color: #9d9480; font-size: 12px; font-variant-numeric: tabular-nums; }
-.candidate-button { display: grid; gap: 2px; width: 100%; border: 0; padding: 0; background: transparent; color: inherit; text-align: left; }
-.candidate-button strong { overflow: hidden; color: #e7dfcd; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.candidate-button small { margin: 0; font-variant-numeric: tabular-nums; }
-.num { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.score-cell { color: var(--gold-2) !important; font-weight: 700; }
-.exclusion-cell { text-align: left; white-space: normal; }
-.exclusion-cell span { display: inline-flex; margin: 2px 4px 2px 0; border: 1px solid #5b3738; border-radius: 4px; padding: 3px 6px; background: rgba(255, 93, 93, .06); color: #e5a6a6; }
-.status-pill,
-.change-pill,
-.lifecycle-pill { display: inline-flex; align-items: center; width: fit-content; border: 1px solid; border-radius: 8px; padding: 2px 6px; font-size: 12px; white-space: nowrap; }
-.tone-ok { border-color: rgba(39, 197, 138, .35); background: rgba(39, 197, 138, .08); color: #6fd8b2 !important; }
-.tone-warning { border-color: rgba(213, 166, 66, .4); background: rgba(213, 166, 66, .1); color: #e6c36f !important; }
-.tone-danger { border-color: rgba(255, 93, 93, .4); background: rgba(255, 93, 93, .08); color: #ff8b8b !important; }
-.tone-muted { border-color: var(--line); background: var(--surface-2); color: var(--muted) !important; }
-.change-pill { border-color: var(--line); color: var(--muted); }
-.change-added { border-color: rgba(242, 84, 184, .35); color: #ef9dce; }
-.change-retained { border-color: rgba(43, 212, 212, .3); color: #73d4d4; }
-.change-removed { border-color: rgba(255, 93, 93, .3); color: #e89494; }
-.candidate-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 49px; margin-top: auto; border-top: 1px solid var(--line-strong); padding: 7px 10px; background: #0d0d0f; color: var(--muted); font-size: 12px; }
-.candidate-pagination > div { display: flex; gap: 5px; }
-
-.inspector-identity { display: grid; gap: 11px; padding: 13px; border-bottom: 1px solid var(--line); }
-.inspector-identity > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.inspector-identity > div:first-child strong { overflow: hidden; color: #f0e4c4; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
-.inspector-identity code { color: var(--gold); font-size: 12px; }
-.inspector-identity dl { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 0; background: var(--line); }
-.inspector-identity dl div { display: grid; gap: 3px; padding: 8px; background: #151517; }
-.inspector-identity dt,
-.market-evidence dt { color: var(--muted); font-size: 12px; }
-.inspector-identity dd { margin: 0; color: var(--text); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.inspector-block { padding: 12px 13px; border-bottom: 1px solid var(--line); }
-.inspector-block h3 { margin: 0 0 8px; color: #a9a291; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
-.inspector-block > p { margin: 0; color: var(--muted-2); font-size: 12px; }
-.inspector-block .positive-evidence { color: #6fb497; }
-.code-list { display: flex; flex-wrap: wrap; gap: 4px; }
-.code-list span { border: 1px solid #493233; border-radius: 4px; padding: 3px 5px; background: rgba(255, 93, 93, .05); color: #d9a2a2; font-size: 12px; }
-.factor-ledger { display: grid; gap: 1px; background: var(--line); }
-.factor-ledger > div { display: grid; grid-template-columns: minmax(0, 1fr) auto 24px; gap: 6px; align-items: center; min-height: 27px; padding: 4px 7px; background: #151517; }
-.factor-ledger span { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.factor-ledger strong { color: #ddd5c1; font-size: 12px; font-variant-numeric: tabular-nums; }
-.factor-ledger small { color: var(--gold-dim); font-size: 12px; text-align: right; text-transform: uppercase; }
-.market-evidence dl { display: grid; gap: 6px; margin: 0; }
-.market-evidence dl div { display: flex; justify-content: space-between; gap: 8px; }
-.market-evidence dd { margin: 0; color: #d2ccbd; font-size: 12px; font-variant-numeric: tabular-nums; }
-.inspector-empty { min-height: 300px; }
-
-.validation-section,
-.governance-section { overflow: hidden; border: 1px solid var(--line-strong); border-radius: 4px; background: #0f0f11; }
-.governance-heading { align-items: center; min-height: 58px; padding: 10px 13px; border-bottom: 1px solid var(--line-strong); background: rgba(213, 180, 106, .025); }
-.governance-heading p { margin: 0; color: var(--muted); font-size: 12px; }
-.validation-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(340px, .75fr); }
-.validation-panel { min-width: 0; }
-.validation-panel + .validation-panel { border-left: 1px solid var(--line-strong); }
-.validation-panel-header,
-.governance-panel-header { min-height: 58px; padding: 11px 13px; border-bottom: 1px solid var(--line); }
-.validation-panel-header h3,
-.governance-panel-header h3 { margin: 0; color: #ddd4bc; font-size: 12px; }
-.validation-panel-header p,
-.governance-panel-header p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
-.evaluation-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.evaluation-grid > article { min-width: 0; padding: 12px; border-right: 1px solid var(--line); }
-.evaluation-grid > article:last-child { border-right: 0; }
-.evaluation-grid header { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
-.evaluation-grid header strong { color: var(--gold-2); font-size: 13px; }
-.evaluation-grid dl { display: grid; gap: 5px; margin: 11px 0; }
-.evaluation-grid dl div { display: flex; justify-content: space-between; gap: 7px; }
-.evaluation-grid dt { color: var(--muted); font-size: 12px; }
-.evaluation-grid dd { margin: 0; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.evaluation-grid article > small,
-.evaluation-grid article > p { color: var(--muted); font-size: 12px; }
-.evaluation-grid .evaluation-error { color: #e49b9b; }
-.explanation-section { display: flex; min-height: 260px; flex-direction: column; }
-.explanation-body { flex: 1; overflow-wrap: anywhere; padding: 13px; color: #d4cfc2; font-size: 12px; line-height: 1.7; }
-.explanation-error { padding: 13px; color: var(--warning); font-size: 12px; }
-.explanation-section footer { border-top: 1px solid var(--line); padding: 7px 13px; color: var(--muted); font-size: 12px; }
-.risk-contained { color: #9bb7aa; }
-.risk-watch { color: #e3bd65; }
-.risk-critical { color: #ff8c8c; }
-
-.governance-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(360px, .8fr); }
-.governance-panel { min-width: 0; }
-.governance-panel + .governance-panel { border-left: 1px solid var(--line-strong); }
-.strategy-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); max-height: 370px; overflow: auto; }
-.strategy-list > article { display: grid; gap: 8px; min-width: 0; padding: 11px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.strategy-list > article.official { background: linear-gradient(135deg, rgba(213, 180, 106, .09), transparent 58%); }
-.strategy-list article header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.strategy-list article header > div:first-child { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.strategy-list article strong { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.strategy-list article strong small { color: var(--muted); font-weight: 400; }
-.lifecycle-pill { border-color: var(--line); color: var(--muted); }
-.lifecycle-official { border-color: var(--gold-dim); background: rgba(213, 180, 106, .1); color: var(--gold-2); }
-.lifecycle-challenger { border-color: rgba(242, 84, 184, .3); color: #df91c0; }
-.lifecycle-shadow { border-color: rgba(43, 212, 212, .28); color: #69caca; }
-.strategy-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; }
-.strategy-actions button { border: 0; padding: 2px 3px; background: transparent; color: var(--gold); font-size: 12px; }
-.strategy-actions .danger-link { color: #e47777; }
-.strategy-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 12px; }
-.strategy-list code { overflow: hidden; color: var(--muted-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.strategy-list p { margin: 0; color: var(--muted); font-size: 12px; }
-.audit-list { display: grid; max-height: 370px; overflow: auto; }
-.audit-list > button { display: grid; grid-template-columns: minmax(95px, 1fr) minmax(100px, 1fr) minmax(100px, 1fr) auto; align-items: center; gap: 8px; min-height: 58px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 8px 11px; background: transparent; color: var(--text); text-align: left; }
-.audit-list > button:hover,
-.audit-list > button.selected { background: rgba(213, 180, 106, .05); }
-.audit-list > button.selected { box-shadow: inset 2px 0 var(--gold); }
-.audit-list span { min-width: 0; }
-.audit-list strong,
-.audit-list b,
-.audit-list code { display: block; overflow: hidden; color: #d8d0bc; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.audit-list code { color: var(--muted); font-size: 12px; }
-.audit-list small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 12px; }
-
-
-
-
-
-
-
-
+.muted-value { color: var(--muted) !important; font-size: 13px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.pnl-up { color: var(--up) !important; }
+.pnl-down { color: var(--down) !important; }
 button:focus-visible,
-[tabindex]:focus-visible,
-input:focus-visible,
 select:focus-visible,
-textarea:focus-visible { outline: 2px solid #d5b46a; outline-offset: 2px; }
-.pnl-up { color: #ff6767 !important; }
-.pnl-down { color: #35cb8f !important; }
-
-.auto-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .78); backdrop-filter: blur(4px); }
-.auto-dialog { width: min(780px, 100%); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid var(--line-strong); border-radius: 4px; outline: 0; background: #101012; box-shadow: 0 24px 80px rgba(0, 0, 0, .65); }
-.auto-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-.auto-dialog h2 { margin: 3px 0 0; color: var(--gold-2); font-size: 16px; }
-.auto-dialog > header > button { border: 0; background: transparent; color: var(--muted); font-size: 24px; }
-.auto-dialog-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 16px; }
-.auto-dialog-body.single-column { grid-template-columns: 1fr; }
-.auto-dialog label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
-.auto-dialog input,
-.auto-dialog select,
-.auto-dialog textarea { width: 100%; border: 1px solid var(--line); border-radius: 4px; outline: 0; background: var(--bg-2); padding: 9px 10px; color: var(--text); }
-.auto-dialog input:focus,
-.auto-dialog select:focus,
-.auto-dialog textarea:focus { border-color: var(--gold-dim); }
-.auto-dialog textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.5; }
-.dialog-span { grid-column: 1 / -1; }
-.auto-dialog-body p { margin: 0; color: var(--muted); font-size: 12px; }
-.auto-dialog-body .promotion-evidence-notice { border-left: 2px solid var(--warning); padding: 7px 9px; background: rgba(213, 166, 66, .06); color: #d8c697; line-height: 1.55; }
-.action-target { display: grid; gap: 5px; padding: 11px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); }
-.action-target code { overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
-.auto-dialog > footer { display: flex; justify-content: flex-end; gap: 7px; padding: 11px 16px; border-top: 1px solid var(--line); }
+[tabindex]:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 
 @media (max-width: 1380px) {
-  .cockpit-command { grid-template-columns: minmax(250px, 1fr) minmax(350px, auto) auto; gap: 12px; }
-  .command-run > div { padding: 0 9px; }
-  .cockpit-workspace { grid-template-columns: 220px minmax(0, 1fr); }
-  .ranking-console { border-right: 0; }
-  .candidate-inspector { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line-strong); }
-  .candidate-inspector > .panel-heading { grid-column: 1 / -1; }
-  .inspector-identity,
-  .rule-evidence,
-  .factor-evidence { border-right: 1px solid var(--line); }
-  .inspector-empty { grid-column: 1 / -1; }
+  .pick-row { grid-template-columns: 32px minmax(140px, 1fr) minmax(160px, 1.2fr) minmax(200px, 1.2fr) 84px; }
+  .pick-row .pick-spark { display: none; }
 }
 
 @media (max-width: 980px) {
-  .cockpit-command { grid-template-columns: minmax(0, 1fr) auto; }
-  .command-run { grid-row: 2; grid-column: 1 / -1; border-top: 1px solid var(--line); border-left: 0; padding-top: 8px; }
-  .kpi-strip { grid-template-columns: repeat(3, 1fr); }
-  .cockpit-workspace { grid-template-columns: minmax(0, 1fr); }
-  .run-rail { border-right: 0; border-bottom: 1px solid var(--line-strong); }
-  .candidate-inspector { display: grid; grid-template-columns: 1fr 1fr; }
-  .candidate-inspector > .panel-heading,
-  .inspector-empty { grid-column: 1 / -1; }
-  .inspector-identity,
-  .factor-evidence { border-right: 1px solid var(--line); }
-  .rule-evidence { border-right: 0; }
-  .validation-grid,
-  .governance-grid { grid-template-columns: 1fr; }
-  .validation-panel + .validation-panel,
-  .governance-panel + .governance-panel { border-top: 1px solid var(--line-strong); border-left: 0; }
+  .conclusion { grid-template-columns: minmax(0, 1fr); }
+  .pick-row { grid-template-columns: 32px minmax(0, 1fr) 84px; grid-template-areas: "rank who perf" ". reason reason" ". dims dims"; gap: 8px 12px; }
+  .pick-rank { grid-area: rank; }
+  .pick-identity { grid-area: who; }
+  .pick-reason { grid-area: reason; }
+  .pick-dims { grid-area: dims; }
+  .pick-perf { grid-area: perf; }
+  .summary-grid,
+  .horizon-grid,
+  .method-grid { grid-template-columns: minmax(0, 1fr); }
+  .horizon-grid article + article { border-top: 1px solid var(--line); border-left: 0; }
 }
 
 @media (max-width: 680px) {
-  .automatic-selection-page { gap: 9px; }
-  .cockpit-command { grid-template-columns: 1fr; align-items: stretch; }
-  .command-title-line { align-items: flex-start; flex-direction: column; gap: 5px; }
-  .command-actions { justify-content: stretch; }
-  .command-actions .ui-btn,
-  .scope-tabs button,
-  .candidate-pagination .ui-btn { min-height: 44px; }
-  .command-actions .ui-btn { flex: 1; }
-  .command-run { grid-row: auto; grid-column: auto; grid-template-columns: 1fr; }
-  .command-run > div { min-height: 39px; border-right: 0; border-bottom: 1px solid var(--line); }
-  .research-boundary { align-items: flex-start; flex-direction: column; }
-  .research-boundary strong { white-space: normal; }
-  .kpi-strip { grid-template-columns: repeat(2, 1fr); }
-  .run-selector { display: flex; max-height: none; overflow-x: auto; }
-  .run-option { min-width: 210px; border-right: 1px solid var(--line); }
-  .ranking-console { min-height: 590px; }
-  .candidate-table-wrap { max-height: 430px; }
-  .candidate-inspector { display: block; }
-  .candidate-inspector > * { border-right: 0; }
-  .candidate-pagination { align-items: stretch; flex-direction: column; }
-  .candidate-pagination > div { justify-content: flex-end; }
-  .governance-heading { align-items: flex-start; flex-direction: column; }
-  .evaluation-grid { grid-template-columns: 1fr; }
-  .evaluation-grid > article { border-right: 0; border-bottom: 1px solid var(--line); }
-  .audit-list > button { grid-template-columns: 1fr 1fr; }
-  .auto-dialog-body { grid-template-columns: 1fr; }
-  .dialog-span { grid-column: auto; }
+  .auto-command { align-items: stretch; flex-direction: column; }
+  .auto-actions .ui-btn { flex: 1; min-height: 44px; }
+  .date-picker select { min-height: 44px; flex: 1; }
+  .date-picker { width: 100%; }
+  .auto-tabs { overflow-x: auto; }
+  .auto-tabs [role="tab"] { min-height: 44px; flex: 0 0 auto; }
+  .conclusion,
+  .status-panel { padding: 16px; }
+  .pick-row { padding: 12px; }
+  .pick-dims { grid-template-columns: minmax(0, 1fr); }
+  .pick-drawer { width: 100vw; }
+  .fact-grid { grid-template-columns: minmax(0, 1fr); }
+  .status-actions .ui-btn,
+  .drawer-actions .ui-btn { flex: 1; min-height: 44px; }
 }
 </style>

@@ -83,6 +83,7 @@ import type {
   TushareFactorSyncResult,
   FactorCompositeResult,
   AutomaticSelectionCandidate,
+  AutomaticSelectionDaily,
   AutomaticSelectionDispatchResult,
   AutomaticSelectionEvaluation,
   AutomaticSelectionLifecycle,
@@ -91,6 +92,7 @@ import type {
   AutomaticSelectionRunDetail,
   AutomaticSelectionStrategy,
   AutomaticSelectionStrategyConfig,
+  AutomaticSelectionTrackRecord,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -751,6 +753,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((res) => res.data),
+  automaticSelectionDaily: (tradeDate?: string | null) =>
+    request<ApiEnvelope<AutomaticSelectionDaily>>(
+      `/api/automatic-selection/daily${tradeDate ? `?trade_date=${encodeURIComponent(tradeDate)}` : ''}`
+    ).then((res) => res.data),
+  automaticSelectionTrackRecord: (limit = 60) =>
+    request<ApiEnvelope<AutomaticSelectionTrackRecord>>(
+      `/api/automatic-selection/track-record?limit=${limit}`
+    ).then((res) => res.data),
   automaticSelectionOverview: () =>
     request<ApiEnvelope<AutomaticSelectionOverview>>('/api/automatic-selection/overview').then(
       (res) => res.data

@@ -1043,3 +1043,140 @@ def _iso(value: datetime | None) -> str | None:
 def _nullable_text(value: Any, limit: int) -> str | None:
     text = str(value or "").strip()
     return text[:limit] if text else None
+
+
+# ---- 白话呈现层（automatic_selection_presentation）使用的只读查询 ----
+
+
+def display_strategy(strategy_id: int | None = None) -> dict[str, Any] | None:
+    """普通用户默认看正式策略；没有正式策略时退回最近一次运行所属的策略。"""
+    with SessionLocal() as db:
+        if strategy_id is not None:
+            row = db.get(AutomaticSelectionStrategy, strategy_id)
+            return strategy_to_dict(row) if row is not None else None
+        row = db.scalar(
+            select(AutomaticSelectionStrategy).where(AutomaticSelectionStrategy.official_slot == 1)
+        )
+        if row is None:
+            latest = db.scalar(
+                select(AutomaticSelectionRun.strategy_id).order_by(*_latest_run_order()).limit(1)
+            )
+            row = db.get(AutomaticSelectionStrategy, latest) if latest is not None else None
+        return strategy_to_dict(row) if row is not None else None
+
+
+def strategy_run_index(strategy_id: int, *, limit: int = 60) -> list[dict[str, Any]]:
+    """某策略每个目标交易日的最终运行（已排除被修订替代的运行），按日期倒序。"""
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(
+                AutomaticSelectionRun.run_id,
+                AutomaticSelectionRun.target_trade_date,
+                AutomaticSelectionRun.status,
+            )
+            .where(AutomaticSelectionRun.strategy_id == strategy_id, _not_superseded_run())
+            .order_by(*_latest_run_order())
+            .limit(max(1, min(int(limit), 250)))
+        ).all()
+    seen: set[str] = set()
+    index: list[dict[str, Any]] = []
+    for run_id, trade_date, status in rows:
+        if trade_date in seen:
+            continue
+        seen.add(trade_date)
+        index.append({"run_id": run_id, "trade_date": trade_date, "status": status})
+    return index
+
+
+def eligible_score_pool(run_id: str) -> list[dict[str, Any]]:
+    """合格池每只股票的 z 值，用于把单只股票换算成“超过了多少合格股票”。"""
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(AutomaticSelectionCandidate.symbol, AutomaticSelectionCandidate.z_scores_json).where(
+                AutomaticSelectionCandidate.run_id == run_id,
+                AutomaticSelectionCandidate.eligible.is_(True),
+            )
+        ).all()
+    return [{"symbol": str(symbol), "z_scores": _loads(z_scores, {})} for symbol, z_scores in rows]
+
+
+def removed_candidates(run_id: str) -> list[dict[str, Any]]:
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(AutomaticSelectionCandidate.symbol, AutomaticSelectionCandidate.name)
+            .where(
+                AutomaticSelectionCandidate.run_id == run_id,
+                AutomaticSelectionCandidate.change_state == "removed",
+            )
+            .order_by(AutomaticSelectionCandidate.symbol)
+        ).all()
+    return [{"symbol": str(symbol), "name": name or str(symbol)} for symbol, name in rows]
+
+
+def constraint_skipped_count(run_id: str) -> int:
+    """排名够前但因行业/市值上限没能入选的股票数。"""
+    with SessionLocal() as db:
+        return int(
+            db.scalar(
+                select(func.count())
+                .select_from(AutomaticSelectionCandidate)
+                .where(
+                    AutomaticSelectionCandidate.run_id == run_id,
+                    AutomaticSelectionCandidate.eligible.is_(True),
+                    AutomaticSelectionCandidate.selected.is_(False),
+                    AutomaticSelectionCandidate.constraint_codes_json != "[]",
+                )
+            )
+            or 0
+        )
+
+
+def track_record_rows(strategy_id: int, *, limit: int = 60) -> list[dict[str, Any]]:
+    """已完成运行及其 5/20/60 日评估，按目标交易日倒序。"""
+    with SessionLocal() as db:
+        runs = db.scalars(
+            select(AutomaticSelectionRun)
+            .where(
+                AutomaticSelectionRun.strategy_id == strategy_id,
+                AutomaticSelectionRun.status == "completed",
+                _not_superseded_run(),
+            )
+            .order_by(*_latest_run_order())
+            .limit(max(1, min(int(limit), 250)))
+        ).all()
+        run_ids = [row.run_id for row in runs]
+        evaluations = (
+            db.scalars(
+                select(AutomaticSelectionEvaluation).where(AutomaticSelectionEvaluation.run_id.in_(run_ids))
+            ).all()
+            if run_ids
+            else []
+        )
+        by_run: dict[str, dict[int, dict[str, Any]]] = {}
+        for row in evaluations:
+            by_run.setdefault(row.run_id, {})[int(row.horizon)] = {
+                "status": row.status,
+                "entry_trade_date": row.entry_trade_date,
+                "exit_trade_date": row.exit_trade_date,
+                "basket_return": row.basket_return,
+                "benchmark_return": row.benchmark_return,
+                "excess_return": row.excess_return,
+                "max_drawdown": row.max_drawdown,
+                "coverage_ratio": row.coverage_ratio,
+            }
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in runs:
+            if row.target_trade_date in seen:
+                continue
+            seen.add(row.target_trade_date)
+            result.append(
+                {
+                    "run_id": row.run_id,
+                    "target_trade_date": row.target_trade_date,
+                    "selected_count": row.selected_count,
+                    "eligible_count": row.eligible_count,
+                    "evaluations": by_run.get(row.run_id, {}),
+                }
+            )
+        return result

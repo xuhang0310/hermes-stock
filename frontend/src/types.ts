@@ -1929,6 +1929,201 @@ export type AutomaticSelectionDispatchResult = {
   job_key: string
 }
 
+// 自动选股白话视图（/api/automatic-selection/daily、/track-record）
+export type AutomaticSelectionDimension = {
+  key: 'value' | 'trend' | 'activity' | 'stability' | 'extra' | string
+  label: string
+  score: number | null
+  level: 'strong' | 'medium' | 'weak' | 'unknown'
+  weight_percent: number
+  contribution: number | null
+  reverse: boolean
+  description: string
+  detail: string
+}
+
+export type AutomaticSelectionRisk = {
+  level: 'warning' | 'info'
+  text: string
+}
+
+export type AutomaticSelectionHorizonResult = {
+  horizon: number
+  status: string
+  status_label: string
+  net_return: number | null
+}
+
+export type AutomaticSelectionPick = {
+  symbol: string
+  name: string
+  industry: string | null
+  rank: number | null
+  eligible_count: number
+  top_percent: number | null
+  change_state: string
+  change_label: string
+  market_cap_label: string | null
+  total_mv_yi: number | null
+  close_price: number | null
+  pct_chg: number | null
+  pe_ttm: number | null
+  pb: number | null
+  avg_amount_yi: number | null
+  momentum_20: number | null
+  volatility_20: number | null
+  headline: string
+  dimensions: AutomaticSelectionDimension[]
+  risks: AutomaticSelectionRisk[]
+  price_path: Array<{ trade_date: string; value: number }>
+  performance: {
+    since_selection: number | null
+    horizons: AutomaticSelectionHorizonResult[]
+  }
+}
+
+export type AutomaticSelectionDailyStatus = {
+  code: 'ok' | 'running' | 'blocked' | 'failed' | 'empty'
+  title: string
+  message: string
+  issues: string[]
+  fallback_trade_date: string | null
+}
+
+export type AutomaticSelectionSinceSelection = {
+  status: 'observing' | 'waiting'
+  entry_trade_date: string | null
+  as_of: string | null
+  trading_days: number
+  basket_return: number | null
+  benchmark_return: number | null
+  excess_return: number | null
+  covered_count: number
+  selected_count: number
+  note: string
+}
+
+export type AutomaticSelectionFunnel = {
+  steps: Array<{ key: string; label: string; count: number; note: string }>
+  exclusions: Array<{ code: string; label: string; count: number }>
+  overlap_note: string
+}
+
+export type AutomaticSelectionMethod = {
+  filters: string[]
+  dimensions: Array<{ key: string; label: string; weight_percent: number; description: string }>
+  scoring: string
+  selection: string[]
+  evaluation: string[]
+  schedule: string
+  disclaimer: string
+  limitations: string
+}
+
+export type AutomaticSelectionStrategyBrief = {
+  id: number
+  name: string
+  version: number
+  lifecycle_state: AutomaticSelectionLifecycle
+  is_official: boolean
+}
+
+export type AutomaticSelectionDaily = {
+  strategy: AutomaticSelectionStrategyBrief | null
+  available_dates: Array<{ trade_date: string; status: string; status_label: string }>
+  trade_date: string | null
+  is_latest: boolean
+  last_completed_trade_date: string | null
+  run: {
+    run_id: string
+    status: string
+    stage: string
+    target_trade_date: string
+    strategy_name: string
+    strategy_version: number
+    universe_count: number
+    eligible_count: number
+    selected_count: number
+    selected_turnover: number | null
+    llm_status: string
+    llm_model: string | null
+    llm_explanation: string | null
+    finished_at: string | null
+    started_at: string | null
+  } | null
+  status: AutomaticSelectionDailyStatus
+  summary: {
+    headline: string
+    selected_count: number
+    added: number
+    retained: number
+    removed: number
+    industries: Array<{ industry: string; count: number }>
+    dimension_averages: Array<{ key: string; label: string; score: number }>
+    universe_count: number | null
+    eligible_count: number | null
+  } | null
+  picks: AutomaticSelectionPick[]
+  removed: Array<{ symbol: string; name: string }>
+  funnel: AutomaticSelectionFunnel | null
+  method: AutomaticSelectionMethod
+  performance: {
+    since_selection: AutomaticSelectionSinceSelection | null
+    horizons: Array<{
+      horizon: number
+      status: string
+      status_label: string
+      entry_trade_date: string | null
+      exit_trade_date: string | null
+      basket_return: number | null
+      benchmark_return: number | null
+      excess_return: number | null
+      max_drawdown: number | null
+      note: string | null
+    }>
+  }
+  track_brief: { horizon: number; periods: number; wins: number; avg_excess_return: number | null } | null
+  disclaimer: string
+  limitations: string
+}
+
+export type AutomaticSelectionPeriodCell = {
+  status: string
+  status_label: string
+  exit_trade_date?: string | null
+  basket_return?: number | null
+  benchmark_return?: number | null
+  excess_return?: number | null
+  beat?: boolean | null
+}
+
+export type AutomaticSelectionHorizonSummary = {
+  horizon: number
+  completed: number
+  pending: number
+  insufficient: number
+  wins: number
+  win_rate: number | null
+  avg_excess_return: number | null
+  avg_basket_return: number | null
+  avg_benchmark_return: number | null
+  best_excess_return: number | null
+  worst_excess_return: number | null
+}
+
+export type AutomaticSelectionTrackRecord = {
+  strategy: AutomaticSelectionStrategyBrief | null
+  periods: Array<{
+    run_id: string
+    trade_date: string
+    selected_count: number
+    horizons: Record<string, AutomaticSelectionPeriodCell>
+  }>
+  summary: AutomaticSelectionHorizonSummary[]
+  notes: string[]
+  disclaimer: string
+}
+
 // 运营后台（oc-console）只读视图类型
 export type OpsConsoleUser = {
   id: number

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from backend.app.auth.auth import AuthContext, require_permission
 from backend.app.core.database import get_db
 from backend.app.core.response import fail, ok
+from backend.app.quant import automatic_selection_presentation as presentation
 from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant.automatic_selection_scoring import RESEARCH_LIMITATIONS
 from backend.app.scheduler.rhythm_api import _owned_job
@@ -69,6 +70,31 @@ def automatic_selection_overview(
             "limitations": RESEARCH_LIMITATIONS,
         }
     )
+
+
+@router.get("/daily")
+def automatic_selection_daily(
+    trade_date: str | None = Query(default=None, pattern=r"^\d{8}$"),
+    strategy_id: int | None = Query(default=None, ge=1),
+    _context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    """面向普通用户的某日选股结果：入选理由、风险、选出后表现与白话状态。"""
+    try:
+        return ok(presentation.daily_view(trade_date=trade_date, strategy_id=strategy_id))
+    except LookupError as exc:
+        return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
+
+
+@router.get("/track-record")
+def automatic_selection_track_record(
+    strategy_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=60, ge=1, le=250),
+    _context: AuthContext = Depends(require_permission("data:read")),
+) -> dict:
+    try:
+        return ok(presentation.track_record(strategy_id=strategy_id, limit=limit))
+    except LookupError as exc:
+        return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
 
 
 @router.get("/strategies")

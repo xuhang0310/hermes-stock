@@ -4,7 +4,12 @@ import test from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 
+// 运行审计与策略管理收进了自动选股页的“高级”标签（AutomaticSelectionAudit 组件）。
 const viewSource = await readFile(
+  new URL('../src/components/AutomaticSelectionAudit.vue', import.meta.url),
+  'utf8'
+)
+const pageSource = await readFile(
   new URL('../src/views/AutomaticSelectionView.vue', import.meta.url),
   'utf8'
 )
@@ -47,7 +52,7 @@ function overviewEvidence(runId) {
 }
 
 const setupMatch = viewSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)
-assert.ok(setupMatch, 'AutomaticSelectionView script setup should be present')
+assert.ok(setupMatch, 'AutomaticSelectionAudit script setup should be present')
 const harnessExposure = `
 ;(globalThis as Record<string, unknown>).__automaticSelectionHarness = {
   loadDashboard,
@@ -166,14 +171,15 @@ test('automatic selection types preserve immutable evidence fields', () => {
   assert.match(typesSource, /input_evidence\?: \{[\s\S]*expected_history_dates: string\[\][\s\S]*trade_date: string[\s\S]*close: number \| null[\s\S]*amount: number \| null/)
 })
 
-test('cockpit uses a compact run-aware command bar, KPI strip, and three-column research workspace', () => {
-  assert.match(viewSource, /data-testid="automatic-selection-command"/)
+test('audit panel uses a compact run-aware command bar, KPI strip, and three-column workspace', () => {
+  assert.match(viewSource, /data-testid="automatic-selection-audit-command"/)
   assert.match(viewSource, /\{\{ runContextLabel \}\}/)
-  assert.match(viewSource, /\? '最新运行' : '历史运行'/)
-  assert.match(viewSource, /运行研究流水线/)
-  assert.match(viewSource, /<h1 id="automatic-selection-title">自动选股研究驾驶舱<\/h1>/)
-  assert.match(viewSource, /<h3 id="quality-gate-title">质量与排除证据<\/h3>/)
-  assert.match(viewSource, /<h2 id="ranking-title">候选排名<\/h2>/)
+  assert.match(viewSource, /\? '最新一次' : '历史记录'/)
+  assert.doesNotMatch(viewSource, /运行研究流水线|automaticSelectionDispatch/)
+  assert.match(viewSource, /<h2 id="automatic-selection-audit-title">运行记录与策略管理<\/h2>/)
+  assert.doesNotMatch(viewSource, /<h1|研究驾驶舱/)
+  assert.match(viewSource, /<h3 id="quality-gate-title">数据检查与剔除明细<\/h3>/)
+  assert.match(viewSource, /<h2 id="ranking-title">全部排名<\/h2>/)
   assert.doesNotMatch(viewSource, /class="eyebrow"/)
   assert.doesNotMatch(viewSource, /letter-spacing: \.13em/)
   assert.doesNotMatch(viewSource, /A-SHARE QUANT|RUN SELECTOR|QUALITY GATE|SERVER-RANKED EVIDENCE/)
@@ -184,31 +190,35 @@ test('cockpit uses a compact run-aware command bar, KPI strip, and three-column 
   assert.match(viewSource, /class="run-rail cockpit-panel"/)
   assert.match(viewSource, /class="ranking-console cockpit-panel"/)
   assert.match(viewSource, /class="candidate-inspector cockpit-panel"/)
-  assert.match(viewSource, /当前运行错误/)
+  assert.match(viewSource, /这次运行出错/)
   assert.match(viewSource, /currentRun\.error/)
 })
 
-test('cockpit exposes quality gate, deterministic ranking and forward evaluation', () => {
+test('audit panel exposes data checks, the full ranking and forward evaluation in plain words', () => {
   assert.match(viewSource, /data-testid="automatic-selection-quality-gate"/)
-  assert.match(viewSource, /不会静默删除缺失因子后继续排名/)
+  assert.match(viewSource, /不会只拿部分股票硬算/)
   assert.match(viewSource, /data-testid="automatic-selection-ranking"/)
-  assert.match(viewSource, />Top-N</)
-  assert.match(viewSource, />全量合格</)
-  assert.match(viewSource, />排除项</)
-  assert.match(viewSource, /原始值 \/ z-score/)
+  assert.match(viewSource, />入选</)
+  assert.match(viewSource, />全部合格</)
+  assert.match(viewSource, />被剔除</)
+  assert.match(viewSource, /因子原始值与标准化分（z）/)
   assert.match(viewSource, /data-testid="automatic-selection-evaluations"/)
-  assert.match(viewSource, /5 \/ 20 \/ 60 交易日前瞻评估/)
-  assert.match(viewSource, /下一交易日开盘进入观察窗口/)
+  assert.match(viewSource, /5 \/ 20 \/ 60 个交易日后的表现/)
+  assert.match(viewSource, /以下一个交易日开盘价为起点/)
   assert.match(viewSource, /历史行情覆盖/)
   assert.match(viewSource, /qualityGate\.metrics\.history_count/)
   assert.match(viewSource, /qualityGate\.thresholds\.min_history_coverage/)
   assert.match(viewSource, /fmtQualityValue\(failure\.code/)
   assert.match(viewSource, /candidateScope === 'excluded'/)
-  assert.match(viewSource, /主要排除原因/)
+  assert.match(viewSource, /剔除原因/)
   assert.match(viewSource, /item\.exclusion_codes\.slice\(0, 2\)/)
-  assert.match(viewSource, /入选换手/)
+  assert.match(viewSource, /比上期换手/)
   assert.match(viewSource, /selected_turnover/)
-  assert.match(viewSource, /目标日收盘 \/ 涨跌/)
+  assert.match(viewSource, /收盘价 \/ 涨跌/)
+  assert.match(viewSource, /marketCapLabel\(item\.market_cap_bucket\)/)
+  assert.match(viewSource, /small: '小盘', mid: '中盘', large: '大盘'/)
+  assert.match(viewSource, /fmtNumber\(item\.composite_score, 2\)/)
+  assert.doesNotMatch(viewSource, /Top-N|质量门禁|合格池|研究池|落库|supersede 链|挑战者|影子|晋升|退役/)
   assert.match(viewSource, /20 日均成交额/)
   assert.match(viewSource, /value \/ 100_000/)
   assert.match(viewSource, /input_evidence\?\.history\?\.length/)
@@ -224,8 +234,7 @@ test('cockpit paginates immutable server evidence and maintains a page-local sel
   assert.match(viewSource, /data-testid="automatic-selection-pagination"/)
   assert.match(viewSource, /previousCandidatePage/)
   assert.match(viewSource, /nextCandidatePage/)
-  assert.match(viewSource, /固定 50 行服务端分页/)
-  assert.match(viewSource, /不在本地跨页重排/)
+  assert.doesNotMatch(viewSource, /固定 50 行服务端分页|不在本地跨页重排|页面不做二次排序|会清空旧选择/)
   assert.match(viewSource, /v-memo="\[item, selectedCandidateSymbol === item\.symbol, candidateScope\]"/)
   assert.doesNotMatch(viewSource, /candidates\.value\.sort\(/)
   assert.match(viewSource, /const selectedCandidateSymbol = ref\(''\)/)
@@ -443,13 +452,23 @@ test('browser history restores the backtest origin independently from automatic 
 
 test('strategy lifecycle actions are permission-gated and require human confirmation', () => {
   assert.match(viewSource, /permissions\.includes\('model:manage'\)/)
-  assert.match(viewSource, /permissions\.includes\('schedule:manage'\)/)
+  assert.match(pageSource, /hasPermission\('schedule:manage'\)/)
   assert.match(viewSource, /v-if="canManageStrategies"/)
   assert.match(viewSource, /人工核验说明/)
   assert.match(viewSource, /minlength="4"/)
-  assert.match(viewSource, /确认人工晋升/)
-  assert.match(viewSource, /至少 1 个已到期且覆盖达标的 5 日前瞻窗口/)
-  assert.match(viewSource, /不代表统计显著或策略已通过统计验证/)
+  assert.match(viewSource, /确认设为正式方案/)
+  assert.match(viewSource, /至少有 1 期已到期、数据覆盖达标的 5 日表现/)
+  assert.match(viewSource, /不代表策略已被证明有效/)
+})
+
+test('strategy versions are edited through a form with an expert JSON mode and a change summary', () => {
+  assert.match(viewSource, /const WEIGHT_FIELDS = \[/)
+  assert.match(viewSource, /function configFromForm\(\)/)
+  assert.match(viewSource, /function formFromConfig\(/)
+  assert.match(viewSource, /min_avg_amount: Number\(form\.minAvgAmountWan\) \* 10/)
+  assert.match(viewSource, /专家模式（直接编辑 JSON）/)
+  assert.match(viewSource, /const configChanges = computed/)
+  assert.match(viewSource, /createForm\.value\.expertMode\s*\? JSON\.parse/)
 })
 
 test('cockpit accessibility covers semantic selection, busy/live state, and modal focus behavior', () => {
@@ -494,10 +513,12 @@ test('drawdown uses risk severity rather than A-share return direction', () => {
   assert.match(viewSource, /\.risk-critical/)
 })
 
-test('cockpit states the research boundary and exposes no order integration', () => {
-  assert.match(viewSource, /只做确定性选股与前瞻观察/)
-  assert.match(viewSource, /不构成投资建议或交易指令/)
-  assert.doesNotMatch(viewSource, /paper_service|place_order|paperOrder|placeOrder/)
+test('the page states the research boundary and exposes no order integration', () => {
+  assert.match(pageSource, /不是对未来涨跌的预测/)
+  assert.match(pageSource, /不构成投资建议/)
+  for (const source of [viewSource, pageSource]) {
+    assert.doesNotMatch(source, /paper_service|place_order|paperOrder|placeOrder/)
+  }
   assert.doesNotMatch(apiSource, /automaticSelection(?:Buy|Sell|Order)/)
 })
 
