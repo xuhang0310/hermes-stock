@@ -62,6 +62,14 @@ _AUTOMATIC_SELECTION_CLAIM_GROUP = tuple(
     )
 )
 _SAME_DAY_CATCHUP_JOB_KEYS = frozenset(_AUTOMATIC_SELECTION_CLAIM_GROUP)
+# TuShare 当天数据 17:00 前后才发齐；数据入库失败后每 30 分钟重试，22:00 后当天不再重试。
+AUTOMATIC_SELECTION_DATA_RETRY_MINUTES = 30
+AUTOMATIC_SELECTION_DATA_RETRY_UNTIL = "22:00"
+# 旧版默认 15:45/16:10 早于数据发布，未被用户改过的内置任务升级时迁移到新默认时间。
+_LEGACY_AUTOMATIC_SELECTION_RUN_TIMES = {
+    AUTOMATIC_SELECTION_DATA_JOB_KEY: "15:45",
+    AUTOMATIC_SELECTION_JOB_KEY: "16:10",
+}
 _MANUAL_TRIGGER_TYPES = frozenset(("manual", "manual_pipeline"))
 
 # 数字人 code -> agent_profiles.agent_name（AgentReport.agent_name 外键指向后者）
@@ -916,14 +924,21 @@ def _run_automatic_selection_data(
 
     error = "；".join(summary["errors"])[:1000] or "自动选股数据入库未就绪"
     owner_user_id = snapshot.get("owner_user_id")
-    if owner_user_id is None:
+    # 定时任务失败会每 30 分钟自动重试；只在当天首次失败时提醒，避免重试刷屏。
+    if owner_user_id is None or "~retry" in str(snapshot.get("fire_key") or ""):
         return output_content, None, "failed", error
+    retry_note = (
+        f"系统将每 {AUTOMATIC_SELECTION_DATA_RETRY_MINUTES} 分钟自动重试，"
+        f"直到 {AUTOMATIC_SELECTION_DATA_RETRY_UNTIL}；"
+        if snapshot.get("trigger_type") == "schedule"
+        else ""
+    )
     notification = create_notification(
         int(owner_user_id),
         "自动选股数据入库失败",
         content=(
             f"目标交易日 {summary['target_trade_date'] or '未知'}；"
-            f"{error}"
+            f"{retry_note}{error}"
         ),
         level="error",
         category="automatic_selection",
@@ -1037,6 +1052,7 @@ def _execute_job(job_key: str, run_id: str) -> None:
             )
             if run is not None:
                 snapshot["owner_user_id"] = run.owner_user_id
+                snapshot["fire_key"] = run.fire_key
     if snapshot is None:
         _finalize_run(run_id, "failed", error="任务不存在")
         return
@@ -1248,6 +1264,11 @@ def _find_running_claim(
     )
 
 
+def _hhmm_minutes(value: str) -> int:
+    hour, minute = value.split(":")[:2]
+    return int(hour) * 60 + int(minute)
+
+
 def _scheduled_fire_key(job: ScheduledJob, now: datetime) -> str:
     if (
         job.schedule_type == "daily"
@@ -1255,26 +1276,54 @@ def _scheduled_fire_key(job: ScheduledJob, now: datetime) -> str:
         and job.run_time
     ):
         fire_minute = f"{now:%Y-%m-%d}T{job.run_time}"
+        if job.job_key == AUTOMATIC_SELECTION_DATA_JOB_KEY:
+            # 每个 30 分钟槽位最多一次；超过重试截止时间后槽位不再增长，当天不再重试。
+            elapsed = min(
+                _hhmm_minutes(now.strftime("%H:%M")),
+                _hhmm_minutes(AUTOMATIC_SELECTION_DATA_RETRY_UNTIL),
+            ) - _hhmm_minutes(job.run_time)
+            slot = max(0, elapsed) // AUTOMATIC_SELECTION_DATA_RETRY_MINUTES
+            if slot:
+                fire_minute += f"~retry{slot}"
     else:
         fire_minute = now.strftime("%Y-%m-%dT%H:%M")
     return f"{job.job_key}@{fire_minute}"
 
 
-def _scheduled_automatic_selection_data_ready(session, now: datetime) -> bool:
-    """Use only local evidence to gate the scheduled ranking run."""
-    expected_trade_date = now.strftime("%Y%m%d")
+def _scheduled_automatic_selection_target(session, now: datetime) -> str | None:
+    """定时选股的目标交易日：今天须为本地日历开市日；17:00 前用前一开市日。"""
+    from backend.app.market.market_sync import selection_target_ceiling
+
+    today = now.strftime("%Y%m%d")
     local_open_date = session.scalar(
         select(MarketTradingCalendar.cal_date)
         .where(
             MarketTradingCalendar.exchange == "SSE",
-            MarketTradingCalendar.cal_date == expected_trade_date,
+            MarketTradingCalendar.cal_date == today,
             MarketTradingCalendar.is_open.is_(True),
         )
         .limit(1)
     )
-    if str(local_open_date or "") != expected_trade_date:
-        return False
+    if str(local_open_date or "") != today:
+        return None
+    ceiling = selection_target_ceiling(now)
+    if ceiling >= today:
+        return today
+    previous = session.scalar(
+        select(func.max(MarketTradingCalendar.cal_date)).where(
+            MarketTradingCalendar.exchange == "SSE",
+            MarketTradingCalendar.is_open.is_(True),
+            MarketTradingCalendar.cal_date <= ceiling,
+        )
+    )
+    return str(previous) if previous else None
 
+
+def _scheduled_automatic_selection_data_ready(session, now: datetime) -> bool:
+    """Use only local evidence to gate the scheduled ranking run."""
+    expected_trade_date = _scheduled_automatic_selection_target(session, now)
+    if not expected_trade_date:
+        return False
     return successful_automatic_selection_ingestion(session, expected_trade_date) is not None
 
 
@@ -1355,6 +1404,14 @@ def _claim_job_run(
     ):
         session.rollback()
         return {"status": "waiting_dependency", "run_id": None}
+    if (
+        trigger_type == "schedule"
+        and job_key == AUTOMATIC_SELECTION_DATA_JOB_KEY
+        and _scheduled_automatic_selection_data_ready(session, ran_at)
+    ):
+        # 当前目标日已入库成功（含手动触发），重试槽位不再重复同步。
+        session.rollback()
+        return {"status": "not_due", "run_id": None}
 
     run_id = uuid4().hex
     fire_key = (
@@ -1717,10 +1774,10 @@ DEFAULT_JOBS = [
     {
         "job_key": AUTOMATIC_SELECTION_DATA_JOB_KEY,
         "name": "自动选股数据入库",
-        "description": "收盘后同步全市场日线、基础指标、股票目录、交易日历和策略所需因子。",
+        "description": "17:00 后同步全市场日线、基础指标、复权因子、股票目录、交易日历和策略所需因子；失败每 30 分钟重试至 22:00。",
         "job_kind": "automatic_selection_data",
         "schedule_type": "daily",
-        "run_time": "15:45",
+        "run_time": "17:30",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
         "enabled": True,
@@ -1728,10 +1785,10 @@ DEFAULT_JOBS = [
     {
         "job_key": AUTOMATIC_SELECTION_JOB_KEY,
         "name": "全自动选股",
-        "description": "收盘后运行确定性多因子选股、保存不可变证据并更新前瞻评估；只做研究，不自动交易。",
+        "description": "数据入库成功后运行确定性多因子选股、保存不可变证据并更新前瞻评估；只做研究，不自动交易。",
         "job_kind": "automatic_selection",
         "schedule_type": "daily",
-        "run_time": "16:10",
+        "run_time": "17:50",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
         "enabled": True,
@@ -1868,7 +1925,7 @@ def _normalize_shared_price_sync_history(session) -> None:
 
 
 def ensure_default_jobs(session) -> int:
-    """补齐内置任务；仅基础设施型价格同步任务会随版本迁移调度配置。"""
+    """补齐内置任务；基础设施型价格同步任务、以及仍停留在旧默认时间的自动选股任务会随版本迁移调度配置。"""
     created = 0
     owner_user_id = _default_jobs_owner_id(session)
     for item in DEFAULT_JOBS:
@@ -1881,6 +1938,10 @@ def ensure_default_jobs(session) -> int:
                 existing.owner_user_id = None
             elif existing.owner_user_id is None and owner_user_id is not None:
                 existing.owner_user_id = owner_user_id
+            legacy_time = _LEGACY_AUTOMATIC_SELECTION_RUN_TIMES.get(existing.job_key)
+            if legacy_time and existing.run_time == legacy_time:
+                existing.run_time = item.get("run_time")
+                existing.description = item.get("description")
             if existing.job_kind == "position_price_sync":
                 # 系统内置行情任务属于基础设施配置；版本升级时迁移为分钟同步。
                 existing.name = item["name"]

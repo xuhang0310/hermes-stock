@@ -170,11 +170,14 @@ class AutomaticSelectionOrchestrationTests(unittest.TestCase):
         self.mock(repository, "ensure_default_strategy")
         self.mock(repository, "active_strategy_models", return_value=[])
         sync = self.mock(service, "sync_market", return_value={"errors": ["daily 部分失败"]})
-        self.mock(service, "local_selection_cache_status", return_value={"ready": True, "expected_trade_date": TARGET})
+        self.mock(service, "selection_target_ceiling", return_value=TARGET)
+        cache = self.mock(service, "local_selection_cache_status", return_value={"ready": True, "expected_trade_date": TARGET})
         result = service.sync_automatic_selection_data()
         self.assertFalse(result["ready"])
         self.assertIn("daily 部分失败", result["errors"])
-        sync.assert_called_once_with(days=60)
+        # 入库与校验共用同一个目标上限，跨过 17:00 也不会前后口径不一。
+        sync.assert_called_once_with(days=60, target_ceiling=TARGET)
+        cache.assert_called_once_with(target_ceiling=TARGET)
 
     def test_factor_error_is_disclosed_without_blocking_other_factor_free_strategies(self):
         self.mock(service, "_ingestion_lock", return_value=MagicMock())

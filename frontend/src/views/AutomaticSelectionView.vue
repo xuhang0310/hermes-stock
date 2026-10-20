@@ -60,6 +60,7 @@ const detailPick = computed<AutomaticSelectionPick | null>(
 )
 const dateOptions = computed(() => daily.value?.available_dates || [])
 const since = computed(() => daily.value?.performance.since_selection || null)
+const dataSync = computed(() => daily.value?.data_sync || null)
 const explanationHtml = computed(() => renderMarkdown(daily.value?.run?.llm_explanation || ''))
 const trackLine = computed(() => {
   const brief = daily.value?.track_brief
@@ -401,6 +402,32 @@ onBeforeUnmount(() => {
 
       <template v-else-if="daily && status">
         <section
+          v-if="dataSync && !dataSync.ok"
+          class="sync-panel ui-panel"
+          :class="`sync-${dataSync.status}`"
+          role="status"
+          data-testid="automatic-selection-data-sync"
+        >
+          <header>
+            <strong>数据同步：{{ dataSync.title }}</strong>
+            <span v-if="dataSync.at">
+              {{ beijingFromDb(dataSync.at) }}<template v-if="dataSync.trigger_label"> · {{ dataSync.trigger_label }}触发</template><template v-if="dataSync.target_trade_date"> · 目标交易日 {{ fmtDate(dataSync.target_trade_date) }}</template>
+            </span>
+          </header>
+          <ul v-if="dataSync.issues.length">
+            <li v-for="issue in dataSync.issues" :key="issue">{{ issue }}</li>
+          </ul>
+          <p v-if="dataSync.next_step">{{ dataSync.next_step }}</p>
+          <details v-if="dataSync.detail && canSeeAdvanced" class="tech-detail">
+            <summary>技术详情</summary>
+            <p>{{ dataSync.detail }}</p>
+          </details>
+        </section>
+        <p v-else-if="dataSync?.ok" class="sync-line" data-testid="automatic-selection-data-sync">
+          行情数据：{{ dataSync.title }}<template v-if="dataSync.at">（{{ beijingFromDb(dataSync.at) }}）</template>
+        </p>
+
+        <section
           v-if="status.code === 'ok'"
           class="conclusion ui-panel"
           aria-labelledby="conclusion-title"
@@ -469,6 +496,10 @@ onBeforeUnmount(() => {
           <ul v-if="status.issues.length">
             <li v-for="issue in status.issues" :key="issue">{{ issue }}</li>
           </ul>
+          <details v-if="status.detail && canSeeAdvanced" class="tech-detail">
+            <summary>技术详情</summary>
+            <p>{{ status.detail }}</p>
+          </details>
           <div class="status-actions">
             <button
               v-if="status.fallback_trade_date"
@@ -926,6 +957,17 @@ onBeforeUnmount(() => {
 .status-panel p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
 .status-panel ul { margin: 0; padding-left: 20px; color: #e6c36f; font-size: 13px; line-height: 1.7; }
 .status-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.sync-panel { display: grid; gap: 8px; padding: 16px 20px; border-left: 2px solid var(--warning); }
+.sync-panel.sync-never,
+.sync-panel.sync-running { border-left-color: var(--gold-dim); }
+.sync-panel header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.sync-panel header strong { font-size: 14px; font-weight: 500; }
+.sync-panel header span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.sync-panel ul { margin: 0; padding-left: 20px; color: #e6c36f; font-size: 13px; line-height: 1.7; }
+.sync-panel > p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.sync-line { margin: 0; color: var(--muted); font-size: 12px; }
+.tech-detail summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.tech-detail p { margin: 8px 0 0; color: var(--muted-2); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 
 .ui-panel-head p { line-height: 1.5; }
 .ui-panel-head h3 { margin: 0; font-size: 16px; font-weight: 500; }

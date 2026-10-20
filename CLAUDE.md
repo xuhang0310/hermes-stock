@@ -123,6 +123,7 @@ Adjacent flows: `agents/position_agent.py` (natural-language / screenshot positi
 - **技术选股**：`POST /api/screener/run` —— 候选池=最近一次全市场截面（`stock_latest_prices` 中 trade_date 的众数）上仍在交易的非 ST 股票（JOIN `instruments`）；基础条件纯 SQL，技术条件（站上 5/10/20 均线）对**全部**命中股票分批取 K 线在 Python 计算（按 `stock_adj_factors` 前复权，缺因子退回不复权并标 `ma_adjusted=false`）。综合分（估值规模/动量/流动性分位分 × 权重）与排序在服务端对全部命中计算，`universe`=候选池、`total`=真实命中数、`items`=排序后前 limit 只。选股器不外呼拉全市场。
 - **复权**：`daily_bars` 是不复权价。凡跨交易日比较价格（自动选股动量/波动、前瞻评估收益、选股器均线）都必须乘同日 `stock_adj_factors.adj_factor`；缺因子按缺失处理，不得退回原始价冒充。
 - **自动选股页面**：`/automatic-selection` 面向普通用户（今日选股 / 历史战绩 / 选股方法；有 `model:manage` 或 `schedule:manage` 才见“高级”审计台 `components/AutomaticSelectionAudit.vue`）。白话内容全部由 `quant/automatic_selection_presentation.py` 从落库证据派生（维度 0–100 分、理由、规则风险、选出后表现、历史战绩），接口 `GET /api/automatic-selection/daily`、`/track-record`。呈现层只读，不得回写排名或改动 `DEFAULT_STRATEGY_CONFIG`/评分实现（会改变 config_hash/指纹）。详见 `docs/automatic-selection.md`。
+- **自动选股时间口径**：目标交易日 = 不晚于 `market_sync.selection_target_ceiling()` 的最近开市日（北京时间 17:00 前用前一日，TuShare 当天数据此前未发齐）。内置入库 17:30（失败每 30 分钟重试至 22:00）、排名 17:50；任务键名 `automatic-selection-data-1545`/`automatic-selection-1610` 是历史 ID，与实际时间无关。
 - **报告导出**：`data/report_api.py` —— `GET /api/reports/{report_id}`（全量结构化）、`/{report_id}/export?format=md|json`、`GET /api/reports/export.csv`（BOM 兼容 Excel，与 backtest trades.csv 同款）。
 - **模拟盘**：`paper/` 三表（`paper_accounts`/`paper_positions`/`paper_orders`，与真实持仓域完全隔离、无外键）；市价单即时成交、成交价=`stock_latest_prices` 缓存（无缓存拒绝下单）、一手 100 股、单边万 2.5 手续费、账户行 `with_for_update()` 防双花。**仍是研究演练，无任何真实交易通道。**
 

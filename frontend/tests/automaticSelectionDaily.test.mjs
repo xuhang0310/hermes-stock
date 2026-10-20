@@ -287,3 +287,15 @@ test('track record loads once, explains the brief and draws signed bars', async 
   assert.equal(cells.length, 3)
   assert.equal(cells[1].status_label, '—')
 })
+
+test('data sync status is visible in plain words, technical detail only for operators', () => {
+  const template = pageSource.slice(pageSource.indexOf('<template>'), pageSource.indexOf('<style'))
+  assert.match(template, /v-if="dataSync && !dataSync\.ok"[\s\S]*data-testid="automatic-selection-data-sync"/)
+  assert.match(template, /数据同步：\{\{ dataSync\.title \}\}/)
+  assert.match(template, /\{\{ dataSync\.next_step \}\}/)
+  assert.match(template, /<details v-if="dataSync\.detail && canSeeAdvanced" class="tech-detail">/)
+  assert.match(template, /<details v-if="status\.detail && canSeeAdvanced" class="tech-detail">/)
+  assert.match(template, /beijingFromDb\(dataSync\.at\)/)
+  assert.match(typesSource, /export type AutomaticSelectionDataSync = \{/)
+  assert.match(typesSource, /data_sync: AutomaticSelectionDataSync \| null/)
+})

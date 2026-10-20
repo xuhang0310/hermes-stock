@@ -20,6 +20,7 @@ from backend.app.market.market_sync import (
     load_local_open_trade_dates,
     load_local_stock_catalog_snapshot,
     local_selection_cache_status,
+    selection_target_ceiling,
     sync_market,
 )
 from backend.app.quant import automatic_selection_repository as repository
@@ -82,8 +83,10 @@ def sync_automatic_selection_data() -> dict[str, Any]:
             repository.strategy_to_dict(row)
             for row in repository.active_strategy_models()
         ]
-        market_summary = sync_market(days=60)
-        cache_status = local_selection_cache_status()
+        # 同一轮入库与校验共用一个目标上限，跨过 17:00 也不会前后口径不一。
+        ceiling = selection_target_ceiling()
+        market_summary = sync_market(days=60, target_ceiling=ceiling)
+        cache_status = local_selection_cache_status(target_ceiling=ceiling)
         target_trade_date = str(cache_status.get("expected_trade_date") or "")
         factor_ids, config_errors = _collect_factor_requirements(
             strategies

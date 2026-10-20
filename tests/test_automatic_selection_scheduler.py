@@ -45,9 +45,11 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
 
         data = configs[rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY]
         ranking = configs[rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY]
-        self.assertEqual(data["run_time"], "15:45")
+        # TuShare 当天数据 17:00 前后才发齐：入库在其后，排名再其后。
+        self.assertEqual(data["run_time"], "17:30")
         self.assertEqual(data["job_kind"], "automatic_selection_data")
-        self.assertEqual(ranking["run_time"], "16:10")
+        self.assertEqual(ranking["run_time"], "17:50")
+        self.assertLess(data["run_time"], ranking["run_time"])
         self.assertEqual(ranking["job_kind"], "automatic_selection")
         for config in configs.values():
             self.assertEqual(config["schedule_type"], "daily")
@@ -94,21 +96,66 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
             )
 
     def test_catchup_fire_key_uses_canonical_configured_time(self) -> None:
-        data_job = self._job(
-            rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
-            "automatic_selection_data",
-            "15:45",
+        ranking_job = self._job(
+            rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
+            "automatic_selection",
+            "17:50",
         )
         fire_key = rhythm_scheduler._scheduled_fire_key(
-            data_job,
-            datetime(2026, 9, 7, 18, 30),
+            ranking_job,
+            datetime(2026, 9, 7, 20, 30),
         )
 
         self.assertEqual(
             fire_key,
-            f"{rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY}"
-            "@2026-09-07T15:45",
+            f"{rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY}"
+            "@2026-09-07T17:50",
         )
+
+    def test_data_job_gets_one_retry_slot_every_thirty_minutes_until_cutoff(self) -> None:
+        data_job = self._job(
+            rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+            "automatic_selection_data",
+            "17:30",
+        )
+        prefix = f"{data_job.job_key}@2026-09-07T17:30"
+        expectations = {
+            (17, 30): prefix,
+            (17, 59): prefix,
+            (18, 0): f"{prefix}~retry1",
+            (21, 59): f"{prefix}~retry8",
+            (22, 0): f"{prefix}~retry9",
+            (23, 40): f"{prefix}~retry9",
+        }
+        for (hour, minute), expected in expectations.items():
+            with self.subTest(at=f"{hour}:{minute}"):
+                self.assertEqual(
+                    rhythm_scheduler._scheduled_fire_key(data_job, datetime(2026, 9, 7, hour, minute)),
+                    expected,
+                )
+
+    def test_data_retry_stops_once_current_target_is_ingested(self) -> None:
+        data_job = self._job(
+            rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+            "automatic_selection_data",
+            "17:30",
+        )
+        session = MagicMock()
+        with (
+            patch.object(rhythm_scheduler, "_lock_claim_group", return_value={data_job.job_key: data_job}),
+            patch.object(rhythm_scheduler, "_find_running_claim", return_value=None),
+            patch.object(rhythm_scheduler, "is_trading_day", return_value=True),
+            patch.object(rhythm_scheduler, "_scheduled_automatic_selection_data_ready", return_value=True),
+        ):
+            result = rhythm_scheduler._claim_job_run(
+                session,
+                data_job.job_key,
+                trigger_type="schedule",
+                ran_at=datetime(2026, 9, 7, 18, 5),
+            )
+
+        self.assertEqual(result, {"status": "not_due", "run_id": None})
+        session.add.assert_not_called()
 
     def test_both_automatic_jobs_use_one_deterministically_locked_group(self) -> None:
         expected = tuple(
@@ -216,17 +263,17 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
         data_job = self._job(
             rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
             "automatic_selection_data",
-            "15:45",
+            "17:30",
             owner_user_id=31,
         )
         ranking_job = self._job(
             rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
             "automatic_selection",
-            "16:10",
+            "17:50",
             owner_user_id=31,
         )
         session = MagicMock()
-        ran_at = datetime(2026, 9, 7, 18, 30)
+        ran_at = datetime(2026, 9, 7, 17, 40)
         with (
             patch.object(
                 rhythm_scheduler,
@@ -260,7 +307,7 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
         self.assertEqual(added.owner_user_id, 31)
         self.assertEqual(
             added.fire_key,
-            f"{data_job.job_key}@2026-09-07T15:45",
+            f"{data_job.job_key}@2026-09-07T17:30",
         )
         session.commit.assert_called_once_with()
 
@@ -339,7 +386,7 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
         ):
             ready = rhythm_scheduler._scheduled_automatic_selection_data_ready(
                 session,
-                datetime(2026, 9, 7, 16, 10),
+                datetime(2026, 9, 7, 17, 50),
             )
 
         self.assertTrue(ready)
@@ -366,8 +413,31 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
         self.assertFalse(
             rhythm_scheduler._scheduled_automatic_selection_data_ready(
                 stale_session,
-                datetime(2026, 9, 7, 16, 10),
+                datetime(2026, 9, 7, 17, 50),
             )
+        )
+
+    def test_before_data_release_the_gate_targets_the_previous_open_day(self) -> None:
+        session = MagicMock()
+        session.scalar.side_effect = [
+            "20260907",
+            "20260904",
+            SimpleNamespace(
+                status="success",
+                output_content=json.dumps({"ready": True, "target_trade_date": "20260904"}),
+            ),
+        ]
+        self.assertTrue(
+            rhythm_scheduler._scheduled_automatic_selection_data_ready(session, datetime(2026, 9, 7, 16, 59))
+        )
+        previous_sql = str(session.scalar.call_args_list[1].args[0].compile(compile_kwargs={"literal_binds": True}))
+        self.assertIn("max(market_trading_calendar.cal_date)", previous_sql)
+        self.assertIn("market_trading_calendar.cal_date <= '20260906'", previous_sql)
+
+        holiday = MagicMock()
+        holiday.scalar.side_effect = [None]
+        self.assertFalse(
+            rhythm_scheduler._scheduled_automatic_selection_data_ready(holiday, datetime(2026, 10, 1, 18, 0))
         )
 
     def test_scheduled_ranking_due_check_does_not_call_external_calendar(self) -> None:
@@ -378,7 +448,7 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
     def test_newer_failed_ingestion_does_not_reuse_older_success(self) -> None:
         session = MagicMock()
         session.scalar.side_effect = ["20260907", SimpleNamespace(status="failed", output_content='{"ready":true,"target_trade_date":"20260907"}')]
-        self.assertFalse(rhythm_scheduler._scheduled_automatic_selection_data_ready(session, datetime(2026, 9, 7, 16, 11)))
+        self.assertFalse(rhythm_scheduler._scheduled_automatic_selection_data_ready(session, datetime(2026, 9, 7, 17, 51)))
 
     def test_running_claim_check_is_a_current_locking_read(self) -> None:
         session = MagicMock()

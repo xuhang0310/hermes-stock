@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 import math
 import threading
@@ -18,7 +19,7 @@ from typing import Any, Iterable
 from sqlalchemy import func, select
 
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import DailyBar
+from backend.app.core.models import DailyBar, JobRun, ScheduledJob
 from backend.app.market.market_sync import load_local_adj_factors, load_local_open_trade_dates
 from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant.automatic_selection_evaluation import EVALUATION_HORIZONS
@@ -32,7 +33,7 @@ from backend.app.quant.automatic_selection_scoring import (
 logger = logging.getLogger(__name__)
 
 DISCLAIMER = "这是按固定规则打分排序的研究结果，不是对未来涨跌的预测，也不构成投资建议。"
-SCHEDULE_NOTE = "每个交易日 15:45 自动同步数据，16:10 自动选股。"
+SCHEDULE_NOTE = "每个交易日 17:30 自动同步收盘数据（失败每 30 分钟重试到 22:00），成功后自动选股。"
 
 # (key, 名称, 包含的特征, 计分方向说明)
 DIMENSIONS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
@@ -104,14 +105,16 @@ def daily_view(*, trade_date: str | None = None, strategy_id: int | None = None)
         if strategy_id is not None:
             raise LookupError("自动选股策略不存在")
         return _empty_view(None, [], None)
-    index = repository.strategy_run_index(int(strategy["id"]), limit=120)
+    runs = repository.strategy_run_index(int(strategy["id"]), limit=120)
+    # 没能确定交易日的失败运行（数据未就绪）不进入日期列表，只在没有任何结果时展示原因。
+    index = [entry for entry in runs if entry["trade_date"]]
     last_completed = next((entry["trade_date"] for entry in index if entry["status"] == "completed"), None)
     if trade_date:
         entry = next((item for item in index if item["trade_date"] == trade_date), None)
         if entry is None:
             raise LookupError("这一天没有选股结果")
     else:
-        entry = index[0] if index else None
+        entry = index[0] if index else next(iter(runs), None)
     if entry is None:
         return _empty_view(strategy, index, last_completed)
 
@@ -133,18 +136,23 @@ def daily_view(*, trade_date: str | None = None, strategy_id: int | None = None)
             {"trade_date": item["trade_date"], "status": item["status"], "status_label": STATUS_LABELS.get(item["status"], item["status"])}
             for item in index
         ],
-        "trade_date": detail["target_trade_date"],
-        "is_latest": entry is index[0],
+        "trade_date": detail["target_trade_date"] or None,
+        "is_latest": not index or entry is index[0],
         "last_completed_trade_date": last_completed,
         "run": _run_brief(detail),
         "status": status_view(detail, last_completed_trade_date=last_completed),
         "summary": _summary(detail, picks, removed),
         "picks": picks,
         "removed": removed,
-        "funnel": funnel_view(detail, repository.constraint_skipped_count(detail["run_id"]) if picks else 0),
+        "funnel": (
+            funnel_view(detail, repository.constraint_skipped_count(detail["run_id"]) if picks else 0)
+            if detail.get("universe_count")
+            else None
+        ),
         "method": method_view(config),
         "performance": _run_performance(detail, since),
         "track_brief": _track_brief(int(strategy["id"])),
+        "data_sync": _safe_data_sync_view(),
         "disclaimer": DISCLAIMER,
         "limitations": RESEARCH_LIMITATIONS,
     }
@@ -733,6 +741,7 @@ def status_view(run: dict[str, Any] | None, *, last_completed_trade_date: str | 
             "title": "还没有选股结果",
             "message": f"{SCHEDULE_NOTE}管理员也可以点击“重新计算”立即生成。",
             "issues": [],
+            "detail": None,
             "fallback_trade_date": None,
         }
     status = str(run.get("status") or "")
@@ -744,6 +753,7 @@ def status_view(run: dict[str, Any] | None, *, last_completed_trade_date: str | 
             "title": f"{_date_label(trade_date)} 收盘后的选股结果",
             "message": "数据检查通过，结果已生成。",
             "issues": [],
+            "detail": None,
             "fallback_trade_date": None,
         }
     if status == "running":
@@ -752,6 +762,7 @@ def status_view(run: dict[str, Any] | None, *, last_completed_trade_date: str | 
             "title": f"正在计算 {_date_label(trade_date)} 的结果",
             "message": "通常几分钟内完成，稍后刷新即可。",
             "issues": [],
+            "detail": None,
             "fallback_trade_date": fallback,
         }
     if status == "blocked":
@@ -764,15 +775,150 @@ def status_view(run: dict[str, Any] | None, *, last_completed_trade_date: str | 
                 f"{SCHEDULE_NOTE}数据补齐后管理员也可以点击“重新计算”。"
             ),
             "issues": [_failure_text(failure) for failure in gate.get("failures") or []],
+            "detail": None,
+            "fallback_trade_date": fallback,
+        }
+    error = str(run.get("error") or "未知错误")
+    if not trade_date:
+        started = _date_label(str(run.get("started_at") or run.get("created_at") or "")[:10])
+        title = f"最近一次选股没能运行（{started}）"
+    else:
+        title = f"{_date_label(trade_date)} 的计算出错了"
+    if error.startswith(_CACHE_NOT_READY_PREFIX):
+        return {
+            "code": "failed",
+            "title": title,
+            "message": (
+                "当时本地的行情数据还没准备好，系统没有选股（不会拿残缺数据硬算）。"
+                "数据同步成功后会自动选股，进展见本页“数据同步”提示。"
+            ),
+            "issues": plain_data_issues(error[len(_CACHE_NOT_READY_PREFIX):]),
+            "detail": error[:2000],
             "fallback_trade_date": fallback,
         }
     return {
         "code": "failed",
-        "title": f"{_date_label(trade_date)} 的计算出错了",
+        "title": title,
         "message": "错误已记录，管理员可以在“高级”里查看详情后重新计算。",
-        "issues": [str(run.get("error") or "未知错误")[:300]],
+        "issues": [error[:300]],
+        "detail": error[:2000],
         "fallback_trade_date": fallback,
     }
+
+
+_CACHE_NOT_READY_PREFIX = "自动选股本地缓存未就绪："
+# 按顺序匹配，命中第一条即用；None 表示保留原文（数据源的报错本身就是可操作信息）。
+_DATA_ISSUE_RULES: tuple[tuple[tuple[str, ...], str | None], ...] = (
+    (("未配置 STOCK_TUSHARE_TOKEN",), "没有配置 TuShare 数据源 Token，无法拉取行情（请在“数据源设置”中配置）"),
+    (("TuShare 返回错误", "TuShare 调用失败"), None),
+    (("上市标的 0/",), "数据源还没有返回这一天的全市场行情，通常是当天数据尚未发布（收盘后约 15:00–17:00 陆续入库）"),
+    (("全市场响应不完整", "行情响应格式无效", "含无效标的"), "数据源返回的全市场行情不完整"),
+    (("交易日历", "历史交易日"), "交易日历没有同步到最新"),
+    (("A 股目录", "股票目录", "stock_basic"), "股票名单没有同步完整"),
+    (("复权因子", "adj_factor"), "复权数据不全"),
+    (("daily_basic",), "市盈率、市值等每日指标不全"),
+    (("日线",), "日线行情不全"),
+    (("因子",), "策略所需的附加因子数据不全"),
+)
+
+
+def plain_data_issues(text: str, *, limit: int = 4) -> list[str]:
+    """把数据入库/缓存检查的技术报错翻成去重后的白话原因。"""
+    issues: list[str] = []
+    for piece in (part.strip() for part in str(text or "").replace(";", "；").split("；")):
+        if not piece:
+            continue
+        plain = piece
+        for needles, replacement in _DATA_ISSUE_RULES:
+            if any(needle in piece for needle in needles):
+                plain = f"数据源报错：{piece}" if replacement is None else replacement
+                break
+        if plain not in issues:
+            issues.append(plain)
+    return issues[:limit]
+
+
+def data_sync_view(now: datetime | None = None) -> dict[str, Any]:
+    """最近一次“自动选股数据入库”任务的白话状态；选股结果停更时，原因几乎都在这里。"""
+    from backend.app.scheduler.rhythm_scheduler import (
+        AUTOMATIC_SELECTION_DATA_JOB_KEY,
+        AUTOMATIC_SELECTION_DATA_RETRY_MINUTES,
+        AUTOMATIC_SELECTION_DATA_RETRY_UNTIL,
+        now_sh,
+    )
+
+    current = now or now_sh()
+    with SessionLocal() as db:
+        row = db.scalar(
+            select(JobRun)
+            .where(JobRun.job_key == AUTOMATIC_SELECTION_DATA_JOB_KEY)
+            .order_by(JobRun.started_at.desc(), JobRun.id.desc())
+            .limit(1)
+        )
+        run_time = db.scalar(
+            select(ScheduledJob.run_time).where(ScheduledJob.job_key == AUTOMATIC_SELECTION_DATA_JOB_KEY)
+        )
+    schedule = f"每个交易日 {run_time or '收盘后'} 自动同步"
+    if row is None:
+        return {
+            "status": "never",
+            "ok": False,
+            "title": "还没有同步过选股所需的行情数据",
+            "at": None,
+            "trigger_label": None,
+            "target_trade_date": None,
+            "issues": [],
+            "detail": None,
+            "next_step": f"{schedule}；管理员也可以点击“重新计算”立即同步并选股。",
+        }
+    try:
+        output = json.loads(row.output_content or "{}")
+    except (TypeError, ValueError):
+        output = {}
+    target = str((output or {}).get("target_trade_date") or "") or None
+    trigger_label = "手动" if str(row.trigger_type or "").startswith("manual") else "定时"
+    base = {
+        "status": row.status,
+        "ok": row.status == "success",
+        # job_runs 存的是北京墙钟时间（now_sh），按接口约定显式带上 +08:00。
+        "at": f"{row.started_at.isoformat(timespec='seconds')}+08:00" if row.started_at else None,
+        "trigger_label": trigger_label,
+        "target_trade_date": target,
+        "issues": [],
+        "detail": None,
+        "next_step": None,
+    }
+    if row.status == "success":
+        return {**base, "title": f"{_date_label(target)} 收盘数据已同步" if target else "行情数据已同步"}
+    if row.status == "running":
+        return {**base, "title": "正在同步行情数据", "next_step": "通常一两分钟完成，完成后会自动选股。"}
+    same_day = row.started_at is not None and row.started_at.date() == current.date()
+    if trigger_label == "定时" and same_day and current.strftime("%H:%M") < AUTOMATIC_SELECTION_DATA_RETRY_UNTIL:
+        next_step = (
+            f"系统会每 {AUTOMATIC_SELECTION_DATA_RETRY_MINUTES} 分钟自动重试，"
+            f"直到 {AUTOMATIC_SELECTION_DATA_RETRY_UNTIL}；成功后自动选股。"
+        )
+    else:
+        next_step = (
+            f"{schedule}；管理员也可以点击“重新计算”立即重试"
+            "（17:00 前会使用上一个交易日的收盘数据）。"
+        )
+    error = str(row.error or "")
+    return {
+        **base,
+        "title": "最近一次数据同步失败",
+        "issues": plain_data_issues(error) or ["数据同步没有成功"],
+        "detail": error[:2000] or None,
+        "next_step": next_step,
+    }
+
+
+def _safe_data_sync_view() -> dict[str, Any] | None:
+    try:
+        return data_sync_view()
+    except Exception as exc:
+        logger.warning("读取自动选股数据同步状态失败 error=%s", exc)
+        return None
 
 
 def _failure_text(failure: dict[str, Any]) -> str:
@@ -939,6 +1085,7 @@ def _empty_view(strategy: dict[str, Any] | None, index: list[dict[str, Any]], la
         "method": method_view(_run_config({"config": (strategy or {}).get("config")})),
         "performance": {"since_selection": None, "horizons": []},
         "track_brief": None,
+        "data_sync": _safe_data_sync_view(),
         "disclaimer": DISCLAIMER,
         "limitations": RESEARCH_LIMITATIONS,
     }

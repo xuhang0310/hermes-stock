@@ -1987,7 +1987,20 @@ export type AutomaticSelectionDailyStatus = {
   title: string
   message: string
   issues: string[]
+  detail: string | null
   fallback_trade_date: string | null
+}
+
+export type AutomaticSelectionDataSync = {
+  status: 'success' | 'failed' | 'running' | 'never' | string
+  ok: boolean
+  title: string
+  at: string | null
+  trigger_label: string | null
+  target_trade_date: string | null
+  issues: string[]
+  detail: string | null
+  next_step: string | null
 }
 
 export type AutomaticSelectionSinceSelection = {
@@ -2083,6 +2096,7 @@ export type AutomaticSelectionDaily = {
     }>
   }
   track_brief: { horizon: number; periods: number; wins: number; avg_excess_return: number | null } | null
+  data_sync: AutomaticSelectionDataSync | null
   disclaimer: string
   limitations: string
 }

@@ -209,6 +209,31 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
         for call in db.execute.call_args_list:
             self.assertIn("instruments.list_status = 'L'", _sql(call.args[0]))
 
+    def test_selection_target_waits_for_the_daily_data_release(self):
+        from datetime import datetime
+
+        ceiling = self.market.selection_target_ceiling
+        self.assertEqual(ceiling(datetime(2026, 9, 7, 10, 8)), "20260906")
+        self.assertEqual(ceiling(datetime(2026, 9, 7, 16, 59)), "20260906")
+        self.assertEqual(ceiling(datetime(2026, 9, 7, 17, 0)), "20260907")
+
+    def test_cache_target_and_watermarks_respect_the_ceiling(self):
+        db = self.cache(calendar_date="20260903", bar_date="20260903", basic_date="20260903")
+        status = self.market.local_selection_cache_status(target_ceiling="20260903")
+        self.assertEqual(status["target_ceiling"], "20260903")
+        self.assertEqual(status["expected_trade_date"], "20260903")
+        calendar_sql = _sql(db.scalar.call_args_list[1].args[0])
+        self.assertIn("market_trading_calendar.cal_date <= '20260903'", calendar_sql)
+        bar_sql = _sql(db.scalar.call_args_list[2].args[0])
+        self.assertIn("'20260903'", bar_sql)
+        self.assertNotIn("'20260905'", bar_sql)
+
+    def test_ceiling_can_never_move_past_today(self):
+        self.cache()
+        status = self.market.local_selection_cache_status(target_ceiling="20991231")
+        self.assertEqual(status["target_ceiling"], self.today)
+        self.assertEqual(status["expected_trade_date"], self.latest)
+
     def test_one_current_row_is_not_a_full_market_cache(self):
         self.cache(bar_counts={day: 1 for day in self.history}, basic_count=1)
         status = self.market.local_selection_cache_status()
@@ -461,6 +486,14 @@ class AutomaticSelectionMarketCacheTests(unittest.TestCase):
         self.assertEqual(events[3][0], "_upsert_trading_calendar")
         self.assertEqual(writers["_upsert_instruments"].call_args.args[0][-1]["list_status"], "D")
         self.market.get_trade_cal.assert_called_once_with(start_date="20260508", end_date=self.today, exchange="SSE")
+
+    def test_sync_window_ends_at_the_selection_ceiling(self):
+        events, _ = self.sync()
+        status = self.market.sync_market(days=5, target_ceiling="20260903")
+        self.assertTrue(status["ready"], status["errors"])
+        self.assertEqual(status["latest_trade_date"], "20260903")
+        market_calls = [(api, params["trade_date"]) for api, params in events if api in {"daily", "daily_basic"}]
+        self.assertEqual(market_calls, [("daily_basic", "20260903"), ("daily", "20260903")])
 
     def test_sync_catalog_error_makes_no_writes_including_calendar(self):
         for channel in ("L", "P", "D"):

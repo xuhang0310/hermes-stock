@@ -18,8 +18,10 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from math import ceil, isfinite
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
 
@@ -56,6 +58,21 @@ _CATALOG_SYMBOL_RE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 _DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
 _BASIC_FIELDS = "ts_code,trade_date,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv"
 _ADJ_FIELDS = "ts_code,trade_date,adj_factor"
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+# TuShare 日线约 15:00–16:00、daily_basic 约 15:00–17:00 入库；此前当天的全市场截面
+# 还不完整，盘中或刚收盘时去拉“今天”必然失败。
+SELECTION_DATA_READY_TIME = dt_time(17, 0)
+
+
+def selection_target_ceiling(now: datetime | None = None) -> str:
+    """自动选股可用的最晚交易日上限（含）：北京时间 17:00 前只能用到前一个自然日。
+
+    目标交易日 = 本地权威日历中不晚于该上限的最近开市日。"""
+    current = now or datetime.now(_SHANGHAI)
+    day = current.date()
+    if current.time() < SELECTION_DATA_READY_TIME:
+        day -= timedelta(days=1)
+    return day.strftime("%Y%m%d")
 
 
 def _float(value: Any) -> float | None:
@@ -616,8 +633,13 @@ def _calendar_gaps(dates: set[str], start: str, end: str) -> list[str]:
     return missing
 
 
-def local_selection_cache_status(history_days: int = 20) -> dict[str, Any]:
+def local_selection_cache_status(
+    history_days: int = 20, *, target_ceiling: str | None = None,
+) -> dict[str, Any]:
     """无外呼的完整性检查，目标日只来自覆盖今日的 SSE 权威日历。
+
+    目标日 = 不晚于 ``target_ceiling``（默认见 selection_target_ceiling）的最近开市日，
+    当天数据发布前不会把“今天”当成可排名的交易日。
 
     latest_trade_date 是日线与 basic 实际水位的较小值，不冒充日历目标；
     覆盖率分母仅 L，P/D 保留在目录中作为排除证据，不参与覆盖率计数。
@@ -627,6 +649,7 @@ def local_selection_cache_status(history_days: int = 20) -> dict[str, Any]:
     if not 1 <= history_days < 250:
         raise ValueError("历史窗口只支持 1-249 个交易日")
     today = date.today().strftime("%Y%m%d")
+    ceiling = min(target_ceiling or selection_target_ceiling(), today)
     with SessionLocal() as db:
         calendar_today = db.scalar(
             select(MarketTradingCalendar.cal_date).where(
@@ -640,11 +663,12 @@ def local_selection_cache_status(history_days: int = 20) -> dict[str, Any]:
                 MarketTradingCalendar.exchange == "SSE",
                 MarketTradingCalendar.source == "tushare",
                 MarketTradingCalendar.is_open.is_(True),
-                MarketTradingCalendar.cal_date <= today,
+                MarketTradingCalendar.cal_date <= ceiling,
             )
         )
-        bar_date = _latest_local_date(db, DailyBar, today)
-        basic_date = _latest_local_date(db, StockDailyBasic, today)
+        # 水位只看上限以内：盘中零星写入的当天行情不能让“前一交易日”看起来未对齐。
+        bar_date = _latest_local_date(db, DailyBar, ceiling)
+        basic_date = _latest_local_date(db, StockDailyBasic, ceiling)
         catalog_count = int(
             db.scalar(
                 select(func.count()).select_from(Instrument).where(
@@ -713,6 +737,7 @@ def local_selection_cache_status(history_days: int = 20) -> dict[str, Any]:
     return {
         "ready": not errors,
         "expected_trade_date": expected_date,
+        "target_ceiling": ceiling,
         "latest_trade_date": min(bar_date, basic_date) if bar_date and basic_date else None,
         "calendar_date": str(calendar_date) if calendar_date else None,
         "calendar_through_today": bool(calendar_today),
@@ -777,8 +802,11 @@ def _fetch_market_rows(
     return None, error or f"{api_name}({trade_date}): 行情响应格式无效"
 
 
-def sync_market(days: int = 20) -> dict:
+def sync_market(days: int = 20, *, target_ceiling: str | None = None) -> dict:
     """增量同步最近 ``days`` 个交易日的全市场行情（5-60 天）。
+
+    ``target_ceiling``（YYYYMMDD）限制同步窗口的最新交易日；自动选股传入
+    selection_target_ceiling()，避免在当天数据发布前去拉“今天”。默认到今天为止。
 
     流程：交易日历 → instruments 目录（FK 父表先行）→ 逐缺失日拉 daily →
     逐缺失日拉 adj_factor → 最新一日 daily_basic → 全市场最新价。按日提交，错误记入 errors；
@@ -825,8 +853,10 @@ def sync_market(days: int = 20) -> dict:
         calendar_by_date[day] = normalized
     if today not in calendar_by_date:
         raise RuntimeError(f"SSE 交易日历未覆盖今日 {today}，无法确定同步目标交易日")
+    ceiling = min(target_ceiling or today, today)
     open_dates = sorted(
-        (day for day, row in calendar_by_date.items() if row["is_open"]), reverse=True,
+        (day for day, row in calendar_by_date.items() if row["is_open"] and day <= ceiling),
+        reverse=True,
     )
     targets = open_dates[: int(days)]
     if len(targets) != int(days):

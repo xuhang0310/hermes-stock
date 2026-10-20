@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import unittest
 from datetime import date, datetime, timedelta
@@ -23,7 +24,9 @@ from backend.app.core.models import (
     AutomaticSelectionStrategy,
     DailyBar,
     Instrument,
+    JobRun,
     MarketTradingCalendar,
+    ScheduledJob,
     StockAdjFactor,
     User,
 )
@@ -34,6 +37,7 @@ from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant import automatic_selection_service as service
 from backend.app.quant import tushare_factor_service
 from backend.app.quant.automatic_selection_scoring import DEFAULT_STRATEGY_CONFIG, canonical_json, validate_config
+from backend.app.scheduler import rhythm_scheduler
 from tests.automatic_selection_fixtures import history_dates
 from tests.automatic_selection_mysql import TEST_DATABASE_ENV, create_isolated_mysql_engine, reset_isolated_schema
 
@@ -318,6 +322,87 @@ class AutomaticSelectionPresentationFlowTests(unittest.TestCase):
         self.assertEqual(len(evidence["picks"]), 4)
         self.assertEqual(set(evidence["picks"][0]["dimension_scores"]), {"估值", "走势", "活跃度", "稳定性"})
 
+    def _data_job_run(self, *, status: str, trigger: str, started: datetime, error: str | None = None, output=None) -> None:
+        with self.SessionFactory() as db:
+            if db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY)) is None:
+                db.add(ScheduledJob(
+                    job_key=rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY, name="自动选股数据入库",
+                    job_kind="automatic_selection_data", schedule_type="daily", run_time="17:30",
+                    weekday_mask="1,2,3,4,5", trading_day_only=True, enabled=True,
+                ))
+            db.add(JobRun(
+                run_id=f"data-{started:%H%M%S}-{status}", job_key=rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+                fire_key=f"fire-{started:%Y%m%d%H%M%S}", trigger_type=trigger, status=status,
+                started_at=started, finished_at=started, error=error,
+                output_content=json.dumps(output or {}, ensure_ascii=False),
+            ))
+            db.commit()
+
+    def test_data_sync_failure_is_explained_with_the_next_step(self) -> None:
+        self.assertEqual(presentation.data_sync_view(datetime(2026, 10, 20, 10, 30))["status"], "never")
+        production_error = (
+            "daily(20261020): 全市场响应不完整，上市标的 0/5575，至少需 5018；"
+            "daily_basic(20261020): 全市场响应不完整，上市标的 0/5575，至少需 4739；"
+            "日线水位 20261019 未对齐交易日 20261020；daily_basic 水位 20261019 未对齐交易日 20261020"
+        )
+        self._data_job_run(
+            status="failed", trigger="manual_pipeline", started=datetime(2026, 10, 20, 10, 8),
+            error=production_error, output={"ready": False, "target_trade_date": "20261020"},
+        )
+        manual = presentation.data_sync_view(datetime(2026, 10, 20, 10, 30))
+        self.assertEqual((manual["status"], manual["ok"], manual["trigger_label"]), ("failed", False, "手动"))
+        self.assertEqual(manual["issues"][0], "数据源还没有返回这一天的全市场行情，通常是当天数据尚未发布（收盘后约 15:00–17:00 陆续入库）")
+        self.assertIn("日线行情不全", manual["issues"])
+        self.assertIn("17:00 前会使用上一个交易日的收盘数据", manual["next_step"])
+        self.assertEqual(manual["detail"], production_error)
+
+        self._data_job_run(status="failed", trigger="schedule", started=datetime(2026, 10, 20, 17, 30), error="daily_basic(20261020): 全市场响应不完整，上市标的 0/5575")
+        scheduled = presentation.data_sync_view(datetime(2026, 10, 20, 17, 45))
+        self.assertEqual(scheduled["trigger_label"], "定时")
+        self.assertIn("每 30 分钟自动重试，直到 22:00", scheduled["next_step"])
+        late = presentation.data_sync_view(datetime(2026, 10, 20, 22, 30))
+        self.assertIn("每个交易日 17:30 自动同步", late["next_step"])
+
+        self._data_job_run(status="success", trigger="schedule", started=datetime(2026, 10, 20, 18, 0), output={"ready": True, "target_trade_date": "20261020"})
+        done = presentation.data_sync_view(datetime(2026, 10, 20, 18, 5))
+        self.assertTrue(done["ok"])
+        self.assertEqual(done["title"], "10 月 20 日 收盘数据已同步")
+        self.assertIsNotNone(presentation.daily_view()["data_sync"])
+
+    def test_undated_cache_failure_is_shown_only_when_nothing_else_exists(self) -> None:
+        other = repository.create_strategy(
+            strategy_key="undated-failure", name="未就绪策略", config=_config(),
+            lifecycle_state="challenger", actor_user_id=1,
+        )
+        service._persist_failed_strategy_run(
+            other,
+            target_trade_date="",
+            trigger_type="schedule",
+            job_run_id=None,
+            sync_summary={},
+            error=RuntimeError(
+                "自动选股本地缓存未就绪：本地 SSE 权威交易日历未覆盖今日 20260905，无法确定目标交易日；"
+                "本地历史交易日不足：0/21；本地上市 A 股目录不完整：0 只，至少需 3000；"
+                "目标日 daily_basic 覆盖不足：0/0，至少需 3000"
+            ),
+        )
+
+        view = presentation.daily_view(strategy_id=other["id"])
+        self.assertEqual(view["available_dates"], [])
+        self.assertIsNone(view["trade_date"])
+        self.assertIsNone(view["funnel"])
+        status = view["status"]
+        self.assertEqual(status["code"], "failed")
+        self.assertRegex(status["title"], r"^最近一次选股没能运行（\d+ 月 \d+ 日）$")
+        self.assertIn("行情数据还没准备好", status["message"])
+        self.assertEqual(status["issues"], ["交易日历没有同步到最新", "股票名单没有同步完整", "市盈率、市值等每日指标不全"])
+        self.assertTrue(status["detail"].startswith("自动选股本地缓存未就绪"))
+
+        # 正式策略已有结果时，这条无日期失败不会混进日期列表或抢占默认视图。
+        official = presentation.daily_view()
+        self.assertEqual(official["trade_date"], TARGET_DATE)
+        self.assertNotIn("", [item["trade_date"] for item in official["available_dates"]])
+
     def test_api_serves_daily_view_and_track_record(self) -> None:
         app = FastAPI()
         app.include_router(selection_api.router)
@@ -483,7 +568,7 @@ class StatusViewTests(unittest.TestCase):
         self.assertEqual((failed["code"], failed["issues"]), ("failed", ["评分失败"]))
         empty = presentation.status_view(None)
         self.assertEqual(empty["code"], "empty")
-        self.assertIn("16:10", empty["message"])
+        self.assertIn("17:30", empty["message"])
 
 
 if __name__ == "__main__":

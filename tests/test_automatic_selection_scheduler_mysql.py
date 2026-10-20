@@ -55,13 +55,13 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
 
-    def test_default_job_runs_at_1610_on_trading_weekdays(self) -> None:
+    def test_default_job_runs_at_1750_on_trading_weekdays(self) -> None:
         config = next(
             item
             for item in rhythm_scheduler.DEFAULT_JOBS
             if item["job_key"] == rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY
         )
-        self.assertEqual(config["run_time"], "16:10")
+        self.assertEqual(config["run_time"], "17:50")
         self.assertEqual(config["weekday_mask"], "1,2,3,4,5")
         self.assertTrue(config["trading_day_only"])
         self.assertEqual(config["job_kind"], "automatic_selection")
@@ -77,10 +77,43 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
             )
             self.assertEqual(job.owner_user_id, self.user_id)
             self.assertTrue(
-                rhythm_scheduler._is_due(job, datetime(2026, 9, 7, 16, 10))
+                rhythm_scheduler._is_due(job, datetime(2026, 9, 7, 17, 50))
             )
             self.assertFalse(
-                rhythm_scheduler._is_due(job, datetime(2026, 9, 7, 16, 9))
+                rhythm_scheduler._is_due(job, datetime(2026, 9, 7, 17, 49))
+            )
+
+    def test_untouched_legacy_default_times_migrate_but_custom_times_stay(self) -> None:
+        with self.SessionFactory() as db:
+            rhythm_scheduler.ensure_default_jobs(db)
+            db.commit()
+            jobs = {
+                job.job_key: job
+                for job in db.scalars(
+                    select(ScheduledJob).where(
+                        ScheduledJob.job_key.in_(
+                            [
+                                rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY,
+                                rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
+                            ]
+                        )
+                    )
+                )
+            }
+            jobs[rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY].run_time = "15:45"
+            jobs[rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY].run_time = "18:20"
+            db.commit()
+
+            rhythm_scheduler.ensure_default_jobs(db)
+            db.commit()
+            db.expire_all()
+            self.assertEqual(
+                db.get(ScheduledJob, jobs[rhythm_scheduler.AUTOMATIC_SELECTION_DATA_JOB_KEY].id).run_time,
+                "17:30",
+            )
+            self.assertEqual(
+                db.get(ScheduledJob, jobs[rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY].id).run_time,
+                "18:20",
             )
 
     def test_executor_persists_summary_notifies_owner_and_never_places_orders(self) -> None:
