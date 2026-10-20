@@ -5,7 +5,7 @@ import logging
 import math
 from collections import defaultdict
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, Iterable, Iterator
 
 from sqlalchemy import func, select, text
@@ -370,6 +370,7 @@ def load_candidate_input_rows(
                 **snapshot,
                 "close_price": target_bar.get("close") if target_bar else None,
                 "pct_chg": target_bar.get("change_pct") if target_bar else None,
+                "daily_basic_present": basic is not None,
                 "pe_ttm": basic.get("pe_ttm") if basic else None,
                 "pb": basic.get("pb") if basic else None,
                 "total_mv": basic.get("total_mv") if basic else None,

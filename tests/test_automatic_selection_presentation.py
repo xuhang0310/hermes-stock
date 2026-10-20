@@ -28,6 +28,7 @@ from backend.app.core.models import (
     MarketTradingCalendar,
     ScheduledJob,
     StockAdjFactor,
+    StockDailyBasic,
     User,
 )
 from backend.app.market import market_sync
@@ -35,6 +36,7 @@ from backend.app.quant import automatic_selection_api as selection_api
 from backend.app.quant import automatic_selection_presentation as presentation
 from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant import automatic_selection_service as service
+from backend.app.quant import automatic_selection_scoring as scoring
 from backend.app.quant import tushare_factor_service
 from backend.app.quant.automatic_selection_scoring import DEFAULT_STRATEGY_CONFIG, canonical_json, validate_config
 from backend.app.scheduler import rhythm_scheduler
@@ -97,10 +99,11 @@ def _rows(target_trade_date: str, *, drop_valuation: bool = False) -> list[dict]
                 "industry": industry,
                 "close_price": closes[-1],
                 "pct_chg": pct_chg,
-                # 数据不全场景：大半股票缺估值，基础数据覆盖率跌破门槛。
+                # 数据不全场景：大半股票没有当日基础记录，不能用 PE 空值冒充缺行。
+                "daily_basic_present": not (drop_valuation and index >= 2),
                 "pe_ttm": None if drop_valuation and index >= 2 else pe,
                 "pb": pb,
-                "total_mv": mv,
+                "total_mv": None if drop_valuation and index >= 2 else mv,
                 "circ_mv": mv * 0.8,
                 "history": [
                     {"trade_date": day, "close": closes[position], "adj_factor": 1.0, "amount": amount}
@@ -276,6 +279,69 @@ class AutomaticSelectionPresentationFlowTests(unittest.TestCase):
         self.assertEqual(len(earlier["picks"]), 4)
         with self.assertRaises(LookupError):
             presentation.daily_view(trade_date="20200101")
+
+    def test_input_loader_distinguishes_null_pe_from_a_missing_basic_record(self) -> None:
+        with self.SessionFactory() as db:
+            db.add(StockDailyBasic(
+                symbol="600001.SH", trade_date=TARGET_DATE,
+                pe_ttm=None, pb=0.5, total_mv=5_000_000.0,
+            ))
+            db.add(StockDailyBasic(
+                symbol="600002.SH", trade_date=TARGET_DATE,
+                pe_ttm=6.0, pb=0.7, total_mv=3_000_000.0,
+            ))
+            db.commit()
+        rows = service.load_candidate_input_rows(
+            _rows(TARGET_DATE), target_trade_date=TARGET_DATE, history_days=20,
+            expected_history_dates=history_dates(TARGET_DATE),
+        )
+        by_symbol = {row["symbol"]: row for row in rows}
+        self.assertTrue(by_symbol["600001.SH"]["daily_basic_present"])
+        self.assertIsNone(by_symbol["600001.SH"]["pe_ttm"])
+        self.assertTrue(by_symbol["600002.SH"]["daily_basic_present"])
+        self.assertFalse(by_symbol["600003.SH"]["daily_basic_present"])
+        self.assertIsNone(by_symbol["600003.SH"]["total_mv"])
+
+    def test_corrected_coverage_creates_a_new_run_and_preserves_old_blocked_evidence(self) -> None:
+        rows = _rows(BLOCKED_DATE)
+        for row in rows[2:]:
+            row["pe_ttm"] = None
+        legacy_gate = {
+            "passed": False,
+            "metrics": {"basic_coverage": 0.25},
+            "failures": [{"code": "basic_coverage", "actual": 0.25, "required": 0.5}],
+            "thresholds": self.strategy["config"]["quality"],
+        }
+        with (
+            patch.object(scoring, "SCORING_IMPLEMENTATION_VERSION", "forward-selection-v3"),
+            patch.object(service, "SCORING_IMPLEMENTATION_VERSION", "forward-selection-v3"),
+            patch.object(service, "quality_gate", return_value=legacy_gate),
+        ):
+            previous = service.run_strategy_from_rows(
+                self.strategy, rows, target_trade_date=BLOCKED_DATE,
+                trigger_type="test", generate_explanation=False,
+            )
+        corrected = service.run_strategy_from_rows(
+            self.strategy, rows, target_trade_date=BLOCKED_DATE,
+            trigger_type="test", generate_explanation=False,
+        )
+        self.assertEqual(previous["status"], "blocked")
+        self.assertEqual(corrected["status"], "completed")
+        self.assertEqual(corrected["quality_gate"]["metrics"]["basic_coverage"], 1.0)
+        self.assertEqual(corrected["supersedes_run_id"], previous["run_id"])
+        self.assertNotEqual(corrected["data_fingerprint"], previous["data_fingerprint"])
+        preserved = repository.run_detail(previous["run_id"])
+        self.assertEqual(preserved["status"], "blocked")
+        self.assertEqual(preserved["quality_gate"]["metrics"]["basic_coverage"], 0.25)
+        repeat = service.run_strategy_from_rows(
+            self.strategy, rows, target_trade_date=BLOCKED_DATE,
+            trigger_type="test", generate_explanation=False,
+        )
+        self.assertEqual(repeat["run_id"], corrected["run_id"])
+        self.assertFalse(repeat["created"])
+        view = presentation.daily_view()
+        self.assertEqual(view["run"]["run_id"], corrected["run_id"])
+        self.assertEqual({pick["symbol"] for pick in view["picks"]}, {"600001.SH", "600002.SH"})
 
     def test_track_record_summarizes_matured_windows(self) -> None:
         with self.SessionFactory() as db:

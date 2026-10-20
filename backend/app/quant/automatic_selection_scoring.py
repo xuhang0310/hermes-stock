@@ -15,7 +15,7 @@ import pandas as pd
 from backend.app.quant.factor_signal_engine import _zscore_cross_section
 
 BUILTIN_STRATEGY_KEY = "forward-multifactor"
-SCORING_IMPLEMENTATION_VERSION = "forward-selection-v3"  # v3：动量/波动改用后复权价
+SCORING_IMPLEMENTATION_VERSION = "forward-selection-v4"  # v4：基础记录覆盖与估值可用性分开校验
 RESEARCH_LIMITATIONS = (
     "仅用于上线后的研究观察。未完整模拟复权、涨跌停、停牌成交失败、整手与真实容量，"
     "不构成投资建议或交易指令。"
@@ -242,9 +242,18 @@ def build_candidates(
         pb = _finite(row.get("pb"))
         total_mv = _finite(row.get("total_mv"))
         circ_mv = _finite(row.get("circ_mv"))
-        if pe_ttm is None or pb is None or total_mv is None:
+        valid_market_cap = total_mv is not None and total_mv > 0
+        # PE/PB 为空可能是估值不适用，不代表 daily_basic 整行未入库。
+        # 旧调用未传记录标记时，只用有效市值保守推断；显式 False 始终优先。
+        daily_basic_present = (
+            bool(row["daily_basic_present"])
+            if "daily_basic_present" in row
+            else valid_market_cap
+        )
+        basic_data_complete = daily_basic_present and valid_market_cap
+        if not basic_data_complete:
             exclusions.append("daily_basic_missing")
-        elif pe_ttm <= 0 or pb <= 0:
+        elif pe_ttm is None or pb is None or pe_ttm <= 0 or pb <= 0:
             exclusions.append("valuation_invalid")
 
         expected_dates = [str(value).replace("-", "") for value in row.get("expected_history_dates") or []]
@@ -345,7 +354,12 @@ def build_candidates(
             "momentum_20": momentum,
             "volatility_20": volatility,
             "factor_values": feature_values,
-            "input_evidence": {"expected_history_dates": expected_dates, "history": history},
+            "input_evidence": {
+                "daily_basic_present": daily_basic_present,
+                "expected_history_dates": expected_dates,
+                "history": history,
+            },
+            "basic_data_complete": basic_data_complete,
             "history_complete": history_complete,
             "z_scores": {},
             "eligible": not exclusions,
@@ -375,10 +389,7 @@ def quality_gate(candidates: list[dict[str, Any]], config: dict[str, Any]) -> di
     metrics: dict[str, float | int] = {
         "catalog_count": denominator,
         "bar_count": sum(item.get("close_price") is not None for item in listed),
-        "basic_count": sum(
-            item.get("pe_ttm") is not None and item.get("pb") is not None and item.get("total_mv") is not None
-            for item in listed
-        ),
+        "basic_count": sum(bool(item.get("basic_data_complete")) for item in listed),
         "history_count": sum(bool(item.get("history_complete")) for item in listed),
         "industry_count": sum(bool(item.get("industry")) for item in listed),
         "eligible_count": eligible_count,

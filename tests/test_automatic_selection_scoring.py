@@ -90,6 +90,7 @@ class AutomaticSelectionScoringTests(unittest.TestCase):
             _row("600006.SH", pe_ttm=-2.0),
             _row("600007.SH", history=_history(amount=1_000.0)),
             _row("600008.SH", history=_history()[:10]),
+            _row("600009.SH", daily_basic_present=False),
         ]
 
         candidates = build_candidates(rows, _config(), target_trade_date=TARGET_DATE)
@@ -99,10 +100,11 @@ class AutomaticSelectionScoringTests(unittest.TestCase):
         self.assertIn("not_listed", codes["600002.SH"])
         self.assertIn("listing_too_short", codes["600003.SH"])
         self.assertIn("target_bar_missing", codes["600004.SH"])
-        self.assertIn("daily_basic_missing", codes["600005.SH"])
+        self.assertIn("valuation_invalid", codes["600005.SH"])
         self.assertIn("valuation_invalid", codes["600006.SH"])
         self.assertIn("liquidity_low", codes["600007.SH"])
         self.assertIn("history_insufficient", codes["600008.SH"])
+        self.assertIn("daily_basic_missing", codes["600009.SH"])
         self.assertTrue(all(not item["eligible"] for item in candidates))
 
     def test_required_tushare_factor_is_strict_and_enters_score(self) -> None:
@@ -185,7 +187,7 @@ class AutomaticSelectionScoringTests(unittest.TestCase):
         )
         rows = [
             _row("600001.SH"),
-            _row("600002.SH", close_price=None, pe_ttm=None, industry=None),
+            _row("600002.SH", close_price=None, pe_ttm=None, industry=None, daily_basic_present=False),
         ]
 
         gate = quality_gate(build_candidates(rows, config, target_trade_date=TARGET_DATE), config)
@@ -197,6 +199,107 @@ class AutomaticSelectionScoringTests(unittest.TestCase):
         self.assertIn("basic_coverage", failure_codes)
         self.assertIn("industry_coverage", failure_codes)
         self.assertIn("eligible_count", failure_codes)
+
+    def test_unavailable_pe_does_not_reduce_real_basic_coverage(self) -> None:
+        config = _config()
+        config["quality"]["min_basic_coverage"] = 0.85
+        rows = [
+            _row(
+                f"{600000 + index}.SH",
+                daily_basic_present=index < 99,
+                pe_ttm=None if index < 30 else 10.0,
+                total_mv=1000.0 if index < 99 else None,
+            )
+            for index in range(100)
+        ]
+        candidates = build_candidates(rows, config, target_trade_date=TARGET_DATE)
+        gate = quality_gate(candidates, config)
+
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["metrics"]["basic_count"], 99)
+        self.assertEqual(gate["metrics"]["basic_coverage"], 0.99)
+        self.assertEqual(gate["metrics"]["eligible_count"], 69)
+        score_candidates(candidates, config)
+        for candidate in candidates[:30]:
+            self.assertTrue(candidate["basic_data_complete"])
+            self.assertTrue(candidate["input_evidence"]["daily_basic_present"])
+            self.assertEqual(candidate["exclusion_codes"], ["valuation_invalid"])
+            self.assertFalse(candidate["eligible"])
+            self.assertFalse(candidate["selected"])
+            self.assertIsNone(candidate["rank"])
+
+    def test_actual_missing_basic_records_still_block_even_with_filled_values(self) -> None:
+        config = _config()
+        config["quality"]["min_basic_coverage"] = 0.85
+        rows = [
+            _row(f"{600000 + index}.SH", daily_basic_present=index < 84)
+            for index in range(100)
+        ]
+        candidates = build_candidates(rows, config, target_trade_date=TARGET_DATE)
+        gate = quality_gate(candidates, config)
+
+        self.assertFalse(gate["passed"])
+        self.assertEqual(gate["metrics"]["basic_coverage"], 0.84)
+        self.assertIn("basic_coverage", {failure["code"] for failure in gate["failures"]})
+        for candidate in candidates[84:]:
+            self.assertFalse(candidate["input_evidence"]["daily_basic_present"])
+            self.assertFalse(candidate["basic_data_complete"])
+            self.assertFalse(candidate["eligible"])
+            self.assertEqual(candidate["exclusion_codes"], ["daily_basic_missing"])
+
+    def test_basic_record_requires_positive_finite_market_cap(self) -> None:
+        for market_cap in (None, 0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(market_cap=market_cap):
+                rows = [
+                    _row("600001.SH", daily_basic_present=True),
+                    _row("600002.SH", daily_basic_present=True, total_mv=market_cap),
+                ]
+                candidates = build_candidates(rows, _config(), target_trade_date=TARGET_DATE)
+                invalid = candidates[1]
+                self.assertTrue(invalid["input_evidence"]["daily_basic_present"])
+                self.assertFalse(invalid["basic_data_complete"])
+                self.assertFalse(invalid["eligible"])
+                self.assertEqual(invalid["exclusion_codes"], ["daily_basic_missing"])
+                self.assertEqual(quality_gate(candidates, _config())["metrics"]["basic_coverage"], 0.5)
+
+    def test_null_or_nonpositive_valuation_stays_excluded_with_complete_basic_data(self) -> None:
+        for field in ("pe_ttm", "pb"):
+            for value in (None, 0.0, -1.0, float("nan"), float("inf")):
+                with self.subTest(field=field, value=value):
+                    candidates = build_candidates(
+                        [_row("600001.SH", daily_basic_present=True, **{field: value})],
+                        _config(),
+                        target_trade_date=TARGET_DATE,
+                    )
+                    candidate = candidates[0]
+                    self.assertTrue(candidate["basic_data_complete"])
+                    self.assertFalse(candidate["eligible"])
+                    self.assertEqual(candidate["exclusion_codes"], ["valuation_invalid"])
+                    self.assertEqual(quality_gate(candidates, _config())["metrics"]["basic_coverage"], 1.0)
+
+    def test_legacy_inputs_infer_basic_record_only_from_valid_market_cap(self) -> None:
+        rows = [
+            _row("600001.SH", pe_ttm=None),
+            _row("600002.SH", total_mv=None),
+            _row("600003.SH", total_mv=0.0),
+        ]
+        candidates = build_candidates(rows, _config(), target_trade_date=TARGET_DATE)
+        self.assertEqual([item["basic_data_complete"] for item in candidates], [True, False, False])
+        self.assertEqual(
+            [item["input_evidence"]["daily_basic_present"] for item in candidates],
+            [True, False, False],
+        )
+        self.assertEqual(candidates[0]["exclusion_codes"], ["valuation_invalid"])
+
+    def test_basic_presence_evidence_and_v4_scoring_change_run_identity(self) -> None:
+        candidates = build_candidates([_row("600001.SH")], _config(), target_trade_date=TARGET_DATE)
+        original = fingerprint_payload(candidates, _config(), TARGET_DATE)
+        changed = copy.deepcopy(candidates)
+        changed[0]["input_evidence"]["daily_basic_present"] = False
+        self.assertNotEqual(original, fingerprint_payload(changed, _config(), TARGET_DATE))
+        self.assertEqual(scoring.SCORING_IMPLEMENTATION_VERSION, "forward-selection-v4")
+        with patch.object(scoring, "SCORING_IMPLEMENTATION_VERSION", "forward-selection-v3"):
+            self.assertNotEqual(original, fingerprint_payload(candidates, _config(), TARGET_DATE))
 
     def test_config_and_data_fingerprints_are_stable_and_sensitive(self) -> None:
         config = _config()

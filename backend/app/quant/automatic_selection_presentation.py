@@ -720,8 +720,8 @@ _EXCLUSION_TEXT = {
     "st": "ST / *ST 风险警示股",
     "listing_too_short": "上市时间太短",
     "target_bar_missing": "当天没有行情（停牌等）",
-    "daily_basic_missing": "缺少市盈率、市值等基础数据",
-    "valuation_invalid": "亏损或净资产为负",
+    "daily_basic_missing": "缺少当日基础数据记录或有效市值",
+    "valuation_invalid": "市盈率或市净率为空或非正，不满足估值筛选条件",
     "history_insufficient": "近 20 个交易日行情不全",
     "adj_factor_missing": "缺少复权数据",
     "liquidity_low": "成交太少",
@@ -931,7 +931,7 @@ def _failure_text(failure: dict[str, Any]) -> str:
     if code == "bar_coverage":
         return f"当天行情只拿到 {pct(actual)} 的股票（至少要 {pct(required)}）"
     if code == "basic_coverage":
-        return f"市盈率、市值等基础数据只覆盖 {pct(actual)}（至少要 {pct(required)}）"
+        return f"当日基础数据只覆盖 {pct(actual)}（至少要 {pct(required)}）；按已入库且市值有效的记录统计"
     if code == "history_coverage":
         return f"过去 20 个交易日的行情或复权数据只覆盖 {pct(actual)}（至少要 {pct(required)}）"
     if code == "industry_coverage":
