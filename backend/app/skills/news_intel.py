@@ -24,7 +24,7 @@ SKILL = {
     "description": "个股新闻搜索、市场情报搜索、综合情报（Tavily/Brave 自动择优）",
     "version": "1.0.0",
     "chat_modes": ["stock", "research"],
-    "roles": ["intelligence-officer", "stock-pm"],
+    "roles": ["intelligence-officer", "stock-pm", "research-analyst"],
     "tools": _pick(
         "search_stock_news",
         "search_market_intel",

@@ -202,7 +202,7 @@ class AgentRunExecutor:
             and self._is_retryable(error)
             and int(run["attempts"]) < int(run["max_attempts"])
         ):
-            delay_seconds = min(10.0, 2 ** max(0, int(run["attempts"]) - 1)) + random.uniform(0, 0.5)
+            delay_seconds = self._retry_delay_seconds(run)
             await sink.emit(
                 {
                     "type": "retrying",
@@ -288,6 +288,18 @@ class AgentRunExecutor:
         return max(attempt_ms, total_ms or 0)
 
     @staticmethod
+    def _retry_delay_seconds(run: dict[str, Any]) -> float:
+        # 网页/飞书对话有人在等，保持短间隔；定时、工作流、看板等后台任务给模型服务留出恢复时间
+        # （生产 502/503 三次重试都在 40 秒内用完，服务还没恢复）。等待期间占着 worker 槽位，
+        # 所以封顶 60 秒；不改成延时入队，是因为进程在延时中重启会让普通 queued 任务无人找回。
+        attempt = max(0, int(run["attempts"]) - 1)
+        if str(run.get("source_type") or "web") in {"web", "feishu"}:
+            base = min(10.0, 2.0 ** attempt)
+        else:
+            base = min(60.0, 20.0 * 3 ** attempt)
+        return base + random.uniform(0, 0.5)
+
+    @staticmethod
     def _is_retryable(error: str) -> bool:
         value = error.lower()
         permanent_markers = (
@@ -326,6 +338,18 @@ class AgentRunExecutor:
             "status code: 502",
             "status code: 503",
             "status code: 504",
+            "error code: 429",
+            "error code: 500",
+            "error code: 502",
+            "error code: 503",
+            "error code: 504",
+            "stream was interrupted",
+            "stream failed",
+            "overloaded",
+            "service unavailable",
+            "bad gateway",
+            "deadlock found",
+            "lock wait timeout",
         )
         return any(marker in value for marker in transient_markers)
 

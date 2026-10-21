@@ -217,6 +217,13 @@ class SkillRegistry:
             self._tool_executors[tname] = fn
 
     # ------------------------------------------------------------------ 查询
+    @staticmethod
+    def _role_allows(skill: dict, chat_mode: str | None, role_code: str | None) -> bool:
+        # roles 只约束研究模式里各数字人的分工；问股模式没有数字人角色，按 chat_modes 全量下发，
+        # 否则声明了 stock 模式的新闻/技术工具会被 role_code=None 整组滤掉。
+        roles = skill.get("roles", [])
+        return not roles or chat_mode == "stock" or role_code in roles
+
     def get_tools_for(
         self,
         chat_mode: str,
@@ -230,8 +237,7 @@ class SkillRegistry:
                 continue
             if chat_mode not in skill.get("chat_modes", []):
                 continue
-            roles = skill.get("roles", [])
-            if roles and role_code not in roles:
+            if not self._role_allows(skill, chat_mode, role_code):
                 continue
             tools.extend(skill.get("tools", []))
         return tools
@@ -254,8 +260,7 @@ class SkillRegistry:
                 continue
             if chat_mode is not None and chat_mode not in skill.get("chat_modes", []):
                 continue
-            roles = skill.get("roles", [])
-            if roles and role_code not in roles:
+            if not self._role_allows(skill, chat_mode, role_code):
                 continue
             instructions.extend(skill.get("prompt_instructions", []))
         return instructions

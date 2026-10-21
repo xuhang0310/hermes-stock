@@ -57,5 +57,6 @@ allowed-tools: resolve_stock get_latest_price get_realtime_quote get_tushare_dai
 - 查询具体股票的涨跌停记录必须携带股票代码，避免全市场结果被截断后漏掉目标标的。
 - 不同来源数值偏差显著时同时保留，并解释可能的复权、币种、报告期或合并口径差异。
 - 不把空数组解释为“没有事件”；它也可能意味着检索失败。
+- 以上检查是做给自己的。写给用户时，口径校正、来源冲突和工具失败只在影响结论时用一句白话交代，不写工具名和字段名。
 
 详细的来源和时效判定见 [references/source-policy.md](references/source-policy.md)。

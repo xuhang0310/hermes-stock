@@ -1132,7 +1132,7 @@ function openScreenerStockAnalysis(item: ScreenerItem) {
   digitalHumanInitialQuestion.value = [
     `请对 ${item.name}（${item.symbol}）进行专项解读。`,
     snapshot ? `该标的来自 AI 选股结果，当前筛选快照：${snapshot}。` : '',
-    '请先调用可用的行情与研究工具核对最新数据，再从趋势与量价、基本面与估值、近期催化、主要风险、关键观察位五个方面分析，并给出后续跟踪清单。请明确区分事实与推断，不构成投资建议。'
+    '请先查最新数据，再用大白话告诉我：现在走势怎么样、关键价位在哪，基本面和估值贵不贵，最近发生了什么事，最大的风险是什么，接下来该盯什么。'
   ].filter(Boolean).join('\n')
   activePage.value = 'digitalHumans'
 }
@@ -1148,7 +1148,7 @@ function openAutomaticSelectionStockAnalysis(pick: AutomaticSelectionPick, trade
     `请对 ${pick.name}（${pick.symbol}）进行专项解读。`,
     `该股票来自每日自动选股（${dateText} 收盘后第 ${pick.rank} 名）：${pick.headline}。`,
     risks ? `规则提示的注意点：${risks}。` : '',
-    '请先调用可用的行情与研究工具核对最新数据，再从趋势与量价、基本面与估值、近期催化、主要风险、关键观察位五个方面分析，并给出后续跟踪清单。请明确区分事实与推断，不构成投资建议。'
+    '请先查最新数据，再用大白话告诉我：现在走势怎么样、关键价位在哪，基本面和估值贵不贵，最近发生了什么事，最大的风险是什么，接下来该盯什么。'
   ].filter(Boolean).join('\n')
   activePage.value = 'digitalHumans'
 }

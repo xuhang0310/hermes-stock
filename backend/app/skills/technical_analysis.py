@@ -29,7 +29,7 @@ SKILL = {
     "description": "日线分析、趋势判断、均线、量能、筹码分布、资金流向、形态识别",
     "version": "1.0.0",
     "chat_modes": ["stock", "research"],
-    "roles": ["quant-analyst", "short-term-hunter"],
+    "roles": ["quant-analyst", "short-term-hunter", "stock-pm", "research-analyst"],
     "tools": _pick(
         "analyze_daily_bars",
         "analyze_trend",

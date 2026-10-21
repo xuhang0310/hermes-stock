@@ -11,6 +11,7 @@ from typing import Any
 from backend.app.core.applog import log_event
 from backend.app.core.database import Base, SessionLocal
 from backend.app.agents import sql_sandbox
+from backend.app.agents.answer_style import ANSWER_STYLE_RULES
 from backend.app.ai.llm_client import stream_chat as _stream_chat
 from backend.app.data.user_scope import current_data_owner_user_id
 from backend.app.ai.tool_progress import ToolArgsProgressTracker
@@ -303,9 +304,11 @@ def _knowledge_system_prompt(memory_context: str = "") -> str:
 1. 核心工具是 search_knowledge —— 在已索引的文档切块中做混合检索（向量+关键词召回→RRF融合→重排精排），支持按标的(symbol)、文档类型(doc_types)、可信度(trust_levels)过滤。
 2. search_knowledge 返回的每条结果包含 doc_type（news/report/notice/research/upload）、title、source、content 和四路评分（vector/keyword/fused/rerank），要引用相关片段作答，标注来源。
 3. 必要时用 get_schema 了解实体关系（如 documents 与 document_chunks 的关联），再用 run_sql 做只读 SELECT 精确查询聚合统计或关联记录；个人数据表自动只返回当前用户的记录。
-4. 所有结论必须标注来源（文档标题、类型、可信度）；不得编造信息。
+4. 结论要说明出自哪份资料（文档标题和日期），自然写进句子或句末括号；不输出可信度等级、评分或切块编号；不得编造信息。
 5. 对于简单的招呼、闲聊或与知识库搜索无关的话题，简短友好地直接回应，不查数据、不调用工具。
-6. 最终回答使用中文 Markdown，条理清晰、引用准确。"""
+6. 最终回答使用中文 Markdown，按下面“回答怎么写”组织，引用准确。
+
+{ANSWER_STYLE_RULES}"""
 
 
 def _system_prompt(extra_context: str | None = None, digital_human_code: str | None = None, memory_context: str = "") -> str:
@@ -339,11 +342,13 @@ def _system_prompt(extra_context: str | None = None, digital_human_code: str | N
 3. 优先使用 get_my_universe / get_portfolio_snapshot / get_watchlist_snapshot / get_symbol_context 等结构化工具。
 4. 结构化工具覆盖不到的统计、筛选和关联查询，先用 get_schema 确认表和字段，再用 run_sql 执行只读 SELECT；持仓、自选、事件、报告等个人数据表会自动只返回当前用户自己的记录，用户、密钥、日志与系统运行表不可查询，被拒绝时按提示改写，不要反复重试同一语句。
 5. 系统内没有的信息——外部个股、行业、政策、新闻、宏观、突发事件等——用 search_market_intel / search_stock_news 联网搜索补充，再结合内部数据作答；不要以"不在持仓/自选池"为由拒绝，你本职专业之外但用户确实需要的问题也尽力帮忙。
-6. 所有结论必须标注数据来源或说明样例/缺失；不得编造行情、新闻或财务数据。
+6. 关键数字和事实要让用户知道从哪来（按“回答怎么写”第 7 条自然写进句子）；数据是样例或缺失时如实说明；不得编造行情、新闻或财务数据。
 7. 用户询问“今日/当前涨停、跌停、炸板、连板或异动”时，必须调用 get_limit_list，并同时传 symbol 与目标 trade_date。不能用上一交易日收盘价否定用户描述的当日盘中事件。
 8. 若行情结果 stale=true、intraday_unavailable=true，或 trade_date 早于开盘中的当前交易日，只能说“当前数据源尚未覆盖今日盘中，无法核实”，严禁断言“今天没有涨停/没有异动”。
-9. A股输出要区分事实、推断、风险、下一步动作，不提供自动下单建议，不构成投资建议。
-10. 最终回答使用中文 Markdown，长度与任务匹配：简单事实问题保持简短；持仓、换仓、完整研究必须严格执行已激活技能的专业报告结构，不得为了缩短而省略财务、估值、事件、技术、资金、风险、方案触发条件或证据缺口。禁止用 ASCII 字符画模拟结论卡片。{skill_rules_block}{context}"""
+9. 让用户分得清哪些是数据、哪些是你的判断（如“数据显示……”“我的判断是……”），不提供自动下单建议，不构成投资建议。
+10. 最终回答使用中文 Markdown，按下面“回答怎么写”组织，长度与任务匹配：简单事实问题几句话说完；持仓、换仓、完整研究要把已激活技能要求的方面（财务、估值、事件、技术、资金、风险、操作条件、数据缺口）都讲到，但用白话结论串起来，不照搬报告模板标题，没有数据的方面一句话带过。禁止用 ASCII 字符画模拟结论卡片。
+
+{ANSWER_STYLE_RULES}{skill_rules_block}{context}"""
 
 
 def validate_sql(sql: str, *, owner_user_id: int | None = None) -> str | None:

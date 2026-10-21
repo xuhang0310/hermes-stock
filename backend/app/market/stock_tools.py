@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
+from backend.app.agents.answer_style import ANSWER_STYLE_RULES
 from backend.app.core.api_keys import TAVILY_POOL_PROVIDER, merge_api_keys
 from backend.app.core.database import engine
 from backend.app.core.settings import settings
@@ -864,8 +865,10 @@ def stock_system_prompt(extra_context: str | None = None) -> str:
 2. 如果用户只给股票名称或不完整代码，先调用 resolve_stock。
 3. 参考 daily_stock_analysis 的问股路径：先 get_analysis_context，再 get_realtime_quote / get_daily_history，然后 analyze_trend / calculate_ma / get_volume_analysis / analyze_pattern；需要筹码、资金、基本面时继续调用 get_chip_distribution / get_capital_flow / get_stock_info。
 4. 用户问消息面、催化、利空、近期发生了什么时，调用 search_stock_news；需要行业、政策、公告、研报、风险的综合情报时调用 search_comprehensive_intel。
-5. 最终回答用中文 Markdown，固定包含：标的识别、数据来源、技术/价格结构、筹码/资金/基本面、消息面、风险、观察动作。
-6. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{context}"""
+5. 最终回答用中文 Markdown，按下面“回答怎么写”组织；要讲到：是哪只股票、价格走势和关键价位、筹码/资金/基本面里有数据的部分、近期消息、风险和接下来看什么。这些是内容，不是固定标题。
+6. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。
+
+{ANSWER_STYLE_RULES}{context}"""
 
 
 def stock_strategy_payload() -> dict:
@@ -915,8 +918,10 @@ def stock_system_prompt_with_skills(extra_context: str | None = None, skills: li
 5. 用户问消息面、催化、利空、近期发生了什么时，调用 search_stock_news；需要行业、政策、公告、研报、风险的综合情报时调用 search_comprehensive_intel。
 6. 用户询问“今日/当前涨停、跌停、炸板、连板或异动”时，必须调用 get_limit_list，并同时传 symbol 与目标 trade_date。不能用上一交易日收盘价否定用户描述的当日盘中事件。
 7. 若行情结果 stale=true、intraday_unavailable=true，或 trade_date 早于开盘中的当前交易日，只能说“当前数据源尚未覆盖今日盘中，无法核实”，严禁断言“今天没有涨停/没有异动”。
-8. 最终回答用中文 Markdown，固定包含：标的识别、数据来源、技术/价格结构、筹码/资金/基本面、消息面、风险、观察动作。
-9. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。{skill_rules_block}{context}"""
+8. 最终回答用中文 Markdown，按下面“回答怎么写”组织；要讲到：是哪只股票、价格走势和关键价位、筹码/资金/基本面里有数据的部分、近期消息、风险和接下来看什么。这些是内容，不是固定标题；简单问题几句话即可。
+9. 只能做研究辅助，不给保证收益、自动下单或无条件买卖结论。
+
+{ANSWER_STYLE_RULES}{skill_rules_block}{context}"""
 
 
 def normalize_a_share_symbol(raw: str) -> str:

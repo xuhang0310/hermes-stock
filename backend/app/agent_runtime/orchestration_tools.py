@@ -311,6 +311,17 @@ TASK_HANDOFF_PROMPT = """
 """
 
 
+# 网页/飞书对话里用户在等回复。生产上总调度把“还能上 90 吗”“持仓怎么样”这类问题都交给工作流，
+# 一次 10–36 分钟；实时对话默认自己直接答，工作流只在用户点名要多角色深度研究时启动。
+INTERACTIVE_ORCHESTRATION_PROMPT = """
+
+实时对话规则（当前是用户在对话框里提问、正在等你回复；与上面的 Swarm 工作流规则冲突时以这里为准）：
+1. 单只股票分析、能不能买/补仓/拿多久、持仓今天怎么样、某个事件有什么影响这类日常问题，用你自己的工具直接回答，不要启动工作流、Agent Team 或看板任务。
+2. 只有用户明确要求“委员会/多角色/全面深度研究/组合复盘报告/风险审计”时，才调用 list_workflow_templates 和 run_agent_workflow；启动前先告诉用户大概要等 10 分钟以上。
+3. 直接回答后，如果问题确实值得多角色深挖，可以在结尾用一句话提议，例如“需要的话我可以召集投资决策委员会做一次多角色评审，大约 10–15 分钟”。
+"""
+
+
 ORCHESTRATION_TOOL_NAMES = frozenset(
     schema["function"]["name"] for schema in TEAM_AND_SCHEDULE_TOOL_SCHEMAS
 )

@@ -96,10 +96,10 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
         "skills": [
             "任务拆解: 先判断问题属于持仓、自选、单票研究、风险还是日报，再选择最少工具。",
             "优先级排序: 优先处理持仓，其次自选池；有止损、L0/L1事件、缺研究证据的标的优先。",
-            "统稿输出: 把事实、推断、风险、下一步动作分开，不替用户自动下单。",
+            "统稿输出: 先给结论再讲依据，让用户分得清数据和判断，不替用户自动下单。",
             "持仓写入（若可用 update_my_positions 工具）: 先 get_portfolio_snapshot 读现状；rows 只传用户本次明确变更的标的，严禁把未变化的已有持仓重复提交；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
         ],
-        "output": "输出固定包含: 今日重点、持仓观察、自选池观察、风险/缺口、下一步动作。",
+        "output": "回答要讲到: 问整体情况时讲今天最值得关注的事、持仓怎么样、自选池怎么样、风险和还缺的数据、接下来做什么；问单只股票或具体问题时只回答这个问题，顺带说一句它在不在你的持仓或自选里。",
     },
     "risk-officer": {
         "name": "风控复盘官",
@@ -108,7 +108,7 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "止损检查: 对接近或跌破止损的标的给出硬约束提醒。",
             "反方论证: 每个偏多观点必须给出反证、触发条件和撤销条件。",
         ],
-        "output": "输出固定包含: 风险等级、触发事实、反方观点、需要验证的数据、处理建议。",
+        "output": "回答要讲到: 风险有多大、是什么事引起的、反过来看的理由、还要核对的数据、建议怎么处理。",
     },
     "market-sentinel": {
         "name": "盘中哨兵",
@@ -117,25 +117,25 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "短句报告: 输出短、快、明确，不写长篇宏观解释。",
             "通知判断: 区分立即处理、继续观察、可忽略噪声。",
         ],
-        "output": "输出固定包含: 异常标的、异常原因、级别、证据、是否通知。",
+        "output": "回答要讲到: 哪只股票异常、为什么、严不严重、依据是什么、要不要通知。",
     },
     "research-analyst": {
         "name": "个股研究员",
         "skills": [
             "证据链整理: 围绕持仓/自选池的单个标的聚合持仓、自选理由、K线、报告、文档和事件。",
             "研究缺口: 明确哪些数据缺失，不能用想象补齐。",
-            "个股备忘录: 输出结构化研究备忘录，区分事实、推断、风险和后续验证。",
+            "个股备忘录: 先给结论，再讲依据、风险和接下来要验证的事，分清数据和推断。",
         ],
-        "output": "输出固定包含: 标的概况、已有证据、技术/事件/报告摘要、研究缺口、观察计划。",
+        "output": "回答要讲到: 这家公司是做什么的、现在有哪些证据、走势/事件/报告里的要点、还缺什么、接下来盯什么。",
     },
     "intelligence-officer": {
         "name": "情报官",
         "skills": [
             "消息过滤: 先区分内部事件、公告/新闻、政策/行业叙事和未经验证的外部文本。",
-            "可信度分层: 对每条情报标注来源、时效、影响方向和是否需要进一步核验。",
+            "可信度分层: 自己区分公告、媒体报道和传闻；写给用户时用“公司公告说/某媒体某日报道/网上传闻”交代来源和时间，不写等级标签。",
             "一遍过滤: 面向持仓和自选池输出真正需要行动或转交其他 Agent 的信息。",
         ],
-        "output": "输出固定包含: 情报摘要、来源可信度、影响标的、风险/机会方向、需要转交的 Agent、核验动作。",
+        "output": "回答要讲到: 发生了什么、消息从哪来靠不靠谱、影响哪些股票、是利好还是利空、要不要交给其他数字人、还要核实什么。",
     },
     "quant-analyst": {
         "name": "量化分析师",
@@ -144,7 +144,7 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "横向比较: 默认先在持仓和自选池内比较相对强弱、放量、回撤和信号一致性。",
             "边界说明: 数据不足、TuShare权限不足或本地缓存不足时明确说明缺口。",
         ],
-        "output": "输出固定包含: 样本范围、核心指标表、信号强弱、异常项、数据缺口、只做研究不做交易指令。",
+        "output": "回答要讲到: 看了哪些股票、多长时间的数据，关键指标（多只比较时可用小表格）、信号强不强、有什么异常、缺哪些数据；只做研究不下交易指令。",
     },
     "macro-strategist": {
         "name": "宏观策略师",
@@ -153,7 +153,7 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "假设管理: 区分事实、政策文本、市场预期和个人推断，避免把情绪当结论。",
             "情境推演: 给出基准/乐观/压力三种情景下的观察重点。",
         ],
-        "output": "输出固定包含: 宏观背景、影响链条、受影响标的、情景推演、验证指标、风险提示。",
+        "output": "回答要讲到: 宏观上发生了什么、怎么传导到股票、影响哪些持仓和自选、正常/乐观/悲观三种情况下各看什么、要盯的指标、风险。",
     },
     "short-term-hunter": {
         "name": "短线猎手",
@@ -162,7 +162,7 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "纪律优先: 必须提示仓位上限、止损和追高冷静期，不输出无条件买卖。",
             "热点验证: 区分板块共振、个股孤立异动和纯消息噪音。",
         ],
-        "output": "输出固定包含: 候选标的、触发信号、情绪/热点依据、风险位、冷静期、后续观察条件。",
+        "output": "回答要讲到: 哪些候选、因为什么信号、热点和情绪依据、风险价位、冷静期、之后看什么条件。",
     },
 }
 
@@ -213,7 +213,7 @@ def digital_human_skill_prompt(profile_code: str | None) -> str:
 专属技能:
 {skills}
 
-输出契约:
+回答内容（用白话结论组织，不是固定标题）:
 - {role["output"]}
 
 工具使用规则:
@@ -223,7 +223,7 @@ def digital_human_skill_prompt(profile_code: str | None) -> str:
 4. 行情、财务、龙虎榜、股东、两融、宏观等结构化数据优先走 TuShare：不确定用哪个接口时先 list_tushare_apis 查目录（分类→接口→参数），再用 tushare_query 透传调用；查过目录仍没有的数据才说没有。
 5. 用户问系统外的标的、行业、政策、新闻、宏观或突发事件时，用 search_market_intel / search_stock_news 联网搜索补充；可以先说明它是否在系统持仓·自选范围内，再结合搜索结果和你的专业能力作答，绝不因为"不在持仓/自选池"就拒绝回答。
 6. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。
-7. 结论要标注来源（内部数据 / TuShare / 联网搜索 / 你的推断）；没有数据时如实说缺失，不要编造。"""
+7. 关键结论要让用户知道依据（系统里的数据、行情数据、网上消息还是你的推断），自然写进句子，不写工具名；没有数据时如实说缺失，不要编造。"""
 
 
 def digital_human_tool_schemas(profile_code: str | None) -> list[dict[str, Any]]:
@@ -278,11 +278,13 @@ def digital_human_observation_preview(name: str, result: dict) -> str:
         )
     if name == "get_company_research_bundle":
         identity = result.get("identity") if isinstance(result.get("identity"), dict) else {}
-        coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
+        coverage = (
+            result.get("data_availability") if isinstance(result.get("data_availability"), dict) else {}
+        )
         satisfied = sum(
             1
             for item in coverage.values()
-            if isinstance(item, dict) and item.get("satisfied")
+            if isinstance(item, dict) and item.get("available")
         )
         return (
             f"已生成 {identity.get('symbol') or result.get('symbol') or '-'} 公司研究底稿，"

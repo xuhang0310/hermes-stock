@@ -265,6 +265,13 @@ function handleRunEvent(reply: ChatMessage, controller: AbortController, event: 
       type: 'reasoning',
       content: event.message || `第 ${event.attempt || 2} 次尝试正在启动`
     })
+  } else if (event.type === 'continuation_started') {
+    // 上一段只是进度说明或空回复，后端在催模型接着做完：这段挪进过程步骤，答案位置留给续写结果
+    flushReasoning(reply)
+    flushThought(reply)
+    if (reply.content.trim()) pushStep(reply, { type: 'thought', content: reply.content.trim() })
+    reply.content = ''
+    reply.streamStatus = 'streaming'
   } else if (event.type === 'reasoning_delta') {
     reply.streamStatus = 'streaming'
     reply.liveReasoning += event.content || ''

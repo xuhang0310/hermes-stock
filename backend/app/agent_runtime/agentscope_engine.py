@@ -14,6 +14,7 @@ from backend.app.agent_runtime.artifact_service import artifact_service
 from backend.app.agent_runtime.contracts import EngineOutcome
 from backend.app.agent_runtime.external_tools import external_tool_executor
 from backend.app.agent_runtime.orchestration_tools import (
+    INTERACTIVE_ORCHESTRATION_PROMPT,
     ORCHESTRATION_PROMPT,
     ORCHESTRATION_TOOL_NAMES,
     SCHEDULE_MUTATION_TOOL_NAMES,
@@ -28,11 +29,13 @@ from backend.app.agent_runtime.payloads import (
 )
 from backend.app.agent_runtime.tool_specs import should_externalize, tool_spec
 from backend.app.agent_runtime.transaction_state import transaction_state_service
+from backend.app.agents.answer_style import ANSWER_STYLE_REMINDER, ANSWER_STYLE_RULES
 from backend.app.agents.tool_approval import (
     classify_tool_risk,
     create_tool_approval,
     requires_approval,
 )
+from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.llm_config import active_llm_config, reasoning_params
 from backend.app.core.models import AgentToolApproval
@@ -533,6 +536,8 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         system_prompt += f"\n\n{progressive_context}"
     if role_code == "stock-pm":
         system_prompt += ORCHESTRATION_PROMPT
+        if str(request_payload.get("source_type") or "web") in {"web", "feishu"}:
+            system_prompt += INTERACTIVE_ORCHESTRATION_PROMPT
     elif structured_task_handoff:
         system_prompt += TASK_HANDOFF_PROMPT
     active_artifacts = artifact_service.active_context(
@@ -1045,6 +1050,141 @@ async def _stage_position_ocr_draft(
     return EngineOutcome(final_answer=reply)
 
 
+# 回答没写完就收尾：模型只说了“接下来我去查……”，或者什么都没输出就结束本轮
+# （生产 10-18 连续 5 次）。检测到时在同一上下文里追加一条系统提示让它做完，最多两次。
+_UNFINISHED_ANSWER_CONTINUATIONS = 2
+_PROGRESS_NOTE_MAX_CHARS = 500
+_PROGRESS_NOTE_MARKERS = (
+    "接下来",
+    "下面",
+    "我再",
+    "再补",
+    "补齐",
+    "现在补",
+    "现在先",
+    "我先",
+    "随后",
+    "稍后",
+    "然后再",
+    "马上",
+    "一次性给",
+    "继续核对",
+    "继续补",
+)
+_CONTINUATION_PROMPTS = {
+    "progress_note": (
+        "（系统提示，不是用户的新问题）你上一条回复只说了接下来要做什么，用户还没有拿到答案。"
+        "现在直接把事情做完：还缺的数据马上调用工具去查，查完立刻给出完整回答；"
+        "不要再输出“接下来/我再/下面给你”这类计划性的话。"
+    ),
+    "empty_answer": (
+        "（系统提示，不是用户的新问题）你上一条回复是空的，用户什么也没看到。"
+        "请基于已经拿到的数据直接给出完整回答；确实缺关键数据就先调用工具去查。"
+    ),
+}
+_EMPTY_ANSWER_ERROR = (
+    "模型这次没有给出回答（连续返回空内容），系统已自动催促两次仍未成功。"
+    "请再发一次问题，或在模型设置里换一个模型。"
+)
+
+
+def _unfinished_answer_reason(answer: str, *, used_tools: bool) -> str | None:
+    text = answer.strip()
+    if not text:
+        return "empty_answer"
+    if not used_tools or len(text) > _PROGRESS_NOTE_MAX_CHARS:
+        return None
+    sentences = [part for part in re.split(r"(?<=[。！？!?；\n])", text) if part.strip()]
+    tail = "".join(sentences[-2:])
+    if any(marker in tail for marker in _PROGRESS_NOTE_MARKERS):
+        return "progress_note"
+    return None
+
+
+# 记忆压缩：AgentScope 默认让模型按五个必填字段写 JSON 摘要，漏一个字段整轮任务就失败
+# （生产近 30 天 13 次）。改成单字段中文摘要，仍失败时退回不调模型的确定性裁剪。
+_TOOL_RESULT_TOKEN_LIMIT = 20_000
+_COMPRESSION_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "到目前为止的工作摘要：用户要什么、已经查到的关键数据（保留数字和日期）、已有判断、还要做什么。",
+        }
+    },
+    "required": ["summary"],
+}
+
+
+def _agent_context_config():
+    from agentscope.agent import ContextConfig
+
+    return ContextConfig(
+        tool_result_limit=_TOOL_RESULT_TOKEN_LIMIT,
+        compression_prompt=(
+            "<system-hint>上下文快满了。请把到目前为止的工作压缩成一份摘要，"
+            "以便在新的上下文里接着完成用户的问题：用户要什么、已经查到的关键数据（保留具体数字和日期）、"
+            "已经得出的判断、还要做什么。只写摘要，不要回答用户。</system-hint>"
+        ),
+        summary_template="<system-info>此前工作的摘要：\n{summary}</system-info>",
+        summary_schema=_COMPRESSION_SUMMARY_SCHEMA,
+    )
+
+
+async def _trim_context_without_model(agent, context_config, error: Exception) -> None:
+    """结构化摘要失败时的兜底：较早的上下文只留下用户原话和用过的工具名，保留最近部分。"""
+    tools = (await agent._prepare_model_input()).get("tools", [])
+    to_compress, to_reserve = await agent._split_context_for_compression(
+        context_config.reserve_ratio * agent.model.context_size,
+        tools,
+    )
+    if not to_compress:
+        to_compress, to_reserve = await agent._split_context_for_compression(0, tools)
+    if not to_compress:
+        raise error
+    asks: list[str] = []
+    tool_names: list[str] = []
+    for msg in to_compress:
+        if msg.role == "user":
+            text = (msg.get_text_content() or "").strip()
+            if text:
+                asks.append(text[:800])
+        tool_names.extend(block.name for block in msg.get_content_blocks("tool_call"))
+    lines = ["<system-info>较早的上下文因篇幅过长已省略，以下是保留的要点。"]
+    if agent.state.summary:
+        lines.append(agent.state.summary[:4000])
+    if asks:
+        lines.append("用户此前的要求：\n" + "\n".join(f"- {item}" for item in asks[-5:]))
+    if tool_names:
+        lines.append(
+            "已调用过的工具：" + "、".join(dict.fromkeys(tool_names)) + "。需要其中的具体数据时重新查询。"
+        )
+    lines.append("</system-info>")
+    await agent._clear_unreserved_read_cache(to_reserve)
+    agent.state.summary = "\n".join(lines)
+    agent.state.context = to_reserve
+
+
+def _resilient_agent_class(agent_cls):
+    class ResilientAgent(agent_cls):
+        async def _compress_context_impl(self, context_config=None, instructions=None) -> None:
+            try:
+                await super()._compress_context_impl(context_config, instructions)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log_event(
+                    "agent",
+                    "WARNING",
+                    "AgentScope 记忆压缩失败，改用确定性裁剪",
+                    to_db=False,
+                    error=str(exc)[:300],
+                )
+                await _trim_context_without_model(self, context_config or self.context_config, exc)
+
+    return ResilientAgent
+
+
 def _history_state(request_payload: dict[str, Any]):
     from agentscope.message import AssistantMsg, UserMsg
     from agentscope.state import AgentState
@@ -1195,13 +1335,18 @@ async def run_agentscope(
         if staged_draft is not None:
             return staged_draft
     system_prompt, schemas, write_names = _build_definition(request_payload)
+    # 技能上下文排在基础提示之后；带表达规范的模式在末尾再提醒一次白话写法（录入 Agent 不带）。
+    style_reminder = f"\n{ANSWER_STYLE_REMINDER}" if ANSWER_STYLE_RULES in system_prompt else ""
     system_prompt = (
         f"{system_prompt.rstrip()}\n\n"
         "## AgentLoop 执行约束\n"
         f"- 本轮最多允许 {max_iterations} 次推理迭代；这是复杂任务预算，不是必须消耗的轮数。\n"
         "- 能直接回答时立即收敛，不得为消耗轮数继续调用工具。\n"
         "- 已获得的工具结果必须复用；不要使用完全相同的参数重复调用同一只读工具。\n"
-        "- 工具返回的信息足以支持结论后，立即输出最终答案；证据不足则明确数据缺口。"
+        "- 工具返回的信息足以支持结论后，立即输出最终答案；证据不足则明确数据缺口。\n"
+        "- 不要只发一段进度说明就结束本轮：说了要去查什么，就在同一条回复里直接调用对应工具；"
+        "最后一条回复必须是给用户的完整回答。"
+        f"{style_reminder}"
     )
     request_payload["write_tool_names"] = sorted(write_names)
     llm = active_llm_config(request_payload.get("model_config_id"))
@@ -1232,7 +1377,7 @@ async def run_agentscope(
         extra_body=extra_body,
     )
     state = AgentState.model_validate_json(checkpoint_json) if checkpoint_json else _history_state(request_payload)
-    agent = Agent(
+    agent = _resilient_agent_class(Agent)(
         name=str(request_payload.get("digital_human_code") or "ask_stock"),
         system_prompt=system_prompt,
         model=model,
@@ -1240,6 +1385,7 @@ async def run_agentscope(
         state=state,
         model_config=ModelConfig(max_retries=1),
         react_config=ReActConfig(max_iters=max_iterations),
+        context_config=_agent_context_config(),
     )
 
     if checkpoint_json:
@@ -1318,7 +1464,28 @@ async def run_agentscope(
         text_buffer.clear()
         text_block_open = False
 
-    async for event in agent.reply_stream(inputs):
+    used_tools = checkpoint_json is not None
+    continuation_count = 0
+
+    async def reply_events():
+        # 一轮结束后若回答为空或只是进度说明，追加系统提示让模型在同一上下文里接着做完。
+        nonlocal continuation_count
+        reply_inputs = inputs
+        while True:
+            async for reply_event in agent.reply_stream(reply_inputs):
+                yield reply_event
+            if text_block_open:
+                await close_text("thought" if waiting else "answer")
+            if outcome.status != "completed" or waiting or verified_schedule_receipts or transaction_agent:
+                return
+            reason = _unfinished_answer_reason(outcome.final_answer, used_tools=used_tools)
+            if reason is None or continuation_count >= _UNFINISHED_ANSWER_CONTINUATIONS:
+                return
+            continuation_count += 1
+            await emit({"type": "continuation_started", "attempt": continuation_count, "reason": reason})
+            reply_inputs = UserMsg("user", _CONTINUATION_PROMPTS[reason])
+
+    async for event in reply_events():
         if await is_cancelled():
             outcome.status = "cancelled"
             break
@@ -1370,6 +1537,7 @@ async def run_agentscope(
                 }
             )
         elif isinstance(event, ToolCallEndEvent):
+            used_tools = True
             name = tool_names.get(event.tool_call_id, "")
             raw_args = "".join(tool_args.get(event.tool_call_id, []))
             try:
@@ -1687,6 +1855,15 @@ async def run_agentscope(
 
     if text_block_open:
         await close_text("thought" if waiting else "answer")
+    if (
+        outcome.status == "completed"
+        and continuation_count
+        and not waiting
+        and not verified_schedule_receipts
+        and not outcome.final_answer.strip()
+    ):
+        outcome.status = "failed"
+        outcome.error = _EMPTY_ANSWER_ERROR
     if outcome.status == "completed" and verified_schedule_receipts:
         await emit_schedule_receipt()
     outcome.checkpoint_json = agent.state.model_dump_json()

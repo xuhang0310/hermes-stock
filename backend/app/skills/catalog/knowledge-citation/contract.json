@@ -12,5 +12,5 @@
       "validation_profile": "knowledge_hits"
     }
   ],
-  "output_contract": ["引用内容", "文档标题", "切块标识", "可信度", "资料日期", "适用范围"]
+  "output_contract": ["引用内容", "文档标题", "资料日期", "支持哪个判断", "资料没提到的部分"]
 }

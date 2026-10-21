@@ -36,22 +36,22 @@ allowed-tools: get_company_research_bundle get_latest_price get_daily_history ge
 9. 补充资金、技术和内部知识证据，但不让它们替代基本面。
 10. 主动构建最强反方论证。
 11. 列出催化、风险、监测指标和观点失效条件。
-12. 按专业报告结构一次性输出完整结论；数据源暂不可用时在“数据局限”中说明。
+12. 按回答结构一次性用白话写出完整结论；数据源暂不可用时在末尾用一句话说明。
 
-## 观点结构
+## 观点自检
 
-每个关键观点采用：
+写每个关键观点前先自己过一遍（这是思考清单，不要把这些条目或标签写进回答）：
 
-```text
-Claim：可被证伪的一句话判断
-Evidence：直接支撑材料，含来源和日期
-Reasoning：证据如何支持判断
-Counter-evidence：最强反方材料
-Confidence：高 / 中 / 低
-Invalidation：什么新事实会推翻判断
-```
+- 这个判断能不能被事实推翻；
+- 直接支撑它的材料是什么，哪天、从哪来；
+- 证据怎么推出这个判断；
+- 最强的反面材料是什么；
+- 有多大把握；
+- 出现什么新事实就说明判断错了。
 
-完整研究模板见 [references/research-template.md](references/research-template.md)。
+写给用户时把这些融进白话里，例如：“市盈率 11 倍，比同行便宜（10 月 20 日数据）；但便宜可能有原因——煤价要是比电价涨得快，利润会被吃掉，10 月 29 日三季报出来就能看清。”
+
+回答结构见 [references/research-template.md](references/research-template.md)。
 
 ## 专业边界
 
