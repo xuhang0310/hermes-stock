@@ -1515,6 +1515,25 @@ export type FactorCompositeResult = {
 }
 
 // 统一响应信封（core/response.py::ok/fail），新增端点共用
+export type InboxNotificationLevel = 'info' | 'success' | 'warning' | 'error'
+
+export type InboxNotification = {
+  id: number
+  level: InboxNotificationLevel
+  category: string
+  title: string
+  content: string | null
+  link: string | null
+  is_read: boolean
+  created_at: string | null
+  read_at: string | null
+}
+
+export type InboxNotificationList = {
+  items: InboxNotification[]
+  unread_count: number
+}
+
 export type ApiEnvelope<T> = {
   success: boolean
   data: T

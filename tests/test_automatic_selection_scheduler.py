@@ -720,5 +720,191 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
         self.assertIsNone(error)
 
 
+class AutomaticSelectionDigestDeliveryTests(unittest.TestCase):
+    CYCLE = {
+        "target_trade_date": "20261021",
+        "strategy_count": 1,
+        "completed_count": 1,
+        "blocked_count": 0,
+        "failed_count": 0,
+        "selected_count": 30,
+        "evaluation_updates": {"completed": 0, "insufficient_data": 0, "pending": 3, "failed": 0},
+    }
+    DIGEST = {
+        "run_id": "selection-run-1",
+        "trade_date": "20261021",
+        "title": "每日选股 | 2026-10-21",
+        "inbox_title": "每日选股（10 月 21 日）：甲、乙、丙等 30 只",
+        "content": "**10 月 21 日收盘后，按固定规则选出 30 只，下面是排名前 5 的。**",
+    }
+
+    def _run(self, *, cycle=None, digest=None, feishu_status="sent", push_channel_key="feishu-daily"):
+        from backend.app.notify import notification_service
+        from backend.app.quant import automatic_selection_presentation, automatic_selection_service
+
+        created: list[dict] = []
+
+        def create_notification(user_id, title, **kwargs):
+            created.append({"user_id": user_id, "title": title, **kwargs})
+            return {"id": len(created)}
+
+        feishu = MagicMock(
+            return_value=SimpleNamespace(
+                status=feishu_status,
+                error=None if feishu_status == "sent" else "签名校验失败",
+            )
+        )
+        session = MagicMock()
+        session.__enter__.return_value = "db-session"
+        session.__exit__.return_value = False
+        digest_patch = (
+            patch.object(automatic_selection_presentation, "daily_digest", side_effect=digest)
+            if isinstance(digest, Exception)
+            else patch.object(automatic_selection_presentation, "daily_digest", return_value=digest)
+        )
+        with (
+            patch.object(
+                automatic_selection_service,
+                "run_automatic_selection_cycle",
+                return_value=cycle or self.CYCLE,
+            ),
+            digest_patch as daily_digest,
+            patch.object(notification_service, "create_notification", side_effect=create_notification),
+            patch.object(rhythm_scheduler, "send_feishu", feishu),
+            patch.object(rhythm_scheduler, "SessionLocal", return_value=session),
+        ):
+            result = rhythm_scheduler._run_automatic_selection(
+                {
+                    "job_key": rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
+                    "name": "全自动选股",
+                    "owner_user_id": 7,
+                    "push_channel_key": push_channel_key,
+                    "trigger_type": "schedule",
+                },
+                "job-run-1",
+            )
+        return result, created, feishu, daily_digest
+
+    def test_completed_selection_pushes_top_picks_to_feishu_and_inbox(self) -> None:
+        (_, notification_id, status, error), created, feishu, daily_digest = self._run(digest=self.DIGEST)
+
+        self.assertEqual((status, error), ("success", None))
+        daily_digest.assert_called_once_with(trade_date="20261021")
+        args, kwargs = feishu.call_args
+        self.assertEqual(args, ("db-session", "feishu-daily", self.DIGEST["title"], self.DIGEST["content"]))
+        self.assertEqual(kwargs["event_id"], "automatic-selection:selection-run-1")
+        self.assertEqual(kwargs["card_template"], "green")
+        self.assertIn(("触发方式", "自动调度"), kwargs["card_metadata"])
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["title"], self.DIGEST["inbox_title"])
+        self.assertEqual(created[0]["content"], self.DIGEST["content"])
+        self.assertEqual(created[0]["level"], "success")
+        self.assertEqual(created[0]["link"], "/automatic-selection")
+        self.assertEqual(notification_id, 1)
+
+    def test_feishu_failure_marks_run_failed_but_keeps_inbox_digest(self) -> None:
+        (_, _, status, error), created, _, _ = self._run(digest=self.DIGEST, feishu_status="failed")
+
+        self.assertEqual(status, "failed")
+        self.assertIn("飞书任务群推送失败", error)
+        self.assertIn("签名校验失败", error)
+        self.assertEqual([item["title"] for item in created], [self.DIGEST["inbox_title"]])
+
+    def test_blocked_run_sends_a_plain_status_notice_only(self) -> None:
+        blocked = {**self.CYCLE, "completed_count": 0, "blocked_count": 1, "selected_count": 0}
+        (_, _, status, _), created, feishu, daily_digest = self._run(cycle=blocked)
+
+        self.assertEqual(status, "skipped")
+        daily_digest.assert_not_called()
+        feishu.assert_not_called()
+        self.assertEqual(created[0]["title"], "自动选股需要关注")
+        self.assertIn("因数据不全暂停", created[0]["content"])
+        self.assertNotIn("阻断", created[0]["content"])
+        self.assertNotIn("入选证据", created[0]["content"])
+
+    def test_job_without_channel_only_writes_the_inbox(self) -> None:
+        (_, _, status, _), created, feishu, _ = self._run(digest=self.DIGEST, push_channel_key=None)
+
+        self.assertEqual(status, "success")
+        feishu.assert_not_called()
+        self.assertEqual(created[0]["title"], self.DIGEST["inbox_title"])
+
+    def test_digest_failure_falls_back_to_status_notice(self) -> None:
+        (_, _, status, _), created, feishu, _ = self._run(digest=RuntimeError("库连不上"))
+
+        self.assertEqual(status, "success")
+        feishu.assert_not_called()
+        self.assertEqual(created[0]["title"], "自动选股运行完成")
+        self.assertIn("1 个策略出了结果", created[0]["content"])
+
+
+class AutomaticSelectionPushMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from backend.app.core.models import Base, User
+
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.addCleanup(self.engine.dispose)
+        self.SessionFactory = sessionmaker(bind=self.engine)
+        with self.SessionFactory() as db:
+            admin = User(username="admin", display_name="管理员", role="super_admin", permission_scope="", password_hash="x")
+            db.add(admin)
+            db.commit()
+            self.admin_id = admin.id
+
+    def _selection_job(self, db, description: str) -> None:
+        job = self._job_row(db)
+        if job is None:
+            db.add(
+                ScheduledJob(
+                    job_key=rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
+                    name="全自动选股",
+                    description=description,
+                    job_kind="automatic_selection",
+                    schedule_type="daily",
+                    run_time="17:50",
+                    weekday_mask="1,2,3,4,5",
+                    trading_day_only=True,
+                    owner_user_id=self.admin_id,
+                    push_channel_key=None,
+                    enabled=True,
+                )
+            )
+            db.commit()
+
+    @staticmethod
+    def _job_row(db):
+        from sqlalchemy import select
+
+        return db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY))
+
+    def test_untouched_selection_job_gets_feishu_push_once(self) -> None:
+        with self.SessionFactory() as db:
+            self._selection_job(db, rhythm_scheduler._LEGACY_AUTOMATIC_SELECTION_DESCRIPTION)
+            rhythm_scheduler.ensure_default_jobs(db)
+            db.commit()
+            job = self._job_row(db)
+            self.assertEqual(job.push_channel_key, "feishu-daily")
+            self.assertIn("推送任务群", job.description)
+
+            job.push_channel_key = None
+            db.commit()
+            rhythm_scheduler.ensure_default_jobs(db)
+            db.commit()
+            self.assertIsNone(self._job_row(db).push_channel_key)
+
+    def test_customized_selection_job_keeps_its_channel_choice(self) -> None:
+        with self.SessionFactory() as db:
+            self._selection_job(db, "管理员自己写的说明")
+            rhythm_scheduler.ensure_default_jobs(db)
+            db.commit()
+            job = self._job_row(db)
+            self.assertIsNone(job.push_channel_key)
+            self.assertEqual(job.description, "管理员自己写的说明")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -236,6 +236,26 @@ class AutomaticSelectionPresentationFlowTests(unittest.TestCase):
         self.assertIn("5,000 万元", view["method"]["filters"][2])
         self.assertIn("不构成投资建议", view["disclaimer"])
 
+    def test_daily_digest_lists_top_picks_in_plain_words(self) -> None:
+        digest = presentation.daily_digest()
+
+        self.assertEqual(digest["run_id"], self.run["run_id"])
+        self.assertEqual(digest["trade_date"], TARGET_DATE)
+        self.assertEqual(digest["title"], "每日选股 | 2026-08-28")
+        self.assertEqual(digest["inbox_title"], "每日选股（8 月 28 日）：样本600001、样本600004、样本600002等 4 只")
+        content = digest["content"]
+        self.assertIn("8 月 28 日收盘后，按固定规则从 8 只合格股票里选出 4 只，下面是排名前 4 的。", content)
+        self.assertIn("1. **样本600001（600001.SH）** · 银行 · 收盘 11.05 元（+1.20%） · 新进", content)
+        self.assertRegex(content, r"\n   估值比 \d+% 的股票便宜")
+        self.assertIn("   注意：近 20 个交易日已上涨 29.5%，短期涨幅较大，注意回调", content)
+        self.assertNotIn("达到行业上限", content)
+        self.assertIn("满 5 个交易日后出第一期战绩", content)
+        self.assertIn("在系统「自动选股」页面查看", content)
+        self.assertIn("不构成投资建议", content)
+        for jargon in ("z_score", "入选证据", "阻断"):
+            self.assertNotIn(jargon, content)
+        self.assertIsNone(presentation.daily_digest(trade_date="20200101"))
+
     def test_since_selection_uses_adjusted_prices_and_pool_average(self) -> None:
         view = presentation.daily_view()
 

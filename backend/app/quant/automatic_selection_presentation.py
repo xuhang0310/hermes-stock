@@ -158,6 +158,75 @@ def daily_view(*, trade_date: str | None = None, strategy_id: int | None = None)
     }
 
 
+DIGEST_TOP_N = 5
+
+
+def daily_digest(*, trade_date: str | None = None) -> dict[str, Any] | None:
+    """每日选股的白话摘要，飞书推送和站内信共用；这一天没有出结果时返回 None。"""
+    try:
+        view = daily_view(trade_date=trade_date)
+    except LookupError:
+        return None
+    picks = view["picks"]
+    if not picks or not view["trade_date"]:
+        return None
+    summary = view["summary"] or {}
+    date_text = _date_label(view["trade_date"])
+    top = picks[:DIGEST_TOP_N]
+    eligible = summary.get("eligible_count") or (view["run"] or {}).get("eligible_count")
+    pool_text = f"从 {eligible} 只合格股票里" if eligible else ""
+    lines = [f"**{date_text}收盘后，按固定规则{pool_text}选出 {len(picks)} 只，下面是排名前 {len(top)} 的。**"]
+    if summary.get("headline"):
+        lines.append(f"{summary['headline']}。")
+    if summary.get("retained") or summary.get("removed"):
+        lines.append(
+            f"和上一期比：新进 {summary.get('added', 0)} 只，保留 {summary.get('retained', 0)} 只，"
+            f"移出 {summary.get('removed', 0)} 只。"
+        )
+    lines.append("")
+    for index, pick in enumerate(top, start=1):
+        tags = [pick["industry"] or "未分类"]
+        if pick["close_price"] is not None:
+            price = f"收盘 {float(pick['close_price']):.2f} 元"
+            if pick["pct_chg"] is not None:
+                price += f"（{float(pick['pct_chg']):+.2f}%）"
+            tags.append(price)
+        if pick["change_state"] == "added":
+            tags.append("新进")
+        lines.append(f"{index}. **{pick['name']}（{pick['symbol']}）** · {' · '.join(tags)}")
+        if pick["headline"]:
+            lines.append(f"   {pick['headline']}")
+        # 只提醒这只股票自己的明显风险；行业集中等提示在开头的行业分布里已经讲过。
+        warning = next((risk for risk in pick["risks"] if risk["level"] == "warning"), None)
+        if warning:
+            lines.append(f"   注意：{warning['text']}")
+    lines += ["", _digest_track_line(view.get("track_brief"))]
+    lines.append(f"完整的 {len(picks)} 只名单和每只的打分，在系统「自动选股」页面查看。")
+    lines.append(DISCLAIMER)
+    names = "、".join(pick["name"] for pick in picks[:3])
+    more = f"等 {len(picks)} 只" if len(picks) > 3 else ""
+    return {
+        "run_id": (view["run"] or {}).get("run_id"),
+        "trade_date": view["trade_date"],
+        "title": f"每日选股 | {_iso_date(view['trade_date'])}",
+        "inbox_title": f"每日选股（{date_text}）：{names}{more}"[:200],
+        "content": "\n".join(lines),
+    }
+
+
+def _digest_track_line(track: dict[str, Any] | None) -> str:
+    if not track:
+        return "**过往战绩**：选股刚开始运行，满 5 个交易日后出第一期战绩。"
+    line = (
+        f"**过往战绩**：最近 {track['periods']} 期选出的股票，买入后 5 个交易日有 {track['wins']} 期"
+        "跑赢当天全部合格股票的平均表现"
+    )
+    if track.get("avg_excess_return") is None:
+        return f"{line}。"
+    diff = float(track["avg_excess_return"]) * 100
+    return f"{line}，平均每期{'多' if diff >= 0 else '少'}涨 {abs(diff):.1f} 个百分点。"
+
+
 def track_record(*, strategy_id: int | None = None, limit: int = 60) -> dict[str, Any]:
     """历史各期 5/20/60 日表现与汇总。"""
     strategy = repository.display_strategy(strategy_id)
@@ -1129,6 +1198,11 @@ def _run_config(run: dict[str, Any]) -> dict[str, Any]:
         return validate_config(dict(run.get("config") or {}))
     except (TypeError, ValueError):
         return validate_config(dict(DEFAULT_STRATEGY_CONFIG))
+
+
+def _iso_date(trade_date: str) -> str:
+    value = trade_date.replace("-", "")
+    return f"{value[:4]}-{value[4:6]}-{value[6:8]}" if len(value) == 8 else trade_date
 
 
 def _date_label(trade_date: str) -> str:

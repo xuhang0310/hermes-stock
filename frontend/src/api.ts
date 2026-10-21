@@ -93,6 +93,7 @@ import type {
   AutomaticSelectionStrategy,
   AutomaticSelectionStrategyConfig,
   AutomaticSelectionTrackRecord,
+  InboxNotificationList,
   AgentBoardCounts,
   AgentTask,
   AgentTaskDetail,
@@ -757,6 +758,18 @@ export const api = {
     request<ApiEnvelope<AutomaticSelectionDaily>>(
       `/api/automatic-selection/daily${tradeDate ? `?trade_date=${encodeURIComponent(tradeDate)}` : ''}`
     ).then((res) => res.data),
+  notifications: (unreadOnly = false, limit = 50) =>
+    request<ApiEnvelope<InboxNotificationList>>(
+      `/api/notifications?unread_only=${unreadOnly}&limit=${limit}`
+    ).then((res) => res.data),
+  markNotificationRead: (id: number) =>
+    request<ApiEnvelope<null>>(`/api/notifications/${id}/read`, { method: 'POST' }),
+  markAllNotificationsRead: () =>
+    request<ApiEnvelope<{ marked: number }>>('/api/notifications/read-all', { method: 'POST' }).then(
+      (res) => res.data
+    ),
+  deleteNotification: (id: number) =>
+    request<ApiEnvelope<null>>(`/api/notifications/${id}`, { method: 'DELETE' }),
   automaticSelectionTrackRecord: (limit = 60) =>
     request<ApiEnvelope<AutomaticSelectionTrackRecord>>(
       `/api/automatic-selection/track-record?limit=${limit}`

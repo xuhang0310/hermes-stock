@@ -7,12 +7,22 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import InboxNotification
 
 _LIST_LIMIT_MAX = 100
+
+
+# 时间统一按 UTC 存、带时区输出：生产库默认时间（server_default NOW()）就是 UTC，
+# 不带时区输出时前端会按本地时间显示，早 8 小时。
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    return value.replace(tzinfo=timezone.utc).isoformat() if value else None
 
 
 def _to_dict(row: InboxNotification) -> dict:
@@ -24,8 +34,8 @@ def _to_dict(row: InboxNotification) -> dict:
         "content": row.content,
         "link": row.link,
         "is_read": bool(row.is_read),
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "read_at": row.read_at.isoformat() if row.read_at else None,
+        "created_at": _utc_iso(row.created_at),
+        "read_at": _utc_iso(row.read_at),
     }
 
 
@@ -47,6 +57,7 @@ def create_notification(
             level=level if level in ("info", "success", "warning", "error") else "info",
             category=category[:32],
             link=link,
+            created_at=_utcnow(),
         )
         session.add(row)
         session.commit()
@@ -94,7 +105,7 @@ def mark_read(user_id: int, notification_id: int) -> bool:
             return False
         if not row.is_read:
             row.is_read = True
-            row.read_at = datetime.now()
+            row.read_at = _utcnow()
             session.commit()
         return True
 
@@ -105,7 +116,7 @@ def mark_all_read(user_id: int) -> int:
         updated = (
             session.query(InboxNotification)
             .filter(InboxNotification.user_id == user_id, InboxNotification.is_read.is_(False))
-            .update({"is_read": True, "read_at": datetime.now()}, synchronize_session=False)
+            .update({"is_read": True, "read_at": _utcnow()}, synchronize_session=False)
         )
         session.commit()
         return int(updated or 0)

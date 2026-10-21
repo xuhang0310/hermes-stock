@@ -66,6 +66,10 @@ _SAME_DAY_CATCHUP_JOB_KEYS = frozenset(_AUTOMATIC_SELECTION_CLAIM_GROUP)
 AUTOMATIC_SELECTION_DATA_RETRY_MINUTES = 30
 AUTOMATIC_SELECTION_DATA_RETRY_UNTIL = "22:00"
 # 旧版默认 15:45/16:10 早于数据发布，未被用户改过的内置任务升级时迁移到新默认时间。
+# 旧版选股任务不推送飞书；仍是这段默认描述（没人改过）的任务在启动时补上任务群推送，只迁移一次。
+_LEGACY_AUTOMATIC_SELECTION_DESCRIPTION = (
+    "数据入库成功后运行确定性多因子选股、保存不可变证据并更新前瞻评估；只做研究，不自动交易。"
+)
 _LEGACY_AUTOMATIC_SELECTION_RUN_TIMES = {
     AUTOMATIC_SELECTION_DATA_JOB_KEY: "15:45",
     AUTOMATIC_SELECTION_JOB_KEY: "16:10",
@@ -128,6 +132,7 @@ _CARD_TEMPLATE_BY_JOB = {
     "evening-daily-2200": "indigo",
     "weekend-review": "purple",
     "month-end-review": "orange",
+    "automatic-selection-1610": "green",
 }
 
 
@@ -992,27 +997,93 @@ def _run_automatic_selection(
         task_status = "skipped"
         task_error = "所有启用策略均被质量门禁阻断"
 
-    owner_user_id = snapshot.get("owner_user_id")
-    if owner_user_id is None:
-        return output_content, None, task_status, task_error
     has_warning = (
         task_status != "success"
         or summary["blocked_count"] > 0
         or summary["failed_count"] > 0
     )
-    notification = create_notification(
-        int(owner_user_id),
-        "自动选股运行完成" if not has_warning else "自动选股运行需关注",
-        content=(
-            f"目标交易日 {summary['target_trade_date'] or '未知'}；"
-            f"完成 {summary['completed_count']}，阻断 {summary['blocked_count']}，"
-            f"失败 {summary['failed_count']}，入选证据 {summary['selected_count']} 条。"
-        ),
-        level="error" if task_status == "failed" else ("warning" if has_warning else "success"),
-        category="automatic_selection",
-        link="/automatic-selection",
-    )
-    return output_content, int(notification["id"]), task_status, task_error
+    digest = _automatic_selection_digest(summary)
+    if digest is not None and snapshot.get("push_channel_key"):
+        push_error = _push_automatic_selection_digest(snapshot, digest)
+        if push_error and task_status == "success":
+            task_status = "failed"
+            task_error = f"选股已完成，但飞书任务群推送失败: {push_error}"
+    owner_user_id = snapshot.get("owner_user_id")
+    if owner_user_id is None:
+        return output_content, None, task_status, task_error
+    # 站内信发选股结果；运行状态只在出问题或没有结果可发时单独提醒。
+    notification_id: int | None = None
+    if digest is not None:
+        notification = create_notification(
+            int(owner_user_id),
+            digest["inbox_title"],
+            content=digest["content"],
+            level="success",
+            category="automatic_selection",
+            link="/automatic-selection",
+        )
+        notification_id = int(notification["id"])
+    if has_warning or digest is None:
+        notification = create_notification(
+            int(owner_user_id),
+            "自动选股需要关注" if has_warning else "自动选股运行完成",
+            content=_automatic_selection_status_text(summary),
+            level="error" if task_status == "failed" else ("warning" if has_warning else "success"),
+            category="automatic_selection",
+            link="/automatic-selection",
+        )
+        notification_id = int(notification["id"])
+    return output_content, notification_id, task_status, task_error
+
+
+def _automatic_selection_digest(summary: dict[str, Any]) -> dict[str, Any] | None:
+    if not summary["completed_count"] or not summary["target_trade_date"]:
+        return None
+    from backend.app.quant.automatic_selection_presentation import daily_digest
+
+    try:
+        return daily_digest(trade_date=str(summary["target_trade_date"]))
+    except Exception as exc:  # noqa: BLE001 - 摘要只是通知内容，生成失败不影响选股结果
+        _log("WARNING", "每日选股摘要生成失败", {"error": str(exc)[:300]})
+        return None
+
+
+def _push_automatic_selection_digest(snapshot: dict[str, Any], digest: dict[str, Any]) -> str | None:
+    now = now_sh()
+    trigger_label = "自动调度" if snapshot.get("trigger_type") == "schedule" else "手动执行"
+    with SessionLocal() as session:
+        notification = send_feishu(
+            session,
+            snapshot["push_channel_key"],
+            digest["title"],
+            digest["content"],
+            event_id=f"automatic-selection:{digest['run_id']}" if digest.get("run_id") else None,
+            card_template=_CARD_TEMPLATE_BY_JOB.get(str(snapshot.get("job_key")), "green"),
+            card_metadata=[
+                ("任务", str(snapshot.get("name") or "全自动选股")),
+                ("触发方式", trigger_label),
+                ("生成时间", now.strftime("%Y-%m-%d %H:%M:%S")),
+            ],
+            card_footer="SixRabbits Stock | 规则选股，仅供研究与复盘，不构成投资建议",
+        )
+        if notification.status != "sent":
+            return notification.error or "飞书未确认发送成功"
+    return None
+
+
+def _automatic_selection_status_text(summary: dict[str, Any]) -> str:
+    parts = [f"目标交易日 {summary['target_trade_date'] or '未知'}"]
+    if summary["completed_count"]:
+        parts.append(f"{summary['completed_count']} 个策略出了结果")
+    if summary["blocked_count"]:
+        parts.append(f"{summary['blocked_count']} 个策略因数据不全暂停（不会拿残缺数据硬算）")
+    if summary["failed_count"]:
+        parts.append(f"{summary['failed_count']} 个策略计算出错")
+    if summary["evaluation_updates"]["failed"]:
+        parts.append(f"{summary['evaluation_updates']['failed']} 个历史战绩没算出来，会自动重试")
+    if not summary["strategy_count"]:
+        parts.append("没有启用的选股策略")
+    return "；".join(parts) + "。详情见「自动选股」页面。"
 
 
 def _run_manual_automatic_selection_followup(
@@ -1785,12 +1856,13 @@ DEFAULT_JOBS = [
     {
         "job_key": AUTOMATIC_SELECTION_JOB_KEY,
         "name": "全自动选股",
-        "description": "数据入库成功后运行确定性多因子选股、保存不可变证据并更新前瞻评估；只做研究，不自动交易。",
+        "description": "数据入库成功后运行确定性多因子选股、保存不可变证据并更新前瞻评估，前 5 名推送任务群并写入站内信；只做研究，不自动交易。",
         "job_kind": "automatic_selection",
         "schedule_type": "daily",
         "run_time": "17:50",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
+        "push_channel_key": "feishu-daily",
         "enabled": True,
     },
     {
@@ -1938,6 +2010,13 @@ def ensure_default_jobs(session) -> int:
                 existing.owner_user_id = None
             elif existing.owner_user_id is None and owner_user_id is not None:
                 existing.owner_user_id = owner_user_id
+            if (
+                existing.job_key == AUTOMATIC_SELECTION_JOB_KEY
+                and existing.push_channel_key is None
+                and existing.description == _LEGACY_AUTOMATIC_SELECTION_DESCRIPTION
+            ):
+                existing.push_channel_key = item.get("push_channel_key")
+                existing.description = item.get("description")
             legacy_time = _LEGACY_AUTOMATIC_SELECTION_RUN_TIMES.get(existing.job_key)
             if legacy_time and existing.run_time == legacy_time:
                 existing.run_time = item.get("run_time")

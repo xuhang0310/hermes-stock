@@ -3,6 +3,9 @@ import type { HealthPayload, UserPayload } from '../types'
 
 import { computed, ref } from 'vue'
 
+import { pageForNotificationLink } from '../utils/notifications'
+import NotificationBell from './NotificationBell.vue'
+
 export type PageKey =
   | 'workbench'
   | 'askStock'
@@ -39,6 +42,11 @@ const emit = defineEmits<{
 }>()
 
 const expandedMenu = ref<PageKey | null>(null)
+
+function openNotificationLink(link: string) {
+  const page = pageForNotificationLink(link)
+  if (page) emit('navigate', page)
+}
 const mobileNavOpen = ref(false)
 
 const canViewRhythm = computed(
@@ -212,6 +220,7 @@ function handleChildClick(key: PageKey) {
           <span class="topbar-user">{{ user.display_name }}</span>
           <span class="topbar-role">{{ user.role }}</span>
           <span class="topbar-database">{{ health?.journal_mode ?? 'mysql' }}</span>
+          <NotificationBell @open-link="openNotificationLink" />
           <button type="button" @click="$emit('refresh')">刷新</button>
           <button type="button" @click="$emit('logout')">退出</button>
         </div>

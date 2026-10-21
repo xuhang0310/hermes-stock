@@ -165,6 +165,10 @@ class AutomaticSelectionSchedulerTests(unittest.TestCase):
                 return_value=cycle_result,
             ) as run_cycle,
             patch.object(paper_service, "place_order") as place_order,
+            patch(
+                "backend.app.quant.automatic_selection_presentation.daily_digest",
+                return_value=None,
+            ),
         ):
             rhythm_scheduler._execute_job(
                 rhythm_scheduler.AUTOMATIC_SELECTION_JOB_KEY,
