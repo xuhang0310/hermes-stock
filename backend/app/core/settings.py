@@ -71,6 +71,9 @@ class Settings:
     # 查询改写+多路扩展（RAG P2）：检索/联网搜索前用一次 LLM 把口语 query 改写并扩成多角度查询，
     # 提高召回。成本=每次搜索多一次 LLM 调用；关闭则降级为原单查询（行为与改造前一致）。
     query_rewrite_enabled: bool = os.getenv("STOCK_QUERY_REWRITE_ENABLED", "true").lower() == "true"
+    # 说人话改稿（ai/plain_rewrite.py）：定时报告推送前多一次 LLM 调用，只改说法不改事实，
+    # 过不了数字核对就沿用原文。关闭则直接推送数字人原文。
+    plain_rewrite_enabled: bool = os.getenv("STOCK_PLAIN_REWRITE_ENABLED", "true").lower() == "true"
     # Agent 工作区（文件读写/查找/执行）：受控 scratch 目录，与项目代码/.env/DB 物理隔离
     workspace_enabled: bool = os.getenv("STOCK_WORKSPACE_ENABLED", "true").lower() == "true"
     # 执行能力独立开关，默认关：开启=给聊天用户放开"以应用用户身份执行 Python"，生产须在独立低权账户/沙箱下才开

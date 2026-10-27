@@ -14,6 +14,15 @@ def _tool(name: str, description: str, parameters: dict[str, Any]) -> dict[str, 
     }
 
 
+# 定时任务指令会原样交给数字人，指令里的规矩常被它复述进推送（见 docs/scheduled-task-prompts.md）。
+_SCHEDULE_INSTRUCTION_GUIDE = (
+    "每次触发时交给数字人的完整指令。写法：1) 贴着用户的原话写清要交付什么、几点前要，"
+    "交付物要“先给结论、大白话、能照着做”，用户要具体价格和数量就要求每条都给出；"
+    "2) 只写用户这次要的内容，不要把以前对话里的一次性约定、或你自己加的限制（预算比例、"
+    "减仓上限、数据核实前不给数量等）写成每次都要守的规矩；3) 不写“推送飞书”，"
+    "push_to_feishu 打开后由系统自动推送；4) 不写核对清单和免责条款，尽量控制在 800 字以内。"
+)
+
 TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
     _tool(
         "list_workflow_templates",
@@ -139,7 +148,7 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
                         "兼容 orchestrator、pm 和中文名，但应优先使用真实 code。"
                     ),
                 },
-                "instruction": {"type": "string", "description": "每次触发时交给数字人的完整指令。"},
+                "instruction": {"type": "string", "description": _SCHEDULE_INSTRUCTION_GUIDE},
                 "schedule": {
                     "type": "object",
                     "additionalProperties": False,
@@ -181,7 +190,7 @@ TEAM_AND_SCHEDULE_TOOL_SCHEMAS = [
                 "job_key": {"type": "string"},
                 "name": {"type": "string"},
                 "target_agent_code": {"type": "string"},
-                "instruction": {"type": "string"},
+                "instruction": {"type": "string", "description": _SCHEDULE_INSTRUCTION_GUIDE},
                 "schedule": {"type": "object"},
                 "trading_day_only": {"type": "boolean"},
                 "push_to_feishu": {"type": "boolean"},

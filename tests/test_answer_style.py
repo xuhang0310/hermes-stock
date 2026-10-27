@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from backend.app.agent_runtime.orchestration_tools import TEAM_AND_SCHEDULE_TOOL_SCHEMAS
 from backend.app.agents import stock_agent
 from backend.app.agents.answer_style import ANSWER_STYLE_RULES
 from backend.app.market import stock_tools
@@ -43,6 +44,18 @@ class AnswerStylePromptTests(unittest.TestCase):
                 self.assertFalse({"执行摘要", "多维决策矩阵", "切块标识"} & set(manifest.output_contract))
         self.assertIn("## 回答结构", manifests["position-decision-support"].instructions)
         self.assertIn("不写“A级/C级”", manifests["event-intelligence"].instructions)
+
+    def test_schedule_tools_say_how_to_write_task_instructions(self) -> None:
+        properties = {
+            item["function"]["name"]: item["function"]["parameters"]["properties"]
+            for item in TEAM_AND_SCHEDULE_TOOL_SCHEMAS
+        }
+        for name in ("create_agent_schedule", "update_agent_schedule"):
+            with self.subTest(tool=name):
+                description = properties[name]["instruction"]["description"]
+                self.assertIn("贴着用户的原话", description)
+                self.assertIn("一次性约定", description)
+                self.assertIn("由系统自动推送", description)
 
 
 if __name__ == "__main__":

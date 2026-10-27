@@ -29,6 +29,7 @@ from backend.app.agent_runtime.channel_runs import (
     wait_for_channel_run,
 )
 from backend.app.agent_runtime.profile_access import target_roles_allow
+from backend.app.ai.plain_rewrite import rewrite_plain
 from backend.app.feishu.feishu import send_feishu
 from backend.app.core.models import (
     AgentReport,
@@ -284,7 +285,10 @@ def _scheduled_execution_constraints(job_key: str) -> str:
     common = (
         "本轮是独立的定时任务，只处理提示中的当日范围；历史报告仅可作为证据，"
         "不得补做往日任务。工具已返回的数据直接复用，同一工具与同一参数不要重复调用，"
-        "同一事实和计算不要在推理中反复核验；数据缺失时明确标注后继续完成报告。"
+        "同一事实和计算不要在推理中反复核验；数据缺失时继续完成报告，缺了什么在文末集中说一次，"
+        "并说明影响哪些操作。报告写完由系统自动推送飞书，你不用自己推送，正文也不提推送情况。"
+        "任务里的核对要求和限制是给你做事用的，照做即可，不要在报告里逐条复述"
+        "（如“不跨账户挪用”“不构成授权”“不冒充实时数据”）。"
     )
     if job_key == "close-review-1530":
         return (
@@ -438,6 +442,20 @@ def _run_scheduled_agent(
     return answer, model_name
 
 
+def _plain_report(snap: dict, answer: str) -> str:
+    """推送前改成白话；改稿没做成或没过数字核对就沿用原文（原文仍在定时任务会话记录里）。"""
+    result = rewrite_plain(answer)
+    if result.applied:
+        _log(
+            "INFO",
+            "定时报告已改成白话",
+            {"job_key": snap["job_key"], "chars_before": len(answer), "chars_after": len(result.text)},
+        )
+    elif result.reason:
+        _log("WARNING", f"定时报告沿用原文：{result.reason}", {"job_key": snap["job_key"]})
+    return result.text
+
+
 def _run_agent_report(
     snap: dict,
     now: datetime,
@@ -451,6 +469,7 @@ def _run_agent_report(
         raise RuntimeError(agent_error)
     if not answer:
         raise RuntimeError("模型未返回有效内容")
+    answer = _plain_report(snap, answer)
 
     report_id = f"rhythm-{job_run_id}"
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
