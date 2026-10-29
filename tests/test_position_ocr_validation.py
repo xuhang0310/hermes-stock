@@ -299,6 +299,20 @@ class PositionOcrValidationTests(unittest.TestCase):
         self.assertIn("绝不能附带其他未变化的已有持仓", prompt)
         self.assertNotIn("必须同时包含该新标的行和所有已有持仓行", prompt)
 
+    def test_position_agent_can_pass_sell_price_for_cash_proceeds(self) -> None:
+        prompt = position_agent._position_agent_prompt()
+        save_tool = next(
+            tool for tool in position_agent.POSITION_AGENT_TOOLS
+            if tool["function"]["name"] == "save_position_holdings"
+        )
+        row_fields = save_tool["function"]["parameters"]["properties"]["rows"]["items"]["properties"]
+
+        # 卖出/减仓/清仓的成交价走 execution_price，回款按它记入可用资金；待续草稿也要保留它
+        self.assertIn("execution_price", row_fields)
+        self.assertIn("execution_price", position_agent._PENDING_ROW_FIELDS)
+        self.assertIn('action="close"、position_quantity=0', prompt)
+        self.assertIn("回款记入该账户可用资金", prompt)
+
     def test_valid_symbol_uses_authoritative_name(self) -> None:
         with patch.object(
             position_agent,

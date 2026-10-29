@@ -502,9 +502,9 @@ DIGITAL_HUMAN_TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "update_my_positions",
-        "增量更新/录入当前用户持仓。rows 只能包含用户本次明确新增、加减仓、清仓或修改的标的，严禁回传未变化的完整持仓清单。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；账户事实字段（代码/数量/成本价）缺失才追问，不臆造；最新价/市值/浮盈由系统自动同步。买入/加仓/卖出/减仓时 position_quantity 表示本次变动数量并设置对应 action；清仓传 action=close。用户没说账户时系统自动匹配该标的现有持仓所在账户；同一标的在多个账户都有持仓时才追问。首次调用不传 confirmed 返回预览，用户确认后再以 confirmed=true 写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
+        "增量更新/录入当前用户持仓。rows 只能包含用户本次明确新增、加减仓、清仓或修改的标的，严禁回传未变化的完整持仓清单。先 get_portfolio_snapshot 读现状，按用户明确给出的数字写；账户事实字段（代码/数量/成本价）缺失才追问，不臆造；最新价/市值/浮盈由系统自动同步。买入/加仓/卖出/减仓时 position_quantity 表示本次变动数量并设置对应 action；清仓传 action=close。买入/加仓的成交价填 cost_price（从可用资金扣款）；卖出/减仓/清仓的成交价填 execution_price（回款记入可用资金，不填按最新价估算），不要填进 cost_price。用户没说账户时系统自动匹配该标的现有持仓所在账户；同一标的在多个账户都有持仓时才追问。首次调用不传 confirmed 返回预览，用户确认后再以 confirmed=true 写入。仅在数字人开启写持仓且用户有 data:write 权限时可用。",
         {
-            "rows": {"type": "array", "description": "仅包含本次变更标的的数组。每项含 symbol、action、position_quantity、cost_price 等；action=buy/add/sell/reduce 时 position_quantity 是本次变动数量，不是变更后的总持仓。", "items": {"type": "object"}},
+            "rows": {"type": "array", "description": "仅包含本次变更标的的数组。每项含 symbol、action、position_quantity、cost_price、execution_price 等；action=buy/add/sell/reduce 时 position_quantity 是本次变动数量，不是变更后的总持仓。", "items": {"type": "object"}},
             "account": {"type": "object", "description": "账户信息，含 account_id/broker_name/account_name/as_of_date 等。"},
             "as_of_date": {"type": "string", "description": "快照日期 YYYYMMDD。"},
             "confirmed": {"type": "boolean", "description": "是否真正写入。默认 false 返回预览不落库；用户确认后传 true 才落库。"},

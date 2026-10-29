@@ -286,24 +286,28 @@ def build_intent_hint(intent: PositionIntent) -> str:
         PositionAction.SELL: (
             "用户意图是 **卖出** 持仓标的。"
             "必须先 get_portfolio_snapshot 获取该标的当前持仓数量，"
-            "再按用户指定数量减仓；若未指定数量则追问。"
-            "保存时传卖出后的剩余 quantity。"
+            "再按用户指定数量卖出；若未指定数量则追问。"
+            "保存时 action=sell，position_quantity 传本次卖出数量（不是卖出后的剩余数量），"
+            "后端负责扣减并把回款记入可用资金；用户说了成交价就填 execution_price。"
         ),
         PositionAction.CLOSE: (
             "用户意图是 **清仓** 该标的（全部卖出/退出）。"
             "必须先 get_portfolio_snapshot 确认持仓存在，"
-            "然后用 update_my_positions 将该标的 position_quantity 设为 0（系统自动转 closed）。"
+            "然后以 action=close、position_quantity=0 写入（系统自动转 closed，并按全部持仓数量把回款记入可用资金；"
+            "用户说了成交价就填 execution_price）。"
             "这是不可逆操作，必须复述确认后才以 confirmed=true 写入。"
         ),
         PositionAction.ADD: (
             "用户意图是 **加仓/补仓** 现有持仓标的。"
             "必须先 get_portfolio_snapshot 获取该标的当前 quantity，"
-            "新 quantity = 当前数量 + 加仓数量；成本价按加权平均计算（用户给了新价格则用新价格）。"
+            "保存时 action=add，position_quantity 传本次加仓数量（不是加仓后的总数），cost_price 传本次成交价；"
+            "后端负责累加数量、加权成本并从可用资金扣款。"
         ),
         PositionAction.REDUCE: (
             "用户意图是 **减仓** 现有持仓标的（卖出部分）。"
             "必须先 get_portfolio_snapshot 获取该标的当前 quantity，"
-            "新 quantity = 当前数量 - 减仓数量。若减仓后 quantity=0 则等同于清仓转 closed。"
+            "保存时 action=reduce，position_quantity 传本次减仓数量（不是减仓后的剩余数量），"
+            "后端负责扣减并把回款记入可用资金，减到 0 自动转 closed；用户说了成交价就填 execution_price。"
         ),
         PositionAction.UPDATE_FIELD: (
             "用户意图是 **修改持仓字段**（止损/止盈/逻辑说明/仓位比例）。"

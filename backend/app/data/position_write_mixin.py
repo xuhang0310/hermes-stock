@@ -290,6 +290,12 @@ class PositionWriteMixin:
                     return {"symbol": norm, "action": "close", "closed": False, "note": "持仓已关仓"}
                 close_qty = position.quantity or 0
                 execution_price = number_or_none(payload.get("execution_price"))
+                # 清仓 = 按成交价卖光：回款记入可用资金（没给成交价按最新价估算）。
+                # 取价必须在写入关仓快照之前，否则拿不到仍持有时的实时价。
+                trade_price = self._resolve_trade_price(
+                    norm, execution_price, self._latest_open_snapshot(norm, acc_id)
+                )
+                self._settle_trade_cash(acc_id, close_qty * trade_price if trade_price else None)
                 position.status = "closed"
                 position.quantity = 0
                 position.closed_at = datetime.now()
@@ -315,7 +321,7 @@ class PositionWriteMixin:
                     name=str(payload.get("name") or "").strip(),
                     action="close",
                     quantity=close_qty,
-                    price=execution_price,
+                    price=trade_price,
                     source_type=source_type,
                 )
                 self.db.flush()

@@ -23,6 +23,7 @@ from backend.app.agents.position_import import (
 from backend.app.agents.position_intent import (
     PositionAction,
     _normalize_to_ts_code,
+    build_intent_hint,
     detect_position_intent,
 )
 from backend.app.ai.llm_client import parse_sse_stream
@@ -51,6 +52,14 @@ class IntentDetectionTests(unittest.TestCase):
 
     def test_close(self) -> None:
         self.assertAction("清仓000002", PositionAction.CLOSE)
+
+    def test_trade_hints_pass_the_traded_quantity_not_the_new_total(self) -> None:
+        # 后端按"本次变动数量"扣减/累加并结算资金；提示若让模型传剩余/总数会扣错数量和回款
+        for text in ("减仓200股000002", "卖出100股000002", "加仓500股600519"):
+            hint = build_intent_hint(detect_position_intent(text))
+            self.assertIn("position_quantity 传本次", hint, text)
+            self.assertNotIn("新 quantity =", hint, text)
+            self.assertNotIn("剩余 quantity", hint, text)
 
     def test_chitchat_is_unknown(self) -> None:
         self.assertAction("你好", PositionAction.UNKNOWN)

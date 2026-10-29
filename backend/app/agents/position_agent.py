@@ -88,7 +88,14 @@ POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
                                 "frozen_quantity": {"type": "number", "description": "冻结数量"},
                                 "today_buy_quantity": {"type": "number", "description": "今日买入数量"},
                                 "today_sell_quantity": {"type": "number", "description": "今日卖出数量"},
-                                "cost_price": {"type": "number", "description": "成本价"},
+                                "cost_price": {"type": "number", "description": "成本价。买入/加仓时填本次成交价；卖出/减仓/清仓不要填（成交价填 execution_price）"},
+                                "execution_price": {
+                                    "type": "number",
+                                    "description": (
+                                        "本次卖出成交价。action=sell/reduce/close 时用户说了成交价就填，"
+                                        "系统按它把卖出回款记入该账户可用资金；用户没说就不填（按最新价估算），不必追问。"
+                                    ),
+                                },
                                 "cost_amount": {"type": "number", "description": "成本金额"},
                                 "latest_price": {"type": "number", "description": "现价/最新价。截图里有就顺带填，没有绝不要向用户索要——系统会定时自动同步行情价"},
                                 "market_value": {"type": "number", "description": "持仓市值。截图里有才填，缺失由系统按行情自动计算"},
@@ -108,8 +115,8 @@ POSITION_AGENT_TOOLS: list[dict[str, Any]] = [
                                         "本条持仓的交易动作。根据用户意图选择："
                                         "buy=买入新股票(累加数量+加权成本+自动加入自选)；"
                                         "add=加仓已有持仓(同buy)；"
-                                        "sell=全部卖出(清仓关闭)；reduce=减仓(扣减数量)；"
-                                        "close=直接关闭持仓(无交易仅关闭)；"
+                                        "sell/reduce=卖出/减仓(position_quantity 传本次卖出数量，后端扣减并把回款记入可用资金，卖光自动关闭)；"
+                                        "close=清仓(position_quantity 传 0，按全部持仓数量回款并关闭)；"
                                         "replace=完全替换(覆盖旧数据，未指定时默认)；"
                                         "update_field=仅修改字段如止损止盈(不改数量)。"
                                         "用户说'买入/加仓/新增'应选buy/add；'卖出全部/清仓/止损出局'应选sell/close；'减持/卖出部分'应选reduce。"
@@ -150,6 +157,7 @@ _PENDING_ROW_FIELDS = {
     "today_buy_quantity",
     "today_sell_quantity",
     "cost_price",
+    "execution_price",
     "cost_amount",
     "latest_price",
     "market_value",
@@ -950,12 +958,15 @@ def _position_agent_prompt() -> str:
 2. **卖出/减仓**（关键词：卖出、减持、减仓、出一部分、抛）:
    用户要减少某标的的持仓数量。必须先用 get_current_positions 读取该标的
    当前 quantity 并校验不超卖。保存时 rows 只传该目标标的一行，action="sell" 或
-   action="reduce"，position_quantity=本次卖出/减仓数量；后端负责计算剩余持仓。
+   action="reduce"，position_quantity=本次卖出/减仓数量；后端负责计算剩余持仓，
+   并把卖出回款记入该账户可用资金。用户说了成交价就填 execution_price（不要填进 cost_price，
+   卖出不改成本价）；没说就不填，系统按最新价估算回款，不必为此追问。
    不要自行计算后再传剩余数量，也不要附带其他持仓。
 
 3. **清仓**（关键词：清仓、全出、全部卖出、全抛、止损出场、不拿了）:
    用户要完全退出某标的。先用 get_current_positions 确认该持仓存在，
-   然后 rows 中该标的 position_quantity=0（系统自动将 status 转为 closed）。
+   然后 rows 中该标的 action="close"、position_quantity=0（系统自动将 status 转为 closed，
+   并按全部持仓数量把回款记入可用资金；用户说了成交价就填 execution_price）。
    这是不可逆操作，保存前必须复述确认（"将清仓 XXX 共 N 股，确认吗？"）。
    绝不要自作主张替用户清仓；用户明确说清仓关键词时才执行。
 

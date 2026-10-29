@@ -219,6 +219,25 @@ class PositionReliabilityTests(unittest.TestCase):
         # 可用资金从未维护时，卖出回款从 0 起记
         self.assertAlmostEqual(self.account.available_cash, 300)
 
+    def test_close_returns_full_holding_proceeds_to_available_cash(self) -> None:
+        self.account.available_cash = 1_000
+        self.db.commit()
+        self.repo.save_position_holding(self._holding(100))
+
+        # 持仓 Agent 清仓：action=close、position_quantity=0，按全部持仓数量回款
+        self.repo.merge_position_holding(
+            {"symbol": "600000", "account_id": self.account.id, "position_quantity": 0, "execution_price": 11},
+            action="close",
+        )
+        position = self.db.scalar(select(Position))
+        trade = self.db.scalar(select(PositionTrade))
+
+        self.assertEqual(position.status, "closed")
+        self.assertEqual(trade.quantity, 100)
+        self.assertEqual(trade.price, 11)
+        self.assertAlmostEqual(self.account.available_cash, 1_000 + 100 * 11)
+        self.assertAlmostEqual(self.account.total_asset, 1_000 + 100 * 11)
+
     def test_stale_import_does_not_replace_authoritative_position_summary(self) -> None:
         self.repo.save_position_holding(self._holding(100, as_of_date="2026-07-10"))
         self.repo.save_position_holding(self._holding(50, as_of_date="2026-07-01"))
