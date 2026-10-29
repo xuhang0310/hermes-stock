@@ -2090,6 +2090,24 @@ def stock_strategies(
     return stock_strategy_payload()
 
 
+def _chat_utc_iso(value: datetime | None) -> str | None:
+    """Chat DB defaults and explicit writes use UTC; never leave the browser to guess."""
+    if value is None:
+        return None
+    aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return aware.astimezone(timezone.utc).isoformat()
+
+
+def _session_times_out(row: AiChatSession) -> dict:
+    # Inserting a message does not necessarily dirty the parent session. Include
+    # message timestamps so continued conversations retain their actual activity date.
+    activity_times = [row.updated_at, *(message.created_at for message in row.messages)]
+    return {
+        "created_at": _chat_utc_iso(row.created_at),
+        "updated_at": max((_chat_utc_iso(value) for value in activity_times if value), default=None),
+    }
+
+
 def _chat_messages_out(
     messages: list[AiChatMessage],
     run_durations: dict[int, int] | None = None,
@@ -2114,7 +2132,7 @@ def _chat_messages_out(
                 "error": item.error,
                 "duration_ms": duration_ms,
                 "backtest_run_id": (backtest_runs or {}).get(item.id),
-                "created_at": item.created_at.isoformat(),
+                "created_at": _chat_utc_iso(item.created_at),
             }
         )
     return payloads
@@ -2224,6 +2242,18 @@ def agent_sessions(
     db: Session = Depends(get_db),
     context: AuthContext = Depends(require_permission("agent:use")),
 ) -> list[dict]:
+    # Correlate by session_id (indexed by its FK in MySQL), rather than aggregating
+    # all users' messages. Apply this ordering before the history limit of 50.
+    latest_message_at = (
+        select(func.max(AiChatMessage.created_at))
+        .where(AiChatMessage.session_id == AiChatSession.id)
+        .correlate(AiChatSession)
+        .scalar_subquery()
+    )
+    last_activity_at = case(
+        (latest_message_at > AiChatSession.updated_at, latest_message_at),
+        else_=AiChatSession.updated_at,
+    )
     query = (
         select(AiChatSession)
         .options(
@@ -2238,7 +2268,7 @@ def agent_sessions(
     if digital_human_id:
         query = query.where(AiChatSession.digital_human_id == digital_human_id)
     rows = db.scalars(
-        query.order_by(AiChatSession.updated_at.desc(), AiChatSession.id.desc()).limit(50)
+        query.order_by(last_activity_at.desc(), AiChatSession.id.desc()).limit(50)
     ).all()
     return [
         {
@@ -2251,7 +2281,7 @@ def agent_sessions(
             "model_display_name": row.model_config.display_name if row.model_config else None,
             "status": row.status,
             "message_count": len(row.messages),
-            "updated_at": row.updated_at.isoformat(),
+            **_session_times_out(row),
             **_session_source_out(row),
         }
         for row in rows
@@ -2289,6 +2319,7 @@ def agent_session_detail(
         "digital_human_name": row.digital_human.name if row.digital_human else None,
         "model_config_id": row.model_config_id,
         "model_display_name": row.model_config.display_name if row.model_config else None,
+        **_session_times_out(row),
         "messages": _chat_messages_out(
             messages,
             _run_duration_map(db, row.id),

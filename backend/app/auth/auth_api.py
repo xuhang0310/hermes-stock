@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -67,6 +68,7 @@ def _record_login(
             ip=_client_ip(request),
             user_agent=(request.headers.get("user-agent") or "")[:255] or None,
             trace_id=get_trace_id(),
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
     )
     db.commit()

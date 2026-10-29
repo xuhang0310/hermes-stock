@@ -2,6 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import type { ManagedUser, UserPayload } from '../types'
+import UserLoginLogs from '../components/UserLoginLogs.vue'
+import { beijingFromDb } from '../utils/datetime'
 
 const props = defineProps<{ user: UserPayload }>()
 
@@ -15,6 +17,13 @@ const resetOpen = ref(false)
 const editingId = ref<number | null>(null)
 const resetTarget = ref<ManagedUser | null>(null)
 const resetPassword = ref('')
+const activeTab = ref<'users' | 'login-logs'>('users')
+const logUsername = ref('')
+
+function openLoginLogs(username = '') {
+  logUsername.value = username
+  activeTab.value = 'login-logs'
+}
 
 const form = reactive({
   username: '',
@@ -50,10 +59,7 @@ function roleLabel(role: ManagedUser['role']) {
 
 function formatTime(value: string | null) {
   if (!value) return '从未登录'
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit'
-  }).format(new Date(value))
+  return beijingFromDb(value)
 }
 
 async function loadUsers() {
@@ -113,6 +119,7 @@ async function saveUser() {
       notice.value = '用户创建成功。该用户首次登录时持仓、自选和定时任务均为空。'
     }
     editorOpen.value = false
+    activeTab.value = 'users'
     await loadUsers()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '保存失败'
@@ -157,6 +164,13 @@ onMounted(loadUsers)
       <button class="primary" type="button" @click="openCreate">新建用户</button>
     </header>
 
+    <nav class="user-admin__tabs" aria-label="用户管理视图">
+      <button type="button" :class="{ active: activeTab === 'users' }" :aria-pressed="activeTab === 'users'" @click="activeTab = 'users'">用户列表</button>
+      <button type="button" :class="{ active: activeTab === 'login-logs' }" :aria-pressed="activeTab === 'login-logs'" @click="openLoginLogs()">登录日志</button>
+    </nav>
+
+    <UserLoginLogs v-if="activeTab === 'login-logs'" :key="logUsername" :username="logUsername" />
+    <template v-else>
     <div class="isolation-note">
       <b>新用户从空白空间开始</b>
       <span>不会复制现有用户的持仓、自选股票、定时任务或任务执行记录。</span>
@@ -179,6 +193,7 @@ onMounted(loadUsers)
             <td>{{ formatTime(item.last_login_at) }}</td>
             <td><span :class="['status-dot', { off: !item.is_enabled }]">{{ item.is_enabled ? '已启用' : '已停用' }}</span></td>
             <td class="actions">
+              <button type="button" @click="openLoginLogs(item.username)">登录日志</button>
               <button type="button" @click="openEdit(item)">编辑</button>
               <button type="button" @click="openReset(item)">重置密码</button>
             </td>
@@ -186,6 +201,8 @@ onMounted(loadUsers)
         </tbody>
       </table>
     </div>
+
+    </template>
 
     <div v-if="editorOpen" class="user-modal" @mousedown.self="editorOpen = false">
       <form class="user-dialog" @submit.prevent="saveUser">
@@ -219,6 +236,9 @@ onMounted(loadUsers)
 .user-admin__header small, .user-dialog small { color: #d9b85f; letter-spacing: .12em; }
 .user-admin__header h2, .user-dialog h3 { margin: 5px 0 6px; }
 .user-admin__header p, .user-dialog p { margin: 0; color: #89949f; }
+.user-admin__tabs { display: flex; gap: 6px; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid #252c32; }
+.user-admin__tabs button { background: transparent; border-color: transparent; color: #89949f; }
+.user-admin__tabs button.active { color: #e4c574; background: #262115; border-color: #51442a; }
 button { border: 1px solid #303842; border-radius: 7px; background: #151a1f; color: #d8dde2; padding: 9px 14px; cursor: pointer; }
 button.primary { border-color: #d5b45c; background: #d5b45c; color: #17130b; font-weight: 700; }
 button:disabled { cursor: not-allowed; opacity: .5; }
@@ -230,7 +250,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .user-table td { padding: 14px; border-top: 1px solid #242a30; color: #c8ced3; vertical-align: middle; }
 .user-table th:nth-child(4), .user-table td:nth-child(4) { width: 140px; white-space: nowrap; }
 .user-table th:nth-child(5), .user-table td:nth-child(5) { width: 76px; white-space: nowrap; }
-.user-table th:nth-child(6), .user-table td:nth-child(6) { width: 150px; white-space: nowrap; }
+.user-table th:nth-child(6), .user-table td:nth-child(6) { width: 225px; white-space: nowrap; }
 .user-table td:first-child b, .user-table td:first-child span { display: block; }
 .user-table td:first-child span { margin-top: 3px; color: #77828c; font-size: 12px; }
 .role-chip, .isolated-chip, .status-dot { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 9px; font-size: 12px; }

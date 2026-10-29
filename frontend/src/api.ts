@@ -31,6 +31,8 @@ import type {
   SystemLog,
   UserPayload,
   ManagedUser,
+  UserLoginLogQuery,
+  UserLoginLogPage,
   LoginPayload,
   ModelPlatform,
   ModelConfig,
@@ -203,6 +205,8 @@ type AgentRunCreated = {
 
 type AgentRunStatus = AgentRunCreated & {
   source_type?: string
+  created_at?: string | null
+  started_at?: string | null
   last_event_seq: number
   attempts: number
   max_attempts: number
@@ -660,6 +664,13 @@ export const api = {
     request<JobRun>(`/api/schedule/runs/${encodeURIComponent(runId)}`),
   scheduleStatus: () => request<ScheduleStatus>('/api/schedule/status'),
   users: () => request<ManagedUser[]>('/api/users'),
+  userLoginLogs: (params: UserLoginLogQuery = {}) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== '') query.set(key, String(value))
+    }
+    return request<UserLoginLogPage>(`/api/users/login-logs?${query.toString()}`)
+  },
   createUser: (payload: {
     username: string
     display_name: string

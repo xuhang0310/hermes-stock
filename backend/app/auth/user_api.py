@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend.app.auth.auth import AuthContext, hash_password, require_permission
+from backend.app.auth.auth import BEIJING_TZ, AuthContext, hash_password, require_permission
 from backend.app.core.applog import log_event
 from backend.app.core.database import get_db
-from backend.app.core.models import User
+from backend.app.core.models import LoginLog, User
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -44,7 +44,8 @@ def _out(user: User) -> dict:
         "display_name": user.display_name,
         "role": user.role,
         "is_enabled": bool(user.is_enabled),
-        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "last_login_at": user.last_login_at.replace(tzinfo=BEIJING_TZ).isoformat()
+        if user.last_login_at else None,
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "updated_at": user.updated_at.isoformat() if user.updated_at else None,
     }
@@ -133,6 +134,71 @@ def create_user(
         role=user.role,
     )
     return _out(user)
+
+
+@router.get("/login-logs")
+def list_login_logs(
+    db: Annotated[Session, Depends(get_db)],
+    _context: Annotated[AuthContext, Depends(require_permission("user:manage"))],
+    username: Annotated[str | None, Query(max_length=80)] = None,
+    success: bool | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> dict:
+    """管理员登录审计；日期筛选按北京时间，持久化时间按 UTC。
+
+    按日志中原始账号筛选，不关联当前 users 表，保留未知账号和历史账号的失败记录。
+    """
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
+    if end_date == date.max:
+        raise HTTPException(status_code=422, detail="结束日期超出支持范围")
+    if start_date == date.min:
+        raise HTTPException(status_code=422, detail="开始日期超出支持范围")
+
+    filters = []
+    if username and username.strip():
+        filters.append(func.lower(LoginLog.username) == username.strip().lower())
+    if success is not None:
+        filters.append(LoginLog.success.is_(success))
+    if start_date:
+        start = datetime.combine(start_date, time.min, tzinfo=BEIJING_TZ)
+        filters.append(LoginLog.created_at >= start.astimezone(timezone.utc).replace(tzinfo=None))
+    if end_date:
+        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=BEIJING_TZ)
+        filters.append(LoginLog.created_at < end.astimezone(timezone.utc).replace(tzinfo=None))
+
+    total = int(db.scalar(select(func.count()).select_from(LoginLog).where(*filters)) or 0)
+    rows = db.scalars(
+        select(LoginLog)
+        .where(*filters)
+        .order_by(LoginLog.created_at.desc(), LoginLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "username": row.username,
+                "user_id": row.user_id,
+                "role": row.role,
+                "success": bool(row.success),
+                "reason": row.reason,
+                "ip": row.ip,
+                "user_agent": row.user_agent,
+                "trace_id": row.trace_id,
+                "created_at": row.created_at.replace(tzinfo=timezone.utc).isoformat()
+                if row.created_at else None,
+            }
+            for row in rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.patch("/{user_id}")

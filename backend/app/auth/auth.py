@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
@@ -23,6 +23,7 @@ from backend.app.core.settings import settings
 
 
 PASSWORD_ITERATIONS = 260_000
+BEIJING_TZ = timezone(timedelta(hours=8))
 security = HTTPBearer(auto_error=False)
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -126,7 +127,8 @@ def user_payload(context: AuthContext) -> dict:
         "display_name": user.display_name,
         "role": user.role,
         "permissions": sorted(context.permissions),
-        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "last_login_at": user.last_login_at.replace(tzinfo=BEIJING_TZ).isoformat()
+        if user.last_login_at else None,
     }
 
 
@@ -209,7 +211,8 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
         return None
     if not verify_password(password, user.password_hash):
         return None
-    user.last_login_at = datetime.now()
+    # Historical last_login_at values are Beijing wall-clock time, unlike DB-default UTC timestamps.
+    user.last_login_at = datetime.now(BEIJING_TZ).replace(tzinfo=None)
     db.commit()
     db.refresh(user)
     return user

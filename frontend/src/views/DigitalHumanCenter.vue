@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, shallowReactive } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowReactive } from 'vue'
 import { api } from '../api'
 import AgentApprovalCard from '../components/AgentApprovalCard.vue'
 import AgentProcessDisclosure from '../components/AgentProcessDisclosure.vue'
@@ -27,6 +27,7 @@ import { renderMarkdown } from '../utils/markdown'
 import { applyToolProgress, type LiveToolProgress } from '../utils/toolProgress'
 import { extractGeneratedFiles, type GeneratedFile } from '../utils/workspace'
 import { elapsedStreamMilliseconds, formatStreamDuration } from '../utils/streamDuration'
+import { groupSessionsByDate, messageDateTimeline } from '../utils/chatDates'
 
 const props = withDefaults(defineProps<{
   initialTab?: 'chat' | 'feishuBots'
@@ -135,6 +136,16 @@ const loadingPrompts = ref(false)
 const error = ref('')
 const chatScroll = ref<HTMLElement | null>(null)
 const mobileRailOpen = ref(false)
+const calendarNow = ref(Date.now())
+let calendarTimer: ReturnType<typeof setTimeout> | undefined
+
+function refreshCalendar() {
+  calendarNow.value = Date.now()
+  if (calendarTimer) clearTimeout(calendarTimer)
+  const untilMidnight = 86_400_000 - ((calendarNow.value + 8 * 60 * 60 * 1000) % 86_400_000)
+  calendarTimer = setTimeout(refreshCalendar, untilMidnight + 100)
+}
+
 function closeMobileRail() { mobileRailOpen.value = false }
 
 function pasteIntoComposer(event: ClipboardEvent) {
@@ -203,6 +214,8 @@ const filteredSessions = computed(() => {
   if (!profileId) return sessions.value
   return sessions.value.filter((item) => item.digital_human_id === profileId)
 })
+const sessionDateGroups = computed(() => groupSessionsByDate(filteredSessions.value, calendarNow.value))
+const messageTimeline = computed(() => messageDateTimeline(messages.value, calendarNow.value))
 const activeModel = computed(
   () =>
     models.value.find((item) => item.id === selectedModelId.value) ||
@@ -946,7 +959,7 @@ async function recoverActiveRuns() {
         id: -Date.now() - run.session_id,
         role: 'assistant',
         content: '',
-        created_at: new Date().toISOString(),
+        created_at: run.created_at || run.started_at || undefined,
         steps: [],
         liveReasoning: '',
         liveContent: '',
@@ -1018,6 +1031,8 @@ function composerKeydown(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  refreshCalendar()
+  document.addEventListener('visibilitychange', refreshCalendar)
   await load()
   await recoverActiveRuns()
   // 从任务看板跳入时，打开对应的对话窗口
@@ -1029,6 +1044,11 @@ onMounted(async () => {
     question.value = props.initialQuestion.trim()
     await send()
   }
+})
+
+onUnmounted(() => {
+  if (calendarTimer) clearTimeout(calendarTimer)
+  document.removeEventListener('visibilitychange', refreshCalendar)
 })
 
 function sessionIsRunning(sessionId: number) {
@@ -1058,7 +1078,7 @@ function requestIsVisible(request: ActiveChatRequest) {
       <header class="section-header">
         <div>
           <h2>历史会话</h2>
-          <p>{{ filteredSessions.length }} 条记录，切换后恢复上下文。</p>
+          <p>{{ filteredSessions.length }} 条记录 · 按最近活动排列 · 北京时间</p>
         </div>
         <button type="button" @click="newSession()">新建</button>
       </header>
@@ -1072,8 +1092,10 @@ function requestIsVisible(request: ActiveChatRequest) {
       </div>
 
       <div class="session-list">
+        <section v-for="group in sessionDateGroups" :key="group.key" class="session-date-group" :aria-label="group.label">
+          <h3 class="session-date-heading">{{ group.label }}</h3>
         <div
-          v-for="item in filteredSessions"
+          v-for="{ item, stamp } in group.entries"
           :key="item.id"
           class="session-item-wrap"
         >
@@ -1090,7 +1112,10 @@ function requestIsVisible(request: ActiveChatRequest) {
               <em v-if="sessionIsRunning(item.id)" class="session-running-badge">执行中</em>
             </div>
             <span>{{ item.digital_human_name || '数字人' }} · {{ sessionSourceDescription(item) }}</span>
-            <small>{{ item.message_count }} 条 · {{ item.status }}</small>
+            <div class="session-item-meta">
+              <small>{{ item.message_count }} 条 · {{ item.status }}</small>
+              <time :datetime="stamp.iso" :title="`最近活动：${stamp.fullLabel}`">{{ stamp.time }}</time>
+            </div>
           </button>
           <button
             class="session-delete"
@@ -1100,6 +1125,7 @@ function requestIsVisible(request: ActiveChatRequest) {
             @click.stop="deleteSession(item)"
           >×</button>
         </div>
+        </section>
         <div v-if="!filteredSessions.length" class="session-empty">
           {{ loadingSessions || loadingSession ? '正在加载历史会话' : '当前数字人暂无历史会话' }}
         </div>
@@ -1162,9 +1188,16 @@ function requestIsVisible(request: ActiveChatRequest) {
           <StrategyLibrary @select-strategy="selectStrategyPrompt" />
         </div>
 
-        <article v-for="item in messages" :key="item.id" class="message" :class="item.role">
+        <template v-for="{ item, stamp, showDate } in messageTimeline" :key="item.id">
+        <div v-if="showDate" class="message-date-divider" role="separator" :aria-label="stamp.label">
+          <span>{{ stamp.label }}</span>
+        </div>
+        <article class="message" :class="item.role">
+          <header class="message-meta">
+            <span>{{ item.role === 'user' ? (selectedSessionSourceType === 'delegation' ? '派发指令' : selectedSessionReadOnly ? selectedSessionSourceLabel : '你') : selectedProfile?.name || '数字人' }}</span>
+            <time :datetime="stamp.iso" :title="stamp.fullLabel">{{ stamp.time }}</time>
+          </header>
           <template v-if="item.role === 'user'">
-            <span>{{ selectedSessionSourceType === 'delegation' ? '派发指令' : selectedSessionReadOnly ? selectedSessionSourceLabel : '你' }}</span>
             <div
               v-if="selectedSessionSourceType === 'delegation'"
               class="md-body child-task-prompt"
@@ -1242,6 +1275,7 @@ function requestIsVisible(request: ActiveChatRequest) {
             </div>
           </template>
         </article>
+        </template>
       </section>
 
       <div v-if="selectedSessionReadOnly" class="chat-composer chat-composer-readonly">
@@ -1311,3 +1345,20 @@ function requestIsVisible(request: ActiveChatRequest) {
   </section>
   </div>
 </template>
+
+<style scoped>
+.session-date-group { display: grid; gap: 8px; min-width: 0; }
+.session-date-heading { margin: 8px 2px 2px; color: var(--muted); font-size: 11px; font-weight: 500; line-height: 1.5; }
+.session-date-group + .session-date-group { margin-top: 10px; }
+.session-item-meta { display: flex; align-items: center; gap: 10px; min-width: 0; margin-top: 2px; }
+.session-item-meta small { flex: 1; width: auto; }
+.session-item-meta time { flex-shrink: 0; color: #b2a787; font-size: 11px; font-variant-numeric: tabular-nums; }
+.message-date-divider { display: flex; align-items: center; justify-content: center; flex-shrink: 0; gap: 14px; margin: 14px 0 8px; color: #9d978a; font-size: 11px; }
+.message-date-divider::before, .message-date-divider::after { content: ''; height: 1px; flex: 1; max-width: 100px; background: rgba(213, 180, 106, .14); }
+.message-date-divider span { white-space: nowrap; }
+.message-meta { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 7px; font-size: 11px; line-height: 1.4; }
+.message-meta span { color: var(--gold-2); }
+.message-meta time { flex-shrink: 0; color: #9d978a; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.message.user .message-meta time { color: #b2a787; }
+@media (max-width: 600px) { .message-meta { gap: 14px; } .message-date-divider { gap: 8px; } }
+</style>

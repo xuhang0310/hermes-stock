@@ -59,3 +59,10 @@ export function beijingFromDb(value: string | null | undefined): string {
   const s = String(value).trim()
   return _render(_parseDbTimestamp(s))
 }
+
+/** 数据库时间的 epoch 毫秒；缺失或无法解析的时间不使用当前时间兜底。 */
+export function timestampFromDb(value: string | null | undefined): number | null {
+  if (!value?.trim()) return null
+  const timestamp = _parseDbTimestamp(value.trim()).getTime()
+  return Number.isFinite(timestamp) ? timestamp : null
+}

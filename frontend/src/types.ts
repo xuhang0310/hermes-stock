@@ -838,6 +838,7 @@ export type AgentSession = {
   model_display_name: string | null
   status: string
   message_count: number
+  created_at?: string | null
   updated_at: string
   source_type: 'web' | 'feishu' | 'scheduler' | 'delegation' | 'workflow' | string
   source_label: string
@@ -884,6 +885,8 @@ export type AgentToolApproval = {
 
 export type AgentSessionDetail = {
   id: number
+  created_at?: string | null
+  updated_at?: string | null
   title: string
   chat_mode: 'research' | 'stock' | 'knowledge' | string
   digital_human_id: number | null
@@ -2218,4 +2221,22 @@ export type OpsLoginLog = {
   ip: string | null
   user_agent: string | null
   created_at: string | null
+}
+
+export type UserLoginLog = OpsLoginLog & { trace_id: string | null }
+
+export type UserLoginLogQuery = {
+  username?: string
+  success?: boolean
+  start_date?: string
+  end_date?: string
+  page?: number
+  page_size?: number
+}
+
+export type UserLoginLogPage = {
+  items: UserLoginLog[]
+  total: number
+  page: number
+  page_size: number
 }
