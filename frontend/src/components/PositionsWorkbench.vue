@@ -392,7 +392,7 @@ function positionColumnValue(position: PositionItem, key: PositionColumnKey) {
   if (key === 'floating_pnl') return pnlSpan(position.floating_pnl, fmtNum(position.floating_pnl, 2))
   if (key === 'floating_pnl_pct') return pnlSpan(position.floating_pnl_pct, fmtPct(position.floating_pnl_pct))
   if (key === 'stop_price') return fmtNum(position.stop_price, 2)
-  return position.status
+  return position.status === 'open' ? '持有' : position.status === 'closed' ? '已清仓' : position.status
 }
 
 function reorderPositionColumns(fromIndex: number, toIndex: number) {

@@ -391,6 +391,8 @@ export type DashboardPosition = PositionItem & {
   risk_state: {
     level: 'high' | 'medium' | 'low'
     label: string
+    // 判定依据，如“未设止损，浮亏 41.56%”
+    reason?: string
   }
 }
 

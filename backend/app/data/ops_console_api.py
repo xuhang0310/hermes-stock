@@ -65,7 +65,8 @@ def ops_console_positions(
         users = [u for u in users if u.id == user_id]
     rows: list[dict] = []
     for u in users:
-        for item in repository.for_user(u.id).positions():
+        # 运维台带“状态”列，保留已清仓记录便于排查
+        for item in repository.for_user(u.id).positions(include_closed=True):
             item["owner_user_id"] = u.id
             item["owner_username"] = u.username
             item["owner_display_name"] = u.display_name

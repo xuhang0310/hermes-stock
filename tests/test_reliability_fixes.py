@@ -219,6 +219,22 @@ class PositionReliabilityTests(unittest.TestCase):
         # 可用资金从未维护时，卖出回款从 0 起记
         self.assertAlmostEqual(self.account.available_cash, 300)
 
+    def test_positions_lists_only_open_holdings_by_default(self) -> None:
+        self.repo.merge_position_holding({**self._holding(100), "execution_price": 10}, action="buy")
+        self.repo.merge_position_holding(
+            {"symbol": "600000", "account_id": self.account.id, "position_quantity": 100},
+            action="sell",
+        )
+        self.repo.merge_position_holding(
+            {**self._holding(50), "symbol": "000001", "name": "Ping An", "execution_price": 12},
+            action="buy",
+        )
+
+        # 卖光的不再留在持仓列表；需要时显式要已清仓记录，且持有中的排在前面
+        self.assertEqual([row["symbol"] for row in self.repo.positions()], ["000001.SZ"])
+        everything = self.repo.positions(include_closed=True)
+        self.assertEqual([row["status"] for row in everything], ["open", "closed"])
+
     def test_close_returns_full_holding_proceeds_to_available_cash(self) -> None:
         self.account.available_cash = 1_000
         self.db.commit()

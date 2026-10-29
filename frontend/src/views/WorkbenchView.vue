@@ -9,7 +9,7 @@ import type {
   DashboardResearch,
   DashboardRun
 } from '../types'
-import { beijingFromDb } from '../utils/datetime'
+import { beijingFromDb, beijingFromEpoch } from '../utils/datetime'
 
 type WorkbenchPage = 'askStock' | 'positions' | 'watchlist' | 'digitalHumans' | 'rhythm'
 
@@ -114,9 +114,12 @@ function valueTone(value: number | null | undefined) {
   return Number(value) > 0 ? 'positive' : 'negative'
 }
 
+// 今天的只显示时分；不是今天的带上日期，否则几天前的行情/检查时间看起来也像刚更新
 function shortTime(value: string | null | undefined) {
   const formatted = beijingFromDb(value)
-  return formatted === '-' ? '—' : formatted.slice(-5)
+  if (formatted === '-') return '—'
+  const today = beijingFromEpoch(nowMs.value / 1000).slice(0, 10)
+  return formatted.startsWith(today) ? formatted.slice(-5) : formatted.slice(5)
 }
 
 function localDateTime(value: string | null | undefined) {
@@ -394,7 +397,7 @@ function closeRunDetail() {
               </thead>
               <tbody>
                 <tr v-for="position in dashboard.positions" :key="`${position.account_id || 0}-${position.symbol}`">
-                  <td>
+                  <td :title="position.broker_name ? `${position.broker_name}${position.account_name ? ' · ' + position.account_name : ''}` : undefined">
                     <strong>{{ position.name || position.symbol }}</strong>
                     <small>{{ position.symbol }}</small>
                   </td>
@@ -418,7 +421,9 @@ function closeRunDetail() {
                     </button>
                     <span v-else class="muted">暂无报告</span>
                   </td>
-                  <td><span class="wb-risk-badge" :class="position.risk_state.level">{{ position.risk_state.label }}</span></td>
+                  <td :title="position.risk_state.reason">
+                    <span class="wb-risk-badge" :class="position.risk_state.level">{{ position.risk_state.label }}</span>
+                  </td>
                   <td>
                     <div class="wb-row-actions">
                       <button type="button" title="查看持仓图表" @click="emit('openChart', position)">详情</button>

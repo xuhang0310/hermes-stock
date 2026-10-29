@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, case, desc, func, select
 
 from backend.app.core.models import Instrument, Position, PositionAccount, PositionHoldingSnapshot
 from backend.app.data._helpers import dt
 
 
 class PositionQueryMixin:
-    def positions(self, account_id: int | None = None) -> list[dict[str, Any]]:
+    def positions(self, account_id: int | None = None, *, include_closed: bool = False) -> list[dict[str, Any]]:
+        """当前持仓。默认只返回仍持有的；已清仓的记录在交易记录里看，需要时传 include_closed=True。"""
         # 按 (账户, 标的) 取最新快照，使同一 symbol 在不同券商账户各保留一条
         ranked_snapshots = (
             select(
@@ -42,11 +43,16 @@ class PositionQueryMixin:
             .outerjoin(PositionAccount, PositionAccount.id == Position.account_id)
             .where(self._owner_clause(Position))
             .order_by(
-                Position.status,
-                desc(func.coalesce(PositionHoldingSnapshot.position_pct, Position.position_pct)),
+                # 持有中的排前面：直接按 status 字母序会把 closed 排到 open 之前，
+                # Agent 只取前 50 条“当前持仓”时，真实持仓会被清仓记录挤掉
+                case((Position.status == "open", 0), else_=1),
+                # 再按市值从大到小（快照里的 position_pct 是录入时的旧值，多数为空）
+                desc(func.coalesce(PositionHoldingSnapshot.market_value, 0)),
                 desc(func.coalesce(PositionHoldingSnapshot.captured_at, Position.updated_at)),
             )
         )
+        if not include_closed:
+            query = query.where(Position.status == "open")
         if account_id is not None:
             query = query.where(Position.account_id == account_id)
         rows = self.db.execute(query).all()

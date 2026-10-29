@@ -73,6 +73,53 @@ def _risk_level(value: str | None) -> str:
     return "low"
 
 
+# 首页持仓风险标签的浮亏阈值（%）：浮亏超 10% 提示，超 20% 按高风险
+DASHBOARD_LOSS_WATCH_PCT = -10.0
+DASHBOARD_LOSS_HIGH_PCT = -20.0
+
+
+def _position_risk_state(
+    *,
+    stop_distance: float | None,
+    check_level: str,
+    floating_pnl_pct: float | None,
+) -> dict[str, str]:
+    """首页持仓风险标签：止损 > 风控检查 > 浮亏幅度 > 有没有设止损。
+
+    没设止损、也没跑过风控检查时没有任何依据，不能显示"安全"——之前浮亏 40% 的持仓也是绿色"安全"。
+    """
+    loss = float(floating_pnl_pct) if floating_pnl_pct is not None else None
+    reasons: list[str] = []
+    if stop_distance is None:
+        reasons.append("未设止损")
+    elif stop_distance < 0:
+        reasons.append("已跌破止损价")
+    else:
+        reasons.append(f"距止损 {stop_distance:.2f}%")
+    if check_level in {"high", "medium"}:
+        reasons.append(f"风控检查{'高' if check_level == 'high' else '中'}风险")
+    if loss is not None and loss < 0:
+        reasons.append(f"浮亏 {abs(loss):.2f}%")
+
+    if stop_distance is not None and stop_distance < 0:
+        level, label = "high", "已破止损"
+    elif stop_distance is not None and stop_distance <= 2:
+        level, label = "high", "接近止损"
+    elif check_level == "high":
+        level, label = "high", "高风险"
+    elif loss is not None and loss <= DASHBOARD_LOSS_HIGH_PCT:
+        level, label = "high", "深度浮亏"
+    elif (stop_distance is not None and stop_distance <= 5) or check_level == "medium":
+        level, label = "medium", "观察"
+    elif loss is not None and loss <= DASHBOARD_LOSS_WATCH_PCT:
+        level, label = "medium", "浮亏较大"
+    elif stop_distance is None:
+        level, label = "medium", "未设止损"
+    else:
+        level, label = "low", "安全"
+    return {"level": level, "label": label, "reason": "，".join(reasons)}
+
+
 def _last_month_day_allowed(day: date, *, trading_day_only: bool) -> bool:
     cursor = day + timedelta(days=1)
     while cursor.month == day.month:
@@ -180,7 +227,9 @@ class SystemMixin:
         summary = self._dashboard_portfolio(positions)
         reports = self.reports(limit=20)
         risk_checks = self.risk_checks(limit=30)
-        enriched_positions = self._dashboard_positions(positions, reports, risk_checks)
+        enriched_positions = self._dashboard_positions(
+            positions, reports, risk_checks, total_asset=summary.get("total_asset")
+        )
         market = self._dashboard_market()
         runtime = self._dashboard_runtime()
         approvals = self._dashboard_approvals(user_id, utc_now)
@@ -271,7 +320,7 @@ class SystemMixin:
             "approvals": approvals,
             "next_job": next_job,
             "data_freshness": {
-                "positions": max((item.get("updated_at") for item in positions if item.get("updated_at")), default=None),
+                "positions": self._positions_price_freshness(enriched_positions),
                 "market": market_updated_at,
                 "risk": max((item.get("created_at") for item in risk_checks if item.get("created_at")), default=None),
                 "reports": max((item.get("created_at") for item in reports if item.get("created_at")), default=None),
@@ -362,6 +411,7 @@ class SystemMixin:
         positions: list[dict[str, Any]],
         reports: list[dict[str, Any]],
         risk_checks: list[dict[str, Any]],
+        total_asset: float | None = None,
     ) -> list[dict[str, Any]]:
         report_by_symbol: dict[str, dict[str, Any]] = {}
         for report in reports:
@@ -377,6 +427,9 @@ class SystemMixin:
 
         result: list[dict[str, Any]] = []
         for position in positions:
+            # 首页只看仍持有的；卖光/清仓的记录不再出现在“持仓与风险”里
+            if position.get("status") != "open" or not float(position.get("position_quantity") or 0) > 0:
+                continue
             row = dict(position)
             latest_price = row.get("latest_price")
             stop_price = row.get("stop_price")
@@ -385,19 +438,18 @@ class SystemMixin:
                 stop_distance = round((float(latest_price) - float(stop_price)) / float(latest_price) * 100, 2)
 
             latest_risk = risk_by_symbol.get(str(row.get("symbol") or ""))
-            level = _risk_level(latest_risk.get("risk_level") if latest_risk else None)
-            if stop_distance is not None and stop_distance <= 2:
-                risk_state = {"level": "high", "label": "接近止损"}
-            elif level == "high":
-                risk_state = {"level": "high", "label": "高风险"}
-            elif (stop_distance is not None and stop_distance <= 5) or level == "medium":
-                risk_state = {"level": "medium", "label": "观察"}
-            else:
-                risk_state = {"level": "low", "label": "安全"}
+            risk_state = _position_risk_state(
+                stop_distance=stop_distance,
+                check_level=_risk_level(latest_risk.get("risk_level") if latest_risk else None),
+                floating_pnl_pct=row.get("floating_pnl_pct"),
+            )
 
             day_pnl = row.get("day_pnl")
             market_value = row.get("market_value")
             day_base = float(market_value or 0) - float(day_pnl or 0)
+            # 仓位按当前市值 / 全部账户总资产实时算；快照里的 position_pct 是录入时的旧值，多数为空
+            if market_value is not None and total_asset:
+                row["position_pct"] = round(float(market_value) / float(total_asset) * 100, 2)
             row.update(
                 {
                     "stop_distance_pct": stop_distance,
@@ -410,7 +462,28 @@ class SystemMixin:
                 }
             )
             result.append(row)
+        # 按市值从大到小：仓位最重的排最前（原顺序按快照里过期的 position_pct）
+        result.sort(key=lambda item: float(item.get("market_value") or 0), reverse=True)
         return result
+
+    def _positions_price_freshness(self, positions: list[dict[str, Any]]) -> str | None:
+        """“持仓行情”时间：取最近一次成功的价格同步与最新快照写入中较晚者。
+
+        价格同步只改快照里的价格、不改 captured_at，只看快照时间会一直停在最后一次录入/交易。
+        """
+        candidates: list[datetime] = [
+            # 快照时间是库里的 UTC 裸时间
+            datetime.fromisoformat(str(item["updated_at"])).replace(tzinfo=timezone.utc)
+            for item in positions
+            if item.get("updated_at")
+        ]
+        sync_job = self.db.scalar(
+            select(ScheduledJob).where(ScheduledJob.job_kind == "position_price_sync").limit(1)
+        )
+        if sync_job is not None and sync_job.last_run_at and sync_job.last_status == "success":
+            # 调度器按北京墙钟时间记 last_run_at
+            candidates.append(sync_job.last_run_at.replace(tzinfo=SHANGHAI_TZ))
+        return max(candidates).isoformat() if candidates else None
 
     def _dashboard_market(self) -> dict[str, Any]:
         symbols = [item[0] for item in INDEX_SPECS]

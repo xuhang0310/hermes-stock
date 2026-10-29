@@ -26,6 +26,7 @@ from backend.app.core.models import (
     WatchlistItem,
 )
 from backend.app.data.repository import StockRepository
+from backend.app.data.system_mixin import _position_risk_state
 
 
 def test_dashboard_uses_real_rows_and_remains_read_only() -> None:
@@ -60,6 +61,7 @@ def test_dashboard_uses_real_rows_and_remains_read_only() -> None:
 
         instruments = [
             Instrument(symbol="600519.SH", name="贵州茅台", market="SH", type="stock"),
+            Instrument(symbol="000858.SZ", name="五粮液", market="SZ", type="stock"),
             Instrument(symbol="000001.SH", name="上证指数", market="SH", type="index"),
             Instrument(symbol="399001.SZ", name="深证成指", market="SZ", type="index"),
             Instrument(symbol="399006.SZ", name="创业板指", market="SZ", type="index"),
@@ -79,10 +81,32 @@ def test_dashboard_uses_real_rows_and_remains_read_only() -> None:
             status="open",
             opened_at=now - timedelta(days=20),
         )
-        db.add(position)
+        # 已清仓的持仓不应出现在首页“持仓与风险”
+        closed_position = Position(
+            account_id=account.id,
+            symbol="000858.SZ",
+            position_pct=0,
+            cost_price=150,
+            quantity=0,
+            status="closed",
+            opened_at=now - timedelta(days=40),
+            closed_at=now - timedelta(days=1),
+        )
+        db.add_all([position, closed_position])
         db.flush()
         db.add_all(
             [
+                PositionHoldingSnapshot(
+                    account_id=account.id,
+                    symbol="000858.SZ",
+                    symbol_name="五粮液",
+                    position_quantity=0,
+                    cost_price=150,
+                    latest_price=140,
+                    market_value=0,
+                    status="closed",
+                    captured_at=now - timedelta(days=1),
+                ),
                 PositionHoldingSnapshot(
                     account_id=account.id,
                     symbol="600519.SH",
@@ -198,8 +222,11 @@ def test_dashboard_uses_real_rows_and_remains_read_only() -> None:
         assert payload["counts"]["running_jobs"] == 1
         assert len(payload["market"]["items"]) == 3
         assert payload["market"]["items"][0]["price"] == 3562.74
+        assert [row["symbol"] for row in payload["positions"]] == ["600519.SH"]
         assert payload["positions"][0]["latest_research"]["report_id"] == "report-dashboard-1"
         assert payload["positions"][0]["risk_state"]["level"] == "high"
+        # 仓位按当前市值 / 总资产实时算，不用快照里录入时的 25.3
+        assert payload["positions"][0]["position_pct"] == round(158_800 / 328_600 * 100, 2)
         assert payload["runtime"]["running"][0]["run_id"] == "run-dashboard-1"
         assert payload["approvals"][0]["approval_id"] == "approval-dashboard-1"
         assert payload["approvals"][0]["expires_at"].endswith("+00:00")
@@ -209,3 +236,15 @@ def test_dashboard_uses_real_rows_and_remains_read_only() -> None:
         assert not db.deleted
 
     engine.dispose()
+
+
+def test_position_risk_state_does_not_call_unchecked_losses_safe() -> None:
+    deep_loss = _position_risk_state(stop_distance=None, check_level="low", floating_pnl_pct=-41.56)
+    assert (deep_loss["level"], deep_loss["label"]) == ("high", "深度浮亏")
+    assert deep_loss["reason"] == "未设止损，浮亏 41.56%"
+
+    assert _position_risk_state(stop_distance=None, check_level="low", floating_pnl_pct=-12)["label"] == "浮亏较大"
+    assert _position_risk_state(stop_distance=None, check_level="low", floating_pnl_pct=8)["label"] == "未设止损"
+    assert _position_risk_state(stop_distance=-1.5, check_level="low", floating_pnl_pct=-5)["label"] == "已破止损"
+    assert _position_risk_state(stop_distance=1.5, check_level="low", floating_pnl_pct=2)["label"] == "接近止损"
+    assert _position_risk_state(stop_distance=12, check_level="low", floating_pnl_pct=3)["label"] == "安全"

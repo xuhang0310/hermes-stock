@@ -271,7 +271,7 @@ def correct_position(
 ) -> dict:
     """修正持仓：校验股票代码（含同代码豁免），更新持仓。"""
     current = next(
-        (item for item in repository.positions() if int(item.get("id") or 0) == position_id),
+        (item for item in repository.positions(include_closed=True) if int(item.get("id") or 0) == position_id),
         None,
     )
     if current is None:
