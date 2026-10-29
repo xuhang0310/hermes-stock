@@ -269,7 +269,7 @@ function fmtQty(v: number | null | undefined) {
 }
 function fmtAmt(v: number | null | undefined) {
   if (v === null || v === undefined) return '—'
-  return Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+  return Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 function fmtPct(v: number | null | undefined) {
   if (v === null || v === undefined) return '—'

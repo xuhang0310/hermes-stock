@@ -92,14 +92,14 @@ function formatNumber(value: number | null | undefined, digits = 2) {
 
 function formatCurrency(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—'
-  return `¥${Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`
+  return `¥${Number(value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function formatSignedCurrency(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—'
   const number = Number(value)
   const sign = number > 0 ? '+' : number < 0 ? '-' : ''
-  return `${sign}¥${Math.abs(number).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}`
+  return `${sign}¥${Math.abs(number).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function formatPercent(value: number | null | undefined, signed = true) {

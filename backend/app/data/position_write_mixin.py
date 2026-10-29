@@ -356,6 +356,11 @@ class PositionWriteMixin:
                 .order_by(desc(Position.id))
                 .limit(1)
             )
+            previous = self._latest_open_snapshot(norm, acc_id)
+            trade_price = self._resolve_trade_price(norm, execution_price or new_cost_price, previous)
+            # 买入没给价格时按成交估算价计成本，与扣款口径一致
+            if not new_cost_price:
+                new_cost_price = trade_price
             if position is not None and position.quantity is not None and position.quantity > 0:
                 old_qty = position.quantity
                 old_cost = position.cost_price or 0
@@ -375,13 +380,16 @@ class PositionWriteMixin:
                     payload["cost_price"] = new_cost_price
 
             payload["status"] = "open"
+            self._carry_forward_holding_fields(payload, previous)
+            # 先扣款再落库：资金不足会抛 ValueError，此时还没有任何写入
+            self._settle_trade_cash(acc_id, -new_qty_raw * trade_price if trade_price else None)
             self._record_trade(
                 account_id=acc_id,
                 symbol=norm,
                 name=str(payload.get("name") or "").strip(),
                 action=action,
                 quantity=new_qty_raw,
-                price=execution_price,
+                price=trade_price,
                 source_type=source_type,
             )
             saved = self._save_position_holding(
@@ -432,13 +440,18 @@ class PositionWriteMixin:
                 remaining = max(0.0, position.quantity - new_qty_raw)
                 payload["position_quantity"] = remaining
                 payload["status"] = "closed" if remaining == 0 else "open"
-                # 卖出时不重复传成本价就沿用旧成本，避免覆盖成 None
-                if "cost_price" not in payload or not payload["cost_price"]:
-                    payload["cost_price"] = position.cost_price
+                # 卖出不改变剩余持仓的成本价；调用方传的 cost_price 在卖出场景只可能是成交价，
+                # 写进成本会把浮盈算错，所以一律沿用原成本
+                payload["cost_price"] = position.cost_price
             else:
                 # 无持仓可卖
                 return {"error": f"卖出失败: {norm} 无可卖出持仓", "symbol": norm, "action": action}
 
+            previous = self._latest_open_snapshot(norm, acc_id)
+            trade_price = self._resolve_trade_price(norm, execution_price, previous)
+            self._carry_forward_holding_fields(payload, previous, sold_quantity=new_qty_raw)
+            # 卖出回款记入该账户可用资金，否则总资产会凭空少掉这部分
+            self._settle_trade_cash(acc_id, new_qty_raw * trade_price if trade_price else None)
             self._record_trade(
                 account_id=acc_id,
                 position_id=position.id,
@@ -446,7 +459,7 @@ class PositionWriteMixin:
                 name=str(payload.get("name") or "").strip(),
                 action=action,
                 quantity=new_qty_raw,
-                price=execution_price,
+                price=trade_price,
                 source_type=source_type,
             )
             saved = self._save_position_holding(
@@ -459,6 +472,75 @@ class PositionWriteMixin:
 
         # 未知 action → 退化到覆盖
         raise ValueError(f"unsupported position action: {action}")
+
+    def _latest_open_snapshot(self, symbol: str, account_id: int | None) -> PositionHoldingSnapshot | None:
+        """该标的在该账户下仍持有的最新快照（max(id)，与价格同步/资金重算口径一致）；已清仓返回 None。"""
+        snap = self.db.scalar(
+            select(PositionHoldingSnapshot)
+            .where(
+                PositionHoldingSnapshot.symbol == symbol,
+                _account_eq(account_id, PositionHoldingSnapshot),
+                self._owner_clause(PositionHoldingSnapshot),
+            )
+            .order_by(desc(PositionHoldingSnapshot.id))
+            .limit(1)
+        )
+        if snap is None or (snap.status or "open") != "open" or not (snap.position_quantity or 0) > 0:
+            return None
+        return snap
+
+    def _resolve_trade_price(
+        self, symbol: str, explicit: float | None, previous: PositionHoldingSnapshot | None
+    ) -> float | None:
+        """成交价：调用方给了就用；没给按最新价估算（快照里的实时价 → 日线收盘），与前端"不填用最新价"一致。"""
+        if explicit is not None and explicit > 0:
+            return float(explicit)
+        if previous is not None and previous.latest_price:
+            return float(previous.latest_price)
+        close = self.db.scalar(
+            select(DailyBar.close)
+            .where(DailyBar.symbol == symbol, DailyBar.close.isnot(None))
+            .order_by(desc(DailyBar.trade_date), desc(DailyBar.id))
+            .limit(1)
+        )
+        return float(close) if close is not None else None
+
+    @staticmethod
+    def _carry_forward_holding_fields(
+        payload: dict[str, Any], previous: PositionHoldingSnapshot | None, *, sold_quantity: float = 0
+    ) -> None:
+        """买卖只改数量/成本，止损止盈、持仓逻辑、实时价、可用数量沿用上一条快照，不被新快照清空。"""
+        if previous is None:
+            return
+        for field in ("latest_price", "stop_price", "take_profit_price", "thesis", "risk_note"):
+            if payload.get(field) is None and getattr(previous, field) is not None:
+                payload[field] = getattr(previous, field)
+        # 当日买入 T+1 才可卖，买入不增加可用数量；卖出从可用里扣
+        if payload.get("available_quantity") is None and previous.available_quantity is not None:
+            payload["available_quantity"] = max(0.0, float(previous.available_quantity) - sold_quantity)
+
+    def _settle_trade_cash(self, account_id: int | None, cash_delta: float | None) -> None:
+        """成交后同步账户可用资金：卖出回款加回，买入扣减（不含佣金/印花税）。
+
+        可用资金从未维护（None）时：卖出从 0 起记回款；买入无从扣起，保持未维护。
+        已维护但不够这笔买入时拒绝，避免把可用资金记成负数。
+        """
+        if account_id is None or not cash_delta:
+            return
+        account = self.db.get(PositionAccount, account_id)
+        if account is None or not self._owns(account):
+            return
+        cash = account.available_cash
+        if cash_delta < 0:
+            if cash is None:
+                return
+            if cash + cash_delta < -0.005:
+                raise ValueError(
+                    f"可用资金不足：这笔买入约需 ¥{-cash_delta:,.2f}，"
+                    f"{account.broker_name} 可用资金只有 ¥{cash:,.2f}。"
+                    "如果券商账户里实际资金更多，请先点“维护资金”更新可用现金再买入。"
+                )
+        account.available_cash = round((cash or 0) + cash_delta, 2)
 
     def _record_trade(
         self,
@@ -904,7 +986,12 @@ class PositionWriteMixin:
             exchange=exchange,
             as_of_date=str(payload.get("as_of_date") or "")[:16] or None,
             position_quantity=quantity,
-            available_quantity=number_or_none(payload.get("available_quantity") or payload.get("available")),
+            # 可用数量 0 是有效值（如卖光可用部分），不能用 or 回退成"未知"
+            available_quantity=number_or_none(
+                payload["available_quantity"]
+                if payload.get("available_quantity") is not None
+                else payload.get("available")
+            ),
             frozen_quantity=number_or_none(payload.get("frozen_quantity") or payload.get("frozen")),
             today_buy_quantity=number_or_none(payload.get("today_buy_quantity")),
             today_sell_quantity=number_or_none(payload.get("today_sell_quantity")),

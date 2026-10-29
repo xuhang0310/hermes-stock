@@ -166,6 +166,59 @@ class PositionReliabilityTests(unittest.TestCase):
         self.assertEqual(trade.price, 12)
         self.assertEqual(trade.amount, 720)
 
+    def test_buy_and_sell_move_available_cash(self) -> None:
+        self.account.available_cash = 5_000
+        self.db.commit()
+
+        self.repo.merge_position_holding({**self._holding(100), "execution_price": 10}, action="buy")
+        self.assertAlmostEqual(self.account.available_cash, 4_000)
+
+        # 旧前端把卖出价塞进 cost_price：回款按成交价算，成本价不能被改写
+        self.repo.merge_position_holding(
+            {
+                "symbol": "600000",
+                "account_id": self.account.id,
+                "position_quantity": 60,
+                "cost_price": 12.5,
+                "execution_price": 12.5,
+            },
+            action="sell",
+        )
+        position = self.db.scalar(select(Position))
+
+        self.assertAlmostEqual(self.account.available_cash, 4_750)
+        self.assertEqual(position.cost_price, 10)
+        self.assertAlmostEqual(self.account.total_asset, 4_750 + 40 * 10)
+
+    def test_buy_beyond_available_cash_is_rejected_before_any_write(self) -> None:
+        self.account.available_cash = 500
+        self.db.commit()
+
+        with self.assertRaisesRegex(ValueError, "可用资金不足"):
+            self.repo.merge_position_holding({**self._holding(100), "execution_price": 10}, action="buy")
+
+        self.assertIsNone(self.db.scalar(select(PositionTrade)))
+        self.assertIsNone(self.db.scalar(select(PositionHoldingSnapshot)))
+        self.assertEqual(self.account.available_cash, 500)
+
+    def test_sell_without_price_uses_latest_price_and_keeps_holding_fields(self) -> None:
+        self.repo.save_position_holding({**self._holding(100), "stop_price": 9, "available_quantity": 100})
+
+        self.repo.merge_position_holding(
+            {"symbol": "600000", "account_id": self.account.id, "position_quantity": 30},
+            action="sell",
+        )
+        snapshot = self.db.scalar(select(PositionHoldingSnapshot).order_by(PositionHoldingSnapshot.id.desc()))
+        trade = self.db.scalar(select(PositionTrade))
+
+        self.assertEqual(snapshot.position_quantity, 70)
+        self.assertEqual(snapshot.available_quantity, 70)
+        self.assertEqual(snapshot.stop_price, 9)
+        self.assertEqual(snapshot.latest_price, 10)
+        self.assertEqual(trade.price, 10)
+        # 可用资金从未维护时，卖出回款从 0 起记
+        self.assertAlmostEqual(self.account.available_cash, 300)
+
     def test_stale_import_does_not_replace_authoritative_position_summary(self) -> None:
         self.repo.save_position_holding(self._holding(100, as_of_date="2026-07-10"))
         self.repo.save_position_holding(self._holding(50, as_of_date="2026-07-01"))

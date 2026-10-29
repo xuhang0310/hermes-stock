@@ -993,7 +993,7 @@ function positionStepLabel(step: { type: string; display_name?: string; tool?: s
 function formatNumber(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
   return Number(value).toLocaleString('zh-CN', {
-    minimumFractionDigits: 0,
+    minimumFractionDigits: digits,
     maximumFractionDigits: digits
   })
 }

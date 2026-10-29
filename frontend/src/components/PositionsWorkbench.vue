@@ -111,6 +111,11 @@ const tradeEstimate = computed(() => {
 })
 
 const selectedAccount = computed(() => accounts.value.find((a) => a.id === selectedAccountId.value) || null)
+// “全部账户”标签固定显示所有账户合计；summary 跟随当前选中的账户，不能拿来当合计
+const allAccountsTotal = computed(() =>
+  accounts.value.reduce((sum, a) => sum + Number(a.total_asset ?? a.holding_market_value ?? 0), 0)
+)
+const tradeAccountCash = computed(() => accounts.value.find((a) => a.id === tradeForm.account_id)?.available_cash ?? null)
 const searchQuery = ref('')
 const filteredPositions = computed(() => {
   const base =
@@ -299,17 +304,18 @@ watch(
   { deep: true }
 )
 
+// 金额、价格、盈亏率一律固定两位小数（¥1,152,708.00 而不是 ¥1,152,708）；股数用 digits=0
 function fmtMoney(v: number | null | undefined) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '—'
-  return `¥${Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}`
+  return `¥${fmtNum(v, 2)}`
 }
 function fmtNum(v: number | null | undefined, digits = 0) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '-'
-  return Number(v).toLocaleString('zh-CN', { maximumFractionDigits: digits })
+  return Number(v).toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
 }
 function fmtPct(v: number | null | undefined) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '-'
-  return `${Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}%`
+  return `${fmtNum(v, 2)}%`
 }
 function pnlClass(v: number | null | undefined) {
   if (v === null || v === undefined) return ''
@@ -966,7 +972,7 @@ function switchTab(tab: 'positions' | 'trades') {
   if (tab === 'trades') void loadTrades()
 }
 async function confirmDeleteTrade(trade: PositionTrade) {
-  if (!window.confirm(`确定删除该笔交易流水吗？\n${trade.symbol} ${tradeActionText(trade.action)} ${fmtNum(trade.quantity)}股\n（仅删流水，不影响持仓）`)) {
+  if (!window.confirm(`确定删除该笔交易流水吗？\n${trade.symbol} ${tradeActionText(trade.action)} ${fmtNum(trade.quantity)}股\n（仅删流水，不影响持仓和可用资金）`)) {
     return
   }
   message.value = ''
@@ -1021,6 +1027,10 @@ async function submitTrade() {
     message.value = '请输入数量'
     return
   }
+  if (tradeForm.action === 'sell' && tradeForm.quantity > tradeForm.current_quantity) {
+    message.value = `卖出数量不能超过当前持仓 ${fmtNum(tradeForm.current_quantity)} 股`
+    return
+  }
   // add 模式（总买入入口）价格必填；行内加仓价格可选（不填走最新价兜底）
   if (tradeForm.mode === 'add' && (!tradeForm.price || tradeForm.price <= 0)) {
     message.value = '请输入买入价格'
@@ -1033,11 +1043,14 @@ async function submitTrade() {
   tradeSaving.value = true
   message.value = ''
   try {
+    const price = tradeForm.price || undefined
     await api.addPosition({
       symbol: tradeForm.symbol.trim().toUpperCase(),
       name: tradeForm.name || undefined,
       position_quantity: tradeForm.quantity,
-      cost_price: tradeForm.price || undefined,
+      // 买入价同时是新增部分的成本；卖出价只是成交价（回款按它算），不能写进成本
+      cost_price: tradeForm.action === 'buy' ? price : undefined,
+      execution_price: price,
       action: tradeForm.action,
       account_id: tradeForm.account_id
     })
@@ -1068,7 +1081,7 @@ onBeforeUnmount(() => {
     <div class="account-tabs">
       <button type="button" :class="{ active: selectedAccountId === null }" @click="selectAccount(null)">
         <span class="acct-name">全部账户</span>
-        <span class="acct-sub">{{ summary ? fmtMoney(summary.total_asset) : '' }}</span>
+        <span class="acct-sub">{{ accounts.length ? fmtMoney(allAccountsTotal) : '' }}</span>
       </button>
       <button
         v-for="a in accounts"
@@ -1452,7 +1465,10 @@ onBeforeUnmount(() => {
         </label>
         <div v-if="tradeForm.action === 'sell'" class="trade-hint">
           当前持仓 {{ fmtNum(tradeForm.current_quantity) }} 股，
-          填写的数量将从现有持仓中扣减；全部卖出后自动关闭持仓。
+          填写的数量将从现有持仓中扣减，卖出回款计入该账户可用资金；全部卖出后自动关闭持仓。
+        </div>
+        <div v-else-if="tradeAccountCash !== null" class="trade-hint">
+          账户可用资金 {{ fmtMoney(tradeAccountCash) }}，买入金额将从中扣除<template v-if="tradeEstimate > tradeAccountCash">（不够这笔买入）</template>。
         </div>
         <div class="trade-estimate">
           <span>{{ tradeForm.action === 'buy' ? '预计花费' : '预计收回' }}</span>
