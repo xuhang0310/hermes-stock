@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -84,7 +85,18 @@ class AgentScheduleService:
             job = self._visible_job(db, actor, job_key)
             return self._out(job, actor=actor)
 
-    def create_job(self, *, user_id: int, run_id: str | None, args: dict[str, Any]) -> dict[str, Any]:
+    def create_job(
+        self,
+        *,
+        user_id: int,
+        run_id: str | None,
+        args: dict[str, Any],
+        db: Session | None = None,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        # Callers that also persist an idempotency receipt can own the transaction.
+        if not commit and db is None:
+            raise ValueError("commit=False requires an external database session.")
         name = str(args.get("name") or "").strip()
         instruction = str(args.get("instruction") or "").strip()
         target_code = str(args.get("target_agent_code") or "").strip()
@@ -93,7 +105,7 @@ class AgentScheduleService:
         if len(name) > 160 or len(instruction) > 16000:
             raise ValueError("任务名称或指令过长。")
         schedule = self._normalize_schedule(args.get("schedule"))
-        with self.session_factory() as db:
+        with nullcontext(db) if db is not None else self.session_factory() as db:
             actor = self._actor(db, user_id)
             profile = self._target_profile(db, target_code, user_id)
             expected = {
@@ -148,7 +160,10 @@ class AgentScheduleService:
                 **schedule,
             )
             db.add(job)
-            db.commit()
+            if commit:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(job)
             if not self._matches_create(job, expected):
                 raise RuntimeError("定时任务已写入，但数据库回读校验未通过，请按任务名称核查。")

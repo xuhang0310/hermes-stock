@@ -622,6 +622,36 @@ class User(Base):
         return self.role == "super_admin"
 
 
+class McpAccessToken(Base):
+    __tablename__ = "mcp_access_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    token_prefix: Mapped[str] = mapped_column(String(20), nullable=False)
+    scopes: Mapped[str] = mapped_column(String(500), nullable=False)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class McpMutationReceipt(Base):
+    __tablename__ = "mcp_mutation_receipts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "tool_name", "idempotency_key", name="uq_mcp_mutation_user_tool_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class LlmModelPlatform(Base):
     __tablename__ = "llm_model_platforms"
 

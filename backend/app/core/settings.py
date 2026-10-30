@@ -164,6 +164,17 @@ class Settings:
         for origin in os.getenv("STOCK_CORS_ORIGINS", "*").split(",")
         if origin.strip()
     )
+    mcp_allowed_hosts: tuple[str, ...] = tuple(
+        value.strip() for value in os.getenv(
+            "STOCK_MCP_ALLOWED_HOSTS", "localhost:*,127.0.0.1:*,[::1]:*,shijingxuan.com"
+        ).split(",") if value.strip()
+    )
+    mcp_allowed_origins: tuple[str, ...] = tuple(
+        value.strip() for value in os.getenv(
+            "STOCK_MCP_ALLOWED_ORIGINS",
+            "http://localhost:*,http://127.0.0.1:*,http://[::1]:*,https://shijingxuan.com",
+        ).split(",") if value.strip()
+    )
 
     @property
     def database_url(self) -> str:

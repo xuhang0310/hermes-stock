@@ -107,6 +107,10 @@ class OperationLogMiddleware:
             not settings.operation_log_enabled
             or method not in _MUTATING_METHODS
             or not path.startswith("/api/")
+            # MCP uses POST even for reads; its dispatcher records the actual
+            # tool, authenticated token owner and semantic result instead.
+            or path == "/api/mcp"
+            or path.startswith("/api/mcp/")
         ):
             await self._app(scope, receive, send)
             return
