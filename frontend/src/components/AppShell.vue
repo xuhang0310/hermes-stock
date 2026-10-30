@@ -57,6 +57,9 @@ const canViewKnowledge = computed(
 )
 const canViewSettings = computed(
   () => ['admin', 'super_admin'].includes(props.user.role)
+    || props.user.permissions.some(
+      permission => ['all', 'data:read', 'data:write', 'schedule:manage'].includes(permission)
+    )
 )
 
 interface NavItem {

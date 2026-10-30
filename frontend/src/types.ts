@@ -10,6 +10,22 @@ export type HealthPayload = {
   user_version: number
 }
 
+export type McpScope = 'market:read' | 'portfolio:read' | 'portfolio:write' | 'schedules:read' | 'schedules:write'
+export type McpCredential = {
+  id: number
+  name: string
+  token_prefix: string
+  scopes: McpScope[]
+  created_at: string
+  expires_at: string
+  revoked_at: string | null
+  is_expired: boolean
+  is_invalidated?: boolean
+}
+export type McpTokenList = { tokens: McpCredential[]; available_scopes: McpScope[]; endpoint: string }
+export type McpTokenCreate = { name: string; scopes: McpScope[]; expires_in_days: number }
+export type McpTokenCreated = { token: string; credential: McpCredential; endpoint: string }
+
 export type EventItem = {
   event_id: string
   level: 'L0' | 'L1' | 'L2'

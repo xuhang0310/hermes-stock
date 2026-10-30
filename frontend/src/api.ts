@@ -1,4 +1,7 @@
 import type {
+  McpTokenList,
+  McpTokenCreate,
+  McpTokenCreated,
   IndustryOverview,
   IndustryMembers,
   ArtifactVersion,
@@ -382,6 +385,11 @@ async function streamJsonRequest<T extends { type?: string }>(
 }
 
 export const api = {
+  mcpTokens: () => request<McpTokenList>('/api/mcp-tokens', { cache: 'no-store' }),
+  createMcpToken: (payload: McpTokenCreate) => request<McpTokenCreated>('/api/mcp-tokens', {
+    method: 'POST', body: JSON.stringify(payload)
+  }),
+  revokeMcpToken: (id: number) => request<{ revoked: boolean; id: number }>(`/api/mcp-tokens/${id}`, { method: 'DELETE' }),
   login: (payload: { username: string; password: string; remember_me: boolean }) =>
     request<LoginPayload>('/api/auth/login', {
       method: 'POST',

@@ -36,7 +36,7 @@ class CreateMcpTokenIn(BaseModel):
         return value
 
 
-def _out(row: McpAccessToken) -> dict:
+def _out(row: McpAccessToken, *, current_token_version: int | None = None) -> dict:
     return {
         "id": row.id,
         "name": row.name,
@@ -46,6 +46,7 @@ def _out(row: McpAccessToken) -> dict:
         "expires_at": row.expires_at.replace(tzinfo=timezone.utc).isoformat(),
         "revoked_at": row.revoked_at.replace(tzinfo=timezone.utc).isoformat() if row.revoked_at else None,
         "is_expired": row.expires_at <= utc_now(),
+        "is_invalidated": current_token_version is not None and row.token_version != current_token_version,
     }
 
 
@@ -59,7 +60,7 @@ def list_tokens(
         .order_by(McpAccessToken.id.desc())
     ).all()
     return {
-        "tokens": [_out(row) for row in rows],
+        "tokens": [_out(row, current_token_version=int(context.user.token_version or 1)) for row in rows],
         "available_scopes": sorted(allowed_scopes(context.permissions)),
         "endpoint": "/api/mcp/",
     }

@@ -93,6 +93,9 @@ const error = ref('')
 const currentUser = ref<UserPayload | null>(null)
 const canViewSettings = computed(
   () => ['admin', 'super_admin'].includes(currentUser.value?.role || '')
+    || !!currentUser.value?.permissions.some(
+      permission => ['all', 'data:read', 'data:write', 'schedule:manage'].includes(permission)
+    )
 )
 const canViewOps = computed(
   () =>
@@ -104,6 +107,9 @@ watch(
   () => [currentUser.value, activePage.value] as const,
   () => {
     if (activePage.value === 'opsConsole' && currentUser.value && !canViewOps.value) {
+      activePage.value = 'workbench'
+    }
+    if (activePage.value === 'settings' && currentUser.value && !canViewSettings.value) {
       activePage.value = 'workbench'
     }
   }
@@ -1028,6 +1034,11 @@ function navigate(page: PageKey) {
   if (page === 'watchlist') void refreshWatchlist()
   if (page === 'industryAnalysis') {
     if (!/^\/industries\/?$/i.test(window.location.pathname)) window.history.pushState({}, '', '/industries')
+  } else if (page === 'settings') {
+    if (!/^\/settings\/?$/i.test(window.location.pathname)) {
+      const initialTab = ['admin', 'super_admin'].includes(currentUser.value?.role || '') ? 'models' : 'mcp'
+      window.history.pushState({}, '', `/settings?tab=${initialTab}`)
+    }
   } else if (page === 'automaticSelection') {
     if (!/^\/automatic-selection\/?$/i.test(window.location.pathname)) {
       window.history.pushState({}, '', '/automatic-selection')
@@ -1038,6 +1049,7 @@ function navigate(page: PageKey) {
     (window.location.pathname.startsWith('/backtests/') ||
       /^\/oc-console-/i.test(window.location.pathname) ||
       /^\/automatic-selection\/?$/i.test(window.location.pathname) ||
+      /^\/settings\/?$/i.test(window.location.pathname) ||
       /^\/industries\/?$/i.test(window.location.pathname))
   ) {
     window.history.pushState({}, '', '/')
@@ -1047,6 +1059,10 @@ function navigate(page: PageKey) {
 
 function syncPageFromLocation() {
   const pathname = window.location.pathname
+  if (/^\/settings\/?$/i.test(pathname)) {
+    activePage.value = 'settings'
+    return
+  }
   if (/^\/industries\/?$/i.test(pathname)) {
     activePage.value = 'industryAnalysis'
     return
@@ -1068,6 +1084,8 @@ function syncPageFromLocation() {
   } else if (activePage.value === 'automaticSelection') {
     activePage.value = 'workbench'
   } else if (activePage.value === 'industryAnalysis') {
+    activePage.value = 'workbench'
+  } else if (activePage.value === 'settings') {
     activePage.value = 'workbench'
   }
 }

@@ -129,6 +129,24 @@ class McpTokenTests(unittest.TestCase):
         principal = authenticate_mcp_token(output["token"], self.db)
         self.assertEqual(principal.scopes, frozenset({"portfolio:read"}))
 
+    def test_list_marks_password_reset_credentials_invalidated_but_new_credentials_valid(self) -> None:
+        original = self._create()
+        self.assertFalse(original["credential"]["is_invalidated"])
+        self.assertFalse(self.client.get("/api/mcp-tokens").json()["tokens"][0]["is_invalidated"])
+
+        self.owner.token_version += 1
+        self.db.commit()
+        refreshed = self._create()
+        self.assertFalse(refreshed["credential"]["is_invalidated"])
+        listed = {row["id"]: row for row in self.client.get("/api/mcp-tokens").json()["tokens"]}
+        original_row = listed[original["credential"]["id"]]
+        self.assertTrue(original_row["is_invalidated"])
+        self.assertFalse(original_row["is_expired"])
+        self.assertIsNone(original_row["revoked_at"])
+        self.assertFalse(listed[refreshed["credential"]["id"]]["is_invalidated"])
+        self._assert_invalid(original["token"])
+        authenticate_mcp_token(refreshed["token"], self.db)
+
     def test_web_jwt_malformed_tokens_and_modified_tokens_are_not_accepted(self) -> None:
         output = self._create()
         for raw in ("", "a.b.c", "hs_mcp_", "密钥", output["token"] + "x", "hs_mcp_" + "A" * 43):
