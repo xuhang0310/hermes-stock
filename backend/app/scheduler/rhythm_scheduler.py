@@ -14,7 +14,7 @@ import contextlib
 import json
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -563,6 +563,11 @@ def _run_health_check(
     push_channel_key: str | None,
     job_run_id: str,
 ) -> tuple[str, int | None, str | None]:
+    # 调度器/心跳使用北京时间，数据库 created_at 使用 UTC 裸时间。
+    # 无时区输入沿用调度器语义；带时区输入先换算，避免查询窗口少算 8 小时。
+    local_now = now.replace(tzinfo=_SHANGHAI) if now.tzinfo is None else now.astimezone(_SHANGHAI)
+    utc_now = local_now.astimezone(timezone.utc).replace(tzinfo=None)
+    now = local_now.replace(tzinfo=None)
     problems: list[str] = []
     with SessionLocal() as session:
         try:
@@ -582,7 +587,11 @@ def _run_health_check(
             session.scalar(
                 select(func.count())
                 .select_from(SystemLog)
-                .where(SystemLog.level == "ERROR", SystemLog.created_at >= now - timedelta(hours=12))
+                .where(
+                    SystemLog.level == "ERROR",
+                    SystemLog.created_at >= utc_now - timedelta(hours=12),
+                    SystemLog.created_at <= utc_now,
+                )
             )
             or 0
         )
@@ -592,7 +601,11 @@ def _run_health_check(
             session.scalar(
                 select(func.count())
                 .select_from(JobRun)
-                .where(JobRun.status == "failed", JobRun.created_at >= now - timedelta(hours=24))
+                .where(
+                    JobRun.status == "failed",
+                    JobRun.created_at >= utc_now - timedelta(hours=24),
+                    JobRun.created_at <= utc_now,
+                )
             )
             or 0
         )

@@ -16,10 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import chat_completion
-from backend.app.core.llm_config import (
-    active_llm_config,
-    resolve_model_config_ids_by_priority,
-)
+from backend.app.core.llm_config import active_llm_config
 from backend.app.core.applog import log_event
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import (
@@ -42,14 +39,8 @@ SCHEDULER_INTERVAL_SECONDS = 30 * 60
 RECOMMENDATION_TTL_HOURS = 10
 FAILED_REFRESH_STALE_GRACE_HOURS = 2
 MAX_RECOMMENDATIONS = 8
-RECOMMENDATION_MODEL_PRIORITY = (
-    "deepseek-v4-flash-0731",
-    "deepseek-v4-pro",
-)
-RECOMMENDATION_MODEL_TIMEOUT_SECONDS = {
-    "deepseek-v4-flash-0731": 18.0,
-    "deepseek-v4-pro": 45.0,
-}
+# Use a read timeout shorter than the 90-second refresh lease.
+RECOMMENDATION_MODEL_TIMEOUT_SECONDS = 60.0
 RECOMMENDATION_FAILURE_BACKOFF_SECONDS = (300, 1800, 7200, 21600)
 _scheduler_task: asyncio.Task | None = None
 _refresh_tasks: set[asyncio.Task[None]] = set()
@@ -763,70 +754,40 @@ def _call_llm_for_recommendations(
     avoid_prompts: list[str] | None = None,
     refresh_token: str | None = None,
 ) -> list[CandidatePrompt]:
-    """Generate recommendations with the dedicated model fallback chain."""
-    model_config_ids = resolve_model_config_ids_by_priority(RECOMMENDATION_MODEL_PRIORITY)
-    if not model_config_ids:
-        log_event(
-            "agent",
-            "WARNING",
-            "LLM 推荐跳过：未找到 deepseek-v4-flash-0731 或 deepseek-v4-pro 的可用配置",
-            to_db=False,
-        )
-        return []
-
+    """Use the current system default; failed refreshes retain existing/fallback prompts."""
     messages = _build_llm_messages(
         profile,
         context,
         avoid_prompts=avoid_prompts,
         refresh_token=refresh_token,
     )
-    errors: list[str] = []
-    for attempt_index, model_config_id in enumerate(model_config_ids):
-        model_label = str(model_config_id)
-        try:
-            llm_config = active_llm_config(model_config_id)
-            model_label = str(llm_config.get("model") or model_config_id)
-            if not llm_config.get("api_key") or not llm_config.get("base_url"):
-                raise RuntimeError("未配置 API Key/Base URL")
-            timeout_seconds = RECOMMENDATION_MODEL_TIMEOUT_SECONDS.get(model_label, 30.0)
-
-            # 不覆盖模型自身温度，避免触发模型特有的 temperature 限制。
-            data = chat_completion(
-                messages,
-                llm_config,
-                temperature=None,
-                timeout=timeout_seconds,
-                log_module="prompt_recommendations",
-            )
-            content = data["choices"][0]["message"]["content"]
-            candidates = _parse_llm_response(_extract_json(content))
-            if not candidates:
-                raise ValueError("模型未返回有效推荐")
-            if attempt_index > 0:
-                log_event(
-                    "agent",
-                    "INFO",
-                    f"推荐模型已切换至兜底模型 {model_label}",
-                    to_db=False,
-                )
-            return candidates
-        except Exception as exc:  # noqa: BLE001
-            error = f"{model_label}: {str(exc)[:240]}"
-            errors.append(error)
-            log_event(
-                "agent",
-                "WARNING",
-                f"推荐模型 {model_label} 调用失败，尝试下一优先级模型: {str(exc)[:240]}",
-                to_db=False,
-            )
-
-    log_event(
-        "agent",
-        "WARNING",
-        f"LLM 推荐模型全部失败，将使用角色预设 fallback: {'; '.join(errors)[:500]}",
-        to_db=False,
-    )
-    return []
+    model_label = "系统默认模型"
+    try:
+        # Resolve for each refresh so changing the default model takes effect immediately.
+        llm_config = active_llm_config()
+        model_label = str(llm_config.get("model") or model_label)
+        if not llm_config.get("api_key") or not llm_config.get("base_url"):
+            raise RuntimeError("未配置 API Key/Base URL")
+        data = chat_completion(
+            messages,
+            llm_config,
+            temperature=None,
+            timeout=RECOMMENDATION_MODEL_TIMEOUT_SECONDS,
+            log_module="prompt_recommendations",
+        )
+        content = data["choices"][0]["message"]["content"]
+        candidates = _parse_llm_response(_extract_json(content))
+        if not candidates:
+            raise ValueError("模型未返回有效推荐")
+        return candidates
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            "agent",
+            "WARNING",
+            f"默认推荐模型 {model_label} 调用失败，保留旧推荐或使用角色预设: {type(exc).__name__}: {str(exc)[:240]}",
+            to_db=False,
+        )
+        return []
 
 
 def _build_llm_messages(

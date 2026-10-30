@@ -68,18 +68,14 @@ class PromptRecommendationModelRoutingTests(unittest.TestCase):
     @patch.object(prompt_recommendations, "log_event")
     @patch.object(prompt_recommendations, "chat_completion")
     @patch.object(prompt_recommendations, "active_llm_config")
-    @patch.object(prompt_recommendations, "resolve_model_config_ids_by_priority")
-    def test_primary_model_success_does_not_call_fallback(
+    def test_recommendations_use_current_default_model(
         self,
-        resolve_ids,
         active_config,
         chat_completion,
         _log_event,
     ) -> None:
-        resolve_ids.return_value = [11, 22]
-        active_config.side_effect = lambda model_id: self._config(
-            "deepseek-v4-flash-0731" if model_id == 11 else "deepseek-v4-pro"
-        )
+        config = self._config("default-research-model")
+        active_config.return_value = config
         chat_completion.return_value = self._response()
 
         result = prompt_recommendations._call_llm_for_recommendations(
@@ -91,74 +87,100 @@ class PromptRecommendationModelRoutingTests(unittest.TestCase):
             [item.text for item in result],
             ["Review current portfolio risk"],
         )
-        active_config.assert_called_once_with(11)
+        active_config.assert_called_once_with()
         self.assertEqual(chat_completion.call_count, 1)
-        self.assertEqual(chat_completion.call_args.kwargs["timeout"], 18.0)
+        self.assertIs(chat_completion.call_args.args[1], config)
+        self.assertIsNone(chat_completion.call_args.kwargs["temperature"])
+        self.assertEqual(chat_completion.call_args.kwargs["timeout"], 60.0)
 
     @patch.object(prompt_recommendations, "log_event")
     @patch.object(prompt_recommendations, "chat_completion")
     @patch.object(prompt_recommendations, "active_llm_config")
-    @patch.object(prompt_recommendations, "resolve_model_config_ids_by_priority")
-    def test_primary_failure_uses_pro_fallback(
+    def test_default_model_change_is_used_by_next_refresh(
         self,
-        resolve_ids,
         active_config,
         chat_completion,
         _log_event,
     ) -> None:
-        resolve_ids.return_value = [11, 22]
-        active_config.side_effect = lambda model_id: self._config(
-            "deepseek-v4-flash-0731" if model_id == 11 else "deepseek-v4-pro"
+        active_config.side_effect = [self._config("default-a"), self._config("default-b")]
+        chat_completion.return_value = self._response()
+
+        for _ in range(2):
+            prompt_recommendations._call_llm_for_recommendations(self.profile, self.context)
+
+        self.assertEqual(
+            [args.args[1]["model"] for args in chat_completion.call_args_list],
+            ["default-a", "default-b"],
         )
-        chat_completion.side_effect = [
-            RuntimeError("primary unavailable"),
-            self._response("Recommendation from fallback model"),
-        ]
+        self.assertEqual(active_config.call_args_list, [call(), call()])
+
+    @patch.object(prompt_recommendations, "log_event")
+    @patch.object(prompt_recommendations, "chat_completion")
+    @patch.object(prompt_recommendations, "active_llm_config")
+    def test_default_failure_does_not_call_another_model(
+        self,
+        active_config,
+        chat_completion,
+        _log_event,
+    ) -> None:
+        active_config.return_value = self._config("default-model")
+        chat_completion.side_effect = RuntimeError("model unavailable")
 
         result = prompt_recommendations._call_llm_for_recommendations(
             self.profile,
             self.context,
         )
 
-        self.assertEqual(
-            [item.text for item in result],
-            ["Recommendation from fallback model"],
-        )
-        self.assertEqual(active_config.call_args_list, [call(11), call(22)])
-        self.assertEqual(chat_completion.call_count, 2)
-        self.assertEqual(chat_completion.call_args_list[0].kwargs["timeout"], 18.0)
-        self.assertEqual(chat_completion.call_args_list[1].kwargs["timeout"], 45.0)
+        self.assertEqual(result, [])
+        active_config.assert_called_once_with()
+        self.assertEqual(chat_completion.call_count, 1)
 
     @patch.object(prompt_recommendations, "log_event")
     @patch.object(prompt_recommendations, "chat_completion")
     @patch.object(prompt_recommendations, "active_llm_config")
-    @patch.object(prompt_recommendations, "resolve_model_config_ids_by_priority")
-    def test_invalid_primary_output_uses_pro_fallback(
-        self,
-        resolve_ids,
-        active_config,
-        chat_completion,
-        _log_event,
+    def test_invalid_default_response_returns_no_new_recommendations(
+        self, active_config, chat_completion, _log_event,
     ) -> None:
-        resolve_ids.return_value = [11, 22]
-        active_config.side_effect = lambda model_id: self._config(
-            "deepseek-v4-flash-0731" if model_id == 11 else "deepseek-v4-pro"
-        )
-        chat_completion.side_effect = [
+        active_config.return_value = self._config("default-model")
+        for response in [
             {"choices": [{"message": {"content": "not-json"}}]},
-            self._response("Fallback after invalid primary response"),
-        ]
+            {"choices": [{"message": {"content": '{"recommendations": []}'}}]},
+        ]:
+            with self.subTest(response=response):
+                chat_completion.return_value = response
+                self.assertEqual(
+                    prompt_recommendations._call_llm_for_recommendations(self.profile, self.context),
+                    [],
+                )
 
-        result = prompt_recommendations._call_llm_for_recommendations(
-            self.profile,
-            self.context,
-        )
+    @patch.object(prompt_recommendations, "log_event")
+    @patch.object(prompt_recommendations, "chat_completion")
+    @patch.object(prompt_recommendations, "active_llm_config")
+    def test_missing_default_credentials_skip_the_http_request(
+        self, active_config, chat_completion, _log_event,
+    ) -> None:
+        for missing in ("api_key", "base_url"):
+            with self.subTest(missing=missing):
+                active_config.return_value = {**self._config("default-model"), missing: ""}
+                self.assertEqual(
+                    prompt_recommendations._call_llm_for_recommendations(self.profile, self.context),
+                    [],
+                )
+        chat_completion.assert_not_called()
 
+    @patch.object(prompt_recommendations, "log_event")
+    @patch.object(prompt_recommendations, "chat_completion")
+    @patch.object(prompt_recommendations, "active_llm_config")
+    def test_default_config_error_still_allows_existing_prompt_fallback(
+        self, active_config, chat_completion, log_event,
+    ) -> None:
+        active_config.side_effect = RuntimeError("default configuration unavailable")
         self.assertEqual(
-            [item.text for item in result],
-            ["Fallback after invalid primary response"],
+            prompt_recommendations._call_llm_for_recommendations(self.profile, self.context),
+            [],
         )
-        self.assertEqual(chat_completion.call_count, 2)
+        chat_completion.assert_not_called()
+        self.assertIn("RuntimeError", log_event.call_args.args[2])
 
 
 class PromptRecommendationCacheTests(unittest.TestCase):

@@ -897,13 +897,14 @@ class AgentScheduleServiceTests(unittest.TestCase):
             self.assertIsNone(run.finished_at)
 
     def test_health_check_notification_is_idempotent_per_job_run(self) -> None:
+        checked_at_beijing = datetime(2026, 10, 30, 8, 15)
         with self.SessionFactory() as db:
             db.add(
                 SystemLog(
                     level="ERROR",
                     module="test",
                     message="force a health-check alert",
-                    created_at=datetime.now(),
+                    created_at=checked_at_beijing - timedelta(hours=8, minutes=1),
                 )
             )
             db.commit()
@@ -915,7 +916,7 @@ class AgentScheduleServiceTests(unittest.TestCase):
             patch("backend.app.core.applog.prune_system_logs"),
         ):
             message, notification_id, error = _run_health_check(
-                datetime.now(),
+                checked_at_beijing,
                 "feishu-channel",
                 "health-run-1",
             )
