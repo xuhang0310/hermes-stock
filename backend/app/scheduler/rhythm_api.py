@@ -491,12 +491,30 @@ def update_schedule_job(
     context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
     job = _owned_job(db, user_id=context.user.id, job_key=job_key)
+    is_agent_job = job.job_kind in ("agent_task", "agent_report")
     if payload.digital_human_code and payload.digital_human_code not in VALID_DIGITAL_HUMAN_CODES:
         raise HTTPException(status_code=400, detail="数字人 code 无效")
     if payload.push_channel_key and payload.push_channel_key not in BUILTIN_CHANNEL_KEYS:
         raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
     _validate_schedule_text_encoding(payload)
     _validate_schedule_shape(payload)
+    if not is_agent_job:
+        # 规则任务（入库、选股计算等）不经数字人，只允许改名称、说明、时间和启停
+        job.name = payload.name
+        job.description = payload.description
+        job.schedule_type = payload.schedule_type
+        job.run_time = payload.run_time
+        job.run_once_at = payload.run_once_at
+        job.weekday_mask = payload.weekday_mask
+        job.interval_minutes = payload.interval_minutes
+        job.window_start = payload.window_start
+        job.window_end = payload.window_end
+        job.trading_day_only = payload.trading_day_only
+        job.enabled = payload.enabled
+        job.sort_order = payload.sort_order
+        db.commit()
+        db.refresh(job)
+        return _job_out(job)
     _validate_agent_job(db, payload, context)
 
     job.name = payload.name

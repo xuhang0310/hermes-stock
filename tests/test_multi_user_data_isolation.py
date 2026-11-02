@@ -319,5 +319,45 @@ class MultiUserDataIsolationTests(unittest.TestCase):
         self.assertEqual(invalid_job.status_code, 422, invalid_job.text)
 
 
+    def test_rule_job_can_be_rescheduled_without_digital_human(self) -> None:
+        with self.SessionFactory() as db:
+            db.add(
+                ScheduledJob(
+                    job_key="rule-a",
+                    name="知识库增量索引",
+                    job_kind="rag_ingest",
+                    schedule_type="daily",
+                    run_time="16:30",
+                    owner_user_id=self.user_a.id,
+                    created_via="admin",
+                    enabled=True,
+                )
+            )
+            db.commit()
+
+        response = self.client.put(
+            "/api/schedule/jobs/rule-a",
+            headers=self._headers(self.user_a),
+            json={
+                "name": "知识库增量索引",
+                "description": "收盘后更新知识库",
+                "schedule_type": "daily",
+                "run_time": "17:00",
+                "trading_day_only": True,
+                "digital_human_code": None,
+                "prompt_template": "不应写入",
+                "allow_code_execution": True,
+                "enabled": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["run_time"], "17:00")
+        self.assertEqual(body["description"], "收盘后更新知识库")
+        self.assertEqual(body["job_kind"], "rag_ingest")
+        self.assertIsNone(body["digital_human_code"])
+        self.assertIsNone(body["prompt_template"])
+        self.assertFalse(body["allow_code_execution"])
+
 if __name__ == "__main__":
     unittest.main()

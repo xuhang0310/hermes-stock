@@ -15,6 +15,7 @@ const MONOSPACE_WHITELIST = new Map([
   ['AutomaticSelectionView.vue', 1],
   ['BacktestReportView.vue', 2],
   ['FactorAnalysisView.vue', 1],
+  ['McpAccessView.vue', 3], // MCP endpoint, key prefix and read-only configuration fields.
   ['WorkspaceDocsView.vue', 1],
 ])
 // 设置中心（model-hub 家族）沿用其自身设计族，eyebrow 清理排入 W5 波次；

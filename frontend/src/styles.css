@@ -5467,6 +5467,50 @@ body.rhythm-modal-open {
   gap: 12px;
 }
 
+.rhythm-job-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.rhythm-job-filters {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+
+.rhythm-job-filters button {
+  min-height: 34px;
+  padding: 6px 16px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.rhythm-job-filters button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.rhythm-job-filters button.active {
+  border-color: var(--line-strong);
+  background: var(--surface-3);
+  color: var(--gold-2);
+}
+
+.rhythm-job-filters button:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
 .rhythm-create-button,
 .rhythm-empty button {
   border: 1px solid #806a37;
@@ -5731,6 +5775,47 @@ body.rhythm-modal-open {
 
 .rhythm-history-toolbar + .rhythm-run-list {
   border-radius: 0 0 8px 8px;
+}
+
+.rhythm-history-toolbar .rhythm-section-count {
+  align-self: center;
+  margin-left: auto;
+}
+
+.rhythm-history-toolbar .rhythm-section-count + .quiet-action {
+  margin-left: 0;
+}
+
+.rhythm-job-toolbar .rhythm-create-button {
+  margin-left: auto;
+}
+
+.rhythm-metrics strong.danger {
+  color: #d87570;
+}
+
+.rhythm-job-last .rhythm-job-error {
+  overflow: hidden;
+  color: #d87570;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rhythm-prompt-hint {
+  margin: 0;
+  color: #77756e;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.rhythm-dialog footer button.danger {
+  border-color: rgba(211, 92, 86, 0.35);
+  color: #d87570;
+}
+
+.rhythm-dialog footer button.danger:hover:not(:disabled) {
+  background: rgba(211, 92, 86, 0.08);
 }
 
 .rhythm-pagination {

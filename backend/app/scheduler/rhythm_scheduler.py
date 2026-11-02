@@ -1777,7 +1777,7 @@ DEFAULT_JOBS = [
     {
         "job_key": POSITION_PRICE_SYNC_JOB_KEY,
         "name": "持仓价格分钟同步",
-        "description": "交易时段每分钟批量拉取实时行情，刷新全部持仓的最新价/市值/浮盈并重算账户资金（不经 LLM、不推送）。",
+        "description": "交易时段每分钟刷新所有持仓的最新价、市值和盈亏，并重算账户资金。",
         "job_kind": "position_price_sync",
         "schedule_type": "interval",
         "run_time": None,
@@ -1791,7 +1791,7 @@ DEFAULT_JOBS = [
     {
         "job_key": "rag-ingest-1630",
         "name": "知识库增量索引",
-        "description": "收盘后把新增文档/报告切块嵌入进知识库（规则任务不经 LLM、不推送；失败自动重试）。",
+        "description": "收盘后把当天新增的文档和报告加进知识库，失败会自动重试。",
         "job_kind": "rag_ingest",
         "schedule_type": "daily",
         "run_time": "16:30",
@@ -1802,7 +1802,7 @@ DEFAULT_JOBS = [
     {
         "job_key": "news-ingest-quick-15m",
         "name": "快讯入库(每15分)",
-        "description": "每15分钟拉 TuShare 新闻快讯(news)入知识库（规则任务不经 LLM、不推送；content_hash 去重，失败自动重试）。",
+        "description": "每 15 分钟把新闻快讯存进知识库，重复的自动跳过。",
         "job_kind": "news_ingest",
         "schedule_type": "interval",
         "run_time": None,
@@ -1815,7 +1815,7 @@ DEFAULT_JOBS = [
     {
         "job_key": "news-ingest-major-1h",
         "name": "要闻入库(每小时)",
-        "description": "每小时拉 TuShare 新闻通讯(major_news)入知识库（规则任务不经 LLM、不推送；content_hash 去重，失败自动重试）。",
+        "description": "每小时把重要新闻存进知识库，重复的自动跳过。",
         "job_kind": "news_ingest",
         "schedule_type": "interval",
         "run_time": None,
@@ -1828,7 +1828,7 @@ DEFAULT_JOBS = [
     {
         "job_key": "news-ingest-cctv-daily",
         "name": "联播入库(每日)",
-        "description": "每日拉 TuShare 新闻联播文字稿(cctv_news)入知识库（规则任务不经 LLM、不推送；content_hash 去重，失败自动重试）。",
+        "description": "每天把新闻联播文字稿存进知识库。",
         "job_kind": "news_ingest",
         "schedule_type": "daily",
         "run_time": "21:30",
@@ -1846,19 +1846,6 @@ DEFAULT_JOBS = [
         "trading_day_only": True,
         "digital_human_code": "intelligence-officer",
         "prompt_template": "请生成 {date}（{weekday}）的A股盘前简报：汇总影响持仓和自选池的隔夜要闻、公告、政策与情绪信号，区分事实/推断/风险，并给出今日重点关注清单。",
-        "push_channel_key": "feishu-daily",
-    },
-    {
-        "job_key": "open-report-0935",
-        "name": "开盘快报",
-        "description": "盘中哨兵播报集合竞价、异动与持仓关注点。",
-        "job_kind": "agent_report",
-        "schedule_type": "daily",
-        "run_time": "09:35",
-        "weekday_mask": "1,2,3,4,5",
-        "trading_day_only": True,
-        "digital_human_code": "market-sentinel",
-        "prompt_template": "请生成 {date} 的A股开盘快报：结合集合竞价、涨跌幅异动和持仓/自选池，短句列出需要关注的标的与信号，只报异常。",
         "push_channel_key": "feishu-daily",
     },
     {
