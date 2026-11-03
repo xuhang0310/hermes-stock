@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.database import Base
 from backend.app.core.models import Instrument, PositionHoldingSnapshot, User
+from backend.app.data.errors import PositionNotFoundError
 from backend.app.data.repository import StockRepository
 
 
@@ -202,7 +203,7 @@ class PositionCorrectionTests(unittest.TestCase):
                 "cost_price": 35,
             }
         )
-        with self.assertRaisesRegex(ValueError, "不属于当前用户"):
+        with self.assertRaisesRegex(PositionNotFoundError, "不属于当前用户"):
             self.other_repo.correct_position_holding(
                 saved["id"],
                 {

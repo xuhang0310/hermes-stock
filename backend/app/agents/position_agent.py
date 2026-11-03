@@ -1047,6 +1047,10 @@ def extract_position_ocr_arguments(
         arguments = _json_args(function.get("arguments"))
         rows = arguments.get("rows")
         if isinstance(rows, list) and rows:
+            # 截图是持仓快照，不是成交：一律按“覆盖”保存，避免模型选了 buy 而生成假的买入流水
+            for row in rows:
+                if isinstance(row, dict):
+                    row["action"] = "replace"
             return {
                 "arguments": arguments,
                 "model": {

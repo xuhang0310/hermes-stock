@@ -14,6 +14,12 @@ import type {
   PositionAgentStreamEvent,
   PositionOcrConfirmResult,
   PositionOcrRecognizeResult,
+  PositionSyncApplyResult,
+  PositionSyncFunds,
+  PositionSyncPreview,
+  PositionSyncRecognizeResult,
+  PositionSyncRow,
+  PositionSyncUndoResult,
   PositionOcrRow,
   PositionSymbolValidation,
   PositionChartPayload,
@@ -443,11 +449,14 @@ export const api = {
     request<PositionSummary>(`/api/positions/summary${accountId ? `?account_id=${accountId}` : ''}`),
   syncPositionPrices: () =>
     request<PositionPriceSyncResult>('/api/positions/price-sync', { method: 'POST' }),
-  positionTrades: (params: { symbol?: string | null; account_id?: number | null; limit?: number } = {}) => {
+  positionTrades: (
+    params: { symbol?: string | null; account_id?: number | null; limit?: number; include_imports?: boolean } = {}
+  ) => {
     const qs = new URLSearchParams()
     if (params.symbol) qs.set('symbol', params.symbol)
     if (params.account_id) qs.set('account_id', String(params.account_id))
     if (params.limit) qs.set('limit', String(params.limit))
+    if (params.include_imports) qs.set('include_imports', 'true')
     const suffix = qs.toString()
     return request<PositionTrade[]>(`/api/positions/trades${suffix ? `?${suffix}` : ''}`)
   },
@@ -478,6 +487,36 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
+  positionSyncRecognize: (payload: {
+    images: Array<{ image_base64: string; mime_type: string; name?: string }>
+    account_id?: number | null
+  }) =>
+    request<ApiEnvelope<PositionSyncRecognizeResult>>('/api/positions/sync/recognize', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }).then((res) => res.data),
+  positionSyncPreview: (payload: { account_id: number; rows: PositionSyncRow[]; funds: PositionSyncFunds | null }) =>
+    request<ApiEnvelope<PositionSyncPreview>>('/api/positions/sync/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }).then((res) => res.data),
+  positionSyncApply: (payload: {
+    account_id: number
+    items: Array<Record<string, unknown>>
+    funds: PositionSyncFunds | null
+    apply_funds: boolean
+    as_of_date?: string | null
+    image_sha256?: string | null
+    account_no_masked?: string | null
+  }) =>
+    request<ApiEnvelope<PositionSyncApplyResult>>('/api/positions/sync/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }).then((res) => res.data),
+  positionSyncUndo: (batchId: number) =>
+    request<ApiEnvelope<PositionSyncUndoResult>>(`/api/positions/sync/${batchId}/undo`, {
+      method: 'POST'
+    }).then((res) => res.data),
   confirmPositionOcr: (payload: {
     rows: PositionOcrRow[]
     account_id: number

@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.app.agent_runtime.transaction_channels import (
@@ -12,7 +12,9 @@ from backend.app.agent_runtime.transaction_channels import (
     stream_transaction_run,
 )
 from backend.app.auth.auth import AuthContext, require_permission
-from backend.app.data import positions_service
+from backend.app.core.response import fail, ok
+from backend.app.data import position_sync, positions_service
+from backend.app.data.errors import PositionNotFoundError
 from backend.app.data.deps import get_repo
 from backend.app.data.repository import StockRepository
 from backend.app.data.sse import sse_event
@@ -125,6 +127,34 @@ class PositionSymbolValidateIn(BaseModel):
     name: str | None = Field(default=None, max_length=120)
 
 
+class PositionSyncImageIn(BaseModel):
+    image_base64: str = Field(min_length=100)
+    mime_type: str = Field(default="image/png", max_length=80)
+    name: str | None = Field(default=None, max_length=200)
+
+
+class PositionSyncRecognizeIn(BaseModel):
+    images: list[PositionSyncImageIn] = Field(min_length=1, max_length=position_sync.MAX_SYNC_IMAGES)
+    account_id: int | None = Field(default=None, ge=1)
+    model_config_id: int | None = None
+
+
+class PositionSyncPreviewIn(BaseModel):
+    account_id: int = Field(ge=1)
+    rows: list[dict] = Field(default_factory=list, max_length=300)
+    funds: dict | None = None
+
+
+class PositionSyncApplyIn(BaseModel):
+    account_id: int = Field(ge=1)
+    items: list[dict] = Field(default_factory=list, max_length=300)
+    funds: dict | None = None
+    apply_funds: bool = True
+    as_of_date: str | None = Field(default=None, max_length=16)
+    image_sha256: str | None = Field(default=None, max_length=80)
+    account_no_masked: str | None = Field(default=None, max_length=80)
+
+
 class PositionAgentConfirmIn(BaseModel):
     rows: list[dict] = Field(min_length=1, max_length=100)
     account: dict | None = None
@@ -220,14 +250,16 @@ def position_trades(
     symbol: str | None = Query(default=None),
     account_id: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    include_imports: bool = Query(default=False, description="是否连截图导入时生成的记录一起列出"),
     repository: StockRepository = Depends(get_repo),
     context: AuthContext = Depends(require_permission("dashboard:view")),
 ) -> list[dict]:
-    """买卖交易流水查询，按时间倒序。"""
+    """买卖交易流水查询，按时间倒序。默认只列真实成交。"""
     return repository.for_user(context.user.id).position_trades(
         symbol=symbol,
         account_id=account_id,
         limit=limit,
+        include_imports=include_imports,
     )
 
 
@@ -365,6 +397,89 @@ def import_positions_from_image(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _sync_error(exc: Exception) -> JSONResponse:
+    if isinstance(exc, PositionNotFoundError):
+        return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
+    if isinstance(exc, ValueError):
+        return JSONResponse(status_code=400, content=fail(str(exc), code="bad_request"))
+    return JSONResponse(status_code=502, content=fail(str(exc), code="upstream_error"))
+
+
+@router.post("/api/positions/sync/recognize")
+def recognize_position_sync(
+    payload: PositionSyncRecognizeIn,
+    repository: StockRepository = Depends(get_repo),
+    context: AuthContext = Depends(require_permission("data:write")),
+):
+    """持仓同步第 1 步：识别多张截图并合并；能确定账户时同时给出变化清单。不写库。"""
+    try:
+        data = position_sync.recognize_sync(
+            repository=repository.for_user(context.user.id),
+            images=[image.model_dump() for image in payload.images],
+            account_id=payload.account_id,
+            model_config_id=payload.model_config_id,
+        )
+    except (PositionNotFoundError, ValueError, RuntimeError) as exc:
+        return _sync_error(exc)
+    return ok(data)
+
+
+@router.post("/api/positions/sync/preview")
+def preview_position_sync(
+    payload: PositionSyncPreviewIn,
+    repository: StockRepository = Depends(get_repo),
+    context: AuthContext = Depends(require_permission("data:write")),
+):
+    """换账户或改正代码后重新生成变化清单，不再调用视觉模型。不写库。"""
+    try:
+        data = repository.for_user(context.user.id).position_sync_preview(
+            account_id=payload.account_id,
+            rows=payload.rows,
+            funds=payload.funds,
+        )
+    except (PositionNotFoundError, ValueError) as exc:
+        return _sync_error(exc)
+    return ok(data)
+
+
+@router.post("/api/positions/sync/apply")
+def apply_position_sync(
+    payload: PositionSyncApplyIn,
+    repository: StockRepository = Depends(get_repo),
+    context: AuthContext = Depends(require_permission("data:write")),
+):
+    """持仓同步第 2 步：按用户勾选一次写入；同步是校正，不写交易流水（勾选了买卖的除外）。"""
+    try:
+        data = position_sync.apply_sync(
+            repository=repository.for_user(context.user.id),
+            account_id=payload.account_id,
+            items=payload.items,
+            funds=payload.funds,
+            apply_funds=payload.apply_funds,
+            as_of_date=payload.as_of_date,
+            image_sha256=payload.image_sha256,
+            account_no_masked=payload.account_no_masked,
+            created_by=context.user.username,
+        )
+    except (PositionNotFoundError, ValueError) as exc:
+        return _sync_error(exc)
+    return ok(data, message=data.get("message") or "ok")
+
+
+@router.post("/api/positions/sync/{batch_id}/undo")
+def undo_position_sync(
+    batch_id: int,
+    repository: StockRepository = Depends(get_repo),
+    context: AuthContext = Depends(require_permission("data:write")),
+):
+    """撤销一次持仓同步：持仓和可用资金回到同步前。之后账户又有改动时拒绝。"""
+    try:
+        data = repository.for_user(context.user.id).undo_position_sync(batch_id)
+    except (PositionNotFoundError, ValueError) as exc:
+        return _sync_error(exc)
+    return ok(data, message=data.get("message") or "ok")
 
 
 @router.post("/api/positions/ocr/recognize")

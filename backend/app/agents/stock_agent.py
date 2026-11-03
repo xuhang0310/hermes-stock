@@ -195,7 +195,7 @@ SCHEMA_DICTIONARY: dict[str, dict[str, Any]] = {
         "fields": ["event_id", "evidence_type", "source_table", "source_id", "content", "created_at"],
     },
     "position_trades": {
-        "label": "持仓成交流水",
+        "label": "持仓成交流水（source_type=screenshot_import 的是截图导入时顺带生成的记录，不是真实成交，统计成交时要排除）",
         "fields": ["symbol", "name", "action", "quantity", "price", "amount", "source_type", "created_at"],
     },
     "backtest_runs": {

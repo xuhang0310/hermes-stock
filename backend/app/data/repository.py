@@ -9,9 +9,10 @@ from backend.app.data.position_chart_mixin import PositionChartMixin
 from backend.app.data.system_mixin import SystemMixin
 from backend.app.data.position_account_mixin import PositionAccountMixin
 from backend.app.data.position_write_mixin import PositionWriteMixin
+from backend.app.data.position_sync_mixin import PositionSyncMixin
 
 
-class StockRepository(PositionWriteMixin, PositionAccountMixin, PositionQueryMixin, PositionChartMixin, WatchlistMixin, AgentMixin, SystemMixin):
+class StockRepository(PositionSyncMixin, PositionWriteMixin, PositionAccountMixin, PositionQueryMixin, PositionChartMixin, WatchlistMixin, AgentMixin, SystemMixin):
     def __init__(self, db: Session, owner_user_id: int | None = None) -> None:
         self.db = db
         self.owner_user_id = owner_user_id

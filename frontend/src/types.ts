@@ -133,6 +133,93 @@ export type PositionTrade = {
   created_at: string
 }
 
+/** 持仓同步向导：一行截图识别结果（已合并去重、校验过代码） */
+export type PositionSyncRow = {
+  key: string
+  symbol: string
+  name: string | null
+  valid: boolean
+  validation_status: string | null
+  validation_message: string | null
+  corrected: boolean
+  suggested_symbol?: string | null
+  image_index?: number
+  position_quantity: number | null
+  available_quantity?: number | null
+  cost_price?: number | null
+  latest_price?: number | null
+  market_value?: number | null
+  floating_pnl?: number | null
+  floating_pnl_pct?: number | null
+}
+
+export type PositionSyncFunds = {
+  total_asset?: number | null
+  available_cash?: number | null
+  holding_market_value?: number | null
+  total_pnl?: number | null
+  day_pnl?: number | null
+}
+
+export type PositionSyncItemKind = 'new' | 'changed' | 'missing' | 'unchanged' | 'invalid'
+
+export type PositionSyncItem = {
+  key: string
+  symbol: string
+  name: string
+  kind: PositionSyncItemKind
+  apply: boolean
+  before: { quantity: number | null; cost_price: number | null; latest_price: number | null; market_value: number | null } | null
+  after: PositionSyncRow | null
+  changes: string[]
+  note: string | null
+  trade_hint: { action: 'buy' | 'sell'; quantity: number | null; price: number | null } | null
+}
+
+export type PositionSyncPreview = {
+  account_id: number
+  account_label: string
+  items: PositionSyncItem[]
+  counts: Record<PositionSyncItemKind, number>
+  funds_before: { available_cash: number | null; total_asset: number | null; holding_market_value: number | null; fund_updated_at: string | null }
+  funds_after: { total_asset: number | null; available_cash: number | null; holding_market_value: number | null } | null
+  apply_funds_default: boolean
+  completeness: { screenshot_market_value: number; holding_market_value: number | null; complete: boolean | null }
+  warnings: string[]
+}
+
+export type PositionSyncRecognizeResult = {
+  rows: PositionSyncRow[]
+  funds: PositionSyncFunds
+  account_hints: Array<{ broker_name?: string | null; app_name?: string | null; account_no_masked?: string | null }>
+  account_no_masked: string | null
+  as_of_date: string | null
+  warnings: string[]
+  detected_account_id: number | null
+  detected_reason: string
+  image_sha256: string | null
+  images: Array<{ index: number; name: string; ok: boolean; row_count: number; error: string | null }>
+  model: { id?: number | null; display_name?: string | null; model_name?: string | null }
+  preview: PositionSyncPreview | null
+}
+
+export type PositionSyncApplyResult = {
+  batch_id: number
+  account: PositionAccount
+  counts: { added: number; updated: number; closed: number; trades: number }
+  funds_applied: boolean
+  learned_account_no: string | null
+  warnings: string[]
+  message: string
+}
+
+export type PositionSyncUndoResult = {
+  batch_id: number
+  account: PositionAccount
+  restored: number
+  message: string
+}
+
 export type ChartResolution = '1D' | '1' | '5' | '15' | '30' | '60'
 
 export type ChartBar = {

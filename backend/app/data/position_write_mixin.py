@@ -560,12 +560,11 @@ class PositionWriteMixin:
         source_type: str,
         position_id: int | None = None,
         created_by: str | None = None,
-    ) -> None:
+    ) -> PositionTrade:
         """记一条买卖流水。只 add 不 commit，跟随调用方（_save_position_holding 或批量 finish）的 commit。"""
         qty = number_or_none(quantity) or 0.0
         pr = number_or_none(price)
-        self.db.add(
-            PositionTrade(
+        trade = PositionTrade(
                 owner_user_id=self.owner_user_id,
                 account_id=account_id,
                 position_id=position_id,
@@ -577,13 +576,22 @@ class PositionWriteMixin:
                 amount=round(qty * pr, 4) if pr is not None else None,
                 source_type=source_type,
                 created_by=created_by,
-            )
         )
+        self.db.add(trade)
+        return trade
+
+    # 这些来源的“流水”是截图导入、数据校正时顺带生成的，不是真实成交；交易记录默认不显示
+    NON_TRADE_SOURCE_TYPES: tuple[str, ...] = ("screenshot_import",)
 
     def position_trades(
-        self, symbol: str | None = None, account_id: int | None = None, limit: int = 100
+        self,
+        symbol: str | None = None,
+        account_id: int | None = None,
+        limit: int = 100,
+        *,
+        include_imports: bool = False,
     ) -> list[dict[str, Any]]:
-        """买卖流水查询，按时间倒序。"""
+        """买卖流水查询，按时间倒序。默认只列真实成交，include_imports=True 时连截图导入记录一起列。"""
         query = (
             select(PositionTrade, PositionAccount, Instrument)
             .outerjoin(PositionAccount, PositionAccount.id == PositionTrade.account_id)
@@ -596,6 +604,8 @@ class PositionWriteMixin:
             query = query.where(PositionTrade.symbol == symbol)
         if account_id is not None:
             query = query.where(PositionTrade.account_id == account_id)
+        if not include_imports:
+            query = query.where(PositionTrade.source_type.notin_(self.NON_TRADE_SOURCE_TYPES))
         rows = self.db.execute(query).all()
         result: list[dict[str, Any]] = []
         for trade, account, instrument in rows:
@@ -789,7 +799,18 @@ class PositionWriteMixin:
             self.db.delete(snap)
         batch.status = "rolled_back"
         self.db.flush()
-        for symbol, account_id in affected_pairs:
+        self._restore_positions_from_latest_snapshots(affected_pairs)
+        for account_id in affected_accounts:
+            if account_id is not None:
+                account = self.db.get(PositionAccount, account_id)
+                if account is not None and self._owns(account):
+                    self._recompute_account_funds(account)
+        self.db.commit()
+        return {"batch_id": batch.id, "rolled_back_count": len(snaps)}
+
+    def _restore_positions_from_latest_snapshots(self, pairs: set[tuple[str, int | None]]) -> None:
+        """删掉一批快照后，按每个 (标的, 账户) 剩下的最新快照恢复持仓摘要；一条都不剩就删掉持仓。"""
+        for symbol, account_id in pairs:
             latest = self.db.scalar(
                 select(PositionHoldingSnapshot)
                 .where(
@@ -829,13 +850,7 @@ class PositionWriteMixin:
             position.risk_note = latest.risk_note
             position.status = latest.status
             position.closed_at = datetime.now() if latest.status != "open" else None
-        for account_id in affected_accounts:
-            if account_id is not None:
-                account = self.db.get(PositionAccount, account_id)
-                if account is not None and self._owns(account):
-                    self._recompute_account_funds(account)
-        self.db.commit()
-        return {"batch_id": batch.id, "rolled_back_count": len(snaps)}
+        self.db.flush()
 
     def delete_position(self, symbol: str, account_id: int | None = None) -> dict[str, Any]:
         """物理删除一条持仓记录及其全部历史快照（不可逆，留审计日志）。
