@@ -28,7 +28,8 @@ class AnswerStylePromptTests(unittest.TestCase):
     def test_role_contracts_list_content_not_fixed_headings(self) -> None:
         for code in ROLE_SKILLS:
             with self.subTest(role=code):
-                prompt = digital_human_skill_prompt(code)
+                # role_prompt="" 用代码里的默认角色说明，不读库（库里是可编辑的副本）
+                prompt = digital_human_skill_prompt(code, role_prompt="")
                 self.assertIn("回答要讲到", prompt)
                 self.assertIn("不是固定标题", prompt)
                 self.assertNotIn("输出固定包含", prompt)

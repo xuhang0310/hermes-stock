@@ -35,8 +35,33 @@ DIGEST_MIN_MESSAGES = 4
 DIGEST_LOOKBACK = 20
 MEMORY_RETRIEVAL_LIMIT = 8
 RERANK_POOL = 24  # 开启重排时，先从混合检索取这么多候选，再由 rerank 精排到 MEMORY_RETRIEVAL_LIMIT
-MEMORY_CONTEXT_TOKEN_BUDGET = 800
+MEMORY_CONTEXT_TOKEN_BUDGET = 1000
 MEMORY_TYPES = {"fact": "事实", "preference": "偏好", "decision": "决策", "gap": "缺口", "interest": "关注"}
+
+# 记忆淡出：知识缺口 60 天后过时；事实/决策 180 天没更新且 90 天没被用到就收起来
+STALE_GAP_DAYS = 60
+STALE_MEMORY_DAYS = 180
+STALE_IDLE_DAYS = 90
+
+# 持仓、成交、价格、现金这类随时会变的数字以系统实时数据为准，不当长期记忆。
+# 生产上 7 月记下的“当前持仓仅剩平安银行 1000 股”被反复注入了 180 多次，和实时持仓打架。
+_HOLDING_WORDS = re.compile(
+    r"持有|持仓|清仓|建仓|加仓|减仓|补仓|买入|卖出|卖掉|成交|成本|可用资金|现金|总资产|市值|浮盈|浮亏|"
+    r"仓位占比|止损线|止损价|股价|收盘价|现价|最新价"
+)
+_QUANTITY = re.compile(r"\d{6}|\d[\d,]*(?:\.\d+)?\s*(?:万股|股|手|元|万|亿|%|只)|价[为是:：]?\s*\d")
+_HOLDING_LIST = re.compile(r"(?:持仓|自选池|自选股)(?:中|标的)?(?:包括|包含|涉及|仅剩|集中在|为空)")
+
+
+def is_volatile_memory(memory_type: str, content: str) -> bool:
+    """持仓快照、成交、价格类“事实”很快过时，系统里有实时数据，不进长期记忆。
+
+    只看 fact：decision 里常有用户定下的长期规则（如“每只首次买入不超过总资产 5%”），不能误伤。
+    """
+    if memory_type != "fact":
+        return False
+    text = content or ""
+    return bool(_HOLDING_LIST.search(text) or (_HOLDING_WORDS.search(text) and _QUANTITY.search(text)))
 
 # 向量检索权重
 HYBRID_VECTOR_WEIGHT = 0.55  # 语义相似度权重
@@ -381,16 +406,23 @@ def retrieve_memories(
         db, user_id=user_id, query=query, digital_human_id=digital_human_id,
         limit=RERANK_POOL if rerank_on else limit,
     )
+    # 旧的持仓快照即使还没被收起，也不注入
+    pool = [m for m in pool if not is_volatile_memory(m.memory_type, m.content)]
     if not pool:
         return ""
     memories = _rerank(query, pool, top_n=limit) if rerank_on else pool[:limit]
     if not memories:
         return ""
 
-    lines = ["【用户长期记忆】"]
+    lines = [
+        "【用户长期记忆】（从过去的对话里记下的，方括号里是记录日期，可能已经过时；"
+        "持仓、成交、价格、现金一律以系统里的实时数据为准）"
+    ]
     for m in memories:
         type_label = MEMORY_TYPES.get(m.memory_type, m.memory_type)
-        lines.append(f"- [{type_label}] {m.content}")
+        recorded = m.updated_at or m.created_at
+        date_label = f"｜{recorded:%Y-%m-%d}" if recorded else ""
+        lines.append(f"- [{type_label}{date_label}] {m.content}")
         m.access_count = (m.access_count or 0) + 1
         m.last_accessed_at = datetime.now()
 
@@ -603,6 +635,8 @@ def digest_conversation(
         content = str(item.get("content", "")).strip()
         if not content:
             continue
+        if is_volatile_memory(memory_type, content):
+            continue
 
         confidence = min(1.0, max(0.1, float(item.get("confidence", 0.7))))
         importance = min(1.0, max(0.1, float(item.get("importance", 0.5))))
@@ -682,13 +716,15 @@ def _call_llm_for_digestion(messages: list[AiChatMessage], user_id: int) -> list
         "  confidence: 0.0-1.0，你对这条记忆的确信程度\n"
         "  importance: 0.0-1.0，这条记忆对理解用户的重要性\n\n"
         "规则：\n"
-        "- fact: 可验证的事实，如持仓、交易动作\n"
+        "- fact: 长期稳定、可验证的事实，如账户结构、使用的券商、职业背景、研究习惯\n"
         "- preference: 用户表达的方法、风格、习惯偏好\n"
-        "- decision: 用户明确的决定或结论\n"
+        "- decision: 用户明确定下的长期规则或结论，如仓位上限、止损原则、任务安排\n"
         "- gap: 用户关心但尚未获得满意答案的问题\n"
         "- interest: 用户反复提及的话题或标的\n"
         "- 只提取有价值的、能帮助未来对话的信息\n"
         "- 不要提取临时性、一次性的琐碎问题\n"
+        "- 不要记持仓明细、股数、成本、市值、盈亏、现金、成交和股价：系统里有实时数据，记下来很快就过时\n"
+        "- 不要记某一天的单笔买卖操作，除非它是用户定下的长期规则\n"
         "- 如果对话中没有值得长期记住的内容，返回空数组 []\n"
         "- 只输出 JSON，不要其他文字"
     )
@@ -808,3 +844,43 @@ async def schedule_memory_digestion(session_id: int, user_id: int, digital_human
 def _digest_in_new_session(session_id: int, user_id: int, digital_human_id: int | None) -> None:
     with SessionLocal() as db:
         digest_conversation(db, session_id=session_id, user_id=user_id, digital_human_id=digital_human_id)
+        try:
+            archive_stale_memories(db, user_id=user_id)
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            log_event("agent", "WARNING", f"记忆淡出失败 user:{user_id}", to_db=False)
+
+
+def archive_stale_memories(db: Session, *, user_id: int, now: datetime | None = None) -> int:
+    """记忆淡出：持仓快照类事实、过时的知识缺口、长期没更新也没被用到的事实/决策转为 archived。
+
+    archived 不删除，需要时把 status 改回 active 即可恢复。返回本次收起的条数。
+    """
+    now = now or datetime.now()
+    rows = db.scalars(
+        select(UserMemory).where(UserMemory.user_id == user_id, UserMemory.status == "active")
+    ).all()
+    archived: list[int] = []
+    for m in rows:
+        recorded = m.updated_at or m.created_at or now
+        age_days = (now - recorded).days
+        idle_days = (now - (m.last_accessed_at or recorded)).days
+        stale = (
+            is_volatile_memory(m.memory_type, m.content)
+            or (m.memory_type == "gap" and age_days > STALE_GAP_DAYS)
+            or (
+                m.memory_type in ("fact", "decision")
+                and age_days > STALE_MEMORY_DAYS
+                and idle_days > STALE_IDLE_DAYS
+            )
+        )
+        if stale:
+            m.status = "archived"
+            archived.append(m.id)
+    if not archived:
+        return 0
+    db.commit()
+    for memory_id in archived:
+        _delete_memory_vector(memory_id)
+    log_event("agent", "INFO", f"记忆淡出 user:{user_id} 收起 {len(archived)} 条", to_db=False)
+    return len(archived)

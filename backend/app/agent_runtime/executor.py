@@ -21,6 +21,14 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.models import AiChatMessage, AiChatSession
 from backend.app.core.settings import settings
 
+# 一次运行最多换几次模型（主模型 + 2 个备用）
+MAX_MODEL_FALLBACKS = 2
+
+
+def exception_text(exc: BaseException) -> str:
+    """异常信息为空时（如读超时）至少留下异常类型：否则失败原因是空白，也没法判断要不要重试。"""
+    return str(exc).strip() or type(exc).__name__
+
 
 class AgentRunExecutor:
     def __init__(
@@ -160,7 +168,7 @@ class AgentRunExecutor:
             )
             return True
         except Exception as exc:  # noqa: BLE001
-            await self._recover_or_fail(run_id, str(exc))
+            await self._recover_or_fail(run_id, exception_text(exc))
             return False
         finally:
             if heartbeat_task is not None:
@@ -197,6 +205,8 @@ class AgentRunExecutor:
     ) -> None:
         run_id = run["run_id"]
         has_side_effects = await asyncio.to_thread(self.repository.has_side_effects, run_id)
+        if not has_side_effects and await self._try_model_fallback(run, sink, error):
+            return
         if (
             not has_side_effects
             and self._is_retryable(error)
@@ -247,6 +257,10 @@ class AgentRunExecutor:
                 await self._notify_team_parent(run_id)
                 return
             has_side_effects = await asyncio.to_thread(self.repository.has_side_effects, run_id)
+            if not has_side_effects and await self._try_model_fallback(
+                run, DurableEventSink(run_id, self.repository, self.broker), error
+            ):
+                return
             if not has_side_effects and self._is_retryable(error) and await asyncio.to_thread(
                 self.repository.requeue, run_id, error=error
             ):
@@ -259,6 +273,118 @@ class AgentRunExecutor:
             await sink.flush()
             await self._notify_team_parent(run_id)
         log_event("agent", "ERROR", "Durable Agent worker failed", run_id=run_id, error=error[:500])
+
+    async def _try_model_fallback(
+        self,
+        run: dict[str, Any],
+        sink: DurableEventSink,
+        error: str,
+    ) -> bool:
+        """模型服务出错时换一个模型重跑这次运行。
+
+        临时故障（5xx、流中断）先按原逻辑在同一模型上重试一次，同一模型再失败才换；
+        重试没用的错误（如中转返回的 400“生成失败”、无权限、密钥失效）直接换。
+        """
+        if not self.should_switch_model(error, int(run["attempts"])):
+            return False
+        run_id = run["run_id"]
+        request_payload = await asyncio.to_thread(self.repository.load_request, run_id)
+        if not request_payload:
+            return False
+        choice = await asyncio.to_thread(self.next_model_choice, request_payload)
+        if choice is None:
+            return False
+        next_id, failed_ids, failed_label, next_label = choice
+        switched = await asyncio.to_thread(
+            self.repository.switch_model_and_requeue,
+            run_id,
+            model_config_id=next_id,
+            failed_model_config_ids=failed_ids,
+            error=error,
+        )
+        if not switched:
+            return False
+        await sink.emit(
+            {
+                "type": "retrying",
+                "attempt": int(run["attempts"]) + 1,
+                "max_attempts": int(run["max_attempts"]),
+                "retry_after_ms": 2000,
+                "reset_stream": True,
+                "message": f"{failed_label} 当前不可用，已自动切换到 {next_label} 重新执行。",
+            }
+        )
+        await sink.flush()
+        log_event(
+            "agent",
+            "WARNING",
+            "模型服务出错，自动切换备用模型重跑",
+            to_db=False,
+            run_id=run_id,
+            failed_model=failed_label,
+            fallback_model=next_label,
+            error=error[:300],
+        )
+        await asyncio.sleep(2)
+        await self.broker.enqueue(run_id)
+        return True
+
+    @classmethod
+    def should_switch_model(cls, error: str, attempts: int) -> bool:
+        if not cls._is_model_provider_error(error):
+            return False
+        # 临时故障先在原模型上重试一次（attempts 从 1 开始计）
+        return not cls._is_retryable(error) or attempts >= 2
+
+    @staticmethod
+    def _is_model_provider_error(error: str) -> bool:
+        """模型服务本身出错（换个模型可能就好），不含整个任务超时、数据库死锁等。"""
+        value = (error or "").lower()
+        if "执行超时" in value:
+            return False
+        markers = (
+            "error code: 4",
+            "error code: 5",
+            "toapis_error",
+            "overloaded",
+            "service unavailable",
+            "temporarily unavailable",
+            "bad gateway",
+            "stream was interrupted",
+            "stream failed",
+            "access to model denied",
+            "accessdenied",
+            "model_not_found",
+            "model not found",
+            "invalid api key",
+            "apiconnectionerror",
+            "apitimeouterror",
+            "readtimeout",
+            "remoteprotocolerror",
+        )
+        return any(marker in value for marker in markers)
+
+    @staticmethod
+    def next_model_choice(request_payload: dict[str, Any]) -> tuple[int, list[int], str, str] | None:
+        """按备用顺序（其他平台优先）挑下一个没试过的模型，返回 (模型ID, 已失败模型ID, 失败模型名, 新模型名)。"""
+        from backend.app.core.llm_config import active_llm_config, resolve_chat_model_config_ids
+
+        failed_ids = [int(item) for item in request_payload.get("failed_model_config_ids") or []]
+        if len(failed_ids) >= MAX_MODEL_FALLBACKS:
+            return None
+        candidates = resolve_chat_model_config_ids(request_payload.get("model_config_id"))
+        if len(candidates) < 2:
+            return None
+        failed_ids = [*failed_ids, candidates[0]]
+        next_id = next((item for item in candidates if item not in failed_ids), None)
+        if next_id is None:
+            return None
+
+        def label(model_config_id: int) -> str:
+            config = active_llm_config(model_config_id)
+            return str(config.get("display_name") or config.get("model") or model_config_id)
+
+        return next_id, failed_ids, label(candidates[0]), label(next_id)
 
     async def _notify_team_parent(self, run_id: str) -> None:
         results = [await asyncio.to_thread(self.team_service.on_child_terminal, run_id)]

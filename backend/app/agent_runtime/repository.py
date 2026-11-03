@@ -634,6 +634,29 @@ class AgentRunRepository:
             db.commit()
             return True
 
+    def switch_model_and_requeue(
+        self,
+        run_id: str,
+        *,
+        model_config_id: int,
+        failed_model_config_ids: list[int],
+        error: str,
+    ) -> bool:
+        """模型服务出错时改用备用模型重新排队：只改这次运行的模型，不占重试次数。"""
+        with self.session_factory() as db:
+            row = db.scalar(select(AgentRun).where(AgentRun.run_id == run_id).with_for_update())
+            if row is None or row.status in TERMINAL_RUN_STATUSES:
+                return False
+            payload = json.loads(row.request_json)
+            payload["model_config_id"] = int(model_config_id)
+            payload["failed_model_config_ids"] = [int(item) for item in failed_model_config_ids]
+            row.request_json = json.dumps(payload, ensure_ascii=False, default=str)
+            row.status = "queued"
+            row.worker_id = None
+            row.error = (error or "")[:4000] or None
+            db.commit()
+            return True
+
     def mark_terminal(
         self,
         run_id: str,

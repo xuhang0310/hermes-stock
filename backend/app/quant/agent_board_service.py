@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.database import session_scope
+from backend.app.market.digital_human_tools import is_role_profile
 from backend.app.core.models import (
     AiChatMessage,
     AiChatSession,
@@ -211,7 +212,8 @@ def create_task_batch(
                     f"当前数字人：{profile.name}",
                     f"风格：{profile.avatar_tone}",
                     f"职责：{profile.description}",
-                    f"系统提示：{profile.system_prompt}",
+                    # 研究角色的提示词由角色段落统一注入（digital_human_skill_prompt），这里只给其他数字人带上
+                    *([] if is_role_profile(profile.code) else [f"系统提示：{profile.system_prompt}"]),
                     "当前任务来自 Agent 任务看板，只完成分配给你的任务，不要继续委派。",
                 ]
             )

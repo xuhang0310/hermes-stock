@@ -58,6 +58,7 @@ from backend.app.seed.seed import (
     seed_position_accounts,
     seed_position_agent_profile,
     seed_watchlist_agent_profile,
+    upgrade_role_prompts,
 )
 from backend.app.skills.registry import skill_registry
 
@@ -84,6 +85,7 @@ def create_app(init_db: bool = True) -> FastAPI:
                 seed_position_accounts(db)
                 seed_position_agent_profile(db)
                 seed_watchlist_agent_profile(db)
+                upgrade_role_prompts(db)
                 ensure_default_jobs(db)
                 ensure_ask_stock_profile(db)
             await resume_pending_uploads()

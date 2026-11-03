@@ -67,6 +67,7 @@ from backend.app.ai.prompt_recommendations import (
 from backend.app.core.applog import log_event
 from backend.app.agents.stock_agent import run_agent_events
 from backend.app.agents.tool_approval import cancel_pending_run_approvals, normalize_approval_policy
+from backend.app.market.digital_human_tools import default_role_prompt, is_role_profile
 from backend.app.market.stock_tools import normalize_a_share_symbol, stock_strategy_payload
 from backend.app.core.settings import settings
 from backend.app.skills.registry import skill_registry
@@ -444,6 +445,8 @@ def _digital_human_out(profile: DigitalHumanProfile) -> dict:
         "target_roles": profile.target_roles,
         "description": profile.description,
         "system_prompt": profile.system_prompt,
+        # 研究角色的默认提示词，管理页“恢复默认”用；录入 Agent、问股助手等没有默认值
+        "default_system_prompt": default_role_prompt(profile.code) if is_role_profile(profile.code) else None,
         "quick_prompts": _quick_prompts(profile),
         "status": profile.status,
         "sort_order": profile.sort_order,
@@ -466,7 +469,11 @@ def _profile_allowed(profile: DigitalHumanProfile, context: AuthContext) -> bool
     return _csv_match(profile.target_roles, {context.user.role})
 
 
-def _digital_human_context(context: AuthContext, profile: DigitalHumanProfile | None) -> str:
+def _digital_human_context(
+    context: AuthContext,
+    profile: DigitalHumanProfile | None,
+    chat_mode: str = "research",
+) -> str:
     parts = [
         f"当前用户: {context.user.display_name}",
         f"系统角色: {context.user.role}",
@@ -477,9 +484,11 @@ def _digital_human_context(context: AuthContext, profile: DigitalHumanProfile | 
                 f"当前数字人: {profile.name}",
                 f"风格: {profile.avatar_tone}",
                 f"职责: {profile.description}",
-                f"提示词: {profile.system_prompt}",
             ]
         )
+        # 研究模式的角色提示词由 digital_human_skill_prompt 统一注入，这里只在其他模式（如问股）带上
+        if chat_mode != "research" or not is_role_profile(profile.code):
+            parts.append(f"提示词: {profile.system_prompt}")
     return "\n".join(parts)
 
 
@@ -2588,7 +2597,7 @@ def _prepare_agent_chat(
 
     profile_payload = _digital_human_out(profile) if profile else None
     model_payload = _model_out(model_config) if model_config else None
-    digital_human_context = _digital_human_context(context, profile)
+    digital_human_context = _digital_human_context(context, profile, payload.chat_mode)
     model_config_id = model_config.id if model_config else None
     memory_context = retrieve_memories(
         db,

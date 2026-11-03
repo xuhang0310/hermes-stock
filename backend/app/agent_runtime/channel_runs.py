@@ -10,6 +10,7 @@ from backend.app.agent_runtime.repository import AgentRunRepository, agent_run_r
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import AiChatMessage, AiChatSession, DigitalHumanProfile, User
 from backend.app.core.settings import settings
+from backend.app.market.digital_human_tools import is_role_profile
 
 
 def build_channel_request(
@@ -58,7 +59,8 @@ def build_channel_request(
                 f"当前数字人：{profile.name}",
                 f"风格：{profile.avatar_tone}",
                 f"职责：{profile.description}",
-                f"系统提示：{profile.system_prompt}",
+                # 研究角色的提示词由角色段落统一注入（digital_human_skill_prompt），这里只给其他数字人带上
+                *([] if is_role_profile(profile.code) else [f"系统提示：{profile.system_prompt}"]),
             ]
         )
     return {

@@ -697,6 +697,8 @@ export type DigitalHuman = {
   target_roles: string
   description: string
   system_prompt: string
+  /** 研究角色的默认提示词（“恢复默认”用）；问股助手、录入 Agent 没有 */
+  default_system_prompt?: string | null
   quick_prompts: string[]
   status: string
   sort_order: number

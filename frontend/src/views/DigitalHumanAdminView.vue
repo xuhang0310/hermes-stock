@@ -256,7 +256,19 @@ onMounted(load)
             <label><span>可见角色</span><input v-model="editForm.target_roles" placeholder="* 或 admin,researcher" /></label>
           </div>
           <label><span>角色描述</span><input v-model="editForm.description" /></label>
-          <label><span>系统提示词</span><textarea v-model="editForm.system_prompt" rows="7"></textarea></label>
+          <label>
+            <span>
+              角色提示词
+              <button
+                v-if="editForm.default_system_prompt && editForm.system_prompt !== editForm.default_system_prompt"
+                type="button"
+                class="prompt-reset-button"
+                @click="editForm.system_prompt = editForm.default_system_prompt"
+              >恢复默认</button>
+            </span>
+            <textarea v-model="editForm.system_prompt" rows="12"></textarea>
+            <p class="rhythm-prompt-hint">这就是这个数字人的角色说明：擅长什么、回答要讲到什么，保存后下一次对话生效。查最新价、联网补充、说人话这些通用规则系统会自动加上，不用写进来。</p>
+          </label>
           <label><span>快捷问题 <small>每行一条</small></span><textarea :value="editForm.quick_prompts.join('\n')" rows="4" @input="onQuickPromptsInput"></textarea></label>
           <div class="form-row">
             <label><span>显示顺序</span><input v-model.number="editForm.sort_order" type="number" /></label>

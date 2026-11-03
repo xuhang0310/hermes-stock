@@ -97,7 +97,6 @@ ROLE_SKILLS: dict[str, dict[str, Any]] = {
             "任务拆解: 先判断问题属于持仓、自选、单票研究、风险还是日报，再选择最少工具。",
             "优先级排序: 优先处理持仓，其次自选池；有止损、L0/L1事件、缺研究证据的标的优先。",
             "统稿输出: 先给结论再讲依据，让用户分得清数据和判断，不替用户自动下单。",
-            "持仓写入（若可用 update_my_positions 工具）: 先 get_portfolio_snapshot 读现状；rows 只传用户本次明确变更的标的，严禁把未变化的已有持仓重复提交；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
         ],
         "output": "回答要讲到: 问整体情况时讲今天最值得关注的事、持仓怎么样、自选池怎么样、风险和还缺的数据、接下来做什么；问单只股票或具体问题时只回答这个问题，顺带说一句它在不在你的持仓或自选里。",
     },
@@ -204,17 +203,66 @@ TOOL_DISPLAY_NAMES.update(
 )
 
 
-def digital_human_skill_prompt(profile_code: str | None) -> str:
-    code = _role_code(profile_code)
-    role = ROLE_SKILLS.get(code, ROLE_SKILLS[DEFAULT_ROLE_CODE])
-    skills = "\n".join(f"- {item}" for item in role["skills"])
-    return f"""当前数字人能力包: {role["name"]}
+# 跟工具绑定的硬规则：不放进可编辑的角色提示词，避免在页面上改提示词时误删。
+ROLE_FIXED_RULES: dict[str, list[str]] = {
+    "stock-pm": [
+        "持仓写入（若可用 update_my_positions 工具）: 先 get_portfolio_snapshot 读现状；rows 只传用户本次明确变更的标的，严禁把未变化的已有持仓重复提交；按用户明确给出的数字写，缺字段先追问不臆造；首次调用不传 confirmed（返回预览不落库），复述给用户确认后，用户明确同意才以 confirmed=true 第二次调用真正写入；只维护持仓记录，绝不替用户下单/建议买卖。",
+    ],
+}
 
-专属技能:
+
+def is_role_profile(profile_code: str | None) -> bool:
+    """研究模式下由 digital_human_skill_prompt 注入角色提示词的数字人。"""
+    return (profile_code or "") in ROLE_SKILLS
+
+
+def default_role_prompt(profile_code: str | None) -> str:
+    """角色提示词默认值：数字人管理页“恢复默认”和种子数据都用它。"""
+    role = ROLE_SKILLS.get(_role_code(profile_code), ROLE_SKILLS[DEFAULT_ROLE_CODE])
+    skills = "\n".join(f"- {item}" for item in role["skills"])
+    return f"""你是{role["name"]}。
+
+专长:
 {skills}
 
-回答内容（用白话结论组织，不是固定标题）:
-- {role["output"]}
+{role["output"]}"""
+
+
+def _stored_role_prompt(profile_code: str | None) -> str:
+    """读数字人管理页保存的角色提示词；查不到或库不可用时返回空串，由调用方退回默认值。"""
+    code = (profile_code or "").strip()
+    if not code:
+        return ""
+    try:
+        with engine.connect() as conn:
+            value = conn.execute(
+                text("SELECT system_prompt FROM digital_human_profiles WHERE code = :code LIMIT 1"),
+                {"code": code},
+            ).scalar()
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(value or "").strip()
+
+
+def digital_human_skill_prompt(profile_code: str | None, role_prompt: str | None = None) -> str:
+    """研究模式的角色段落。
+
+    角色提示词只有一个来源：数字人管理页保存的 system_prompt（代码里的 ROLE_SKILLS 只是默认值）。
+    role_prompt=None 时按 code 读库；传空串表示直接用默认值（测试用）。
+    """
+    code = _role_code(profile_code)
+    role = ROLE_SKILLS.get(code, ROLE_SKILLS[DEFAULT_ROLE_CODE])
+    if role_prompt is None:
+        # 只有研究角色读库；问股助手、录入 Agent 等的提示词仍放在数字人上下文里
+        role_prompt = _stored_role_prompt(profile_code) if is_role_profile(profile_code) else ""
+    body = role_prompt.strip()
+    body = body or default_role_prompt(profile_code)
+    fixed_rules = "".join(f"\n- {item}" for item in ROLE_FIXED_RULES.get(code, []))
+    return f"""当前数字人能力包: {role["name"]}
+
+{body}
+
+（上面角色说明里“回答要讲到”的是要覆盖的内容，用白话结论组织，不是固定标题。）
 
 工具使用规则:
 1. 【必做】凡回答涉及具体股票（无论是否在持仓/自选池）的行情、判断、风控问题，先调用 get_latest_price 获取该标的最新价格，回答中标注价格与所属交易日；绝不引用记忆或历史对话里的旧价。
@@ -223,7 +271,7 @@ def digital_human_skill_prompt(profile_code: str | None) -> str:
 4. 行情、财务、龙虎榜、股东、两融、宏观等结构化数据优先走 TuShare：不确定用哪个接口时先 list_tushare_apis 查目录（分类→接口→参数），再用 tushare_query 透传调用；查过目录仍没有的数据才说没有。
 5. 用户问系统外的标的、行业、政策、新闻、宏观或突发事件时，用 search_market_intel / search_stock_news 联网搜索补充；可以先说明它是否在系统持仓·自选范围内，再结合搜索结果和你的专业能力作答，绝不因为"不在持仓/自选池"就拒绝回答。
 6. 遇到你本职专业之外、但用户确实需要的问题，也尽力帮忙（能联网就联网），做既专业又肯搭把手的伙伴，而不是只会查库的机器。
-7. 关键结论要让用户知道依据（系统里的数据、行情数据、网上消息还是你的推断），自然写进句子，不写工具名；没有数据时如实说缺失，不要编造。"""
+7. 关键结论要让用户知道依据（系统里的数据、行情数据、网上消息还是你的推断），自然写进句子，不写工具名；没有数据时如实说缺失，不要编造。{fixed_rules}"""
 
 
 def digital_human_tool_schemas(profile_code: str | None) -> list[dict[str, Any]]:

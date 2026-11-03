@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,8 @@ from backend.app.core.settings import settings
 
 SCHEDULER_INTERVAL_SECONDS = 30 * 60
 RECOMMENDATION_TTL_HOURS = 10
+# 过期/已关闭的推荐问题没有地方再读，留 7 天便于排查后删除（生产表曾积压 4 万行）
+RECOMMENDATION_PURGE_DAYS = 7
 FAILED_REFRESH_STALE_GRACE_HOURS = 2
 MAX_RECOMMENDATIONS = 8
 # Use a read timeout shorter than the 90-second refresh lease.
@@ -594,6 +596,35 @@ async def _scheduler_loop() -> None:
 def _refresh_all_in_new_session() -> None:
     with SessionLocal() as db:
         refresh_all_recommendations(db)
+        try:
+            purged = purge_old_recommendations(db)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log_event("agent", "WARNING", f"清理过期推荐问题失败: {str(exc)[:300]}", to_db=False)
+        else:
+            if purged:
+                log_event("agent", "INFO", f"清理过期推荐问题 {purged} 条", to_db=False)
+
+
+def purge_old_recommendations(db: Session, *, now: datetime | None = None, batch_size: int = 5000) -> int:
+    """删除 7 天前就已过期或被关闭的推荐问题，分批删，避免一次锁太多行。"""
+    cutoff = (now or _utcnow()) - timedelta(days=RECOMMENDATION_PURGE_DAYS)
+    total = 0
+    for _ in range(50):
+        ids = db.scalars(
+            select(AiPromptRecommendation.id)
+            .where(
+                AiPromptRecommendation.status.in_(("expired", "dismissed")),
+                AiPromptRecommendation.updated_at < cutoff,
+            )
+            .limit(batch_size)
+        ).all()
+        if not ids:
+            break
+        db.execute(delete(AiPromptRecommendation).where(AiPromptRecommendation.id.in_(ids)))
+        db.commit()
+        total += len(ids)
+    return total
 
 
 # ---------------------------------------------------------------------------

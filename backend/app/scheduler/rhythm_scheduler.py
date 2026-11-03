@@ -46,6 +46,7 @@ from backend.app.core.models import (
     User,
 )
 from backend.app.core.settings import settings
+from backend.app.market.digital_human_tools import is_role_profile
 
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -333,7 +334,8 @@ def _build_digital_human_context(code: str | None) -> str | None:
                 f"当前数字人: {profile.name}",
                 f"风格: {profile.avatar_tone}",
                 f"职责: {profile.description}",
-                f"提示词: {profile.system_prompt}",
+                # 研究角色的提示词由角色段落统一注入（digital_human_skill_prompt），这里只给其他数字人带上
+                *([] if is_role_profile(profile.code) else [f"提示词: {profile.system_prompt}"]),
             ]
         )
 
