@@ -8566,3 +8566,159 @@ body.workbench-modal-open {
 .ui-empty { display: grid; place-content: center; justify-items: center; gap: 6px; min-height: 120px; padding: 24px; color: var(--muted); text-align: center; }
 .ui-empty strong { color: var(--text); font-size: 14px; font-weight: 500; }
 .ui-empty p { margin: 0; font-size: 12px; }
+
+/* 持仓录入抽屉：精简气泡、处理过程折叠、输入栏一行排开 */
+.position-agent-drawer .position-agent-messages {
+  gap: 12px;
+}
+
+.position-agent-drawer .message.user {
+  max-width: min(440px, 82%);
+  padding: 8px 12px;
+  border-color: rgba(213, 180, 106, 0.3);
+  border-radius: 12px 12px 4px 12px;
+  background: #1d1a13;
+  box-shadow: none;
+}
+
+.position-agent-drawer .message.assistant {
+  max-width: min(540px, 94%);
+  padding: 10px 14px;
+  border-radius: 12px 12px 12px 4px;
+}
+
+.position-agent-drawer .message .stream-status {
+  min-height: 24px;
+  margin-bottom: 8px;
+  padding: 3px 9px;
+  font-size: 11px;
+}
+
+.position-agent-trace {
+  margin-bottom: 8px;
+}
+
+.position-agent-trace > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-2);
+  font-size: 11px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.position-agent-trace > summary::-webkit-details-marker {
+  display: none;
+}
+
+.position-agent-trace > summary::before {
+  content: "▸";
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.position-agent-trace[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.position-agent-trace > summary:hover {
+  color: var(--gold-2);
+}
+
+.position-agent-trace .react-steps {
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.position-agent-trace .react-step {
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+.position-agent-drawer .position-agent-composer {
+  gap: 8px;
+  padding: 10px 14px 14px;
+}
+
+.position-agent-drawer .position-agent-composer textarea {
+  min-height: 64px;
+  max-height: 200px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  line-height: 1.55;
+  resize: none;
+}
+
+.position-agent-drawer .position-agent-composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.position-agent-drawer .position-agent-composer-actions select {
+  width: auto;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.position-agent-drawer .position-agent-account {
+  flex: 1 1 150px;
+  max-width: 220px;
+}
+
+.position-agent-drawer .position-agent-model {
+  flex: 0 1 170px;
+  max-width: 200px;
+  text-overflow: ellipsis;
+}
+
+.position-agent-drawer .position-agent-upload {
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.position-agent-hint {
+  margin-left: auto;
+  color: var(--muted-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.position-agent-drawer .position-agent-composer button.position-agent-send {
+  min-width: 72px;
+  height: 32px;
+  border-color: var(--gold);
+  background: var(--gold);
+  color: #17140c;
+  font-weight: 600;
+}
+
+.position-agent-drawer .position-agent-composer button.position-agent-send:hover:not(:disabled) {
+  border-color: var(--gold-2);
+  background: var(--gold-2);
+}
+
+.position-agent-drawer .position-agent-composer button.position-agent-send:disabled {
+  border-color: var(--line-strong);
+  background: #1a1a1b;
+  color: var(--muted-2);
+}
+
+@media (max-width: 560px) {
+  .position-agent-hint {
+    display: none;
+  }
+
+  .position-agent-drawer .position-agent-account,
+  .position-agent-drawer .position-agent-model {
+    max-width: none;
+  }
+
+  .position-agent-drawer .position-agent-composer button.position-agent-send {
+    margin-left: auto;
+  }
+}

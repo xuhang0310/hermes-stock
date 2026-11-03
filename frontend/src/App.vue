@@ -566,12 +566,8 @@ function modelOptionLabel(model: ModelConfig | null | undefined) {
 async function loadPositionModels() {
   const payload = await api.modelConfigs()
   positionModels.value = payload.filter((item) => item.status !== 'disabled')
-  const preferred = positionModels.value.find(
-    (item) => item.model_name.trim().toLowerCase() === 'qwen3.7-plus'
-  )
-    || positionModels.value.find((item) => item.model_name.trim().toLowerCase() === 'k3')
-    || positionModels.value.find((item) => item.is_active)
-    || positionModels.value[0]
+  // 默认用“设置 → 模型配置”里标为默认的模型；上传截图时后端会自动换成支持识图的模型
+  const preferred = positionModels.value.find((item) => item.is_active) || positionModels.value[0]
   selectedPositionModelId.value = preferred?.id || null
 }
 
@@ -910,7 +906,9 @@ function handlePositionAgentEvent(event: PositionAgentStreamEvent, messageId: nu
   } else if (event.type === 'thinking') {
     const content = event.message || '持仓 Agent 正在分析...'
     const last = message.steps?.[message.steps.length - 1]
-    if (last?.type !== 'thought' || last.content !== content) {
+    if (/^AgentScope 正在分析/.test(content)) {
+      // 引擎的通用进度提示，状态条已经显示“正在识别”，不进处理过程
+    } else if (last?.type !== 'thought' || last.content !== content) {
       updatePositionAgentMessage(messageId, (current) => ({
         ...current,
         steps: [...(current.steps || []), { type: 'thought', content }]
@@ -988,12 +986,35 @@ function positionStatusText(message: PositionAgentChat) {
 }
 
 function positionStepLabel(step: { type: string; display_name?: string; tool?: string }) {
-  if (step.type === 'model') return 'Model'
-  if (step.type === 'thought') return 'Thinking'
-  if (step.type === 'action') return `Action · ${step.display_name || step.tool || 'tool'}`
-  if (step.type === 'observation') return `Observation · ${step.display_name || step.tool || 'tool'}`
-  if (step.type === 'error') return `Error · ${step.display_name || step.tool || 'tool'}`
+  const tool = step.display_name || step.tool || '工具'
+  if (step.type === 'model') return '模型'
+  if (step.type === 'thought') return '思考'
+  if (step.type === 'action') return `调用 · ${tool}`
+  if (step.type === 'observation') return `结果 · ${tool}`
+  if (step.type === 'error') return `出错 · ${tool}`
   return step.type
+}
+
+function positionTraceSummary(message: PositionAgentChat) {
+  const steps = message.steps || []
+  const modelStep = steps.find((step) => step.type === 'model')
+  const model = modelStep?.content.replace(/^使用\s*/, '').replace(/\s*处理。?$/, '').trim()
+  const toolCount = steps.filter((step) => step.type === 'action').length
+  const parts = [
+    message.status === 'thinking' ? '处理中' : '处理过程',
+    model ? `模型 ${model}` : '',
+    toolCount ? `调用工具 ${toolCount} 次` : ''
+  ]
+  return parts.filter(Boolean).join(' · ')
+}
+
+function onPositionComposerKeydown(event: KeyboardEvent) {
+  // 回车发送，Shift+回车换行；中文输入法选字时的回车不发送
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  if (positionAgentBusy.value) return
+  if (!positionAgentInstruction.value.trim() && !positionAgentImageBase64.value) return
+  void agentAddPositions()
 }
 
 function formatNumber(value: number | null | undefined, digits = 2) {
@@ -1356,21 +1377,27 @@ onBeforeUnmount(() => {
 
           <article v-for="item in positionAgentChats" :key="item.id" class="message" :class="item.role">
             <template v-if="item.role === 'user'">
-              <span>你</span>
               <p>{{ item.content }}</p>
               <small v-if="item.imageName" class="position-image-chip">{{ item.imageName }}</small>
             </template>
             <template v-else>
-              <div v-if="item.status" class="stream-status" :class="{ tooling: item.status === 'thinking', done: item.status === 'done', error: item.status === 'error' }">
+              <div
+                v-if="item.status && (item.status !== 'done' || item.kind === 'saved')"
+                class="stream-status"
+                :class="{ tooling: item.status === 'thinking', done: item.status === 'done', error: item.status === 'error' }"
+              >
                 <span class="stream-status-pulse"></span>
                 <strong>{{ positionStatusText(item) }}</strong>
               </div>
-              <div v-if="item.steps?.length" class="react-steps">
-                <div v-for="(step, index) in item.steps" :key="index" class="react-step" :class="step.type">
-                  <strong>{{ positionStepLabel(step) }}</strong>
-                  <span>{{ step.content }}</span>
+              <details v-if="item.steps?.length" class="position-agent-trace" :open="item.status === 'thinking'">
+                <summary>{{ positionTraceSummary(item) }}</summary>
+                <div class="react-steps">
+                  <div v-for="(step, index) in item.steps" :key="index" class="react-step" :class="step.type">
+                    <strong>{{ positionStepLabel(step) }}</strong>
+                    <span>{{ step.content }}</span>
+                  </div>
                 </div>
-              </div>
+              </details>
               <div v-if="item.content" class="md-body" v-html="renderMarkdown(item.content)"></div>
               <div v-else-if="item.error" class="chat-error">{{ item.error }}</div>
               <div v-else class="chat-typing">正在识别并写入持仓...</div>
@@ -1453,30 +1480,46 @@ onBeforeUnmount(() => {
           </div>
           <textarea
             v-model="positionAgentInstruction"
-            rows="3"
-            placeholder="输入持仓描述，或上传截图后补充账户、日期、券商等信息"
+            rows="2"
+            placeholder="说一句就行，比如“方正 卖出同力天启 500 股 24.15”；也可以上传持仓截图"
             :disabled="positionAgentBusy"
+            @keydown="onPositionComposerKeydown"
           ></textarea>
           <div class="position-agent-composer-actions">
-            <label class="position-agent-upload">
+            <label class="position-agent-upload" title="上传券商持仓截图">
               <input type="file" accept="image/*" :disabled="positionAgentBusy" @change="onPositionImageSelected" />
-              <span>上传图片</span>
+              <span>上传截图</span>
             </label>
-            <select v-model="positionAgentTargetAccount" :disabled="positionAgentBusy" title="选择这批持仓保存到哪个证券账户">
+            <select
+              v-model="positionAgentTargetAccount"
+              class="position-agent-account"
+              :disabled="positionAgentBusy"
+              title="选择这批持仓保存到哪个证券账户"
+            >
               <option :value="null">自动识别账户</option>
               <option v-for="account in positionAgentAccounts" :key="account.id" :value="account.id">
                 {{ positionAccountLabel(account) }}
               </option>
             </select>
-            <select v-model.number="selectedPositionModelId" :disabled="positionAgentBusy || !positionModels.length" :title="modelOptionLabel(activePositionModel)">
+            <select
+              v-model.number="selectedPositionModelId"
+              class="position-agent-model"
+              :disabled="positionAgentBusy || !positionModels.length"
+              :title="modelOptionLabel(activePositionModel)"
+            >
               <optgroup v-for="group in positionModelGroups" :key="group.platform" :label="group.platform">
                 <option v-for="item in group.rows" :key="item.id" :value="item.id">
                   {{ modelOptionLabel(item) }}
                 </option>
               </optgroup>
             </select>
-            <button type="submit" :disabled="positionAgentBusy || (!positionAgentInstruction.trim() && !positionAgentImageBase64)">
-              {{ positionAgentBusy ? '识别中' : '发送' }}
+            <span class="position-agent-hint">Enter 发送 · Shift+Enter 换行</span>
+            <button
+              type="submit"
+              class="position-agent-send"
+              :disabled="positionAgentBusy || (!positionAgentInstruction.trim() && !positionAgentImageBase64)"
+            >
+              {{ positionAgentBusy ? '处理中…' : '发送' }}
             </button>
           </div>
           <p v-if="positionAgentComposerMessage && !positionAgentBusy" class="form-message">{{ positionAgentComposerMessage }}</p>
