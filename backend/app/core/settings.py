@@ -74,6 +74,9 @@ class Settings:
     # 说人话改稿（ai/plain_rewrite.py）：定时报告推送前多一次 LLM 调用，只改说法不改事实，
     # 过不了数字核对就沿用原文。关闭则直接推送数字人原文。
     plain_rewrite_enabled: bool = os.getenv("STOCK_PLAIN_REWRITE_ENABLED", "true").lower() == "true"
+    # 飞书推送附带的手机版网页（data/share_api.py）：配了对外地址才加按钮，没配时推送和原来完全一样
+    public_base_url: str = os.getenv("STOCK_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    share_ttl_days: int = int(os.getenv("STOCK_SHARE_TTL_DAYS", "30"))
     # Agent 工作区（文件读写/查找/执行）：受控 scratch 目录，与项目代码/.env/DB 物理隔离
     workspace_enabled: bool = os.getenv("STOCK_WORKSPACE_ENABLED", "true").lower() == "true"
     # 执行能力独立开关，默认关：开启=给聊天用户放开"以应用用户身份执行 Python"，生产须在独立低权账户/沙箱下才开

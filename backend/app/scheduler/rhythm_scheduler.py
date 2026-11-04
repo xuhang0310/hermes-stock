@@ -30,6 +30,7 @@ from backend.app.agent_runtime.channel_runs import (
 )
 from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.ai.plain_rewrite import rewrite_plain
+from backend.app.data.share_service import ShareSpec
 from backend.app.feishu.feishu import send_feishu
 from backend.app.core.models import (
     AgentReport,
@@ -513,6 +514,7 @@ def _run_agent_report(
         session.commit()
         if snap["push_channel_key"]:
             trigger_label = "手动执行" if snap.get("trigger_type") == "manual" else "自动调度"
+            digital_human_name = profile.name if profile else (snap["digital_human_code"] or "系统")
             notification = send_feishu(
                 session,
                 snap["push_channel_key"],
@@ -522,11 +524,20 @@ def _run_agent_report(
                 card_template=_CARD_TEMPLATE_BY_JOB.get(snap["job_key"], "blue"),
                 card_metadata=[
                     ("任务", snap["name"]),
-                    ("数字人", profile.name if profile else (snap["digital_human_code"] or "系统")),
+                    ("数字人", digital_human_name),
                     ("触发方式", trigger_label),
                     ("生成时间", now.strftime("%Y-%m-%d %H:%M:%S")),
                 ],
                 card_footer="SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议",
+                share=ShareSpec(
+                    source_type="agent_report",
+                    source_ref=report_id,
+                    owner_user_id=snap.get("owner_user_id"),
+                    meta={
+                        "digital_human": digital_human_name,
+                        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                ),
             )
             notification_id = notification.id
             if notification.status != "sent":
@@ -556,6 +567,11 @@ def _run_topnews_brief(snapshot: dict, ran_at: datetime) -> str:
                 ("生成时间", ran_at.strftime("%Y-%m-%d %H:%M:%S")),
             ],
             card_footer="SixRabbits Stock | 数据采集自动生成，仅供参考",
+            share=ShareSpec(
+                source_type="topnews_brief",
+                owner_user_id=snapshot.get("owner_user_id"),
+                meta={"generated_at": ran_at.strftime("%Y-%m-%d %H:%M:%S")},
+            ),
         )
     return report
 
@@ -1099,6 +1115,12 @@ def _push_automatic_selection_digest(snapshot: dict[str, Any], digest: dict[str,
                 ("生成时间", now.strftime("%Y-%m-%d %H:%M:%S")),
             ],
             card_footer="SixRabbits Stock | 规则选股，仅供研究与复盘，不构成投资建议",
+            share=ShareSpec(
+                source_type="selection_digest",
+                source_ref=str(digest["run_id"]) if digest.get("run_id") else None,
+                owner_user_id=snapshot.get("owner_user_id"),
+                meta={"generated_at": now.strftime("%Y-%m-%d %H:%M:%S")},
+            ),
         )
         if notification.status != "sent":
             return notification.error or "飞书未确认发送成功"

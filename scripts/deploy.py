@@ -251,6 +251,7 @@ grep -q '^STOCK_SCHEDULER_ENABLED=' "$NEW/backend/.env" || echo 'STOCK_SCHEDULER
 grep -q '^STOCK_WORKSPACE_EXEC_BACKEND=' "$NEW/backend/.env" || echo 'STOCK_WORKSPACE_EXEC_BACKEND=docker' >> "$NEW/backend/.env"
 grep -q '^STOCK_WORKSPACE_EXEC_SOCKET=' "$NEW/backend/.env" || echo 'STOCK_WORKSPACE_EXEC_SOCKET=/run/hermes-stock-sandbox/sandbox.sock' >> "$NEW/backend/.env"
 grep -q '^STOCK_WORKSPACE_EXEC_IMAGE=' "$NEW/backend/.env" || echo 'STOCK_WORKSPACE_EXEC_IMAGE=hermes-stock-python-sandbox:latest' >> "$NEW/backend/.env"
+grep -q '^STOCK_PUBLIC_BASE_URL=' "$NEW/backend/.env" || echo 'STOCK_PUBLIC_BASE_URL=https://shijingxuan.com' >> "$NEW/backend/.env"
 chmod 600 "$NEW/backend/.env"
 chown -R {a.owner} "$NEW"
 /opt/hermes-stock/venv/bin/pip install --disable-pip-version-check -q -r "$NEW/backend/requirements.txt" || exit 31

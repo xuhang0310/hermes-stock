@@ -795,6 +795,11 @@ class AutomaticSelectionDigestDeliveryTests(unittest.TestCase):
         self.assertEqual(kwargs["event_id"], "automatic-selection:selection-run-1")
         self.assertEqual(kwargs["card_template"], "green")
         self.assertIn(("触发方式", "自动调度"), kwargs["card_metadata"])
+        share = kwargs["share"]
+        self.assertEqual(
+            (share.source_type, share.source_ref, share.owner_user_id),
+            ("selection_digest", "selection-run-1", 7),
+        )
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0]["title"], self.DIGEST["inbox_title"])
         self.assertEqual(created[0]["content"], self.DIGEST["content"])

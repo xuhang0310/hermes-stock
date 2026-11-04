@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.models import Notification, NotifyChannel
 from backend.app.core.settings import settings
+from backend.app.data.share_service import SAMPLE_SHARE_MARKDOWN, ShareSpec, create_share_link
 
 
 SCHEDULE_CHANNEL_KEY = "feishu-daily"
@@ -31,6 +32,7 @@ FEISHU_COMPONENTS_PER_CARD = 3
 FEISHU_MAX_CARDS_PER_MESSAGE = 18
 FEISHU_MAX_TABLES_PER_CARD = 5
 RATE_LIMIT_PER_MINUTE = 20
+SHARE_BUTTON_TEXT = "📱 手机查看完整版"
 _RETRYABLE_STATUS = {500, 502, 503, 504}
 _CARD_TEMPLATES = {
     "blue", "wathet", "turquoise", "green", "yellow", "orange", "red",
@@ -449,6 +451,26 @@ def _metadata_markdown(metadata: list[tuple[str, str]] | None) -> str:
     return _format_table_for_mobile(["项目", "内容"], [list(item) for item in items])
 
 
+def _share_button(url: str, element_id: str) -> dict:
+    return {
+        "tag": "button",
+        "element_id": element_id,
+        "text": {"tag": "plain_text", "content": SHARE_BUTTON_TEXT},
+        "type": "primary_filled",
+        "size": "medium",
+        "width": "fill",
+        "behaviors": [
+            {
+                "type": "open_url",
+                "default_url": url,
+                "pc_url": url,
+                "ios_url": url,
+                "android_url": url,
+            }
+        ],
+    }
+
+
 def _card_payload(
     title: str,
     content_elements: list[dict],
@@ -459,40 +481,43 @@ def _card_payload(
     template: str | None,
     page: int,
     page_count: int,
+    share_url: str | None = None,
 ) -> dict:
     card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
     elements: list[dict] = []
     metadata_text = _metadata_markdown(metadata) if page == 1 else ""
     if metadata_text:
-        elements.extend(
-            [
-                {
-                    "tag": "markdown",
-                    "element_id": "metadata",
-                    "content": metadata_text,
-                    "text_size": "normal",
-                    "text_align": "left",
-                },
-                {"tag": "hr"},
-            ]
+        elements.append(
+            {
+                "tag": "markdown",
+                "element_id": "metadata",
+                "content": metadata_text,
+                "text_size": "normal",
+                "text_align": "left",
+            }
         )
+    if share_url and page == 1:
+        elements.append(_share_button(share_url, "share_top"))
+    if elements:
+        elements.append({"tag": "hr"})
     elements.extend(content_elements)
     footer_text = footer or (
         "SixRabbits Stock | 系统告警，请及时核查"
         if purpose == "alert"
         else "SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议"
     )
-    elements.extend(
-        [
-            {"tag": "hr"},
-            {
-                "tag": "markdown",
-                "element_id": f"footer_{page:02d}",
-                "content": footer_text[:200],
-                "text_size": "notation",
-                "text_align": "left",
-            },
-        ]
+    elements.append({"tag": "hr"})
+    # 只有一张卡片时顶部的按钮就够了；长消息翻到最后一张时再给一个，不用翻回去
+    if share_url and page == page_count and page_count > 1:
+        elements.append(_share_button(share_url, "share_bottom"))
+    elements.append(
+        {
+            "tag": "markdown",
+            "element_id": f"footer_{page:02d}",
+            "content": footer_text[:200],
+            "text_size": "notation",
+            "text_align": "left",
+        }
     )
     page_title = title if page_count == 1 else f"{title}（{page}/{page_count}）"
     return {
@@ -523,6 +548,7 @@ def _build_payloads(
     metadata: list[tuple[str, str]] | None = None,
     footer: str | None = None,
     template: str | None = None,
+    share_url: str | None = None,
 ) -> list[dict]:
     text = content.strip() or "本次任务未返回正文。"
     pages = _paginate_markdown(text)
@@ -554,6 +580,7 @@ def _build_payloads(
                 template=template,
                 page=page_index,
                 page_count=page_count,
+                share_url=share_url,
             ),
         }
         if secret:
@@ -573,6 +600,7 @@ def _build_payload(
     metadata: list[tuple[str, str]] | None = None,
     footer: str | None = None,
     template: str | None = None,
+    share_url: str | None = None,
 ) -> dict:
     return _build_payloads(
         title,
@@ -582,6 +610,7 @@ def _build_payload(
         metadata=metadata,
         footer=footer,
         template=template,
+        share_url=share_url,
     )[0]
 
 
@@ -641,6 +670,38 @@ def get_channel(db: Session, channel_key: str) -> NotifyChannel | None:
     return db.scalar(select(NotifyChannel).where(NotifyChannel.channel_key == channel_key).limit(1))
 
 
+def _share_link(db: Session, share: ShareSpec | None, *, title: str, content: str) -> str | None:
+    """建分享记录并返回链接。失败只告警：推送照常发，只是没有按钮。"""
+    if share is None:
+        return None
+    try:
+        with db.begin_nested():
+            return create_share_link(db, share, title=title, content=content)
+    except Exception as exc:  # noqa: BLE001 - 手机版只是附加入口，不能影响推送本身
+        _log(
+            db,
+            "WARNING",
+            "手机版网页链接生成失败，本次推送不带按钮",
+            {"title": title[:80], "error": str(exc)[:200]},
+        )
+        return None
+
+
+def _post_pages(webhook_url: str, payloads: list[dict]) -> tuple[int, int | None, str]:
+    """逐页发送，遇到失败就停。返回 (已发页数, 最后的 HTTP 状态码, 错误文案)。"""
+    sent_pages = 0
+    status_code: int | None = None
+    error = ""
+    for page_index, payload in enumerate(payloads, start=1):
+        ok, status_code, error = _post_with_retry(webhook_url, payload)
+        if not ok:
+            return sent_pages, status_code, f"第 {page_index}/{len(payloads)} 页发送失败：{error}"
+        sent_pages += 1
+        if page_index < len(payloads):
+            time.sleep(0.15)
+    return sent_pages, status_code, ""
+
+
 def send_feishu(
     db: Session,
     channel_key: str,
@@ -653,8 +714,12 @@ def send_feishu(
     card_footer: str | None = None,
     card_template: str | None = None,
     card_kind: str | None = None,
+    share: ShareSpec | None = None,
 ) -> Notification:
-    """向指定通道推送消息。先落 pending 审计记录再发送，任何失败都不抛异常、只写 failed。"""
+    """向指定通道推送消息。先落 pending 审计记录再发送，任何失败都不抛异常、只写 failed。
+
+    传了 share 且配置了 STOCK_PUBLIC_BASE_URL 时，卡片上多一个打开手机版网页的按钮。
+    """
     if report_id or event_id:
         identity_filter = (
             Notification.report_id == report_id
@@ -700,6 +765,7 @@ def send_feishu(
 
     secret = decrypt_value(channel.secret_cipher)
     purpose = card_kind or channel.purpose
+    share_url = _share_link(db, share, title=title, content=content)
     # 先提交 pending 审计行并释放数据库连接，再做外部 HTTP 调用：
     # 避免重试窗口（最长约 33 秒）占用连接池，且进程中途崩溃也能留下审计痕迹
     db.commit()
@@ -712,6 +778,7 @@ def send_feishu(
         metadata=card_metadata,
         footer=card_footer,
         template=card_template,
+        share_url=share_url,
     )
     if not _acquire_rate_slots(channel_key, len(payloads)):
         notification.status = "failed"
@@ -728,17 +795,26 @@ def send_feishu(
         db.commit()
         return notification
 
-    sent_pages = 0
-    status_code: int | None = None
-    error = ""
-    for page_index, payload in enumerate(payloads, start=1):
-        ok, status_code, error = _post_with_retry(webhook_url, payload)
-        if not ok:
-            error = f"第 {page_index}/{len(payloads)} 页发送失败：{error}"
-            break
-        sent_pages += 1
-        if page_index < len(payloads):
-            time.sleep(0.15)
+    sent_pages, status_code, error = _post_pages(webhook_url, payloads)
+    if share_url and sent_pages == 0 and status_code == 200:
+        # 飞书拒收这张卡片（HTTP 200 + 业务错误码）时，可能是按钮的问题。
+        # 报告不能因为一个附加按钮送不到：去掉按钮整条重发一次，并留下告警便于修正。
+        _log(
+            db,
+            "WARNING",
+            f"飞书拒收带按钮的卡片，已去掉按钮重发：通道 {channel_key}",
+            {"title": title[:80], "error": error[:300]},
+        )
+        payloads = _build_payloads(
+            title,
+            content,
+            secret,
+            purpose,
+            metadata=card_metadata,
+            footer=card_footer,
+            template=card_template,
+        )
+        sent_pages, status_code, error = _post_pages(webhook_url, payloads)
 
     if sent_pages == len(payloads):
         notification.status = "sent"
@@ -817,6 +893,15 @@ def test_channel(
         return {"ok": False, "error": url_error, "latency_ms": 0}
 
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 配了对外地址时，测试卡片也带按钮和一个 1 天有效的示例页，一次测完卡片和手机版
+    share_url = _share_link(
+        db,
+        ShareSpec(source_type="channel_test", ttl_days=1, meta={"generated_at": now_text}),
+        title="手机版网页示例",
+        content=SAMPLE_SHARE_MARKDOWN,
+    )
+    if share_url:
+        db.commit()
     payload = _build_payload(
         "SixRabbits Stock | 飞书任务群连接测试",
         "配置校验已经完成。收到这张卡片，代表 Webhook、签名密钥和交互式卡片格式均可正常使用。",
@@ -825,6 +910,7 @@ def test_channel(
         metadata=[("消息类型", "连接测试"), ("发送时间", now_text), ("卡片格式", "Interactive Card")],
         footer="SixRabbits Stock | 定时任务统一推送通道",
         template="turquoise",
+        share_url=share_url,
     )
     started = time.monotonic()
     ok, status_code, error = _post_with_retry(resolved_url, payload, attempts=1)

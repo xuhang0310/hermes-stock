@@ -60,7 +60,7 @@ backend/app/
               startup_validator  operation_log  runtime_overrides(+_api)
   auth/       auth  auth_api
   data/       repository(按域 mixin)  deps  sse  positions_api  watchlist_api  dashboard_api
-              report_api(报告详情/导出)  logs_api  broker_presets
+              report_api(报告详情/导出)  share_api/share_service/share_render(手机版分享页)  logs_api  broker_presets
   market/     stock_tools  digital_human_tools  company_research  position_decision  tushare_api  tushare_catalog
   agents/     stock_agent  position_agent  watchlist_agent  position_import(_v2)  position_intent  tool_approval
   agent_runtime/  service  executor  agentscope_engine  legacy_engine  worker  redis_broker  repository
@@ -135,6 +135,7 @@ Adjacent flows: `agents/position_agent.py` (natural-language / screenshot positi
 - **自动选股页面**：`/automatic-selection` 面向普通用户（今日选股 / 历史战绩 / 选股方法；有 `model:manage` 或 `schedule:manage` 才见“高级”审计台 `components/AutomaticSelectionAudit.vue`）。白话内容全部由 `quant/automatic_selection_presentation.py` 从落库证据派生（维度 0–100 分、理由、规则风险、选出后表现、历史战绩），接口 `GET /api/automatic-selection/daily`、`/track-record`。呈现层只读，不得回写排名或改动 `DEFAULT_STRATEGY_CONFIG`/评分实现（会改变 config_hash/指纹）。详见 `docs/automatic-selection.md`。
 - **自动选股时间口径**：目标交易日 = 不晚于 `market_sync.selection_target_ceiling()` 的最近开市日（北京时间 17:00 前用前一日，TuShare 当天数据此前未发齐）。内置入库 17:30（失败每 30 分钟重试至 22:00）、排名 17:50；任务键名 `automatic-selection-data-1545`/`automatic-selection-1610` 是历史 ID，与实际时间无关。
 - **报告导出**：`data/report_api.py` —— `GET /api/reports/{report_id}`（全量结构化）、`/{report_id}/export?format=md|json`、`GET /api/reports/export.csv`（BOM 兼容 Excel，与 backtest trades.csv 同款）。
+- **手机版分享页**：`send_feishu(share=ShareSpec(...))` 在配置了 `STOCK_PUBLIC_BASE_URL` 时存一份正文快照到 `report_shares`（和卡片同一份，白话改写之后的版本），卡片上加“手机查看完整版”按钮（第一张，消息多于一张时最后一张也有）；没配时推送和原来完全一样。公开页 `GET /api/share/{id}`（`data/share_api.py`）不需要登录，链接即凭证（128 位随机，默认 `STOCK_SHARE_TTL_DAYS`=30 天，可 `POST /api/shares/{id}/revoke` 作废），表不登记进 `sql_sandbox`，数字人查不到。`data/share_render.py` 服务端出自包含 HTML：markdown-it 关原始 HTML + nh3 白名单，无脚本、无外部资源，严格 CSP；中文旁 `**` 的放宽规则与前端 `utils/markdown.ts` 一致（子类覆盖 `scanDelims`，依赖 markdown-it-py 内部结构，升级时看 `tests/test_share_pages.py`）。计划表（按表头识别）和长文字表窄屏变卡片，其他表横向滑动、首列固定。分享失败或飞书拒收带按钮的卡片都不影响送达（后者去掉按钮重发并告警）。新增要带手机版的推送传 `share` 即可。设置页“测试”按钮会带一个 1 天有效的虚构示例页，用来验收卡片和排版。
 - **模拟盘**：`paper/` 三表（`paper_accounts`/`paper_positions`/`paper_orders`，与真实持仓域完全隔离、无外键）；市价单即时成交、成交价=`stock_latest_prices` 缓存（无缓存拒绝下单）、一手 100 股、单边万 2.5 手续费、账户行 `with_for_update()` 防双花。**仍是研究演练，无任何真实交易通道。**
 
 ## Frontend architecture

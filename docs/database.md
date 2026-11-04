@@ -68,6 +68,7 @@ STOCK_DB_NAME=hermes-stock
 - `risk_checks`: 风控检查
 - `reviews`: 复盘记录
 - `notifications`: 飞书、PM、本地通知发送记录
+- `report_shares`: 飞书推送附带的手机版网页（正文快照、有效期、打开次数；链接即凭证，不开放给数字人查询）
 - `api_audit_logs`: 外部接口调用审计
 - `system_logs`: 系统运行日志
 - `heartbeats`: 后台组件心跳

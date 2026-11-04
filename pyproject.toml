@@ -29,6 +29,8 @@ dependencies = [
     "numpy>=1.26,<3",
     "pandas>=2.2,<4",
     "sqlglot>=30.20,<31",
+    "markdown-it-py>=3.0,<5",
+    "nh3>=0.3,<0.4",
     "opentelemetry-api==1.42.1",
     "opentelemetry-sdk==1.42.1",
     "opentelemetry-exporter-otlp==1.42.1",

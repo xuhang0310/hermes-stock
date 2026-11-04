@@ -32,6 +32,7 @@ from backend.app.data.logs_api import router as logs_router
 from backend.app.data.ops_console_api import router as ops_console_router
 from backend.app.data.positions_api import router as positions_router
 from backend.app.data.report_api import router as report_router
+from backend.app.data.share_api import router as share_router
 from backend.app.data.repository import StockRepository
 from backend.app.data.watchlist_api import router as watchlist_router
 from backend.app.feishu.feishu_bot import start_feishu_bots, stop_feishu_bots
@@ -180,6 +181,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(watchlist_router)
     app.include_router(dashboard_router)
     app.include_router(report_router)
+    app.include_router(share_router)
     app.include_router(logs_router)
     app.include_router(ops_console_router)
     app.include_router(tushare_router)

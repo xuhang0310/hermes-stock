@@ -193,6 +193,9 @@ class ScheduledReportRewriteTests(unittest.TestCase):
         self.assertEqual(result, ("rhythm-run-1", 7, EDITED, None))
         self.assertEqual(report.content, EDITED)
         self.assertEqual(push.call_args.args[3], EDITED)
+        share = push.call_args.kwargs["share"]
+        self.assertEqual((share.source_type, share.source_ref), ("agent_report", "rhythm-run-1"))
+        self.assertEqual(share.meta["generated_at"], "2026-10-27 12:30:00")
         self.assertEqual(logs[0][:2], ("INFO", "定时报告已改成白话"))
         self.assertIn("由系统自动推送飞书，你不用自己推送", question)
         self.assertIn("不要在报告里逐条复述", question)

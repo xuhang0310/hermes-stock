@@ -2053,3 +2053,30 @@ class RuntimeConfigOverride(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(String(500), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ReportShare(Base):
+    """飞书推送附带的手机版网页：推送时存正文快照，链接本身就是凭证。
+
+    不登记进 sql_sandbox（数字人查不到分享 ID）；只增表，与用户、报告的生命周期解耦，不加外键。
+    时间按 UTC 裸时间存，和 created_at 的 NOW() 一致。
+    """
+
+    __tablename__ = "report_shares"
+    __table_args__ = (
+        Index("ix_report_shares_source", "source_type", "source_ref"),
+        Index("ix_report_shares_owner_created", "owner_user_id", "created_at"),
+    )
+
+    share_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_ref: Mapped[str | None] = mapped_column(String(120))
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    meta_json: Mapped[str] = mapped_column(Text, nullable=False)
+    content_md: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    view_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
