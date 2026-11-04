@@ -202,7 +202,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn('现价 <span class="fig">35.64</span> <span class="chg up fig">+2.44%</span>', body)
         self.assertIn('<span class="fig big">35.40</span>', body)
         self.assertIn('<span class="fig big">151.00</span>', body)
-        self.assertIn('<span class="tag act-sell">卖出</span>已达到', body)
+        self.assertIn('<span class="row-tag"><span class="tag act-sell">卖出</span></span>', body)
+        self.assertIn('<span class="sl-note">已达到', body)
         self.assertIn("原计划为方正、中信各1,400股。", body)
         self.assertIn("按午盘计划先撤旧单。", body)
 
@@ -216,8 +217,76 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("<li>★", body)
         self.assertIn('<span class="chg down fig">-2.01%</span>', body)
 
+    def test_pipe_written_stock_list_becomes_ledger_rows(self) -> None:
+        body, _ = render_markdown(
+            "- ★同力天启｜21.78｜+0.97%｜已到21.68反弹卖价；若未完成，三账户各按原2,400股的剩余量处理；止损20.59。\n"
+            "- ★澜起科技（方正）｜164.72｜+9.81%｜较13:43明显拉升，仍高于151.00退出限价；不因上涨取消计划。\n"
+            "- 万东医疗｜10.59｜-0.38%｜午盘未设交易价，持有、不加仓。\n"
+        )
+        self.assertIn('<ul class="stocks">', body)
+        items = re.findall(r"<li>.*?</li>", body, flags=re.S)
+        self.assertEqual(len(items), 3)
+        self.assertIn('<span class="star">★</span><span class="nm">同力天启</span>', items[0])
+        self.assertIn('现价 <span class="fig">21.78</span> <span class="chg up fig">+0.97%</span>', items[0])
+        self.assertIn('<span class="fig big">21.68</span>', items[0])
+        self.assertIn('<span class="row-tag"><span class="tag act-sell">卖出</span></span>', items[0])
+        self.assertIn('<span class="sl-note">已到', items[0])
+        self.assertIn('止损<span class="fig key">20.59</span>', items[0])
+        self.assertNotIn("｜", items[0])
+        self.assertIn('<span class="cd">方正</span>', items[1])
+        self.assertIn('<span class="fig big">151.00</span>', items[1], "开头的 13:43 不是价格")
+        self.assertIn('<span class="tag act-sell">卖出</span>', items[1], "开头只是描述，往后找到退出")
+        self.assertIn('<span class="sl-note wide"><span class="tag act-none">拿着</span>午盘未设', items[2])
+        self.assertNotIn("big", items[2])
+        self.assertIn('<span class="chg down fig">-0.38%</span>', items[2])
+
+    def test_process_notes_never_reach_the_page(self) -> None:
+        body, _ = render_markdown(
+            "结论。\n\n正文。\n\n"
+            "已保存至 [notes/reviews/2026-11-04/intraday-14:05.md](notes/reviews/2026-11-04/intraday-14:05.md)，含本轮价格及复盘依据。\n\n"
+            "<details>\n<summary>留档信息</summary>\n\n版本1｜5,117字节｜文件验证通过  \nSHA-256：`585fb27f`\n\n</details>\n\n"
+            "以上是研究参考，不构成投资建议。\n"
+        )
+        for leaked in ("notes/reviews", "details", "留档信息", "SHA-256", "已保存至"):
+            self.assertNotIn(leaked, body)
+        self.assertIn("不构成投资建议", body)
+        other, _ = render_markdown("结论。\n\n已保存：`notes/reviews/2026-11-04/intraday-13:35.md`（v1，4,965字节，验证通过）。\nSHA-256：`ea795a93`\n\n后文。")
+        for leaked in ("notes/reviews", "SHA-256", "已保存"):
+            self.assertNotIn(leaked, other)
+        self.assertIn("后文。", other)
+
+    def test_combined_price_and_change_column(self) -> None:
+        body, _ = render_markdown(
+            "| 股票 | 现价 / 涨跌幅 | 反弹卖价 | 止损价 |\n|---|---|---|---|\n"
+            "| 同力天启（605286） | 21.11 / -2.13% | 22.18 | 20.59 |\n"
+        )
+        self.assertIn('<table class="plan">', body)
+        self.assertIn('现价 <span class="fig">21.11</span> <span class="chg down fig">-2.13%</span>', body)
+        self.assertIn('<span class="lb">反弹卖价</span><span class="fig big">22.18</span>', body)
+        self.assertIn('data-label="止损价"', body)
+
+    def test_watch_table_without_any_plan_column(self) -> None:
+        body, _ = render_markdown("| 股票 | 现价 | 涨跌幅 |\n|---|---|---|\n| 万东医疗（600055） | 10.39 | -1.52% |\n")
+        self.assertIn('<table class="plan">', body)
+        self.assertIn('<span class="cd fig">600055</span>', body)
+        self.assertNotIn("big", body)
+
+    def test_unparsable_price_cell_is_kept_not_dropped(self) -> None:
+        body, _ = render_markdown("| 股票 | 现价 | 怎么做 |\n|---|---|---|\n| 甲（600000） | 盘中停牌 | 拿着 |\n")
+        self.assertIn("盘中停牌", body)
+        self.assertIn('data-label="现价"', body)
+
+    def test_cost_to_close_header_is_not_a_current_price(self) -> None:
+        body, _ = render_markdown("| 股票 | 合计持股 | 加权成本→收盘价 | 浮亏及亏幅 |\n|---|---|---|---|\n| 甲（600000） | 100 | 38.24→21.92元 | -1元 |\n")
+        self.assertNotIn('<table class="plan">', body)
+
     def test_ordinary_lists_are_left_alone(self) -> None:
-        for source in ("- **重点**：今天不追高\n- 第二条\n", "- 第一条\n- 第二条\n", "- **★甲（688091）**\n- 普通一条\n"):
+        for source in (
+            "- **重点**：今天不追高\n- 第二条\n",
+            "- 第一条\n- 第二条\n",
+            "- **★甲（688091）**\n- 普通一条\n",
+            "- 资金｜流入较多，继续观察\n- 情绪｜偏弱\n",
+        ):
             with self.subTest(source=source):
                 self.assertNotIn("stocks", render_markdown(source)[0])
 

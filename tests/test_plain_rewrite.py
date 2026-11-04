@@ -199,6 +199,8 @@ class ScheduledReportRewriteTests(unittest.TestCase):
         self.assertEqual(logs[0][:2], ("INFO", "定时报告已改成白话"))
         self.assertIn("由系统自动推送飞书，你不用自己推送", question)
         self.assertIn("不要在报告里逐条复述", question)
+        self.assertIn("一律写成 Markdown 表格", question)
+        self.assertIn("存文件的路径、版本和校验值不要写进正文", question)
 
     def test_a_rejected_edit_pushes_the_original_and_says_why(self) -> None:
         result, report, push, _, logs = self._run(PlainRewrite(ORIGINAL, False, "改稿出现原文没有的数字 5.8"))

@@ -302,6 +302,9 @@ def _scheduled_execution_constraints(job_key: str, plan_source: str | None = Non
         "并说明影响哪些操作。报告写完由系统自动推送飞书，你不用自己推送，正文也不提推送情况。"
         "任务里的核对要求和限制是给你做事用的，照做即可，不要在报告里逐条复述"
         "（如“不跨账户挪用”“不构成授权”“不冒充实时数据”）。"
+        "版式：任务里“每只一行”“股票｜现价｜……”这类一行一只的内容，一律写成 Markdown 表格，"
+        "不要写成列表或带竖线的文字行；第一列写“名称（6 位代码）”。"
+        "存文件的路径、版本和校验值不要写进正文。"
     )
     if plan_source:
         common += PLAN_SAVE_INSTRUCTION
