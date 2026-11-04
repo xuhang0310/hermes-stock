@@ -89,33 +89,54 @@ _ALLOWED_ATTRIBUTES = {
     "td": {"data-label", "data-tag"},
 }
 _ALLOWED_CLASSES = {
-    "p": {"lead", "lead-big", "lead-end"},
+    "p": {"lead", "lead-big", "lead-end", "fine"},
+    "ul": {"stocks"},
     "table": {"plan", "lines"},
     "th": {"ar", "ac"},
     "td": {
         "ar", "ac", "fig", "dup",
-        "c-name", "c-act", "c-price", "c-qty", "c-line",
+        "c-name", "c-act", "c-solo", "c-price", "c-qty", "c-line",
         "act-buy", "act-sell", "act-stop", "act-none",
     },
-    "span": {"nm", "cd", "now", "px", "lb", "big", "px-note", "fig"},
+    "span": {
+        "nm", "cd", "now", "px", "lb", "big", "px-note", "fig", "key", "star",
+        "chg", "up", "down", "flat", "tag", "act-note", "wide", "sl-head", "sl-note",
+        "act-buy", "act-sell", "act-stop", "act-none",
+    },
 }
 _ALLOWED_URL_SCHEMES = {"http", "https", "mailto", "tel"}
 
-_ACTION_HEADER = re.compile(r"怎么做|操作|动作|方向|买卖")
+_ACTION_HEADER = re.compile(r"怎么做|怎么执行|怎么处理|操作|动作|方向|买卖")
 _NAME_HEADER = re.compile(r"股票|标的|名称|证券")
-_PRICE_HEADER = re.compile(r"价")
+_CURRENT_PRICE_HEADER = re.compile(r"现价|最新价|收盘价|昨收")
+_NOT_PLAN_PRICE_HEADER = re.compile(r"现价|最新价|收盘价|昨收|成本价")
+_CHANGE_HEADER = re.compile(r"涨跌|涨幅|跌幅")
+_PRICE_HEADER = re.compile(r"价|昨收")
 _QUANTITY_HEADER = re.compile(r"股数|数量")
 _NO_ACTION = re.compile(r"不|别|暂缓|持有|拿着|观望|等待|买卖")
-_SELL_ACTION = re.compile(r"卖|减仓|减半|减持|清仓|清掉")
+_SELL_ACTION = re.compile(r"卖|减仓|减半|减持|清仓|清掉|退出")
 _BUY_ACTION = re.compile(r"买|加仓|建仓")
 _ACTION_TAGS = {"act-sell": "卖出", "act-buy": "买入", "act-stop": "止损"}
-_CLAUSE_SPLIT = re.compile(r"[：:，,。；;]")
+_CLAUSE_SPLIT = re.compile(r"[：:，,。；;／/]")  # “反弹卖16.95／止损15.98”是卖单，止损只是备用出口
 
-# “同力天启605286（21.57元）”“示例科技 22.35”：拆成名称、代码、现价
-_NAME_CELL = re.compile(
-    r"^(?P<name>[^\d（(]+?)\s*(?P<code>\d{6})?(?:\.[A-Z]{2})?\s*"
-    r"(?:[（(]\s*(?:最新价|现价|收盘价)?\s*(?P<quoted>\d+(?:\.\d+)?)\s*元?\s*[）)]|\s(?P<bare>\d+\.\d+))?$"
+# 股票格的各种写法：“同力天启605286（21.57元）”“民德电子（300656）”“示例科技 22.35”
+# “★澜起科技（688008，方正）｜153.29｜+2.19%”“#1 兴业银行 601166.SH；19.93元”
+_STOCK_CELL = re.compile(
+    r"^(?P<star>★)?\s*(?:(?P<rank>#\d+)\s*)?(?P<name>[^\d（(｜|；;,，#★][^\d（(｜|；;]*)"
+    r"(?P<code>\d{6})?(?:\.[A-Z]{2})?\s*(?:[（(](?P<inner>[^）)]*)[）)])?\s*(?P<rest>.*)$"
 )
+_STOCK_SPLIT = re.compile(r"[，,、；;｜|\s]+")
+_SIX_DIGIT_CODE = re.compile(r"(\d{6})(?:\.[A-Z]{2})?")
+_QUOTED_PRICE = re.compile(r"(?:最新价|现价|收盘价)?\s*(\d+(?:\.\d+)?)\s*元?")
+_CHANGE_VALUE = re.compile(r"[-+−]?\d+(?:\.\d+)?[%％]")
+# 理由里写明的计划价：“反弹卖价19.92”“已达到35.40减仓条件”。止损价不算，它留在文字里高亮
+_PROSE_PLAN_PRICE = re.compile(
+    r"(?:卖价|卖出价|买价|买入价|限价|挂单价|减仓价|卖|买)\s*(\d+\.\d+)|(\d+\.\d+)\s*元?\s*(?:减仓|退出|卖出|买入|限价)"
+)
+_KEY_NUMBER = re.compile(r"\d+\.\d{2,}")
+_DATA_NOTE = re.compile(r"行情更新|价格单位|数量单位|数据截至|数据日期|更新于|均为|可用现金")
+_DISCLAIMER = re.compile(r"不构成投资建议|仅供研究")
+_SENTENCE_END = re.compile(r"[。！？!?]")
 _BOLD_PRICE = re.compile(r"(\d+(?:\.\d+)?)\s*元?")
 _LIMIT_PRICE = re.compile(r"限价\s*(\d+\.\d+)")
 _DECIMAL_PRICE = re.compile(r"(?<![\d.:])(\d+\.\d+)")
@@ -125,6 +146,9 @@ _RESIDUE_PUNCTUATION = re.compile(r"[\s，,。；;：:元]")
 _NUMERIC_CELL = re.compile(r"[-+]?[\d,]+(?:\.\d+)?\s*[%％元股]?")
 _EMPTY_CELLS = frozenset({"", "—", "-", "--", "/"})
 _LEAD_BIG_MAX_CHARS = 80  # 第一句太长就不放大，整段按普通正文
+# 说明性的话够短才算小字；再长多半夹着操作要求，要当正文读。整段加粗的通常就是一句说明，放宽一点
+_FINE_PRINT_MAX_CHARS = 80
+_FINE_PRINT_PLAIN_MAX_CHARS = 50
 
 
 class _PlanColumns(NamedTuple):
@@ -132,6 +156,19 @@ class _PlanColumns(NamedTuple):
     action: int | None
     price: int | None
     quantity: int | None
+    current: int | None
+    change: int | None
+
+
+class _StockHead(NamedTuple):
+    name: str
+    star: bool
+    rank: str
+    code: str
+    labels: tuple[str, ...]
+    current: str
+    change: str
+    current_label: str = "现价"
 
 
 def _inline_text(token: Token) -> str:
@@ -164,9 +201,9 @@ def _action_class(cell_text: str) -> str | None:
 
 def _neutral_tag(cell_text: str) -> str:
     """没有买卖动作的行，第一小句够短就当标签（拿着、等待、不参与）；各种说法的持有都归成“拿着”。"""
-    clause = _first_clause(cell_text)
-    if "持有" in clause or "拿着" in clause:
+    if "持有" in cell_text or "拿着" in cell_text:
         return "拿着"
+    clause = _first_clause(cell_text)
     return clause if 0 < len(clause) <= 4 and not re.search(r"\d", clause) else ""
 
 
@@ -175,17 +212,130 @@ def _html_token(content: str) -> Token:
     return Token(type="html_inline", tag="", nesting=0, content=content)
 
 
-def _rewrite_name_cell(inline: Token) -> None:
-    matched = _NAME_CELL.match(_inline_text(inline))
-    if not matched or not (matched.group("code") or matched.group("quoted") or matched.group("bare")):
-        return
-    parts = [f'<span class="nm">{escapeHtml(matched.group("name"))}</span>']
-    if matched.group("code"):
-        parts.append(f'<span class="cd fig">{matched.group("code")}</span>')
-    current = matched.group("quoted") or matched.group("bare")
-    if current:
-        parts.append(f'<span class="now">现价 <span class="fig">{current}</span></span>')
-    inline.children = [_html_token("".join(parts))]
+def _parse_stock(text: str) -> _StockHead | None:
+    """拆开股票格。除了名称、代码、账户、现价、涨跌幅还有别的话，就不是单纯的股票格，返回 None。"""
+    matched = _STOCK_CELL.match(text.strip())
+    if not matched:
+        return None
+    code = matched.group("code") or ""
+    current = change = ""
+    labels: list[str] = []
+    for part in _STOCK_SPLIT.split(matched.group("inner") or ""):
+        if not part:
+            continue
+        six_digit = _SIX_DIGIT_CODE.fullmatch(part)
+        quoted = _QUOTED_PRICE.fullmatch(part)
+        if six_digit:
+            code = six_digit.group(1)  # 括号里的 6 位数是代码，不是现价
+        elif quoted:
+            current = quoted.group(1)
+        elif _CHANGE_VALUE.fullmatch(part):
+            change = part
+        else:
+            labels.append(part)
+    for part in _STOCK_SPLIT.split(matched.group("rest") or ""):
+        if not part:
+            continue
+        quoted = _QUOTED_PRICE.fullmatch(part)
+        if quoted:
+            current = quoted.group(1)
+        elif _CHANGE_VALUE.fullmatch(part):
+            change = part
+        else:
+            return None
+    if not (code or current or change):
+        return None
+    return _StockHead(
+        name=matched.group("name").strip(),
+        star=bool(matched.group("star")),
+        rank=matched.group("rank") or "",
+        code=code,
+        labels=tuple(labels),
+        current=current,
+        change=change,
+    )
+
+
+def _change_class(change: str) -> str:
+    value = change.replace("−", "-").rstrip("%％")
+    if value.startswith("-") and float(value) != 0:
+        return "down"
+    return "up" if float(value) != 0 else "flat"
+
+
+def _stock_head_html(head: _StockHead) -> str:
+    parts = ['<span class="star">★</span>'] if head.star else []
+    if head.rank:
+        parts.append(f'<span class="cd">{escapeHtml(head.rank)}</span>')
+    parts.append(f'<span class="nm">{escapeHtml(head.name)}</span>')
+    if head.code:
+        parts.append(f'<span class="cd fig">{head.code}</span>')
+    parts.extend(f'<span class="cd">{escapeHtml(label)}</span>' for label in head.labels)
+    if head.current or head.change:
+        current = f'{head.current_label} <span class="fig">{head.current}</span>' if head.current else ""
+        change = (
+            f' <span class="chg {_change_class(head.change)} fig">{escapeHtml(head.change)}</span>'
+            if head.change
+            else ""
+        )
+        parts.append(f'<span class="now">{current}{change}</span>')
+    return "".join(parts)
+
+
+def _rewrite_name_cell(inline: Token, current: str = "", change: str = "", current_label: str = "现价") -> bool:
+    """名称格写成一行：名称、代码、现价、涨跌幅；现价和涨跌幅可能来自单独的列。"""
+    text = _inline_text(inline)
+    head = _parse_stock(text)
+    if head is None and (current or change):
+        head = _StockHead(text, False, "", "", (), "", "")
+    if head is None:
+        return False
+    if current and _QUOTED_PRICE.fullmatch(current):
+        head = head._replace(current=_QUOTED_PRICE.fullmatch(current).group(1), current_label=current_label)
+    if change and _CHANGE_VALUE.fullmatch(change):
+        head = head._replace(change=change)
+    inline.children = [_html_token(_stock_head_html(head))]
+    return True
+
+
+def _highlight_numbers(children: list[Token]) -> list[Token]:
+    """理由里的价格换成衬线金色，一眼能看到；只换纯文字，其余原样保留。"""
+    result: list[Token] = []
+    for child in children:
+        if child.type != "text" or not _KEY_NUMBER.search(child.content):
+            result.append(child)
+            continue
+        pieces: list[str] = []
+        cursor = 0
+        for matched in _KEY_NUMBER.finditer(child.content):
+            pieces.append(escapeHtml(child.content[cursor:matched.start()]))
+            pieces.append(f'<span class="fig key">{matched.group(0)}</span>')
+            cursor = matched.end()
+        pieces.append(escapeHtml(child.content[cursor:]))
+        result.append(_html_token("".join(pieces)))
+    return result
+
+
+def _prose_price_html(text: str) -> str:
+    matched = _PROSE_PLAN_PRICE.search(text)
+    if not matched:
+        return ""
+    price = matched.group(1) or matched.group(2)
+    return f'<span class="px"><span class="lb">计划价</span><span class="fig big">{price}</span></span>'
+
+
+def _note_children(inline_children: list[Token], text: str, kind: str | None, tag: str) -> list[Token]:
+    """没有股数列的行：标签加理由一行，右边放大理由里写明的计划价。"""
+    price_html = _prose_price_html(text)
+    tag_html = ""
+    if tag and (kind or not text.startswith(tag)):
+        tag_html = f'<span class="tag {kind or "act-none"}">{escapeHtml(tag)}</span>'
+    width = "" if price_html else " wide"
+    return [
+        _html_token(f'{price_html}<span class="act-note{width}">{tag_html}'),
+        *_highlight_numbers(inline_children),
+        _html_token("</span>"),
+    ]
 
 
 def _main_price(inline: Token) -> str | None:
@@ -223,16 +373,22 @@ def _plan_columns(headers: list[str]) -> _PlanColumns | None:
     """认出计划表：既说了怎么做又有价格或股数，或者同时有价格和股数。"""
     action = next((i for i, header in enumerate(headers) if _ACTION_HEADER.search(header)), None)
     has_price = any(_PRICE_HEADER.search(header) for header in headers)
+    current = next((i for i, header in enumerate(headers) if i > 0 and _CURRENT_PRICE_HEADER.search(header)), None)
+    change = next((i for i, header in enumerate(headers) if _CHANGE_HEADER.search(header)), None)
     quantity = next((i for i, header in enumerate(headers) if _QUANTITY_HEADER.search(header)), None)
     if not ((action is not None and (has_price or quantity is not None)) or (has_price and quantity is not None)):
         return None
     name = next((i for i, header in enumerate(headers) if _NAME_HEADER.search(header)), 0)
-    # 首列“股票（最新价）”里的价是现价，不是计划价
+    # 首列“股票（最新价）”和“现价”列都是现在的价格，不能放大成金色的计划价
     price = next(
-        (i for i, header in enumerate(headers) if i != name and _PRICE_HEADER.search(header)),
+        (
+            i
+            for i, header in enumerate(headers)
+            if i != name and _PRICE_HEADER.search(header) and not _NOT_PLAN_PRICE_HEADER.search(header)
+        ),
         None,
     )
-    return _PlanColumns(name, action, price, quantity)
+    return _PlanColumns(name, action, price, quantity, current, change)
 
 
 def _move_align_to_class(token: Token) -> None:
@@ -251,21 +407,42 @@ def _labelled_line(cell: Token, headers: list[str], column: int) -> None:
 
 
 def _decorate_plan_row(row: dict[int, tuple[Token, Token]], headers: list[str], columns: _PlanColumns) -> None:
+    def text_of(column: int | None) -> str:
+        return _inline_text(row[column][1]) if column is not None and column in row else ""
+
     action = row.get(columns.action) if columns.action is not None else None
     quantity = row.get(columns.quantity) if columns.quantity is not None else None
-    action_text = _inline_text(action[1]) if action else ""
-    quantity_text = _inline_text(quantity[1]) if quantity else ""
-    kind = _action_class(action_text or quantity_text)
+    action_text = text_of(columns.action)
+    kind = _action_class(action_text or text_of(columns.quantity))
     tag = _ACTION_TAGS.get(kind or "") or _neutral_tag(action_text)
+    merged = False
+    if columns.name in row:
+        cell, inline = row[columns.name]
+        cell.attrs.pop("style", None)
+        cell.attrJoin("class", "c-name")
+        current_header = headers[columns.current] if columns.current is not None else ""
+        # 表头写的是昨收，就不能显示成现价
+        current_label = "昨收" if "昨收" in current_header else ("收盘" if "收盘" in current_header else "现价")
+        merged = _rewrite_name_cell(inline, text_of(columns.current), text_of(columns.change), current_label)
     for column, (cell, inline) in row.items():
         cell.attrs.pop("style", None)
         if column == columns.name:
-            cell.attrJoin("class", "c-name")
-            _rewrite_name_cell(inline)
+            continue
+        if column in (columns.current, columns.change):
+            if merged:
+                cell.attrJoin("class", "dup")  # 已经并进名称那一行
+            else:
+                _labelled_line(cell, headers, column)
         elif column == columns.action:
-            cell.attrJoin("class", "c-act")
-            if quantity and action_text == tag:
-                cell.attrJoin("class", "dup")  # 整格就是“拿着”，标签已经说了
+            if quantity is None:
+                cell.attrJoin("class", "c-act")
+                cell.attrJoin("class", "c-solo")
+                inline.children = _note_children(inline.children or [], action_text, kind, tag)
+            else:
+                cell.attrJoin("class", "c-act")
+                if action_text == tag:
+                    cell.attrJoin("class", "dup")  # 整格就是“拿着”，标签已经说了
+                inline.children = _highlight_numbers(inline.children or [])
         elif column == columns.quantity:
             cell.attrJoin("class", "c-qty")
         elif column == columns.price:
@@ -277,11 +454,9 @@ def _decorate_plan_row(row: dict[int, tuple[Token, Token]], headers: list[str], 
                 _labelled_line(cell, headers, column)
         else:
             _labelled_line(cell, headers, column)
-    # 没有股数列时标签只能贴在操作文字前面，“不参与 不参与：0股”这种就不贴了
-    holder = quantity or (action if kind else None)
-    if holder and tag:
-        holder[0].attrSet("data-tag", tag)
-        holder[0].attrJoin("class", kind or "act-none")
+    if quantity and tag:
+        quantity[0].attrSet("data-tag", tag)
+        quantity[0].attrJoin("class", kind or "act-none")
 
 
 def _decorate_lines_row(row: dict[int, tuple[Token, Token]], headers: list[str]) -> None:
@@ -345,29 +520,133 @@ def _decorate_table(tokens: list[Token], start: int) -> int:
     return close
 
 
+def _without_empty_text(children: list[Token]) -> list[Token]:
+    # markdown-it 会在粗体前后留下空的文本节点，判断结构前要去掉
+    return [child for child in children if child.type != "text" or child.content]
+
+
+def _is_whole_bold(children: list[Token]) -> bool:
+    return (
+        len(children) >= 3
+        and children[0].type == "strong_open"
+        and children[-1].type == "strong_close"
+        and sum(1 for child in children if child.type == "strong_open") == 1
+    )
+
+
+def _split_at_first_sentence(children: list[Token]) -> tuple[list[Token], list[Token]] | None:
+    """在最外层文字的第一个句号处切开；后面没话了就不切。"""
+    depth = 0
+    for index, child in enumerate(children):
+        depth += child.nesting
+        if child.type != "text" or depth != 0:
+            continue
+        matched = _SENTENCE_END.search(child.content)
+        if not matched:
+            continue
+        before, after = copy.copy(child), copy.copy(child)
+        before.content = child.content[: matched.end()]
+        after.content = child.content[matched.end():].lstrip()
+        rest = ([after] if after.content else []) + children[index + 1:]
+        return (children[:index] + [before], rest) if rest else None
+    return None
+
+
 def _split_lead(tokens: list[Token], position: int) -> None:
-    """开头这段是结论：第一句放大，后面的话作为补充。"""
+    """开头这段是结论：第一句放大，后面的话作为补充。整段都加粗的先去掉粗体，放大已经够醒目。"""
     opening, inline, closing = tokens[position], tokens[position + 1], tokens[position + 2]
     opening.attrJoin("class", "lead")
-    children = inline.children or []
+    children = _without_empty_text(inline.children or [])
+    if _is_whole_bold(children):
+        children = children[1:-1]
+        inline.children = children
     line_break = next(
         (index for index, child in enumerate(children) if child.type in ("softbreak", "hardbreak")),
         None,
     )
-    head = children if line_break is None else children[:line_break]
+    if line_break is not None:
+        head, rest = children[:line_break], children[line_break + 1:]
+    else:
+        head, rest = _split_at_first_sentence(children) or (children, [])
     head_text = "".join(child.content for child in head if child.type in ("text", "code_inline"))
     balanced = sum(c.nesting for c in head) == 0
     if len(head_text) <= _LEAD_BIG_MAX_CHARS and balanced:
         opening.attrJoin("class", "lead-big")
-        if line_break is not None:
+        if rest:
             rest_open = copy.copy(opening)
             rest_open.attrs = {"class": "lead-end"}
             rest_inline = copy.copy(inline)
-            rest_inline.children = children[line_break + 1:]
+            rest_inline.children = rest
             inline.children = head
             tokens[position + 3:position + 3] = [rest_open, rest_inline, copy.copy(closing)]
             return
     opening.attrJoin("class", "lead-end")
+
+
+def _mark_fine_print(tokens: list[Token]) -> None:
+    """行情时间、价格单位、免责这类说明不是观点，改成小字，粗体也去掉。"""
+    for position, token in enumerate(tokens[:-1]):
+        if token.type != "paragraph_open" or token.level != 0 or token.attrGet("class"):
+            continue
+        inline = tokens[position + 1]
+        text = _inline_text(inline)
+        children = _without_empty_text(inline.children or [])
+        limit = _FINE_PRINT_MAX_CHARS if _is_whole_bold(children) else _FINE_PRINT_PLAIN_MAX_CHARS
+        if len(text) > limit or not (_DATA_NOTE.search(text) or _DISCLAIMER.search(text)):
+            continue
+        token.attrSet("class", "fine")
+        if _is_whole_bold(children):
+            inline.children = children[1:-1]
+
+
+def _decorate_stock_list(tokens: list[Token], start: int) -> None:
+    """“★上海谊众（688091）｜35.64｜+2.44%”开头的列表也是账本行；有一条不是这种写法就整个不动。"""
+    level = tokens[start].level
+    close = next(
+        index
+        for index in range(start + 1, len(tokens))
+        if tokens[index].type == "bullet_list_close" and tokens[index].level == level
+    )
+    items: list[tuple[Token, _StockHead, list[Token]]] = []
+    for index in range(start + 1, close):
+        if tokens[index].type != "list_item_open" or tokens[index].level != level + 1:
+            continue
+        inline = tokens[index + 2]
+        children = _without_empty_text(inline.children or [])
+        # 星号有时写在粗体外面：“★ **澜起科技（688008）｜150.98**”
+        star_outside = bool(children) and children[0].type == "text" and children[0].content.strip() == "★"
+        if star_outside:
+            children = children[1:]
+        if inline.type != "inline" or len(children) < 3 or children[0].type != "strong_open":
+            return
+        end = next((i for i, child in enumerate(children) if child.type == "strong_close"), None)
+        if end is None:
+            return
+        head = _parse_stock("".join(child.content for child in children[1:end] if child.type == "text"))
+        if head is None:
+            return
+        rest = children[end + 1:]
+        while rest and rest[0].type in ("softbreak", "hardbreak"):
+            rest = rest[1:]
+        items.append((inline, head._replace(star=head.star or star_outside), rest))
+    if not items:
+        return
+    tokens[start].attrSet("class", "stocks")
+    for inline, head, rest in items:
+        text = "".join(child.content for child in rest if child.type == "text")
+        kind = _action_class(text)
+        tag = _ACTION_TAGS.get(kind or "") or _neutral_tag(text)
+        price_html = _prose_price_html(text)
+        tag_html = f'<span class="tag {kind or "act-none"}">{escapeHtml(tag)}</span>' if tag and kind else ""
+        width = "" if price_html else " wide"
+        inline.children = [
+            _html_token(
+                f'<span class="sl-head">{_stock_head_html(head)}</span>{price_html}'
+                f'<span class="sl-note{width}">{tag_html}'
+            ),
+            *_highlight_numbers(rest),
+            _html_token("</span>"),
+        ]
 
 
 def _mark_lead(tokens: list[Token]) -> None:
@@ -402,12 +681,15 @@ def render_markdown(source: str) -> tuple[str, list[tuple[str, str]]]:
         token = tokens[index]
         if token.type == "table_open":
             index = _decorate_table(tokens, index)
+        elif token.type == "bullet_list_open":
+            _decorate_stock_list(tokens, index)
         elif token.type == "heading_open" and token.tag == "h2":
             anchor = f"s{len(sections) + 1}"
             token.attrSet("id", anchor)
             sections.append((anchor, _inline_text(tokens[index + 1])))
         index += 1
     _mark_lead(tokens)
+    _mark_fine_print(tokens)
     rendered = _MARKDOWN.renderer.render(tokens, _MARKDOWN.options, env)
     cleaned = nh3.clean(
         rendered,
@@ -437,7 +719,7 @@ body{margin:0;min-height:100vh;border-top:2px solid var(--gold);background:var(-
 .mark{color:var(--gold-2);font-size:12px;font-weight:500;letter-spacing:.18em;white-space:nowrap}
 .mast-note{color:var(--muted);font-size:13px;white-space:nowrap}
 .page{padding:0 0 24px}
-.page-title{margin:24px 0 0;color:var(--text);font-size:30px;font-weight:500;line-height:1.25;letter-spacing:.01em}
+.page-title{margin:24px 0 0;color:var(--text);font-size:30px;font-weight:400;line-height:1.25;letter-spacing:.01em}
 .page-meta{margin:8px 0 0;color:var(--muted);font-size:13px;line-height:1.5}
 .kpi{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);margin-top:16px;border-bottom:1px solid var(--line)}
 .kpi>div{padding:0 0 14px 12px;border-left:1px solid var(--line)}
@@ -458,10 +740,13 @@ body{margin:0;min-height:100vh;border-top:2px solid var(--gold);background:var(-
 .report h3{font-size:15px}
 .report h4,.report h5,.report h6{font-size:14px}
 .report p{margin:8px 0}
-.report strong{color:#f4e4b8;font-weight:700}
+.report strong{color:#f4e4b8;font-weight:600}
+.report .fine{color:var(--muted);font-size:12px;line-height:1.6}
+.report .fine strong{color:inherit;font-weight:400}
 .report .lead{margin:20px 0 0;padding-top:16px;border-top:1px solid var(--line-strong)}
 .report .lead::before{content:"结论";display:block;margin-bottom:8px;color:var(--gold);font-size:12px;font-weight:400;letter-spacing:.14em}
-.report .lead-big{color:var(--text);font-size:18px;font-weight:500;line-height:1.6}
+.report .lead-big{color:var(--text);font-size:18px;font-weight:400;line-height:1.6}
+.report .lead-big strong{color:var(--gold-2);font-weight:500}
 .report .lead-end{margin-bottom:0;padding-bottom:16px;border-bottom:1px solid var(--line-strong)}
 .report .lead-end:not(.lead){margin-top:10px;color:var(--soft);line-height:1.75}
 .report ul,.report ol{margin:8px 0;padding-left:22px}
@@ -492,6 +777,20 @@ td.fig{color:var(--text);font-size:14px;white-space:nowrap}
 .cd{color:var(--muted);font-size:13px;font-weight:400}
 .now{margin-left:auto;color:var(--muted);font-size:12px;font-weight:400;white-space:nowrap}
 .now .fig{color:var(--soft);font-size:14px}
+.chg.up{color:var(--up)}
+.chg.down{color:var(--down)}
+.chg.flat{color:var(--muted)}
+.star{margin-right:-2px;color:var(--gold);font-size:13px}
+.key{color:var(--gold-2);font-size:1.05em}
+.tag{display:inline-block;margin-right:8px;padding:0 6px;border:1px solid var(--tag-edge);border-radius:2px;color:var(--tag);font-size:12px;line-height:20px}
+.report .stocks{margin:0 0 8px;padding:0;list-style:none}
+.report .stocks li{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;margin:0;padding:14px 0;border-bottom:1px solid var(--line)}
+.report .stocks li p{display:contents}
+.sl-head{display:flex;flex-wrap:wrap;grid-column:1/-1;grid-row:1;align-items:baseline;gap:0 6px;color:var(--text);font-size:15px;font-weight:500}
+.sl-note,.act-note{grid-column:1;grid-row:2;margin-top:8px;color:var(--soft);font-size:13px;line-height:1.55}
+.sl-note.wide,.act-note.wide{grid-column:1/-1}
+.stocks .px,.c-solo .px{align-self:start;margin-top:6px}
+.plan td.c-solo{display:contents}
 .plan td.c-qty{grid-column:1;grid-row:2;margin-top:8px;color:var(--text);font-size:14px;font-weight:500}
 .plan td.c-price{display:contents}
 .px{display:flex;grid-column:2;grid-row:2;align-items:baseline;gap:6px;margin-top:8px;white-space:nowrap}

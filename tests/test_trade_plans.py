@@ -1059,6 +1059,17 @@ class SchedulerIntegrationTests(_PlanCase):
         self.assertIn("09:47 碰到过 22.20", question)
         self.assertIn("没有登记成交", question)
 
+    def test_reports_without_their_own_plan_link_todays_plan(self) -> None:
+        self._plan_ready()
+        _, _, pushed = self._report(job_key="agent-1-x", name="下午盘中短提醒", answer="短提醒", now=datetime(2026, 11, 3, 13, 5))
+        self.assertRegex(pushed["share"].meta["plan_url"], r"/api/share/[0-9a-f]{32}$")
+        self.assertEqual(pushed["share"].meta["plan_stats"], {"sell": 1, "buy": 0, "stop": 0, "hold": 0})
+
+    def test_only_todays_active_plan_is_linked(self) -> None:
+        self._plan_ready()
+        _, _, pushed = self._report(job_key="agent-1-x", name="下午盘中短提醒", answer="短提醒", now=datetime(2026, 11, 4, 13, 5))
+        self.assertNotIn("plan_url", pushed["share"].meta)
+
     def test_only_evening_gets_the_reconciliation(self) -> None:
         self._plan_ready()
         _, calls, _ = self._report(job_key="agent-1-b", name="午盘挂单调整", answer="正文", now=datetime(2026, 11, 3, 12, 10))

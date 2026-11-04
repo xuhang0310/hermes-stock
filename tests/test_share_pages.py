@@ -130,12 +130,121 @@ class RenderTests(unittest.TestCase):
     def test_neutral_tag_is_not_repeated_on_the_action_line(self) -> None:
         body, _ = render_markdown(
             "| 原排名、股票和收盘价 | 为什么入选 | 11月4日怎么做 | 要留心什么 |\n| --- | --- | --- | --- |\n"
-            "| #2 甲 | 低估值 | **不参与**：0股，财报压力较大。 | 回款 |\n"
-            "| #1 乙 | 低波动 | **准备买**：2000股，按条件。 | 利润 |\n"
+            "| #2 甲 601668.SH；4.73元 | 低估值 | **不参与**：0股，财报压力较大。 | 回款 |\n"
+            "| #1 乙 601166.SH；19.93元 | 低波动 | **准备买**：2000股，按条件。 | 利润 |\n"
         )
         rows = re.findall(r"<tr>.*?</tr>", body, flags=re.S)[1:]
-        self.assertNotIn("data-tag", rows[0])
-        self.assertIn('data-tag="买入"', rows[1])
+        self.assertNotIn('class="tag', rows[0])
+        self.assertIn('<span class="tag act-buy">买入</span>', rows[1])
+        self.assertIn('<span class="cd">#1</span><span class="nm">乙</span><span class="cd fig">601166</span>', rows[1])
+
+    def test_six_digits_in_brackets_are_a_code_not_a_price(self) -> None:
+        body, _ = render_markdown(
+            "| 股票 | 现价 | 涨跌幅 | 接下来怎么做 |\n|---|---|---|---|\n"
+            "| 民德电子（300656） | 19.89 | +0.71% | 反弹卖价19.92，现价还差0.03；止损价19.29。 |\n"
+        )
+        self.assertNotIn("300656</span></span>", body.replace('<span class="cd fig">300656</span>', ""))
+        self.assertIn('<span class="cd fig">300656</span>', body)
+        self.assertIn('现价 <span class="fig">19.89</span>', body)
+        self.assertIn('<span class="chg up fig">+0.71%</span>', body)
+
+    def test_watch_table_keeps_current_price_small_and_shows_the_plan_price_big(self) -> None:
+        body, _ = render_markdown(
+            "| 股票 | 现价 | 涨跌幅 | 接下来怎么做 |\n|---|---|---|---|\n"
+            "| 民德电子（300656） | 19.89 | +0.71% | 反弹卖价19.92，现价还差0.03；止损价19.29。 |\n"
+            "| 万东医疗（600055） | 10.49 | -0.57% | 午盘没设交易价，持有、不加仓。 |\n"
+            "| 普莱柯（603566） | 9.32 | 0.00% | 午盘没设交易价，持有、不加仓。 |\n"
+        )
+        rows = re.findall(r"<tr>.*?</tr>", body, flags=re.S)[1:]
+        self.assertIn('<span class="fig big">19.92</span>', rows[0], "金色大字只给计划价")
+        self.assertNotIn('<span class="fig big">19.89</span>', rows[0])
+        self.assertIn('<span class="tag act-sell">卖出</span>', rows[0])
+        self.assertIn('止损价<span class="fig key">19.29</span>', rows[0])
+        self.assertNotIn("big", rows[1], "午盘没设交易价，不能编一个计划价")
+        self.assertIn('<span class="tag act-none">拿着</span>', rows[1])
+        self.assertIn('<span class="chg down fig">-0.57%</span>', rows[1])
+        self.assertIn('<span class="chg flat fig">0.00%</span>', rows[2])
+
+    def test_previous_close_is_never_called_the_current_price(self) -> None:
+        body, _ = render_markdown(
+            "| 股票（账户） | 昨收 | 早盘计划怎么执行 |\n|---|---|---|\n"
+            "| ★澜起科技（688008，方正） | 150.01 | 原止损退出计划中的200股，按早盘安排先撤旧单。 |\n"
+            "| 海象新材（003011） | 16.45 | 反弹卖16.95／止损15.98。 |\n"
+            "| 万东医疗（600055） | 10.55 | 早盘没设交易价，继续持有，不加仓。 |\n"
+        )
+        rows = re.findall(r"<tr>.*?</tr>", body, flags=re.S)[1:]
+        self.assertIn('<table class="plan">', body)
+        self.assertNotIn("现价", body)
+        self.assertIn('昨收 <span class="fig">150.01</span>', rows[0])
+        self.assertIn('<span class="tag act-stop">止损</span>', rows[0])
+        self.assertIn('<span class="tag act-sell">卖出</span>', rows[1], "是卖单，止损只是备用出口，不能标成止损")
+        self.assertIn('<span class="fig big">16.95</span>', rows[1])
+        self.assertNotIn('<span class="fig big">15.98</span>', rows[1], "止损价不是放大的那个计划价")
+        self.assertIn('<span class="fig key">15.98</span>', rows[1])
+        self.assertIn('<span class="tag act-none">拿着</span>', rows[2])
+
+    def test_cost_price_column_stays_a_labelled_line(self) -> None:
+        body, _ = render_markdown("| 股票 | 成本价 | 怎么做 |\n|---|---|---|\n| 甲（600000） | 12.34 | 拿着 |\n")
+        self.assertIn('data-label="成本价"', body)
+        self.assertNotIn("现价", body)
+        self.assertNotIn("big", body)
+
+    def test_stock_list_becomes_ledger_rows(self) -> None:
+        body, _ = render_markdown(
+            "- **★上海谊众（688091）｜35.64｜+2.44%**  \n"
+            "  已达到35.40减仓条件。原计划为方正、中信各1,400股。\n\n"
+            "- **★澜起科技（688008，方正）｜153.29｜+2.19%**  \n"
+            "  已高于151.00退出限价。按午盘计划先撤旧单。\n"
+        )
+        self.assertIn('<ul class="stocks">', body)
+        self.assertIn('<span class="star">★</span><span class="nm">上海谊众</span><span class="cd fig">688091</span>', body)
+        self.assertIn('<span class="cd">方正</span>', body)
+        self.assertIn('现价 <span class="fig">35.64</span> <span class="chg up fig">+2.44%</span>', body)
+        self.assertIn('<span class="fig big">35.40</span>', body)
+        self.assertIn('<span class="fig big">151.00</span>', body)
+        self.assertIn('<span class="tag act-sell">卖出</span>已达到', body)
+        self.assertIn("原计划为方正、中信各1,400股。", body)
+        self.assertIn("按午盘计划先撤旧单。", body)
+
+    def test_star_written_outside_the_bold_still_counts(self) -> None:
+        body, _ = render_markdown(
+            "- ★ **澜起科技（688008，方正）｜150.98｜+0.65%**  \n  继续盯。\n"
+            "- **海象新材（003011）｜16.12｜-2.01%**  \n  继续盯。\n"
+        )
+        self.assertIn('<ul class="stocks">', body)
+        self.assertEqual(body.count('<span class="star">★</span>'), 1)
+        self.assertNotIn("<li>★", body)
+        self.assertIn('<span class="chg down fig">-2.01%</span>', body)
+
+    def test_ordinary_lists_are_left_alone(self) -> None:
+        for source in ("- **重点**：今天不追高\n- 第二条\n", "- 第一条\n- 第二条\n", "- **★甲（688091）**\n- 普通一条\n"):
+            with self.subTest(source=source):
+                self.assertNotIn("stocks", render_markdown(source)[0])
+
+    def test_lead_splits_at_the_first_sentence(self) -> None:
+        body, _ = render_markdown("上海谊众已达到35.40元减仓条件，澜起也高于151.00元。你先盯这两只，再处理没完成的部分。\n\n后面。")
+        self.assertIn('<p class="lead lead-big">上海谊众已达到35.40元减仓条件，澜起也高于151.00元。</p>', body)
+        self.assertIn('<p class="lead-end">你先盯这两只，再处理没完成的部分。</p>', body)
+
+    def test_whole_bold_lead_loses_the_bold(self) -> None:
+        body, _ = render_markdown("**今天减仓。先处理账户3。**\n\n后面。")
+        self.assertIn('<p class="lead lead-big">今天减仓。</p>', body)
+        self.assertNotIn("<strong>", body)
+
+    def test_data_notes_and_disclaimers_become_fine_print(self) -> None:
+        body, _ = render_markdown(
+            "结论。\n\n"
+            "**2026-11-04 13:05｜行情更新于13:05:09，价格单位：元。以下沿用午盘调整后的计划。**\n\n"
+            "**如果触及止损价，先撤反弹卖单。**\n\n"
+            "以上是研究参考，不构成投资建议。\n"
+        )
+        self.assertIn('<p class="fine">2026-11-04 13:05｜行情更新于', body)
+        self.assertIn("<strong>如果触及止损价，先撤反弹卖单。</strong>", body, "操作要求还是粗体")
+        self.assertIn('<p class="fine">以上是研究参考，不构成投资建议。</p>', body)
+
+    def test_long_paragraphs_with_instructions_stay_normal_text(self) -> None:
+        text = "下面的最新价均为2026年11月3日收盘价，新闻和公告更新至今天盘前约08:43。所有旧仓今天加仓0股；表里写拿着的股票，今天不挂单，其他股票按原定价位处理。"
+        self.assertNotIn('class="fine"', render_markdown(f"结论。\n\n{text}")[0])
 
     def test_price_cell_never_loses_words(self) -> None:
         cases = {

@@ -35,7 +35,7 @@ from backend.app.core.models import (
     WatchlistItem,
 )
 from backend.app.data.position_write_mixin import PositionWriteMixin
-from backend.app.data.share_service import ShareSpec, create_share_link
+from backend.app.data.share_service import ShareSpec, create_share_link, share_url
 from backend.app.plans import rules
 
 SAVE_TRADE_PLAN_TOOL = "save_trade_plan"
@@ -605,6 +605,24 @@ def activate_for_report(
         more = f" 等 {len(unmatched)} 条" if len(unmatched) > 5 else ""
         note = f"有计划和正文对不上，系统不替这些盯价，请以正文为准：{names}{more}。"
     return ActivationResult(note=note, plan_url=plan_url, plan_id=plan.plan_id, stats=_plan_stats(items))
+
+
+def current_plan_meta(db: Session, owner_user_id: int, today: str) -> dict[str, Any]:
+    """盘中提醒这类不出计划的报告也带上今天的计划入口和笔数；今天没有已生效的计划就返回空。"""
+    plan = db.scalar(
+        select(TradePlan)
+        .where(
+            TradePlan.owner_user_id == owner_user_id,
+            TradePlan.status == "active",
+            TradePlan.plan_date == today,
+        )
+        .order_by(TradePlan.activated_at.desc())
+        .limit(1)
+    )
+    share_id = plan_share_id(db, plan.plan_id) if plan is not None else None
+    if not share_id:
+        return {}
+    return {"plan_url": share_url(share_id), "plan_stats": _plan_stats(plan_items(db, plan.plan_id))}
 
 
 def plan_share_id(db: Session, plan_id: str) -> str | None:

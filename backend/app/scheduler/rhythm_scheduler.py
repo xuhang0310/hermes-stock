@@ -37,6 +37,7 @@ from backend.app.plans.service import (
     PLAN_SAVE_INSTRUCTION,
     ActivationResult,
     activate_for_report,
+    current_plan_meta,
     reconciliation_text,
     repair_question,
     repair_request,
@@ -500,6 +501,18 @@ def _plan_reconciliation_block(snap: dict, now: datetime) -> str:
         return ""
 
 
+def _current_plan_meta(snap: dict, now: datetime) -> dict[str, Any]:
+    owner_user_id = snap.get("owner_user_id")
+    if not owner_user_id:
+        return {}
+    try:
+        with SessionLocal() as session:
+            return current_plan_meta(session, int(owner_user_id), now.date().isoformat())
+    except Exception as exc:  # noqa: BLE001 - 手机页上的计划入口只是附加内容
+        _log("WARNING", "读取今天的计划入口失败", {"error": str(exc)[:300]})
+        return {}
+
+
 def _finish_trade_plan(
     snap: dict,
     answer: str,
@@ -570,6 +583,8 @@ def _run_agent_report(
             plan_meta = {"plan_url": plan_result.plan_url, "plan_stats": plan_result.stats}
         if plan_result.note:
             answer = f"{answer}\n\n---\n\n{plan_result.note}"
+    else:
+        plan_meta = _current_plan_meta(snap, now)
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
     title = f"{snap['name']} | {now:%Y-%m-%d}"
     notification_id: int | None = None
