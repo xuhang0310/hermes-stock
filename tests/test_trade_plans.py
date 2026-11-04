@@ -823,13 +823,16 @@ class PlanPageTests(_PlanCase):
         response = self._client().get(f"/api/share/{self._share_id(url)}")
         self.assertEqual(response.status_code, 200)
         page = response.text
-        self.assertIn("早盘计划", page)
+        self.assertIn("早盘计划进度", page)
         self.assertIn("方正证券 账户3", page)
-        self.assertIn("已触发 09:47 @22.20", page)
+        self.assertIn("已触发 09:47", page)
+        self.assertIn("09:47 碰到 22.20，还没有登记成交", page)
         self.assertIn("待触发", page)
         self.assertIn("拿着不动", page)
-        self.assertIn("现价 21.57", page)
+        self.assertIn('现价 <span class="fig">21.57</span>', page)
         self.assertIn("离计划价还差", page)
+        self.assertIn('<div class="bar"><div style="width:', page)
+        self.assertIn("2026 年 11 月 3 日 周二　08:52 生成", page)
         self.assertIn("价格碰到不等于成交", page)
         self.assertEqual(response.headers["cache-control"], "private, no-store")
         self.assertIn("default-src 'none'", response.headers["content-security-policy"])
@@ -856,8 +859,8 @@ class PlanPageTests(_PlanCase):
             )
             db.commit()
         page = self._client().get(f"/api/share/{self._share_id(url)}").text
-        self.assertIn("部分成交 1,000 股", page)
-        self.assertIn("计划 2,400 股，已登记 1,000 股", page)
+        self.assertIn("部分成交", page)
+        self.assertIn("已登记 1,000 / 2,400 股", page)
 
     def test_replaced_plan_points_to_the_newest_one(self) -> None:
         first = self._ready()
@@ -959,6 +962,7 @@ class SchedulerIntegrationTests(_PlanCase):
         self.assertEqual(self._plan().report_id, "rhythm-job-1")
         self.assertEqual(pushed["content"], "同力天启 限价22.18元 卖2,400")
         self.assertRegex(pushed["share"].meta["plan_url"], r"/api/share/[0-9a-f]{32}$")
+        self.assertEqual(pushed["share"].meta["plan_stats"], {"sell": 1, "buy": 0, "stop": 0, "hold": 0})
 
     def test_forgetting_to_save_triggers_one_repair(self) -> None:
         attempts: list[str] = []

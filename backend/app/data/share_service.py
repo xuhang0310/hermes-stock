@@ -11,6 +11,7 @@ import json
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -55,7 +56,7 @@ class ShareSpec:
     source_type: str  # agent_report / selection_digest / topnews_brief / channel_test ...
     source_ref: str | None = None  # 同一来源重发时复用同一条链接
     owner_user_id: int | None = None
-    meta: dict[str, str] = field(default_factory=dict)  # digital_human、generated_at
+    meta: dict[str, Any] = field(default_factory=dict)  # digital_human、generated_at、plan_url、plan_stats
     ttl_days: int | None = None
     button_text: str | None = None  # 卡片按钮文字，默认“手机查看完整版”
 

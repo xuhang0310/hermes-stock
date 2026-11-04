@@ -88,21 +88,84 @@ class RenderTests(unittest.TestCase):
         self.assertIn("<strong>今天（周二）</strong>再看", body)
         self.assertNotIn("**", body)
 
-    def test_plan_table_becomes_cards_with_action_colours(self) -> None:
+    def test_plan_table_becomes_ledger_rows_with_action_tags(self) -> None:
         body, _ = render_markdown(PLAN_TABLE)
-        self.assertIn('<div class="table-wrap cards"><table class="plan">', body)
-        self.assertIn('data-label="今天怎么做"', body)
+        self.assertIn('<div class="ledger"><table class="plan">', body)
         rows = re.findall(r"<tr>.*?</tr>", body, flags=re.S)[1:]
         self.assertEqual(len(rows), 5)
-        self.assertIn('class="act-sell"', rows[0])
-        self.assertIn('class="act-stop"', rows[1])
-        self.assertIn('class="act-buy"', rows[2])
-        # 第一小句是“拿着”或“不参与”的行不上色，哪怕后面提到止损或买
-        self.assertNotIn("act-", rows[3])
-        self.assertNotIn("act-", rows[4])
-        self.assertIn('class="num"', rows[0])
-        # 首列不算价格列：卡片标题由首列样式决定
-        self.assertNotIn('class="num" data-label="股票（最新价）"', body)
+        self.assertIn('data-tag="卖出"', rows[0])
+        self.assertIn("act-sell", rows[0])
+        self.assertIn('data-tag="止损"', rows[1])
+        self.assertIn("act-stop", rows[1])
+        self.assertIn('data-tag="买入"', rows[2])
+        self.assertIn("act-buy", rows[2])
+        # 第一小句是“拿着”或“不参与”的行不上买卖色，哪怕后面提到止损或买
+        self.assertIn('data-tag="拿着"', rows[3])
+        self.assertIn("act-none", rows[3])
+        self.assertIn('data-tag="不参与"', rows[4])
+        for row in rows[3:]:
+            self.assertNotRegex(row, "act-(buy|sell|stop)")
+
+    def test_ledger_row_splits_name_code_and_price(self) -> None:
+        body, _ = render_markdown(
+            "| 股票（最新价） | 今天怎么做 | 价格 | 股数（股） |\n| --- | --- | --- | --- |\n"
+            "| 同力天启605286（21.57元） | 反弹卖一部分 | 限价22.18元 | 卖2,400，留4,800 |\n"
+        )
+        self.assertIn('<span class="nm">同力天启</span>', body)
+        self.assertIn('<span class="cd fig">605286</span>', body)
+        self.assertIn('现价 <span class="fig">21.57</span>', body)
+        self.assertIn('<span class="lb">限价</span><span class="fig big">22.18</span>', body)
+        self.assertNotIn("px-note", body, "“限价22.18元”拆完没有剩下别的话")
+        self.assertIn("卖2,400，留4,800", body)
+        self.assertIn("反弹卖一部分", body)
+
+    def test_hold_phrased_differently_still_gets_the_same_tag(self) -> None:
+        body, _ = render_markdown(
+            "| 股票 | 怎么做 | 价格 | 股数 |\n| --- | --- | --- | --- |\n"
+            "| 甲 | 按早盘安排持有，不加仓 | 不挂单 | 持有7,000 |\n"
+        )
+        self.assertIn('data-tag="拿着"', body)
+        self.assertIn("按早盘安排持有，不加仓", body)
+
+    def test_neutral_tag_is_not_repeated_on_the_action_line(self) -> None:
+        body, _ = render_markdown(
+            "| 原排名、股票和收盘价 | 为什么入选 | 11月4日怎么做 | 要留心什么 |\n| --- | --- | --- | --- |\n"
+            "| #2 甲 | 低估值 | **不参与**：0股，财报压力较大。 | 回款 |\n"
+            "| #1 乙 | 低波动 | **准备买**：2000股，按条件。 | 利润 |\n"
+        )
+        rows = re.findall(r"<tr>.*?</tr>", body, flags=re.S)[1:]
+        self.assertNotIn("data-tag", rows[0])
+        self.assertIn('data-tag="买入"', rows[1])
+
+    def test_price_cell_never_loses_words(self) -> None:
+        cases = {
+            "9:15集合竞价，限价120.01元": "120.01",
+            "22.45→**22.18**；止损触发20.59不变": "22.18",
+            "开盘买一≥155.00时限价**155.00**；低于155.00不卖": "155.00",
+        }
+        for cell, price in cases.items():
+            with self.subTest(cell=cell):
+                body, _ = render_markdown(f"| 股票 | 价格 | 股数 |\n| --- | --- | --- |\n| 甲 | {cell} | 卖200 |\n")
+                self.assertIn(f'<span class="fig big">{price}</span>', body)
+                note = re.search(r'<span class="px-note">(.*?)</span>', body).group(1)
+                self.assertEqual(note, cell.replace("**", "").replace("≥", "≥"))
+
+    def test_price_cell_without_a_number_stays_a_labelled_line(self) -> None:
+        body, _ = render_markdown("| 股票 | 价格 | 股数 |\n| --- | --- | --- |\n| 甲 | 不挂单 | 持有7,000 |\n| 乙 | — | 持有100 |\n")
+        rows = re.findall(r"<tr>.*?</tr>", body, flags=re.S)[1:]
+        self.assertIn('data-label="价格"', rows[0])
+        self.assertIn("不挂单", rows[0])
+        self.assertIn("dup", rows[1], "只有一个横杠就不用占一行")
+
+    def test_cell_text_cannot_inject_markup_through_the_ledger(self) -> None:
+        body, _ = render_markdown(
+            "| 股票 | 价格 | 股数 |\n| --- | --- | --- |\n"
+            "| <b>甲</b>605286（1.00元） | <img src=x onerror=1>限价22.18元 | 卖200 |\n"
+        )
+        self.assertNotIn("<b>", body)
+        self.assertNotIn("<img", body)
+        self.assertIn("&lt;b&gt;甲&lt;/b&gt;", body)
+        self.assertIn("&lt;img", body)
 
     def test_real_plan_headers_are_recognised(self) -> None:
         for header in (
@@ -126,12 +189,18 @@ class RenderTests(unittest.TestCase):
                 self.assertIn('class="ac"', body)
                 self.assertNotIn("style=", body)
 
-    def test_long_text_table_becomes_cards_but_stays_uncoloured(self) -> None:
-        long_cell = "这一格的文字很长，放进窄屏的横向表格里读起来很吃力，需要改成卡片"
+    def test_long_text_table_becomes_lines_without_action_tags(self) -> None:
+        long_cell = "这一格的文字很长，放进窄屏的横向表格里读起来很吃力，需要改成分行显示"
         body, _ = render_markdown(f"| 风险 | 什么时候算发生 | 说明 |\n| --- | --- | --- |\n| 甲 | {long_cell} | 丙 |\n")
-        self.assertIn('<table class="plan">', body)
+        self.assertIn('<div class="ledger"><table class="lines">', body)
+        self.assertIn('data-label="什么时候算发生"', body)
         self.assertNotIn("act-", body)
-        self.assertNotIn('class="num"', body)
+        self.assertNotIn("data-tag", body)
+
+    def test_plain_table_numbers_use_the_figure_font(self) -> None:
+        body, _ = render_markdown("| 账户 | 现金 | 说明 |\n| --- | --- | --- |\n| 甲 | 1,234.50 | 没动 |\n")
+        self.assertIn('<td class="fig">1,234.50</td>', body)
+        self.assertIn("<td>没动</td>", body)
 
     def test_two_column_table_with_long_text_stays_a_table(self) -> None:
         long_cell = "两列放得下，不需要改成卡片，也不用横向滑动，保持表格的样子就可以了"
@@ -150,11 +219,58 @@ class RenderTests(unittest.TestCase):
         self.assertIn('<h2 id="s4">', long_page)
 
     def test_lead_marks_only_an_opening_paragraph(self) -> None:
-        self.assertIn('<p class="lead">结论', render_markdown("结论在这。\n\n后面一段。")[0])
-        self.assertEqual(render_markdown("结论在这。\n\n后面一段。")[0].count('class="lead"'), 1)
-        self.assertIn('<p class="lead">结论', render_markdown("## 结论\n\n结论在这。")[0])
+        single = render_markdown("结论在这。\n\n后面一段。")[0]
+        self.assertIn('<p class="lead lead-big lead-end">结论', single)
+        self.assertEqual(single.count("lead-big"), 1)
+        self.assertIn('<p class="lead lead-big lead-end">结论', render_markdown("## 结论\n\n结论在这。")[0])
         self.assertNotIn("lead", render_markdown("| 账户 | 现金 |\n| --- | --- |\n| 甲 | 1 |\n\n后面一段。")[0])
         self.assertNotIn("lead", render_markdown("- 第一条\n\n后面一段。")[0])
+
+    def test_lead_first_line_is_enlarged_and_the_rest_supports_it(self) -> None:
+        body, _ = render_markdown("今天**减弱仓**。\n先处理账户3。\n新买只看一只。\n\n后面一段。")
+        self.assertIn('<p class="lead lead-big">今天<strong>减弱仓</strong>。</p>', body)
+        self.assertIn('<p class="lead-end">先处理账户3。<br>\n新买只看一只。</p>', body)
+
+    def test_long_first_line_is_not_enlarged(self) -> None:
+        long_line = "这一句很长" * 20
+        self.assertIn('<p class="lead lead-end">', render_markdown(f"{long_line}\n第二句")[0])
+
+    def test_bold_across_lines_keeps_the_lead_whole(self) -> None:
+        body, _ = render_markdown("**跨行\n的粗体**还有后文\n\n后面。")
+        self.assertIn('<p class="lead lead-end"><strong>跨行', body)
+        self.assertEqual(body.count("<strong>"), 1)
+
+    def test_stats_and_toc_come_after_the_conclusion(self) -> None:
+        source = "结论。\n\n" + "\n\n".join(f"## 第{i}节\n\n内容" for i in range(1, 5))
+        page = render_share_page(
+            title="t",
+            meta={"plan_stats": {"sell": 4, "buy": 1, "stop": 2, "hold": 1}},
+            content_md=source,
+            expires_on="2026-12-04",
+        )
+        self.assertLess(page.index("结论。"), page.index('class="kpi"'))
+        self.assertLess(page.index('class="kpi"'), page.index('class="toc"'))
+        self.assertLess(page.index('class="toc"'), page.index("第1节</h2>"))
+        self.assertIn('<span class="fig">4</span><span class="kl">笔卖出</span>', page)
+        self.assertIn('<span class="fig">2</span><span class="kl">条止损线</span>', page)
+
+    def test_stats_without_any_action_or_a_plan_are_hidden(self) -> None:
+        for meta in ({}, {"plan_stats": {"sell": 0, "buy": 0, "stop": 0, "hold": 0}}, {"plan_stats": "x"}):
+            with self.subTest(meta=meta):
+                page = render_share_page(title="t", meta=meta, content_md="结论。", expires_on="2026-12-04")
+                self.assertNotIn('class="kpi"', page)
+
+    def test_plan_link_sits_at_the_end_of_the_report(self) -> None:
+        page = render_share_page(
+            title="t",
+            meta={"plan_url": "https://stock.example.com/api/share/abc"},
+            content_md="结论。\n\n正文。",
+            expires_on="2026-12-04",
+        )
+        self.assertLess(page.index("正文。"), page.index('class="plan-link"'))
+        self.assertLess(page.index('class="plan-link"'), page.index('class="page-foot"'))
+        unsafe = render_share_page(title="t", meta={"plan_url": "javascript:alert(1)"}, content_md="x", expires_on="2026-12-04")
+        self.assertNotIn("plan-link", unsafe.split("</style>")[1])
 
     def test_page_is_self_contained_and_escapes_metadata(self) -> None:
         page = render_share_page(
@@ -164,21 +280,23 @@ class RenderTests(unittest.TestCase):
             expires_on="2026-12-04",
         )
         self.assertNotIn("<script", page)
-        self.assertEqual(page.count("<img"), 1, "只有品牌 logo，正文和元信息里的 img 都被转义了")
+        self.assertNotIn("<img", page)
         self.assertNotIn("<link", page)
-        # 唯一的图片是内嵌的品牌 logo，页面不加载任何外部资源
-        sources = re.findall(r'src="([^"]*)"', page)
-        self.assertEqual(len(sources), 1)
-        self.assertTrue(sources[0].startswith("data:image/png;base64,"))
+        self.assertEqual(re.findall(r'src="([^"]*)"', page), [], "页面不加载任何外部资源")
+        # 唯一内嵌的资源是数字字体
+        urls = re.findall(r"url\(([^)]*)\)", page)
+        self.assertEqual(len(urls), 1)
+        self.assertTrue(urls[0].startswith("data:font/woff2;base64,"))
         self.assertNotRegex(page, r"https?://")
         self.assertIn('name="viewport"', page)
-        self.assertIn("11-04 08:52 · 总调度", page)
-        self.assertIn("生成于 11-04 08:52 · 链接有效期至 2026-12-04", page)
+        self.assertIn("2026 年 11 月 4 日 周三　08:52　总调度&quot;&gt;&lt;img src=x&gt;", page)
+        self.assertIn("生成于 11-04 08:52，链接有效期至 2026-12-04。", page)
+        self.assertIn("No. 1104-0852", page)
         # 卡片标题里的日期不再重复放进页面大标题
         self.assertRegex(page, r'<h1 class="page-title">早盘清单&lt;script&gt;alert\(1\)&lt;/script&gt;</h1>')
 
     def test_page_shell_stays_small(self) -> None:
-        self.assertLess(len(render_notice_page("链接已过期", "x").encode("utf-8")), 12 * 1024)
+        self.assertLess(len(render_notice_page("链接已过期", "x").encode("utf-8")), 16 * 1024)
 
     def test_page_uses_the_same_design_tokens_as_the_website(self) -> None:
         site = Path(__file__).resolve().parents[1].joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
@@ -186,11 +304,11 @@ class RenderTests(unittest.TestCase):
         site_tokens = dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]+)", site_root))
         page = render_notice_page("x", "y")
         self.assertGreater(len(site_tokens), 15)
-        for name in ("--bg", "--bg-2", "--surface", "--surface-2", "--text", "--muted", "--line", "--line-strong", "--gold", "--gold-2", "--gold-dim", "--cyan", "--danger", "--ok"):
+        for name in ("--bg", "--text", "--muted", "--line", "--line-strong", "--gold", "--gold-2", "--gold-dim", "--danger", "--ok"):
             with self.subTest(token=name):
                 self.assertIn(f"{name}:{site_tokens[name]}", page)
         self.assertIn("color-scheme:dark", page)
-        self.assertIn("SixRabbits", page)
+        self.assertIn("SIXRABBITS RESEARCH", page)
 
 
 class ShareLifecycleTests(_DbCase):
@@ -262,6 +380,7 @@ class ShareLifecycleTests(_DbCase):
         self.assertEqual(response.headers["referrer-policy"], "no-referrer")
         self.assertEqual(response.headers["cache-control"], "private, no-store")
         self.assertIn("default-src 'none'", response.headers["content-security-policy"])
+        self.assertIn("font-src data:", response.headers["content-security-policy"])
         self.assertNotIn("script-src", response.headers["content-security-policy"])
         client.get(f"/api/share/{share_id}")
         row = self._row(share_id)

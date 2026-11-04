@@ -563,10 +563,11 @@ def _run_agent_report(
     answer = _plain_report(snap, answer)
 
     report_id = f"rhythm-{job_run_id}"
-    plan_url: str | None = None
+    plan_meta: dict[str, Any] = {}
     if plan_source:
         plan_result = _finish_trade_plan(snap, answer, now, job_run_id, report_id)
-        plan_url = plan_result.plan_url
+        if plan_result.plan_url:
+            plan_meta = {"plan_url": plan_result.plan_url, "plan_stats": plan_result.stats}
         if plan_result.note:
             answer = f"{answer}\n\n---\n\n{plan_result.note}"
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
@@ -630,7 +631,7 @@ def _run_agent_report(
                     meta={
                         "digital_human": digital_human_name,
                         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-                        **({"plan_url": plan_url} if plan_url else {}),
+                        **plan_meta,
                     },
                 ),
             )

@@ -41,7 +41,7 @@ _SHARE_ID = re.compile(r"[0-9a-f]{32}")
 _PAGE_HEADERS = {
     "Cache-Control": "private, no-store",
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+        "default-src 'none'; style-src 'unsafe-inline'; font-src data:; img-src data:; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
     "Referrer-Policy": "no-referrer",

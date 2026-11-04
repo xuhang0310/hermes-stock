@@ -521,11 +521,21 @@ def repair_question(problem: str, task_name: str, report_text: str) -> str:
     )
 
 
+def _plan_stats(items: list[TradePlanItem]) -> dict[str, int]:
+    return {
+        "sell": sum(1 for item in items if item.action in rules.SELL_ACTIONS),
+        "buy": sum(1 for item in items if item.action in rules.BUY_ACTIONS),
+        "stop": sum(1 for item in items if item.action == "stop_loss"),
+        "hold": sum(1 for item in items if item.action == "hold"),
+    }
+
+
 @dataclass(frozen=True)
 class ActivationResult:
     note: str = ""  # 要追加到报告末尾的说明
     plan_url: str | None = None
     plan_id: str | None = None
+    stats: dict[str, int] | None = None  # 报告页顶部的笔数统计
 
 
 def activate_for_report(
@@ -594,7 +604,7 @@ def activate_for_report(
         names = "、".join(_item_label(item) for item, _ in unmatched[:5])
         more = f" 等 {len(unmatched)} 条" if len(unmatched) > 5 else ""
         note = f"有计划和正文对不上，系统不替这些盯价，请以正文为准：{names}{more}。"
-    return ActivationResult(note=note, plan_url=plan_url, plan_id=plan.plan_id)
+    return ActivationResult(note=note, plan_url=plan_url, plan_id=plan.plan_id, stats=_plan_stats(items))
 
 
 def plan_share_id(db: Session, plan_id: str) -> str | None:
