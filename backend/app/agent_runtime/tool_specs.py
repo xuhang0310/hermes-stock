@@ -93,6 +93,17 @@ def tool_spec(tool_name: str, *, write_names: set[str] | None = None) -> ToolSpe
             is_read_only=False,
             is_concurrency_safe=False,
         )
+    if tool_name == "save_trade_plan":
+        # 同一次定时任务重存会覆盖，重试安全；存的是草稿，报告定稿后才生效。
+        return ToolSpec(
+            name=tool_name,
+            side_effect="business",
+            idempotency="key_required",
+            timeout_seconds=30,
+            max_attempts=2,
+            is_read_only=False,
+            is_concurrency_safe=False,
+        )
     if tool_name in _EXTERNAL_READ_TOOLS:
         return ToolSpec(
             name=tool_name,

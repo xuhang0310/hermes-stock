@@ -2080,3 +2080,74 @@ class ReportShare(Base):
     view_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class TradePlan(Base):
+    """一份操作计划（早盘、午盘、晚间、周、月、选股）。
+
+    status：draft（数字人存好，报告还没定稿）/ active / superseded（被新计划替代）。
+    草稿不会提醒：客户先看到报告，才会收到这份计划的提醒。时间按 UTC 裸时间存。
+    """
+
+    __tablename__ = "trade_plans"
+    __table_args__ = (
+        UniqueConstraint("job_run_id", name="uq_trade_plans_job_run"),
+        Index("ix_trade_plans_owner_date", "owner_user_id", "plan_date"),
+        Index("ix_trade_plans_status_date", "status", "plan_date"),
+    )
+
+    plan_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_date: Mapped[str] = mapped_column(String(10), nullable=False)  # 开始生效的交易日 YYYY-MM-DD
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    job_key: Mapped[str | None] = mapped_column(String(120))
+    job_run_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(64))
+    report_id: Mapped[str | None] = mapped_column(String(160))
+    digital_human_code: Mapped[str | None] = mapped_column(String(80))
+    push_channel_key: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime)
+    superseded_by: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TradePlanItem(Base):
+    """计划里的一条操作。状态和成交结果由 plans.service.reconcile_owner 从成交流水推出来。
+
+    status：pending / triggered / partially_executed / executed / expired / superseded。
+    """
+
+    __tablename__ = "trade_plan_items"
+    __table_args__ = (
+        Index("ix_trade_plan_items_plan", "plan_id", "sort_order"),
+        Index("ix_trade_plan_items_owner", "owner_user_id", "symbol"),
+        Index("ix_trade_plan_items_notify", "triggered_at", "notified_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plan_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    account_id: Mapped[int | None] = mapped_column(Integer)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(120))
+    action: Mapped[str] = mapped_column(String(16), nullable=False)  # buy/add/sell/reduce/hold/stop_loss/cancel
+    trigger_type: Mapped[str] = mapped_column(String(16), nullable=False, default="none")  # limit/rise_to/fall_to/none
+    trigger_price: Mapped[float | None] = mapped_column(Float)
+    quantity: Mapped[float | None] = mapped_column(Float)
+    funding_note: Mapped[str | None] = mapped_column(Text)
+    valid_until: Mapped[str] = mapped_column(String(10), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    text_matched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # 和报告正文对得上才盯价
+    baseline_high: Mapped[float | None] = mapped_column(Float)  # 第一次盯价时的当日最高价，之前的高点不算
+    baseline_low: Mapped[float | None] = mapped_column(Float)
+    triggered_at: Mapped[datetime | None] = mapped_column(DateTime)
+    triggered_price: Mapped[float | None] = mapped_column(Float)
+    trigger_via: Mapped[str | None] = mapped_column(String(8))  # price / spike
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime)
+    executed_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    trade_ids: Mapped[str | None] = mapped_column(Text)  # 对账匹配到的 position_trades.id，JSON 数组
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

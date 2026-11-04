@@ -378,4 +378,5 @@ TOOL_DISPLAY_NAMES = {
     "pause_agent_schedule": "暂停或恢复定时 Agent 任务",
     "delete_agent_schedule": "删除定时 Agent 任务",
     "create_agent_task_batch": "创建看板任务批次",
+    "save_trade_plan": "保存操作计划",
 }

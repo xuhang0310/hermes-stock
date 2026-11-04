@@ -32,6 +32,15 @@ from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.ai.plain_rewrite import rewrite_plain
 from backend.app.data.share_service import ShareSpec
 from backend.app.feishu.feishu import send_feishu
+from backend.app.plans.rules import MARKET_CLOSE, plan_source_for_job
+from backend.app.plans.service import (
+    PLAN_SAVE_INSTRUCTION,
+    ActivationResult,
+    activate_for_report,
+    reconciliation_text,
+    repair_question,
+    repair_request,
+)
 from backend.app.core.models import (
     AgentReport,
     AgentRun,
@@ -68,6 +77,7 @@ _SAME_DAY_CATCHUP_JOB_KEYS = frozenset(_AUTOMATIC_SELECTION_CLAIM_GROUP)
 # TuShare 当天数据 17:00 前后才发齐；数据入库失败后每 30 分钟重试，22:00 后当天不再重试。
 AUTOMATIC_SELECTION_DATA_RETRY_MINUTES = 30
 AUTOMATIC_SELECTION_DATA_RETRY_UNTIL = "22:00"
+PLAN_REPAIR_TIMEOUT_SECONDS = 240
 # 旧版默认 15:45/16:10 早于数据发布，未被用户改过的内置任务升级时迁移到新默认时间。
 # 旧版选股任务不推送飞书；仍是这段默认描述（没人改过）的任务在启动时补上任务群推送，只迁移一次。
 _LEGACY_AUTOMATIC_SELECTION_DESCRIPTION = (
@@ -283,7 +293,7 @@ def _render(template: str | None, now: datetime) -> str:
     )
 
 
-def _scheduled_execution_constraints(job_key: str) -> str:
+def _scheduled_execution_constraints(job_key: str, plan_source: str | None = None) -> str:
     common = (
         "本轮是独立的定时任务，只处理提示中的当日范围；历史报告仅可作为证据，"
         "不得补做往日任务。工具已返回的数据直接复用，同一工具与同一参数不要重复调用，"
@@ -292,6 +302,8 @@ def _scheduled_execution_constraints(job_key: str) -> str:
         "任务里的核对要求和限制是给你做事用的，照做即可，不要在报告里逐条复述"
         "（如“不跨账户挪用”“不构成授权”“不冒充实时数据”）。"
     )
+    if plan_source:
+        common += PLAN_SAVE_INSTRUCTION
     if job_key == "close-review-1530":
         return (
             common
@@ -345,7 +357,11 @@ def _run_scheduled_agent(
     snap: dict,
     question: str,
     job_run_id: str,
+    *,
+    repair_timeout_seconds: int | None = None,
 ) -> tuple[str, str | None]:
+    """跑一次定时 Agent。传 repair_timeout_seconds 表示这是报告定稿后的补存计划，不是主运行。"""
+    is_repair = repair_timeout_seconds is not None
     with SessionLocal() as db:
         profile = db.scalar(
             select(DigitalHumanProfile)
@@ -420,23 +436,35 @@ def _run_scheduled_agent(
             "max_delegated_tasks": int(snap.get("max_delegated_tasks") or 20),
         },
     )
-    run = create_channel_run(request_payload, idempotency_key=f"schedule:{job_run_id}")
+    if snap.get("trade_plan_source"):
+        request_payload["trade_plan_source"] = snap["trade_plan_source"]
+        request_payload["trade_plan_context"] = {
+            "job_key": snap["job_key"],
+            "push_channel_key": snap.get("push_channel_key"),
+        }
+    idempotency_key = f"schedule:{job_run_id}:plan-repair" if is_repair else f"schedule:{job_run_id}"
+    run = create_channel_run(request_payload, idempotency_key=idempotency_key)
     # 关联 leader AgentRun 到 JobRun，便于任务提取和审计追溯
-    with SessionLocal() as db:
-        job_run = db.scalar(
-            select(JobRun).where(JobRun.run_id == job_run_id).limit(1)
-        )
-        if job_run is not None:
-            job_run.leader_agent_run_id = run["run_id"]
-            db.commit()
+    if not is_repair:
+        with SessionLocal() as db:
+            job_run = db.scalar(
+                select(JobRun).where(JobRun.run_id == job_run_id).limit(1)
+            )
+            if job_run is not None:
+                job_run.leader_agent_run_id = run["run_id"]
+                db.commit()
     if run["created"]:
         with SessionLocal() as db:
             db.add(AiChatMessage(session_id=session_id, role="user", content=question, event_count=0))
             db.commit()
     answer, model_name, error = wait_for_channel_run(
         run["run_id"],
-        timeout_seconds=max(30, int(settings.agent_run_timeout_seconds)) + 30,
-        hard_timeout_seconds=_scheduled_agent_hard_timeout_seconds(snap),
+        timeout_seconds=(
+            repair_timeout_seconds if is_repair else max(30, int(settings.agent_run_timeout_seconds)) + 30
+        ),
+        hard_timeout_seconds=(
+            repair_timeout_seconds if is_repair else _scheduled_agent_hard_timeout_seconds(snap)
+        ),
     )
     if error:
         raise RuntimeError(error)
@@ -459,13 +487,73 @@ def _plain_report(snap: dict, answer: str) -> str:
     return result.text
 
 
+def _plan_reconciliation_block(snap: dict, now: datetime) -> str:
+    """晚间日报的“计划和实际对照”直接用系统算好的结果，不用数字人再去翻文件比对。"""
+    owner_user_id = snap.get("owner_user_id")
+    if not owner_user_id:
+        return ""
+    try:
+        with SessionLocal() as session:
+            return reconciliation_text(session, int(owner_user_id), now.date().isoformat())
+    except Exception as exc:  # noqa: BLE001 - 对账结果只是素材，拿不到时数字人还能按原来的办法写
+        _log("WARNING", "计划对账结果生成失败", {"error": str(exc)[:300]})
+        return ""
+
+
+def _finish_trade_plan(
+    snap: dict,
+    answer: str,
+    now: datetime,
+    job_run_id: str,
+    report_id: str,
+) -> ActivationResult:
+    """报告定稿后：计划和正文对不上就让数字人补存一次，然后让计划生效。
+
+    补存有时限，不能拖住报告；这里任何失败都不影响报告送达。
+    """
+    try:
+        with SessionLocal() as session:
+            problem = repair_request(session, job_run_id, answer)
+        if problem:
+            _log("WARNING", "计划和正文对不上，让数字人补存一次", {"job_key": snap["job_key"], "problem": problem[:300]})
+            try:
+                _run_scheduled_agent(
+                    {**snap, "delegation_mode": "none"},
+                    repair_question(problem, str(snap["name"]), answer),
+                    job_run_id,
+                    repair_timeout_seconds=PLAN_REPAIR_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001 - 补存失败就按现状生效，并在报告末尾注明
+                _log("WARNING", "计划补存失败", {"job_key": snap["job_key"], "error": str(exc)[:300]})
+        with SessionLocal() as session:
+            return activate_for_report(
+                session,
+                job_run_id=job_run_id,
+                report_id=report_id,
+                text=answer,
+                generated_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+                today=now.date().isoformat(),
+                session_live=is_trading_day(now.date()) and now.time() < MARKET_CLOSE,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _log("ERROR", "计划生效失败", {"job_key": snap["job_key"], "error": str(exc)[:300]})
+        return ActivationResult(note="这份清单的计划没能生效，这次不会有到价提醒。")
+
+
 def _run_agent_report(
     snap: dict,
     now: datetime,
     job_run_id: str,
 ) -> tuple[str, int | None, str, str | None]:
+    plan_source = plan_source_for_job(snap.get("job_key"), snap.get("name"))
+    if plan_source:
+        snap = {**snap, "trade_plan_source": plan_source}
     question = _render(snap["prompt_template"], now) or snap["name"]
-    question = f"{question}\n\n执行约束：{_scheduled_execution_constraints(str(snap['job_key']))}"
+    question = f"{question}\n\n执行约束：{_scheduled_execution_constraints(str(snap['job_key']), plan_source)}"
+    if plan_source == "evening":
+        reconciliation = _plan_reconciliation_block(snap, now)
+        if reconciliation:
+            question = f"{question}\n\n{reconciliation}"
     answer, model_name = _run_scheduled_agent(snap, question, job_run_id)
     agent_error = None
     if agent_error:
@@ -475,6 +563,12 @@ def _run_agent_report(
     answer = _plain_report(snap, answer)
 
     report_id = f"rhythm-{job_run_id}"
+    plan_url: str | None = None
+    if plan_source:
+        plan_result = _finish_trade_plan(snap, answer, now, job_run_id, report_id)
+        plan_url = plan_result.plan_url
+        if plan_result.note:
+            answer = f"{answer}\n\n---\n\n{plan_result.note}"
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
     title = f"{snap['name']} | {now:%Y-%m-%d}"
     notification_id: int | None = None
@@ -536,6 +630,7 @@ def _run_agent_report(
                     meta={
                         "digital_human": digital_human_name,
                         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        **({"plan_url": plan_url} if plan_url else {}),
                     },
                 ),
             )
@@ -818,9 +913,10 @@ def _run_position_price_sync_locked(now: datetime) -> str:
                 select(WatchlistItem.symbol).where(WatchlistItem.status == "active")
             ).all()
         )
-        symbols = sorted({s.symbol for s in snaps} | watchlist_symbols)
+        symbols = {s.symbol for s in snaps} | watchlist_symbols
         session.commit()
 
+    symbols = sorted(symbols | _plan_watch_symbols(now))
     if not symbols:
         return "无 open 持仓或自选标的，跳过价格同步"
 
@@ -878,7 +974,31 @@ def _run_position_price_sync_locked(now: datetime) -> str:
     )
     if failures:
         preview += f"；{len(failures)} 个标的取价失败: {', '.join(failures[:8])}"
-    return preview
+    return preview + _check_trade_plans(quotes, now)
+
+
+def _plan_watch_symbols(now: datetime) -> set[str]:
+    try:
+        from backend.app.plans.watcher import watch_symbols
+
+        return watch_symbols(now.date().isoformat())
+    except Exception as exc:  # noqa: BLE001 - 盯价出问题不能影响价格同步
+        _log("WARNING", "读取计划盯价代码失败", {"error": str(exc)[:300]})
+        return set()
+
+
+def _check_trade_plans(quotes: dict[str, Any], now: datetime) -> str:
+    """价格刷新完顺带查计划价，不调模型。只在开盘时段查，手动更新价格时也一样。"""
+    if not _position_price_sync_session_open(now) or not is_trading_day(now.date()):
+        return ""
+    try:
+        from backend.app.plans.watcher import check_plan_triggers
+
+        result = check_plan_triggers(quotes, now)
+    except Exception as exc:  # noqa: BLE001 - 盯价出问题不能影响价格同步
+        _log("ERROR", "计划盯价失败", {"error": str(exc)[:300]})
+        return "；计划盯价失败"
+    return f"；{result['triggered']} 条计划碰到计划价" if result["triggered"] else ""
 
 
 # --------------------------------------------------------------------------- #

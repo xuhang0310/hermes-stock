@@ -9,6 +9,7 @@ import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -163,19 +164,33 @@ class RenderTests(unittest.TestCase):
             expires_on="2026-12-04",
         )
         self.assertNotIn("<script", page)
-        self.assertNotIn("<img", page)
+        self.assertEqual(page.count("<img"), 1, "只有品牌 logo，正文和元信息里的 img 都被转义了")
         self.assertNotIn("<link", page)
-        self.assertNotIn("src=", page.replace("&lt;img src=x&gt;", ""))
+        # 唯一的图片是内嵌的品牌 logo，页面不加载任何外部资源
+        sources = re.findall(r'src="([^"]*)"', page)
+        self.assertEqual(len(sources), 1)
+        self.assertTrue(sources[0].startswith("data:image/png;base64,"))
         self.assertNotRegex(page, r"https?://")
         self.assertIn('name="viewport"', page)
-        self.assertIn("prefers-color-scheme:dark", page)
         self.assertIn("11-04 08:52 · 总调度", page)
         self.assertIn("生成于 11-04 08:52 · 链接有效期至 2026-12-04", page)
         # 卡片标题里的日期不再重复放进页面大标题
         self.assertRegex(page, r'<h1 class="page-title">早盘清单&lt;script&gt;alert\(1\)&lt;/script&gt;</h1>')
 
     def test_page_shell_stays_small(self) -> None:
-        self.assertLess(len(render_notice_page("链接已过期", "x").encode("utf-8")), 8 * 1024)
+        self.assertLess(len(render_notice_page("链接已过期", "x").encode("utf-8")), 12 * 1024)
+
+    def test_page_uses_the_same_design_tokens_as_the_website(self) -> None:
+        site = Path(__file__).resolve().parents[1].joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+        site_root = re.search(r":root \{(.*?)\}", site, flags=re.S).group(1)
+        site_tokens = dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]+)", site_root))
+        page = render_notice_page("x", "y")
+        self.assertGreater(len(site_tokens), 15)
+        for name in ("--bg", "--bg-2", "--surface", "--surface-2", "--text", "--muted", "--line", "--line-strong", "--gold", "--gold-2", "--gold-dim", "--cyan", "--danger", "--ok"):
+            with self.subTest(token=name):
+                self.assertIn(f"{name}:{site_tokens[name]}", page)
+        self.assertIn("color-scheme:dark", page)
+        self.assertIn("SixRabbits", page)
 
 
 class ShareLifecycleTests(_DbCase):

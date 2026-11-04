@@ -19,6 +19,8 @@ from backend.app.core.models import ReportShare
 from backend.app.core.settings import settings
 
 _BEIJING = timezone(timedelta(hours=8))
+# 这些来源的页面每次打开都实时算，不靠正文快照，所以后续推送不要改动已有记录。
+LIVE_SHARE_SOURCES = frozenset({"trade_plan"})
 
 # 设置页“测试”按钮用的示例，全部是虚构内容，点开就能验收手机版的排版。
 SAMPLE_SHARE_MARKDOWN = """\
@@ -55,6 +57,7 @@ class ShareSpec:
     owner_user_id: int | None = None
     meta: dict[str, str] = field(default_factory=dict)  # digital_human、generated_at
     ttl_days: int | None = None
+    button_text: str | None = None  # 卡片按钮文字，默认“手机查看完整版”
 
 
 def _utc_now() -> datetime:
@@ -82,6 +85,8 @@ def create_share_link(db: Session, spec: ShareSpec, *, title: str, content: str)
             )
             .limit(1)
         )
+    if row is not None and spec.source_type in LIVE_SHARE_SOURCES:
+        return share_url(row.share_id)
     if row is None:
         # 用十六进制而不是 base64url：MySQL 默认排序规则不分大小写，全小写才不会有两个 ID 对上同一行
         row = ReportShare(

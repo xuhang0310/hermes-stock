@@ -29,6 +29,7 @@ from backend.app.data.share_service import (
     share_out,
     share_status,
 )
+from backend.app.plans.page import render_plan_page
 
 logger = logging.getLogger("hermes.share")
 
@@ -72,12 +73,17 @@ def share_page(share_id: str, db: Session = Depends(get_db)) -> HTMLResponse:
     status = share_status(row)
     if status != "active":
         return _notice(status)
-    page = render_share_page(
-        title=row.title,
-        meta=share_meta(row),
-        content_md=row.content_md,
-        expires_on=expires_on_text(row),
-    )
+    if row.source_type == "trade_plan":
+        page = render_plan_page(db, row)
+        if page is None:
+            return _notice("missing")
+    else:
+        page = render_share_page(
+            title=row.title,
+            meta=share_meta(row),
+            content_md=row.content_md,
+            expires_on=expires_on_text(row),
+        )
     try:
         record_view(db, share_id)
     except Exception as exc:  # noqa: BLE001 - 打开次数只是参考，记不上也要让客户看到内容

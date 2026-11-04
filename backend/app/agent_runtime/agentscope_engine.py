@@ -531,6 +531,10 @@ def _build_definition(request_payload: dict[str, Any]) -> tuple[str, list[dict],
         }
         tools = [item for item in tools if item.get("function", {}).get("name") not in blocked]
         write_names.clear()
+    if request_payload.get("trade_plan_source"):
+        from backend.app.plans.service import SAVE_TRADE_PLAN_SCHEMA
+
+        tools.append(SAVE_TRADE_PLAN_SCHEMA)
     system_prompt = _system_prompt(request_payload.get("digital_human_context"), role_code, memory_context)
     if progressive_context:
         system_prompt += f"\n\n{progressive_context}"
@@ -677,6 +681,10 @@ def _execute_tool(
                 "error_code": "schedule_validation_error",
                 "verified": False,
             }
+    if name == "save_trade_plan":
+        from backend.app.plans.service import execute_save_tool
+
+        return execute_save_tool(args, request_payload)
     if name in write_names:
         return _execute_position_write_tool(
             name,

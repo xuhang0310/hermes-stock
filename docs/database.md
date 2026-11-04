@@ -69,6 +69,8 @@ STOCK_DB_NAME=hermes-stock
 - `reviews`: 复盘记录
 - `notifications`: 飞书、PM、本地通知发送记录
 - `report_shares`: 飞书推送附带的手机版网页（正文快照、有效期、打开次数；链接即凭证，不开放给数字人查询）
+- `trade_plans`: 定时任务产出的结构化操作计划（draft / active / superseded，按 `job_run_id` 唯一）
+- `trade_plan_items`: 计划里的每条操作（计划价、股数、触价记录、对账结果）；状态由成交流水推出
 - `api_audit_logs`: 外部接口调用审计
 - `system_logs`: 系统运行日志
 - `heartbeats`: 后台组件心跳

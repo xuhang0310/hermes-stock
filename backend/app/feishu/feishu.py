@@ -451,11 +451,11 @@ def _metadata_markdown(metadata: list[tuple[str, str]] | None) -> str:
     return _format_table_for_mobile(["项目", "内容"], [list(item) for item in items])
 
 
-def _share_button(url: str, element_id: str) -> dict:
+def _share_button(url: str, element_id: str, text: str) -> dict:
     return {
         "tag": "button",
         "element_id": element_id,
-        "text": {"tag": "plain_text", "content": SHARE_BUTTON_TEXT},
+        "text": {"tag": "plain_text", "content": text},
         "type": "primary_filled",
         "size": "medium",
         "width": "fill",
@@ -482,6 +482,7 @@ def _card_payload(
     page: int,
     page_count: int,
     share_url: str | None = None,
+    share_text: str = SHARE_BUTTON_TEXT,
 ) -> dict:
     card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
     elements: list[dict] = []
@@ -497,7 +498,7 @@ def _card_payload(
             }
         )
     if share_url and page == 1:
-        elements.append(_share_button(share_url, "share_top"))
+        elements.append(_share_button(share_url, "share_top", share_text))
     if elements:
         elements.append({"tag": "hr"})
     elements.extend(content_elements)
@@ -509,7 +510,7 @@ def _card_payload(
     elements.append({"tag": "hr"})
     # 只有一张卡片时顶部的按钮就够了；长消息翻到最后一张时再给一个，不用翻回去
     if share_url and page == page_count and page_count > 1:
-        elements.append(_share_button(share_url, "share_bottom"))
+        elements.append(_share_button(share_url, "share_bottom", share_text))
     elements.append(
         {
             "tag": "markdown",
@@ -549,6 +550,7 @@ def _build_payloads(
     footer: str | None = None,
     template: str | None = None,
     share_url: str | None = None,
+    share_text: str = SHARE_BUTTON_TEXT,
 ) -> list[dict]:
     text = content.strip() or "本次任务未返回正文。"
     pages = _paginate_markdown(text)
@@ -581,6 +583,7 @@ def _build_payloads(
                 page=page_index,
                 page_count=page_count,
                 share_url=share_url,
+                share_text=share_text,
             ),
         }
         if secret:
@@ -779,6 +782,7 @@ def send_feishu(
         footer=card_footer,
         template=card_template,
         share_url=share_url,
+        share_text=(share.button_text if share else None) or SHARE_BUTTON_TEXT,
     )
     if not _acquire_rate_slots(channel_key, len(payloads)):
         notification.status = "failed"

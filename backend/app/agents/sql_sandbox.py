@@ -84,6 +84,8 @@ PERSONAL_TABLES: dict[str, str] = {
     "paper_orders": "user_id",
     "screener_saved_strategies": "user_id",
     "inbox_notifications": "user_id",
+    "trade_plans": "owner_user_id",
+    "trade_plan_items": "owner_user_id",
 }
 
 # 归属列为空的行是公共数据（宏观/市场事件、系统回测），所有用户可见；
