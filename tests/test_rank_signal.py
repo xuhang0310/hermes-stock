@@ -15,8 +15,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core import database
-from backend.app.core.models import Base, DailyBar, Instrument, MarketTradingCalendar, ShadowNav, StockDailyBasic
-from backend.app.quant import tree_model
+from backend.app.core.models import Base, DailyBar, Instrument, MarketTradingCalendar, StockDailyBasic, StockModelSignal
+from backend.app.quant import research_buy_model, tree_model
 from backend.app.quant.research_models import RANK_MODEL_FEATURES
 from backend.app.shadow import rank_signal, service
 
@@ -68,6 +68,19 @@ class TreeModelTests(unittest.TestCase):
             tree_model.flatten_tree({**DUMP, "decision_type": "=="})
         with self.assertRaises(ValueError):
             tree_model.flatten_tree({**DUMP, "missing_type": "Zero"})
+
+    def test_a_binary_model_turns_log_odds_into_a_probability(self) -> None:
+        self.assertEqual(tree_model.predict_probability(_model({"leaf_value": 0.0}), np.zeros((1, 2))).tolist(), [0.5])
+        self.assertAlmostEqual(float(tree_model.predict_probability(_model({"leaf_value": 2.0}), np.zeros((1, 2)))[0]), 0.880797, places=5)
+
+    def test_the_shipped_buy_models_load_and_choose_a_price(self) -> None:
+        fill, edge = tree_model.load_model(research_buy_model.FILL_MODEL_PATH), tree_model.load_model(research_buy_model.EDGE_MODEL_PATH)
+        self.assertEqual(tuple(fill["names"]), research_buy_model.ALL_FEATURES)
+        self.assertEqual(tuple(edge["names"]), research_buy_model.ALL_FEATURES)
+        x = np.column_stack([np.full((3, 14), 0.5, dtype=np.float32), np.array([0.25, 1.0, 3.0], dtype=np.float32)])
+        probability = tree_model.predict_probability(fill, x)
+        self.assertTrue(((probability > 0) & (probability < 1)).all())
+        self.assertGreater(probability[0], probability[2])  # 挂得越远越难成交
 
     def test_a_missing_file_is_no_model(self) -> None:
         self.assertIsNone(tree_model.load_model(Path("/nonexistent/model.json")))
@@ -125,13 +138,17 @@ class _Db(unittest.TestCase):
         # 一棵按 20 日成交额排名打分的树：排名结果可以预期
         model = _model({**NODE, "split_feature": 0, "threshold": 0.5, "left_child": {"leaf_value": 1.0}, "right_child": {"leaf_value": 2.0}})
         model["names"] = NAMES
-        cache = patch.dict(rank_signal._cache, {"model": model})
+        # 买入模型：成交概率都是 0.5；走势在 k <= 1 时为负、更远时为正，所以应该选最便宜也最近的正值
+        fill = _model({"leaf_value": 0.0})
+        edge = _model({**NODE, "split_feature": 14, "threshold": 1.0, "left_child": {"leaf_value": -0.01}, "right_child": {"leaf_value": 0.02}})
+        fill["names"], edge["names"] = list(research_buy_model.ALL_FEATURES), list(research_buy_model.ALL_FEATURES)
+        cache = patch.dict(rank_signal._cache, {"model": model, "buy": (fill, edge)})
         cache.start()
         self.addCleanup(cache.stop)
 
     def _ranks(self, trade_date: str = TODAY) -> dict[str, float]:
         with self.Session() as db:
-            return rank_signal.latest_ranks(db, trade_date)
+            return rank_signal.latest_signals(db, trade_date).ranks
 
 
 class LatestRankTests(_Db):
@@ -193,39 +210,85 @@ class LatestRankTests(_Db):
         self.assertEqual(rank_signal.excluded_symbols(instruments, TODAY), {"a", "c", "e"})
 
 
-class RanksForTodayTests(_Db):
-    def _account(self, strategy: str = service.RISK_RANK) -> int:
+class BuySignalTests(_Db):
+    def _signals(self) -> rank_signal.LiveSignals:
         with self.Session() as db:
-            account = service.ShadowAccount(owner_user_id=1, real_account_id=1, strategy=strategy, account_label="x", started_on=TODAY, idle_cash=0.0, pool=0.0)
-            db.add(account)
-            db.commit()
-            return account.id
+            return rank_signal.latest_signals(db, TODAY)
 
-    def test_runs_while_a_rank_account_is_unsettled(self) -> None:
-        self._account()
-        with patch.object(service, "latest_ranks", return_value={GOOD: 0.5}) as ranks:
-            self.assertEqual(service._ranks_for_today(self.Session, TODAY), {GOOD: 0.5})
-        ranks.assert_called_once()
+    def test_every_stock_in_the_universe_gets_a_buy_answer(self) -> None:
+        signals = self._signals()
+        self.assertEqual(set(signals.buy_k), set(signals.ranks))
+        self.assertTrue(signals.complete)
 
-    def test_skips_the_market_scan_once_settled(self) -> None:
-        account = self._account()
+    def test_the_model_picks_the_most_valuable_candidate_price(self) -> None:
+        # 概率一样时走势为正的最小 k 不一定最大，这里每个 k > 1 的价值相同，argmax 取第一个
+        self.assertEqual(set(self._signals().buy_k.values()), {1.25})
+
+    def test_a_negative_edge_everywhere_means_no_order(self) -> None:
+        fill, edge = rank_signal._cache["buy"]
+        flat = _model({"leaf_value": -0.01})
+        flat["names"] = edge["names"]
+        with patch.dict(rank_signal._cache, {"buy": (fill, flat)}):
+            self.assertEqual(set(self._signals().buy_k.values()), {None})
+
+    def test_a_thin_edge_is_not_enough(self) -> None:
+        fill, edge = rank_signal._cache["buy"]
+        thin = _model({"leaf_value": 0.002})  # 扣费后只有 0.12%，门槛是 0.2%
+        thin["names"] = edge["names"]
+        with patch.dict(rank_signal._cache, {"buy": (fill, thin)}):
+            self.assertEqual(set(self._signals().buy_k.values()), {None})
+
+    def test_no_buy_model_keeps_the_ranks(self) -> None:
+        with patch.dict(rank_signal._cache, {"buy": None}):
+            signals = self._signals()
+        self.assertTrue(signals.ranks)
+        self.assertEqual(signals.buy_k, {})
+        self.assertFalse(signals.complete)
+
+    def test_a_broken_buy_model_keeps_the_ranks(self) -> None:
+        with patch.object(rank_signal, "buy_from_panel", side_effect=RuntimeError("boom")):
+            signals = self._signals()
+        self.assertTrue(signals.ranks)
+        self.assertFalse(signals.complete)
+
+    def test_saved_signals_come_back_the_same(self) -> None:
+        signals = rank_signal.LiveSignals({GOOD: 0.7, ST: 0.2}, {GOOD: 1.5, ST: None})
         with self.Session() as db:
-            db.add(ShadowNav(shadow_account_id=account, owner_user_id=1, trade_date=TODAY, shadow_value=1.0, real_value=1.0))
+            rank_signal.save_signals(db, TODAY, signals)
             db.commit()
-        with patch.object(service, "latest_ranks") as ranks:
-            self.assertEqual(service._ranks_for_today(self.Session, TODAY), {})
-        ranks.assert_not_called()
+            self.assertEqual(rank_signal.load_signals(db, TODAY), signals)
+            self.assertIsNone(rank_signal.load_signals(db, "20261104"))
 
-    def test_plain_risk_accounts_do_not_need_ranks(self) -> None:
-        self._account(service.RISK)
-        with patch.object(service, "latest_ranks") as ranks:
-            service._ranks_for_today(self.Session, TODAY)
-        ranks.assert_not_called()
+    def test_old_signals_are_cleared(self) -> None:
+        with self.Session() as db:
+            db.add(StockModelSignal(trade_date="20260901", symbol=GOOD, model_rank=0.5, buy_k=1.0))
+            db.add(StockModelSignal(trade_date="20261101", symbol=GOOD, model_rank=0.5, buy_k=1.0))
+            db.commit()
+            rank_signal.save_signals(db, TODAY, rank_signal.LiveSignals({GOOD: 0.7}, {GOOD: 1.5}))
+            db.commit()
+            self.assertEqual(sorted(db.scalars(select(StockModelSignal.trade_date)).all()), ["20261101", TODAY])
 
-    def test_a_failure_means_no_tilt_today(self) -> None:
-        self._account()
-        with patch.object(service, "latest_ranks", side_effect=RuntimeError("boom")):
-            self.assertEqual(service._ranks_for_today(self.Session, TODAY), {})
+
+class SignalsForTodayTests(_Db):
+    SIGNALS = rank_signal.LiveSignals({GOOD: 0.5}, {GOOD: 1.0})
+
+    def test_the_first_run_computes_and_saves(self) -> None:
+        with patch.object(service, "latest_signals", return_value=self.SIGNALS) as signals:
+            self.assertEqual(service._signals_for_today(self.Session, TODAY), self.SIGNALS)
+            self.assertEqual(service._signals_for_today(self.Session, TODAY), self.SIGNALS)
+        signals.assert_called_once()
+
+    def test_an_incomplete_result_is_not_saved_and_tried_again(self) -> None:
+        with patch.object(service, "latest_signals", return_value=rank_signal.EMPTY) as signals:
+            service._signals_for_today(self.Session, TODAY)
+            service._signals_for_today(self.Session, TODAY)
+        self.assertEqual(signals.call_count, 2)
+        with self.Session() as db:
+            self.assertIsNone(rank_signal.load_signals(db, TODAY))
+
+    def test_a_failure_means_no_signals_today(self) -> None:
+        with patch.object(service, "latest_signals", side_effect=RuntimeError("boom")):
+            self.assertEqual(service._signals_for_today(self.Session, TODAY), rank_signal.EMPTY)
 
 
 class CompareTests(unittest.TestCase):

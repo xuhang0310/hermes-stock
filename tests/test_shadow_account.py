@@ -26,7 +26,8 @@ from backend.app.core.models import (
 from backend.app.quant.order_engine import Level, OrderLevels
 from backend.app.quant.order_table_build import CELLS
 from backend.app.shadow import rules, service
-from backend.app.shadow.page import render_shadow_page
+from backend.app.shadow.rank_signal import EMPTY, LiveSignals
+from backend.app.shadow.page import _money as page_money, render_shadow_page
 
 OWNER = 7
 ACCOUNT = 3
@@ -83,6 +84,21 @@ class RuleTests(unittest.TestCase):
         order = rules.plan_order(SYMBOL, 4000, _levels(), 1_000_000, 5_000)
         self.assertEqual(order.quantity, 200)
 
+    def test_the_buy_model_sets_the_buy_back_price(self) -> None:
+        order = rules.plan_order(SYMBOL, 4000, _levels(), 1_000_000, 500_000, buy_k=1.5)
+        self.assertEqual((order.side, order.price, order.quantity), ("buy", 18.5, 1000))
+        self.assertIn("买入模型", order.basis)
+
+    def test_the_buy_model_can_say_no(self) -> None:
+        self.assertIsNone(rules.plan_order(SYMBOL, 4000, _levels(), 1_000_000, 500_000, buy_k=None))
+
+    def test_the_buy_model_does_not_touch_sells(self) -> None:
+        self.assertEqual(rules.plan_order(SYMBOL, 7300, _levels(), 1_000_000, 0, buy_k=None).side, "sell")
+
+    def test_a_model_price_below_the_limit_down_is_not_placed(self) -> None:
+        self.assertIsNone(rules.plan_order(SYMBOL, 4000, _levels(), 1_000_000, 500_000, buy_k=3.0))
+        self.assertEqual(rules.plan_order(SYMBOL, 4000, _levels(), 1_000_000, 500_000, buy_k=3.0, limit_ratio=0.2).price, 17.0)
+
     def test_star_market_orders_are_at_least_two_hundred(self) -> None:
         star = "688091.SH"  # 投入 20 万时目标 1000 股
         self.assertIsNone(rules.plan_order(star, 1150, _levels(), 200_000, 0))  # 超出 150 股，取整后只有 100 股
@@ -125,7 +141,7 @@ class _Case(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         patches = [
             patch.object(service, "load_table", return_value=TABLE),
-            patch.object(service, "latest_ranks", return_value={SYMBOL: 0.5}),
+            patch.object(service, "latest_signals", return_value=LiveSignals({SYMBOL: 0.5}, {SYMBOL: 1.5})),
         ]
         for item in patches:
             item.start()
@@ -234,25 +250,32 @@ class StartTests(_Case):
             self.assertIsNone(self._account(db))
 
     def test_settlement_saves_both_strategies_without_sending_notifications(self) -> None:
-        with patch.object(service, "latest_ranks", return_value={SYMBOL: 1.0}):
-            self.assertIn("2 个影子账户", self._run())
+        with patch.object(service, "latest_signals", return_value=LiveSignals({SYMBOL: 1.0}, {SYMBOL: 1.5})):
+            self.assertIn("3 个影子账户", self._run())
         with self.Session() as db:
             orders = dict(db.execute(
                 select(ShadowAccount.strategy, ShadowOrder.quantity)
                 .join(ShadowOrder, ShadowOrder.shadow_account_id == ShadowAccount.id)
             ).all())
-            self.assertEqual(orders, {service.RISK: 9000, service.RISK_RANK: 8500})
+            self.assertEqual(orders, {service.RISK: 9000, service.RISK_RANK: 8500, service.RISK_RANK_BUY: 8500})
             self.assertIsNone(db.scalar(select(Notification)))
             self.assertIsNone(db.scalar(select(ReportShare)))
 
     def test_rank_strategy_can_settle_after_ranks_arrive(self) -> None:
-        with patch.object(service, "latest_ranks", return_value={}):
+        with patch.object(service, "latest_signals", return_value=EMPTY):
             self.assertIn("1 个影子账户", self._run())
         with self.Session() as db:
             self.assertEqual(service.owner_summary(db, OWNER)["days"], [])
-        self.assertIn("1 个影子账户", self._run())
+        self.assertIn("2 个影子账户", self._run())
         with self.Session() as db:
             self.assertEqual(service.owner_summary(db, OWNER)["days"], [self.today])
+
+    def test_a_missing_buy_signal_only_holds_back_shadow_c(self) -> None:
+        with patch.object(service, "latest_signals", return_value=LiveSignals({SYMBOL: 0.5}, {})):
+            self.assertIn("2 个影子账户", self._run())
+        with self.Session() as db:
+            settled = set(db.scalars(select(ShadowAccount.strategy).join(ShadowNav, ShadowNav.shadow_account_id == ShadowAccount.id)).all())
+        self.assertEqual(settled, {service.RISK, service.RISK_RANK})
 
     def _hold_etf(self, price: float | None) -> None:
         with self.Session() as db:
@@ -399,6 +422,51 @@ class SettleTests(_Case):
             self.assertEqual(self._position(db).quantity, 500 + order.quantity)
             self.assertAlmostEqual(self._account(db).pool, pool - order.quantity * 19.8 * 1.0008)
 
+    def _strategy_position(self, db, strategy: str) -> ShadowPosition:
+        return db.scalar(
+            select(ShadowPosition).join(ShadowAccount, ShadowAccount.id == ShadowPosition.shadow_account_id).where(ShadowAccount.strategy == strategy, ShadowPosition.symbol == SYMBOL)
+        )
+
+    def _pending(self, db, strategy: str) -> list[ShadowOrder]:
+        return list(db.scalars(select(ShadowOrder).join(ShadowAccount, ShadowAccount.id == ShadowOrder.shadow_account_id).where(ShadowAccount.strategy == strategy, ShadowOrder.status == "pending")).all())
+
+    def _buy_back_day(self, signals: LiveSignals) -> None:
+        self._run(self._add_day(open_=20.0, high=21.5, low=19.8, close=21.0))
+        with self.Session() as db:
+            for strategy in (service.RISK_RANK, service.RISK_RANK_BUY):
+                self._strategy_position(db, strategy).quantity = 300
+            db.commit()
+        with patch.object(service, "latest_signals", return_value=signals):
+            self._run(self._add_day(open_=20.0, high=20.1, low=19.9, close=20.0, pre_close=21.0))
+
+    def test_shadow_c_buys_back_at_the_model_price_and_b_at_the_discount(self) -> None:
+        self._buy_back_day(LiveSignals({SYMBOL: 0.5}, {SYMBOL: 0.5}))
+        with self.Session() as db:
+            b, c = self._pending(db, service.RISK_RANK)[0], self._pending(db, service.RISK_RANK_BUY)[0]
+        self.assertEqual((b.side, b.price), ("buy", 19.8))
+        self.assertEqual(c.side, "buy")
+        self.assertLess(c.price, 20.0)
+        self.assertNotEqual(c.price, 19.8)
+        self.assertIn("买入模型", c.basis)
+
+    def test_shadow_c_does_not_buy_back_when_the_model_says_no(self) -> None:
+        self._buy_back_day(LiveSignals({SYMBOL: 0.5}, {SYMBOL: None}))
+        with self.Session() as db:
+            self.assertEqual(self._pending(db, service.RISK_RANK)[0].side, "buy")
+            self.assertEqual(self._pending(db, service.RISK_RANK_BUY), [])
+
+    def test_shadow_c_does_not_buy_a_stock_without_a_signal(self) -> None:
+        self._buy_back_day(LiveSignals({SYMBOL: 0.5}, {"000001.SZ": 1.0}))
+        with self.Session() as db:
+            self.assertEqual(self._pending(db, service.RISK_RANK_BUY), [])
+
+    def test_signals_are_computed_once_a_day(self) -> None:
+        with patch.object(service, "latest_signals", return_value=LiveSignals({SYMBOL: 0.5}, {SYMBOL: 1.0})) as signals:
+            first = self._add_day(open_=20.0, high=20.1, low=19.9, close=20.0)
+            self._run(first)
+            self._run(first)
+        signals.assert_called_once()
+
     def test_the_real_account_changing_does_not_touch_the_shadow(self) -> None:
         with self.Session() as db:
             db.add(self._snapshot(500))
@@ -430,6 +498,7 @@ class ReportTests(_Case):
         page = self._page()
         self.assertIn("影子 A", page)
         self.assertIn("影子 B", page)
+        self.assertIn("影子 C", page)
         self.assertIn("你的账户", page)
         self.assertIn("方正证券 账户3", page)
         self.assertIn("下一个交易日挂单", page)
@@ -439,7 +508,17 @@ class ReportTests(_Case):
 
     def test_annual_return_stays_blank_early_on(self) -> None:
         self._run()
-        self.assertIn("<td>年化</td><td>—</td><td>—</td>", self._page())
+        page = self._page()
+        self.assertIn("<th>年化</th>", page)
+        self.assertEqual(page.count("<td>—</td>"), 8)  # 全部账户和单个账户两张表，每张 3 个影子加真实账户
+
+    def test_the_table_has_one_row_per_account_and_short_money(self) -> None:
+        self._run()
+        page = self._page()
+        self.assertIn('<td>影子 C</td><td class="fig">30.0万</td>', page)
+        self.assertIn('<td>你的账户</td><td class="fig">30.0万</td>', page)
+        self.assertEqual(page_money(95_000.4), "95,000")
+        self.assertEqual(page_money(1_295_243), "129.5万")
 
     def test_a_filled_order_shows_in_recent_fills(self) -> None:
         self._run()

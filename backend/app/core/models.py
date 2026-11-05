@@ -2132,6 +2132,19 @@ class ShadowOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class StockModelSignal(Base):
+    """模型每天收盘后算的信号。影子账户重跑和出计划都读这张表，不用再扫全市场。"""
+
+    __tablename__ = "stock_model_signals"
+    __table_args__ = (UniqueConstraint("trade_date", "symbol", name="uq_stock_model_signal"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    model_rank: Mapped[float | None] = mapped_column(Float)  # 0 到 1，越大越好
+    buy_k: Mapped[float | None] = mapped_column(Float)  # 昨收下方几倍 ATR 挂买单；空表示模型说不挂
+
+
 class ShadowNav(Base):
     """每个交易日收盘，影子账户和真实账户的总资产。"""
 

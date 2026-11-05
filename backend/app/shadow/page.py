@@ -15,7 +15,10 @@ from backend.app.shadow import rules
 from backend.app.shadow.service import FILLED, PENDING, STRATEGY_LABELS, compare, nav_series, owner_summary
 
 _CSS = """
-.cmp{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:14px}
+.cmp{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:13px}
+.cmp th,.cmp td{white-space:nowrap;min-width:0}
+.cmp td.fig{font-size:13px}
+.cmp th+th,.cmp td+td{padding-left:6px}
 .cmp th{color:var(--muted);font-weight:400;font-size:13px;text-align:right;padding:6px 0;border-bottom:1px solid var(--line)}
 .cmp th:first-child,.cmp td:first-child{text-align:left}
 .cmp td{padding:8px 0;border-bottom:1px solid var(--line);text-align:right}
@@ -33,23 +36,28 @@ _CSS = """
 def _pct_cell(value: float | None) -> str:
     if value is None:
         return "<td>—</td>"
-    tone = "up" if value > 0 else "down" if value < 0 else ""
+    if value == 0:
+        return '<td class="fig">0.00%</td>'
+    tone = "up" if value > 0 else "down"
     return f'<td class="{tone} fig">{value * 100:+.2f}%</td>'
 
 
+def _money(value: float) -> str:
+    return f"{value:,.0f}" if value < 100_000 else f"{value / 10_000:,.1f}万"
+
+
 def _table(series: dict[str, list[float]], real: list[float]) -> str:
-    """每个影子一列，最后一列是真实账户。"""
-    columns = [(STRATEGY_LABELS.get(strategy, strategy), values) for strategy, values in series.items()] + [("你的账户", real)]
+    """每个账户一行，手机上才放得下三个影子和真实账户。金额用万，小账户保留原数。"""
+    accounts = [(STRATEGY_LABELS.get(strategy, strategy), values) for strategy, values in series.items()] + [("你的账户", real)]
     days = max(len(real) - 1, 0)
-    rows = (
-        ("总资产", [f'<td class="fig">{values[-1]:,.0f}</td>' for _, values in columns]),
-        ("累计收益", [_pct_cell(rules.total_return(values[0], values[-1])) for _, values in columns]),
-        ("年化", [_pct_cell(rules.annualized(values[0], values[-1], days)) for _, values in columns]),
-        ("最大回撤", [_pct_cell(rules.max_drawdown(values)) for _, values in columns]),
+    body = "".join(
+        f'<tr><td>{html.escape(label)}</td><td class="fig">{_money(values[-1])}</td>'
+        f"{_pct_cell(rules.total_return(values[0], values[-1]))}"
+        f"{_pct_cell(rules.annualized(values[0], values[-1], days))}"
+        f"{_pct_cell(rules.max_drawdown(values))}</tr>"
+        for label, values in accounts
     )
-    header = "".join(f"<th>{html.escape(label)}</th>" for label, _ in columns)
-    body = "".join(f"<tr><td>{label}</td>{''.join(cells)}</tr>" for label, cells in rows)
-    return f'<table class="cmp"><tr><th></th>{header}</tr>{body}</table>'
+    return f'<table class="cmp"><tr><th></th><th>总资产</th><th>累计</th><th>年化</th><th>回撤</th></tr>{body}</table>'
 
 
 def _order_row(order: ShadowOrder) -> str:
@@ -101,7 +109,7 @@ def render_shadow_page(db: Session, row: ReportShare) -> str | None:
         start = datetime.strptime(days[0], "%Y%m%d").date()
         subtitle = f"{long_date(start)}开始，已运行 {max(len(days) - 1, 0)} 个交易日"
     foot = (
-        f"影子账户由代码自动挂单、按当天 K 线模拟成交，不下真实单。影子 A 只按风险预算，影子 B 再按模型排名微调。碰到价就算成交，实盘可能排不到队。"
+        f"影子账户由代码自动挂单、按当天 K 线模拟成交，不下真实单。影子 A 只按风险预算，影子 B 再按模型排名微调，影子 C 在 B 的基础上，买回的价和买不买听买入模型。碰到价就算成交，实盘可能排不到队。"
         f"满 {rules.ANNUALIZE_MIN_DAYS} 个交易日才算年化。你的账户按系统登记的持仓和现金算，入金、出金和没登记的成交都会影响对比。"
         f"链接有效期至 {expires_on_text(row)}。"
     )

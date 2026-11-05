@@ -95,6 +95,11 @@ def _tree_predict(tree: dict[str, Any], x: np.ndarray) -> np.ndarray:
     return tree["value"][nodes]
 
 
+def predict_probability(model: dict[str, Any], x: np.ndarray) -> np.ndarray:
+    """二分类模型：所有树的叶子值相加是对数几率。"""
+    return 1.0 / (1.0 + np.exp(-predict(model, x)))
+
+
 def predict(model: dict[str, Any], x: np.ndarray) -> np.ndarray:
     """x 的列顺序要和 model["names"] 一致。LightGBM 回归的结果是所有树的叶子值相加。"""
     total = np.zeros(len(x), dtype=np.float64)

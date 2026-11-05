@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
-from backend.app.quant.order_engine import BUY_COST, SELL_COST, OrderLevels
+from backend.app.quant.order_engine import BUY_COST, SELL_COST, OrderLevels, model_buy_price
 
 RISK_BUDGET = 0.01
 POSITION_CAP = 0.25
@@ -25,6 +26,7 @@ LOT = 100
 STAR_MIN = 200
 ANNUALIZE_MIN_DAYS = 60  # 不满这么多交易日，年化没有意义
 TRADING_DAYS = 244
+DISCOUNT = object()  # 买回价用昨收 -1%，影子 A、B 的规则
 
 
 @dataclass(frozen=True)
@@ -54,8 +56,11 @@ def rank_tilt(rank: float | None) -> float:
     return 1.0 if rank is None else 0.5 + rank
 
 
-def plan_order(symbol: str, shares: float, levels: OrderLevels, invested: float, pool: float, *, tilt: float = 1.0) -> PlannedOrder | None:
-    """这只股票下一个交易日挂什么单；不挂返回 None。"""
+def plan_order(symbol: str, shares: float, levels: OrderLevels, invested: float, pool: float, *, tilt: float = 1.0, buy_k: Any = DISCOUNT, limit_ratio: float = 0.1) -> PlannedOrder | None:
+    """这只股票下一个交易日挂什么单；不挂返回 None。
+
+    buy_k 是影子 C 用的：买入模型选的倍数，None 表示模型说不买。
+    """
     target = target_shares(invested, levels.close, levels.atr) * tilt
     if target <= 0:
         return None
@@ -72,13 +77,20 @@ def plan_order(symbol: str, shares: float, levels: OrderLevels, invested: float,
             f"超出风险预算（目标约 {target:,.0f} 股）；卖价为昨收+{levels.sell.atr_multiple:g} 倍 ATR，历史成交概率 {levels.sell.fill * 100:.0f}%",
         )
     if shares < target * (1 - BAND) and pool > 0:
-        price = math.floor(levels.close * (1 - BUY_DISCOUNT) * 100 + 1e-9) / 100
-        if price <= 0:
+        if buy_k is DISCOUNT:
+            price: float | None = math.floor(levels.close * (1 - BUY_DISCOUNT) * 100 + 1e-9) / 100
+            how = "买价为昨收 -1%"
+        elif buy_k is None:
+            return None
+        else:
+            price = model_buy_price(levels.close, levels.atr, buy_k, limit_ratio)
+            how = f"买入模型选的价，昨收-{buy_k:g} 倍 ATR"
+        if price is None or price <= 0:
             return None
         quantity = _round_lot(symbol, min(target - shares, pool / (price * (1 + BUY_COST))))
         if quantity <= 0:
             return None
-        return PlannedOrder("buy", price, quantity, f"低于风险预算（目标约 {target:,.0f} 股），用卖出款买回；买价为昨收 -1%")
+        return PlannedOrder("buy", price, quantity, f"低于风险预算（目标约 {target:,.0f} 股），用卖出款买回；{how}")
     return None
 
 

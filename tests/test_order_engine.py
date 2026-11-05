@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 from sqlalchemy import select
 
-from backend.app.core.models import DailyBar, MarketEvent, Position, WatchlistItem
+from backend.app.core.models import DailyBar, MarketEvent, Position, StockModelSignal, WatchlistItem
 from backend.app.core.settings import settings as real_settings
 from backend.app.events.rules import CRITICAL
 from backend.app.plans import quant_orders
@@ -326,6 +326,61 @@ class PlanWiringTests(_PlanCase):
         self.assertIn("写别的价存不进去", text)
         self.assertIn("止损可以不设", text)
         self.assertIn("买价这一版还没有量化结果", text)
+
+    def _signal(self, k: float | None, day: str = "20261102") -> None:
+        with self.Session() as db:
+            db.add(StockModelSignal(trade_date=day, symbol=SELL_SYMBOL, model_rank=0.5, buy_k=k))
+            db.commit()
+
+    def _add(self, price: float) -> dict:
+        return {"account_id": ACCOUNT, "symbol": SELL_SYMBOL, "action": "add", "trigger_price": price, "quantity": 100, "funding_note": "用现金"}
+
+    def test_a_buy_only_saves_with_the_model_price(self) -> None:
+        self._signal(1.0)
+        rejected = self._save([self._add(21.0)])
+        self.assertFalse(rejected["saved"])
+        self.assertIn("买价要用系统算的 20.57", self._codes(rejected))
+        self.assertTrue(self._save([self._add(20.57)])["saved"])
+
+    def test_a_buy_is_refused_when_the_model_says_no(self) -> None:
+        self._signal(None)
+        rejected = self._save([self._add(20.57)])
+        self.assertFalse(rejected["saved"])
+        self.assertIn("没有优势", self._codes(rejected))
+
+    def test_a_buy_without_a_signal_is_not_blocked(self) -> None:
+        self.assertTrue(self._save([self._add(21.0)])["saved"])
+
+    def test_an_old_signal_is_not_used(self) -> None:
+        self._signal(1.0, day="20261030")
+        self.assertTrue(self._save([self._add(21.0)])["saved"])
+
+    def test_sells_are_not_affected_by_the_buy_model(self) -> None:
+        self._signal(None)
+        self.assertIsNone(quant_orders.buy_problem({SELL_SYMBOL: None}, SELL_SYMBOL, "sell", 22.57))
+        self.assertIsNone(quant_orders.buy_problem({SELL_SYMBOL: None}, SELL_SYMBOL, "stop_loss", 18.0))
+
+    def test_a_broken_signal_lookup_never_blocks_the_plan(self) -> None:
+        self._signal(1.0)
+        with patch.object(quant_orders, "model_buys", side_effect=RuntimeError("boom")):
+            self.assertTrue(self._save([self._add(21.0)])["saved"])
+
+    def test_the_prompt_lists_buy_prices_once_there_are_signals(self) -> None:
+        self._signal(1.0)
+        with self.Session() as db:
+            db.add(Position(owner_user_id=OWNER, account_id=ACCOUNT, symbol=SELL_SYMBOL, position_pct=0, quantity=7200, status="open"))
+            db.commit()
+            text = quant_orders.plan_block(db, OWNER, "2026-11-03", MORNING)
+        self.assertIn("买单 20.57 元", text)
+        self.assertIn("买单同样只能用上面的价", text)
+        self.assertNotIn("买价这一版还没有量化结果", text)
+
+    def test_the_prompt_says_when_the_model_says_no(self) -> None:
+        self._signal(None)
+        with self.Session() as db:
+            db.add(Position(owner_user_id=OWNER, account_id=ACCOUNT, symbol=SELL_SYMBOL, position_pct=0, quantity=7200, status="open"))
+            db.commit()
+            self.assertIn("买单：买入模型判断没有优势，不挂", quant_orders.plan_block(db, OWNER, "2026-11-03", MORNING))
 
     def test_the_scheduler_adds_the_block_only_to_plan_jobs(self) -> None:
         from backend.app.scheduler import rhythm_scheduler

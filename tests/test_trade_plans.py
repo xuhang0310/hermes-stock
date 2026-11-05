@@ -974,7 +974,7 @@ class SchedulerIntegrationTests(_PlanCase):
             self.assertIsNotNone(share)
             self.assertEqual(share.owner_user_id, OWNER)
             url = share_service.share_url(share.share_id)
-        self.assertTrue(pushed["content"].endswith(f"[查看影子账户 A/B 对比]({url})"))
+        self.assertTrue(pushed["content"].endswith(f"[查看影子账户对比]({url})"))
         self.assertNotIn(url, calls[0][1])
 
     def test_plan_job_gets_the_tool_and_activates_its_plan(self) -> None:

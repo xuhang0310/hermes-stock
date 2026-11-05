@@ -589,7 +589,7 @@ def _shadow_compare_link(snap: dict, now: datetime) -> str | None:
             url = create_share_link(
                 session,
                 ShareSpec(source_type=SHARE_SOURCE, source_ref=f"owner-{owner}-{now:%Y%m%d}", owner_user_id=int(owner)),
-                title="影子账户 A/B 对比",
+                title="影子账户对比",
                 content="",
             )
             if url:
@@ -681,7 +681,7 @@ def _run_agent_report(
     if plan_source == "evening":
         shadow_url = _shadow_compare_link(snap, now)
         if shadow_url:
-            answer = f"{answer}\n\n[查看影子账户 A/B 对比]({shadow_url})"
+            answer = f"{answer}\n\n[查看影子账户对比]({shadow_url})"
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
     title = f"{snap['name']} | {now:%Y-%m-%d}"
     notification_id: int | None = None

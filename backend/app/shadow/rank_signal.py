@@ -1,27 +1,35 @@
-"""线上算模型 1 的排名：全市场最近的 K 线 → 特征 → 模型 → 当天的横截面排名。
+"""线上算模型信号：全市场最近的 K 线 → 特征 → 模型 → 当天的排名和买入倍数。
 
-和回测同一套特征和算法（research_features、research_models.predict_ranks 的做法）。两处和回测有差别：
+和回测同一套特征和算法。两处和回测有差别：
 
 - 上市满 120 根 K 线改成看上市日期：线上全市场 K 线只存了几个月，数不出 120 根。
 - 120 日低点这个特征在 K 线存够之前（约 2026 年 12 月），用的是现有长度。
 
-算不出来返回空，影子 B 当天就按不带排名的目标股数算。
+每天算一次，存进 stock_model_signals。影子账户重跑和出计划都直接读这张表，不用再扫全市场。
+算不出来返回空，影子 B、C 当天推迟结算，出计划时买价不校验。
 """
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
-from backend.app.core.models import DailyBar, Instrument, MarketTradingCalendar, StockDailyBasic
+from backend.app.core.applog import get_logger
+from backend.app.core.models import DailyBar, Instrument, MarketTradingCalendar, StockDailyBasic, StockModelSignal
+from backend.app.quant.order_engine import BUY_GRID
+from backend.app.quant.research_buy_model import EDGE_MODEL_PATH, FILL_MODEL_PATH, ONLINE_VARIANT, VARIANTS, choose
 from backend.app.quant.research_features import compute_all
 from backend.app.quant.research_panel import A_SHARE, Panel
-from backend.app.quant.tree_model import load_model, predict
+from backend.app.quant.tree_model import load_model, predict, predict_probability
+
+logger = get_logger("shadow_signal")
 
 MODEL_PATH = Path(__file__).resolve().parents[1] / "quant" / "rank_model.json"
 WINDOW_DAYS = 130
@@ -29,14 +37,35 @@ _MIN_STOCKS_TODAY = 3000  # 当天全市场的 K 线或换手率少于这么多�
 _MIN_LISTED_DAYS = 180  # 上市约满 120 个交易日
 LIVE_MIN_BARS = 60
 _SYMBOL_BATCH = 300
+_KEEP_DAYS = 30
 _BAR_FIELDS = ("open", "high", "low", "close", "pre_close", "vol", "amount")
 _cache: dict[str, Any] = {}
+
+
+@dataclass(frozen=True)
+class LiveSignals:
+    ranks: dict[str, float]  # 0 到 1，越大越好
+    buy_k: dict[str, float | None]  # 昨收下方几倍 ATR 挂买单；None 是模型说不挂。不在字典里的股票没有信号
+
+    @property
+    def complete(self) -> bool:
+        return bool(self.ranks and self.buy_k)
+
+
+EMPTY = LiveSignals({}, {})
 
 
 def _model() -> dict[str, Any] | None:
     if "model" not in _cache:
         _cache["model"] = load_model(MODEL_PATH)
     return _cache["model"]
+
+
+def _buy_models() -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if "buy" not in _cache:
+        fill, edge = load_model(FILL_MODEL_PATH), load_model(EDGE_MODEL_PATH)
+        _cache["buy"] = (fill, edge) if fill is not None and edge is not None else None
+    return _cache["buy"]
 
 
 def excluded_symbols(instruments: Iterable[tuple[str, str | None, str | None]], trade_date: str) -> set[str]:
@@ -82,18 +111,39 @@ def panel_from_rows(days: list[str], codes: list[str], rows: Iterable[tuple], tu
     return Panel(days, codes, data, st=st, min_listed=LIVE_MIN_BARS), today
 
 
-def ranks_from_panel(panel: Panel, model: dict[str, Any]) -> dict[str, float]:
-    names = list(model["names"])
-    features = compute_all(panel, names=names)
+def _rank_matrix(panel: Panel, features: dict[str, np.ndarray], names: list[str]) -> np.ndarray:
+    """和训练时一样：特征先在当天所有有值的股票里排名。"""
     last = len(panel.dates) - 1
-    # 和训练时一样：特征先在当天所有有值的股票里排名，预测只算股票池
     columns = [pd.Series(np.asarray(features[name][last], dtype=np.float64)).rank(pct=True).to_numpy(dtype=np.float32) for name in names]
-    x = np.column_stack(columns)
-    picks = np.flatnonzero(panel.universe[last])
+    return np.column_stack(columns)
+
+
+def ranks_from_panel(panel: Panel, model: dict[str, Any], features: dict[str, np.ndarray] | None = None) -> dict[str, float]:
+    names = list(model["names"])
+    features = features if features is not None else compute_all(panel, names=names)
+    picks = np.flatnonzero(panel.universe[len(panel.dates) - 1])
     if not len(picks):
         return {}
-    scores = pd.Series(predict(model, x[picks])).rank(pct=True).to_numpy()
+    scores = pd.Series(predict(model, _rank_matrix(panel, features, names)[picks])).rank(pct=True).to_numpy()
     return {panel.codes[j]: float(score) for j, score in zip(picks.tolist(), scores)}
+
+
+def buy_from_panel(panel: Panel, fill_model: dict[str, Any], edge_model: dict[str, Any], features: dict[str, np.ndarray] | None = None) -> dict[str, float | None]:
+    """每只股票的买入倍数：每个候选价估成交概率和成交后走势，取价值最大的，都没有优势就是 None。"""
+    names = list(fill_model["names"])
+    features = features if features is not None else compute_all(panel, names=names)
+    picks = np.flatnonzero(panel.universe[len(panel.dates) - 1])
+    if not len(picks):
+        return {}
+    x = _rank_matrix(panel, features, names)[picks]
+    grid = np.array(BUY_GRID, dtype=np.float32)
+    probability, edge = np.zeros((len(picks), len(grid))), np.zeros((len(picks), len(grid)))
+    for column, k in enumerate(grid):
+        rows = np.column_stack([x, np.full(len(picks), k, dtype=np.float32)])
+        probability[:, column] = predict_probability(fill_model, rows)
+        edge[:, column] = predict(edge_model, rows)
+    chosen = choose(probability, edge, grid, VARIANTS[ONLINE_VARIANT].min_edge)
+    return {panel.codes[j]: None if math.isnan(k) else float(k) for j, k in zip(picks.tolist(), chosen.tolist())}
 
 
 def _bar_rows(db: Session, codes: list[str], first_day: str, last_day: str) -> Iterator[tuple]:
@@ -110,11 +160,7 @@ def _bar_rows(db: Session, codes: list[str], first_day: str, last_day: str) -> I
         ).all()
 
 
-def latest_ranks(db: Session, trade_date: str) -> dict[str, float]:
-    """当天每只股票的排名（0 到 1，越大越好）。算不出来返回空。"""
-    model = _model()
-    if model is None:
-        return {}
+def _live_panel(db: Session, trade_date: str) -> Panel | None:
     days = sorted(
         db.scalars(
             select(MarketTradingCalendar.cal_date)
@@ -124,7 +170,7 @@ def latest_ranks(db: Session, trade_date: str) -> dict[str, float]:
         ).all()
     )
     if not days or days[-1] != trade_date:
-        return {}
+        return None
     # 先查换手率：这张表按日期查很快，当天没到就不用去扫 K 线
     turnover = dict(
         db.execute(
@@ -132,10 +178,44 @@ def latest_ranks(db: Session, trade_date: str) -> dict[str, float]:
         ).all()
     )
     if len(turnover) < _MIN_STOCKS_TODAY:
-        return {}
+        return None
     instruments = db.execute(select(Instrument.symbol, Instrument.name, Instrument.list_date)).all()
     codes = sorted(symbol for symbol, _, _ in instruments if A_SHARE.fullmatch(symbol))
     panel, today = panel_from_rows(days, codes, _bar_rows(db, codes, days[0], trade_date), turnover, excluded_symbols(instruments, trade_date))
-    if today < _MIN_STOCKS_TODAY:
-        return {}
-    return ranks_from_panel(panel, model)
+    return panel if today >= _MIN_STOCKS_TODAY else None
+
+
+def latest_signals(db: Session, trade_date: str) -> LiveSignals:
+    """算当天的信号。算不出来返回空。买入模型出问题只影响影子 C 和买价校验，排名照常，不能拖累影子 B。"""
+    rank_model, buy_models = _model(), _buy_models()
+    if rank_model is None:
+        return EMPTY
+    panel = _live_panel(db, trade_date)
+    if panel is None:
+        return EMPTY
+    names = list(rank_model["names"]) + (list(buy_models[0]["names"]) if buy_models else [])
+    features = compute_all(panel, names=list(dict.fromkeys(names)))
+    ranks = ranks_from_panel(panel, rank_model, features)
+    buy_k: dict[str, float | None] = {}
+    if buy_models:
+        try:
+            buy_k = buy_from_panel(panel, *buy_models, features)
+        except Exception as exc:  # noqa: BLE001 - 见上
+            logger.warning("买入模型计算失败: %s", str(exc)[:200])
+    return LiveSignals(ranks, buy_k)
+
+
+def load_signals(db: Session, trade_date: str) -> LiveSignals | None:
+    rows = db.execute(select(StockModelSignal.symbol, StockModelSignal.model_rank, StockModelSignal.buy_k).where(StockModelSignal.trade_date == trade_date)).all()
+    if not rows:
+        return None
+    return LiveSignals({row.symbol: row.model_rank for row in rows}, {row.symbol: row.buy_k for row in rows})
+
+
+def save_signals(db: Session, trade_date: str, signals: LiveSignals) -> None:
+    cutoff = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=_KEEP_DAYS)).strftime("%Y%m%d")
+    db.execute(delete(StockModelSignal).where(StockModelSignal.trade_date < cutoff))
+    db.execute(
+        insert(StockModelSignal),
+        [{"trade_date": trade_date, "symbol": symbol, "model_rank": rank, "buy_k": signals.buy_k.get(symbol)} for symbol, rank in signals.ranks.items()],
+    )

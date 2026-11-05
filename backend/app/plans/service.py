@@ -224,6 +224,7 @@ def _validate_items(
     # 这里才导入：quant_orders 依赖本模块的时间工具
     from backend.app.plans import quant_orders
 
+    quant_buys = quant_orders.enforceable_buys(db, source, plan_date, {_normalize_symbol(str(raw.get("symbol") or "")) for raw in raw_items})
     quant_levels = quant_orders.enforceable_levels(
         db,
         owner_user_id,
@@ -312,7 +313,9 @@ def _validate_items(
             )
             continue
 
-        quant_problem = quant_orders.item_problem(quant_levels.get(symbol), action, trigger_type, float(trigger_price))
+        quant_problem = quant_orders.item_problem(quant_levels.get(symbol), action, trigger_type, float(trigger_price)) or quant_orders.buy_problem(
+            quant_buys, symbol, action, float(trigger_price)
+        )
         if quant_problem:
             issues.append(f"{label}：{quant_problem}")
             continue

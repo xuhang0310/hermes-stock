@@ -140,6 +140,12 @@ def plan_orders(bars: list[Bar], table: dict[str, Any], *, limit_ratio: float = 
     )
 
 
+def model_buy_price(close: float, atr: float, k: float, limit_ratio: float = 0.1) -> float | None:
+    """买入模型选的挂单价。低于跌停价就挂不上，返回 None。"""
+    price = _tick(close - k * atr, up=False)
+    return price if price > 0 and price >= _tick(close * (1 - limit_ratio), up=True) else None
+
+
 def describe_level(level: Level, close: float) -> str:
     return (
         f"{level.price:.2f} 元（昨收{'+' if level.price >= close else '-'}{level.atr_multiple:g} 倍 ATR，"

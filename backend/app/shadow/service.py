@@ -27,14 +27,14 @@ from backend.app.plans.service import open_holdings
 from backend.app.quant.order_engine import load_table, plan_orders
 from backend.app.quant.tech_signal_service import load_bars
 from backend.app.shadow import rules
-from backend.app.shadow.rank_signal import latest_ranks
+from backend.app.shadow.rank_signal import EMPTY, LiveSignals, latest_signals, load_signals, save_signals
 
 logger = get_logger("shadow_account")
 
 PENDING, FILLED, EXPIRED = "pending", "filled", "expired"
-RISK, RISK_RANK = "risk", "risk_rank"
-ACTIVE_STRATEGIES = (RISK, RISK_RANK)
-STRATEGY_LABELS = {RISK: "影子 A", RISK_RANK: "影子 B"}
+RISK, RISK_RANK, RISK_RANK_BUY = "risk", "risk_rank", "risk_rank_buy"
+ACTIVE_STRATEGIES = (RISK, RISK_RANK, RISK_RANK_BUY)
+STRATEGY_LABELS = {RISK: "影子 A", RISK_RANK: "影子 B", RISK_RANK_BUY: "影子 C"}
 SHARE_SOURCE = "shadow_compare"
 
 
@@ -174,7 +174,7 @@ def _market_value(quantities: dict[str, float], closes: dict[str, float]) -> flo
     return total
 
 
-def create_orders(db: Session, account: ShadowAccount, trade_date: str, bars_by_symbol: dict[str, list], positions: dict[str, ShadowPosition], closes: dict[str, float], names: dict[str, str], table: dict[str, Any], ranks: dict[str, float]) -> int:
+def create_orders(db: Session, account: ShadowAccount, trade_date: str, bars_by_symbol: dict[str, list], positions: dict[str, ShadowPosition], closes: dict[str, float], names: dict[str, str], table: dict[str, Any], signals: LiveSignals) -> int:
     invested = account.pool + sum(position.quantity * closes.get(symbol, 0.0) for symbol, position in positions.items())
     created = 0
     pool_left = account.pool
@@ -182,11 +182,13 @@ def create_orders(db: Session, account: ShadowAccount, trade_date: str, bars_by_
         series = bars_by_symbol.get(symbol)
         if not series or series[-1].trade_date != trade_date:
             continue  # 今天停牌，明天不挂
-        levels = plan_orders(series, table, limit_ratio=limit_ratio(symbol, names.get(symbol)))
+        ratio = limit_ratio(symbol, names.get(symbol))
+        levels = plan_orders(series, table, limit_ratio=ratio)
         if levels is None:
             continue
-        tilt = rules.rank_tilt(ranks.get(symbol)) if account.strategy == RISK_RANK else 1.0
-        planned = rules.plan_order(symbol, position.quantity, levels, invested, pool_left, tilt=tilt)
+        tilt = rules.rank_tilt(signals.ranks.get(symbol)) if account.strategy in (RISK_RANK, RISK_RANK_BUY) else 1.0
+        buy_k = signals.buy_k.get(symbol) if account.strategy == RISK_RANK_BUY else rules.DISCOUNT
+        planned = rules.plan_order(symbol, position.quantity, levels, invested, pool_left, tilt=tilt, buy_k=buy_k, limit_ratio=ratio)
         if planned is None:
             continue
         if planned.side == "buy":
@@ -219,7 +221,7 @@ def _real_snapshot(db: Session, account: ShadowAccount) -> tuple[dict[str, float
     return holdings, float((real.available_cash if real is not None else 0) or 0)
 
 
-def run_account(db: Session, account: ShadowAccount, trade_date: str, table: dict[str, Any], ranks: dict[str, float] | None = None) -> dict[str, Any] | None:
+def run_account(db: Session, account: ShadowAccount, trade_date: str, table: dict[str, Any], signals: LiveSignals = EMPTY) -> dict[str, Any] | None:
     """跑一个账户的一天。今天的收盘数据不全、或者已经跑过就返回 None。"""
     done = db.scalar(select(ShadowNav.id).where(ShadowNav.shadow_account_id == account.id, ShadowNav.trade_date == trade_date))
     if done is not None:
@@ -262,7 +264,7 @@ def run_account(db: Session, account: ShadowAccount, trade_date: str, table: dic
         )
     )
     names = {symbol: name for symbol, name, _ in instruments}
-    created = create_orders(db, account, trade_date, bars_by_symbol, positions, closes, names, table, ranks or {})
+    created = create_orders(db, account, trade_date, bars_by_symbol, positions, closes, names, table, signals)
     return {"filled": filled, "created": created}
 
 
@@ -306,16 +308,21 @@ def owner_summary(db: Session, owner: int) -> dict[str, Any]:
     return {"accounts": accounts, **compare(navs)}
 
 
-def _ranks_for_today(session_factory: Callable[[], Session], trade_date: str) -> dict[str, float]:
-    """今天还有影子 B 没结算才算。这一步要读全市场 K 线，而任务每 30 分钟试一次。"""
+def _signals_for_today(session_factory: Callable[[], Session], trade_date: str) -> LiveSignals:
+    """一天只算一次，存表。这一步要读全市场 K 线，而任务每 30 分钟试一次。"""
     try:
         with session_factory() as db:
-            settled = select(ShadowNav.shadow_account_id).where(ShadowNav.trade_date == trade_date)
-            waiting = db.scalar(select(ShadowAccount.id).where(ShadowAccount.strategy == RISK_RANK, ShadowAccount.id.not_in(settled)).limit(1))
-            return latest_ranks(db, trade_date) if waiting is not None else {}
-    except Exception as exc:  # noqa: BLE001 - 排名失败只推迟影子 B 的结算
-        logger.warning("模型排名计算失败: %s", str(exc)[:200])
-        return {}
+            saved = load_signals(db, trade_date)
+            if saved is not None:
+                return saved
+            signals = latest_signals(db, trade_date)
+            if signals.complete:
+                save_signals(db, trade_date, signals)
+                db.commit()
+            return signals
+    except Exception as exc:  # noqa: BLE001 - 信号失败只推迟影子 B、C 的结算
+        logger.warning("模型信号计算失败: %s", str(exc)[:200])
+        return EMPTY
 
 
 def run_shadow_day(now: datetime, *, session_factory: Callable[[], Session] = SessionLocal) -> str:
@@ -329,15 +336,15 @@ def run_shadow_day(now: datetime, *, session_factory: Callable[[], Session] = Se
             ensure_accounts(db, trade_date)
             db.commit()
             ids = list(db.scalars(select(ShadowAccount.id)).all())
-        ranks = _ranks_for_today(session_factory, trade_date)
+        signals = _signals_for_today(session_factory, trade_date)
         settled = 0
         filled = 0
         for account_id in ids:
             with session_factory() as db:
                 account = db.get(ShadowAccount, account_id)
-                if account.strategy == RISK_RANK and not ranks:
+                if (account.strategy == RISK_RANK and not signals.ranks) or (account.strategy == RISK_RANK_BUY and not signals.complete):
                     continue
-                result = run_account(db, account, trade_date, table, ranks)
+                result = run_account(db, account, trade_date, table, signals)
                 if result is None:
                     continue
                 db.commit()
