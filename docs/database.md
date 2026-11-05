@@ -48,8 +48,10 @@ STOCK_DB_NAME=hermes-stock
 - `market_snapshots`: 分钟/实时快照
 - `daily_bars`: 日线行情（不复权价）
 - `stock_adj_factors`: 全市场复权因子（TuShare `adj_factor`，`market_sync` 与日线同窗口落库）；跨日比较价格时用 `close × adj_factor` 得到后复权价
-- `documents`: 新闻、公告、研报、政策、互动问答
-- `document_symbols`: 文档和标的关联
+- `tech_signals`: 技术信号存档（一只股票每个交易日一行，按 `rule_version` 分开存），能由 `daily_bars` 重算。规则还没通过验证，目前不写入，数字人也查不到
+- `documents`: 新闻、公告（`doc_type=announcement`，只有标题和链接）、研报、政策、互动问答
+- `document_symbols`: 文档和标的关联（消息盯盘任务写入）
+- `market_events`: 持仓和自选的消息事件（规则分级、模型解读、推送状态），每位用户每只股票的同一条消息一行
 
 ### 规则与事件
 

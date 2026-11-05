@@ -76,6 +76,10 @@ _AUTOMATIC_SELECTION_CLAIM_GROUP = tuple(
     )
 )
 _SAME_DAY_CATCHUP_JOB_KEYS = frozenset(_AUTOMATIC_SELECTION_CLAIM_GROUP)
+# 报告类任务到点后这么久内还能补跑：名额被占满或服务刚好在重启时，不能整份报告直接丢掉。
+# 2026-11-02 到 04 晚间日报连续三晚被 22:00 的两个新闻任务挤掉，就是因为只认准点那一分钟。
+REPORT_CATCHUP_MINUTES = 30
+_REPORT_JOB_KINDS = frozenset({"agent_report", "agent_task"})
 # TuShare 当天数据 17:00 前后才发齐；数据入库失败后每 30 分钟重试，22:00 后当天不再重试。
 AUTOMATIC_SELECTION_DATA_RETRY_MINUTES = 30
 AUTOMATIC_SELECTION_DATA_RETRY_UNTIL = "22:00"
@@ -225,6 +229,13 @@ def _position_price_sync_session_open(now: datetime) -> bool:
     return (9, 30) <= current <= (11, 30) or (13, 0) <= current <= (15, 0)
 
 
+def _report_catchup_open(job: ScheduledJob, now: datetime) -> bool:
+    if job.job_kind not in _REPORT_JOB_KINDS:
+        return False
+    late = _hhmm_minutes(now.strftime("%H:%M")) - _hhmm_minutes(job.run_time)
+    return 0 <= late <= REPORT_CATCHUP_MINUTES
+
+
 def _is_due(job: ScheduledJob, now: datetime) -> bool:
     schedule_type = job.schedule_type
     if schedule_type == "once":
@@ -241,7 +252,7 @@ def _is_due(job: ScheduledJob, now: datetime) -> bool:
         if allows_catchup:
             if current_hhmm < job.run_time:
                 return False
-        elif current_hhmm != job.run_time:
+        elif current_hhmm != job.run_time and not _report_catchup_open(job, now):
             return False
         if schedule_type in ("daily", "weekly") and not _weekday_ok(job, now):
             return False
@@ -507,6 +518,35 @@ def _plan_reconciliation_block(snap: dict, now: datetime) -> str:
         return ""
 
 
+def _event_digest(snap: dict, plan_source: str | None, now: datetime) -> tuple[str, list[int]]:
+    """排队的消息并入下一份报告：出计划的任务和盘中提醒才收，选股报告不收。失败不影响报告。"""
+    owner = snap.get("owner_user_id")
+    wanted = plan_source != "selection" if plan_source else "提醒" in str(snap.get("name") or "")
+    if owner is None or not wanted:
+        return "", []
+    from backend.app.events.service import report_digest
+
+    try:
+        with SessionLocal() as session:
+            return report_digest(session, int(owner), now)
+    except Exception as exc:  # noqa: BLE001
+        _log("WARNING", "读取排队消息失败", {"error": str(exc)[:200]})
+        return "", []
+
+
+def _mark_events_merged(event_ids: list[int]) -> None:
+    if not event_ids:
+        return
+    from backend.app.events.service import mark_merged
+
+    try:
+        with SessionLocal() as session:
+            mark_merged(session, event_ids)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - 标记失败最多是下一份报告再提一次
+        _log("WARNING", "标记消息已并入失败", {"error": str(exc)[:200]})
+
+
 def _current_plan_meta(snap: dict, now: datetime) -> dict[str, Any]:
     owner_user_id = snap.get("owner_user_id")
     if not owner_user_id:
@@ -573,6 +613,9 @@ def _run_agent_report(
         reconciliation = _plan_reconciliation_block(snap, now)
         if reconciliation:
             question = f"{question}\n\n{reconciliation}"
+    digest, digest_event_ids = _event_digest(snap, plan_source, now)
+    if digest:
+        question = f"{question}\n\n{digest}"
     answer, model_name = _run_scheduled_agent(snap, question, job_run_id)
     agent_error = None
     if agent_error:
@@ -628,6 +671,7 @@ def _run_agent_report(
             report.content = answer
             report.model_name = model_name
         session.commit()
+        _mark_events_merged(digest_event_ids)
         if snap["push_channel_key"]:
             trigger_label = "手动执行" if snap.get("trigger_type") == "manual" else "自动调度"
             digital_human_name = profile.name if profile else (snap["digital_human_code"] or "系统")
@@ -1458,6 +1502,14 @@ def _execute_job(job_key: str, run_id: str) -> None:
                     _log("WARNING", f"定时任务 {snapshot['job_key']} 协同任务提取失败", {"error": str(extract_exc)[:500]})
         elif snapshot["job_kind"] == "topnews_brief":
             output_content = _run_topnews_brief(snapshot, ran_at)
+        elif snapshot["job_kind"] == "message_watch":
+            from backend.app.events.service import run_message_watch
+
+            output_content = run_message_watch(
+                ran_at,
+                owner_user_id=snapshot.get("owner_user_id"),
+                channel=snapshot.get("push_channel_key"),
+            )
         elif snapshot["job_kind"] == "news_ingest":
             from backend.app.data.tushare_news_ingest import run_news_ingest
 
@@ -1571,6 +1623,13 @@ def _scheduled_fire_key(job: ScheduledJob, now: datetime) -> str:
             slot = max(0, elapsed) // AUTOMATIC_SELECTION_DATA_RETRY_MINUTES
             if slot:
                 fire_minute += f"~retry{slot}"
+    elif (
+        job.schedule_type in ("daily", "weekly", "monthly_last")
+        and job.job_kind in _REPORT_JOB_KINDS
+        and job.run_time
+    ):
+        # 补跑和准点用同一个 key：不管哪一分钟抢到名额，同一个时间点只跑一次
+        fire_minute = f"{now:%Y-%m-%d}T{job.run_time}"
     else:
         fire_minute = now.strftime("%Y-%m-%dT%H:%M")
     return f"{job.job_key}@{fire_minute}"
@@ -1705,6 +1764,17 @@ def _claim_job_run(
         if manual_trigger
         else _scheduled_fire_key(job, ran_at)
     )
+    # 补跑窗口里每一轮都会走到这里，先查一下，免得已经跑过的任务每 30 秒撞一次唯一索引
+    if (
+        not manual_trigger
+        and job.job_kind in _REPORT_JOB_KINDS
+        and session.scalar(
+            select(JobRun.id).where(JobRun.job_key == job_key, JobRun.fire_key == fire_key).limit(1)
+        )
+        is not None
+    ):
+        session.rollback()
+        return {"status": "duplicate", "run_id": None}
     session.add(
         JobRun(
             run_id=run_id,
@@ -1980,6 +2050,21 @@ DEFAULT_JOBS = [
         "run_time": "16:30",
         "weekday_mask": "1,2,3,4,5",
         "trading_day_only": True,
+        "enabled": True,
+    },
+    {
+        "job_key": "message-watch-15m",
+        "name": "持仓消息盯盘(每15分)",
+        "description": "盯持仓和自选的公告和新闻，重要的即时解读推送，其余并入下一份报告。",
+        "job_kind": "message_watch",
+        "schedule_type": "interval",
+        "run_time": None,
+        "interval_minutes": 15,
+        # 错开新闻入库的整刻钟和报告任务，免得抢调度器的 2 个名额
+        "window_start": "00:03",
+        "window_end": "23:59",
+        "trading_day_only": False,
+        "push_channel_key": "feishu-daily",
         "enabled": True,
     },
     {

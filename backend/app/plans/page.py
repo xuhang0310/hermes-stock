@@ -8,9 +8,10 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.core.models import ReportShare, StockLatestPrice, TradePlan, TradePlanItem
+from backend.app.core.models import MarketEvent, ReportShare, StockLatestPrice, TradePlan, TradePlanItem
 from backend.app.data.share_render import kpi_strip, long_date, page_shell
 from backend.app.data.share_service import expires_on_text, share_url
+from backend.app.events.service import flag_text, open_flags
 from backend.app.plans import rules
 from backend.app.plans.service import (
     account_labels,
@@ -47,6 +48,7 @@ _PLAN_CSS = """
 .bar{height:2px;margin-top:10px;background:var(--line)}
 .bar div{height:2px;background:var(--gold)}
 .dt{margin:6px 0 0;color:var(--muted);font-size:13px;line-height:1.55}
+.msg{margin:6px 0 0;color:var(--stop);font-size:13px;line-height:1.55}
 """
 
 _STATUS_LABELS = {
@@ -119,7 +121,7 @@ def _detail(item: TradePlanItem, distance: float | None) -> str:
     return "。".join(parts)
 
 
-def _row(item: TradePlanItem, quote: StockLatestPrice | None) -> str:
+def _row(item: TradePlanItem, quote: StockLatestPrice | None, flag: MarketEvent | None = None) -> str:
     price = float(quote.price) if quote is not None and quote.price is not None else None
     plan_text = rules.describe_plan(item.action, item.trigger_type, item.trigger_price, item.quantity)
     status_class, status_text = _status(item)
@@ -128,6 +130,7 @@ def _row(item: TradePlanItem, quote: StockLatestPrice | None) -> str:
     bar = f'<div class="bar"><div style="width:{width}%"></div></div>' if width is not None else ""
     detail = _detail(item, distance)
     detail_html = f'<p class="dt">{html.escape(detail)}</p>' if detail else ""
+    flag_html = f'<p class="msg">消息待复核｜{html.escape(flag_text(flag))}</p>' if flag is not None else ""
     return (
         '<section class="row"><div class="r1"><span>'
         f'<span class="nm">{html.escape(item.name or item.symbol)}</span>'
@@ -135,7 +138,7 @@ def _row(item: TradePlanItem, quote: StockLatestPrice | None) -> str:
         f'<span class="st {status_class}">{html.escape(status_text)}</span></div>'
         f'<div class="r2"><span class="do {_do_class(item)}">{html.escape(plan_text)}</span>'
         f'<span class="now">现价 <span class="fig">{rules.format_price(price)}</span></span></div>'
-        f"{bar}{detail_html}</section>"
+        f"{bar}{detail_html}{flag_html}</section>"
     )
 
 
@@ -172,12 +175,14 @@ def render_plan_page(db: Session, row: ReportShare) -> str | None:
         else {}
     )
     labels = account_labels(db, {item.account_id for item in items})
+    # 计划生效之后出的重要消息，计划还没考虑过，标出来；新计划生效后自然清掉
+    flags = open_flags(db, plan.owner_user_id, symbols, plan.activated_at)
     groups: dict[int | None, list[TradePlanItem]] = {}
     for item in items:
         groups.setdefault(item.account_id, []).append(item)
     body_groups = "".join(
         f"<h2>{html.escape(labels[account_id])}</h2>"
-        + "".join(_row(item, quotes.get(item.symbol)) for item in group)
+        + "".join(_row(item, quotes.get(item.symbol), flags.get(item.symbol)) for item in group)
         for account_id, group in groups.items()
     )
     if not items:

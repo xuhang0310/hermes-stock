@@ -2954,7 +2954,8 @@ def get_anns(ts_code: str | None = None, start_date: str | None = None,
     params: dict[str, Any] = {"start_date": start, "end_date": end}
     if ts_code:
         params["ts_code"] = normalize_a_share_symbol(ts_code)
-    fields = "ts_code,ann_date,ann_title,ann_type,realtime"
+    # TuShare 只返回存在的字段，写错了不报错：之前写成 ann_title，数字人一直看不到公告标题
+    fields = "ts_code,ann_date,name,title,url"
     return _semantic_tushare("anns_d", params, fields, name_cn="上市公司公告", tool_name="get_anns")
 
 

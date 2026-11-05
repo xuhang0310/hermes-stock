@@ -2082,6 +2082,79 @@ class ReportShare(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class MarketEvent(Base):
+    """持仓和自选的一条消息（公告或新闻）：规则分级、模型解读、推送或并入报告（events/service）。
+
+    每位用户、每只股票的同一条消息只有一行，所以重复拉取不会重复推送。
+    """
+
+    __tablename__ = "market_events"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "symbol", "content_hash", name="uq_market_event"),
+        Index("ix_market_event_status", "status"),
+        Index("ix_market_event_owner_symbol", "owner_user_id", "symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    stock_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)  # announcement / news
+    doc_id: Mapped[int | None] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    url: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)  # 北京时间；公告只有日期
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    severity: Mapped[str] = mapped_column(String(12), nullable=False)  # critical / major / minor
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="new")  # new / ready / queued / pushed / merged
+    direction: Mapped[str | None] = mapped_column(String(12))  # positive / negative / neutral，模型判断
+    reliability: Mapped[str | None] = mapped_column(String(4))
+    summary: Mapped[str | None] = mapped_column(Text)
+    impact: Mapped[str | None] = mapped_column(Text)
+    plan_effect: Mapped[str | None] = mapped_column(Text)
+    interpreted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class TechSignalRecord(Base):
+    """技术信号：固定规则按收盘价算出的方向，一只股票每个交易日一行（quant/tech_signal）。
+
+    能由 daily_bars 重新算出来。规则还没通过验证，目前不写入，也没登记进 sql_sandbox。
+    不加外键：信号行与标的生命周期解耦。
+    """
+
+    __tablename__ = "tech_signals"
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", "rule_version", name="uq_tech_signal"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
+    rule_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)  # long 红 / flat 绿 / unknown K 线不够
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    bars_used: Mapped[int] = mapped_column(Integer, nullable=False)
+    flipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    flip_date: Mapped[str | None] = mapped_column(String(8))
+    days_in_state: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    flip_price: Mapped[float | None] = mapped_column(Float)  # 下一交易日收盘高于它是红，否则是绿
+    dif: Mapped[float | None] = mapped_column(Float)
+    dea: Mapped[float | None] = mapped_column(Float)
+    macd_hist: Mapped[float | None] = mapped_column(Float)
+    ma5: Mapped[float | None] = mapped_column(Float)
+    ma10: Mapped[float | None] = mapped_column(Float)
+    ma20: Mapped[float | None] = mapped_column(Float)
+    ma60: Mapped[float | None] = mapped_column(Float)
+    rsi14: Mapped[float | None] = mapped_column(Float)
+    atr14: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class TradePlan(Base):
     """一份操作计划（早盘、午盘、晚间、周、月、选股）。
 

@@ -517,6 +517,86 @@ class SchedulerDeliveryTests(unittest.TestCase):
             # One fixture run already exists; only one due job may be claimed.
             self.assertEqual(len(running), 2)
 
+    def _crowded_evening(self) -> None:
+        """线上的 22:00：两个新闻任务排在前面，报告排第三，而名额只有 2 个。"""
+        with self.SessionFactory() as db:
+            db.add_all(
+                [
+                    ScheduledJob(
+                        job_key=key,
+                        name=key,
+                        job_kind="news_ingest",
+                        schedule_type="interval",
+                        interval_minutes=minutes,
+                        window_start="00:00",
+                        window_end="23:59",
+                        trading_day_only=False,
+                        enabled=True,
+                        sort_order=order,
+                    )
+                    for key, minutes, order in (("news-quick", 15, 40), ("news-major", 60, 50))
+                ]
+                + [
+                    ScheduledJob(
+                        job_key="evening",
+                        name="晚间日报",
+                        job_kind="agent_report",
+                        schedule_type="daily",
+                        run_time="22:00",
+                        trading_day_only=False,
+                        enabled=True,
+                        sort_order=80,
+                    )
+                ]
+            )
+            db.commit()
+
+    def _claim_at(self, *clock: int, limit: int = 2) -> list[str]:
+        with patch.object(rhythm_scheduler, "SessionLocal", self.SessionFactory):
+            return [key for key, _ in rhythm_scheduler._claim_due_jobs(datetime(*clock), limit=limit)]
+
+    def test_a_report_squeezed_out_at_its_minute_runs_when_a_slot_frees_up(self) -> None:
+        self._crowded_evening()
+        self.assertEqual(self._claim_at(2026, 11, 5, 22, 0), ["news-quick", "news-major"])
+        self.assertEqual(self._claim_at(2026, 11, 5, 22, 2), ["evening"])
+        self.assertEqual(self._claim_at(2026, 11, 5, 22, 3), [])
+        with self.SessionFactory() as db:
+            run = db.scalars(select(JobRun).where(JobRun.job_key == "evening")).one()
+            self.assertEqual(run.fire_key, "evening@2026-11-05T22:00")
+
+    def test_a_report_that_ran_on_time_is_not_run_again_in_the_window(self) -> None:
+        self._crowded_evening()
+        self.assertIn("evening", self._claim_at(2026, 11, 5, 22, 0, limit=5))
+        self.assertEqual(self._claim_at(2026, 11, 5, 22, 1), [])
+        # 22:30 是新闻任务的整点，新闻照跑，报告不再跑
+        self.assertEqual(self._claim_at(2026, 11, 5, 22, 30), ["news-quick"])
+
+    def test_the_next_day_is_a_new_run(self) -> None:
+        self._crowded_evening()
+        self.assertIn("evening", self._claim_at(2026, 11, 5, 22, 0, limit=5))
+        self.assertIn("evening", self._claim_at(2026, 11, 6, 22, 1))
+
+    def test_the_catchup_window_is_thirty_minutes_after_the_run_time(self) -> None:
+        job = ScheduledJob(job_key="evening", job_kind="agent_report", schedule_type="daily", run_time="22:00", trading_day_only=False)
+        self.assertFalse(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 21, 59)))
+        self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 0)))
+        self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 30)))
+        self.assertFalse(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 31)))
+
+    def test_weekly_reports_catch_up_on_their_own_day_only(self) -> None:
+        job = ScheduledJob(
+            job_key="weekly", job_kind="agent_report", schedule_type="weekly", run_time="22:00", weekday_mask="7", trading_day_only=False
+        )
+        self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 8, 22, 10)))
+        self.assertFalse(rhythm_scheduler._is_due(job, datetime(2026, 11, 7, 22, 10)))
+        self.assertEqual(rhythm_scheduler._scheduled_fire_key(job, datetime(2026, 11, 8, 22, 10)), "weekly@2026-11-08T22:00")
+
+    def test_other_job_kinds_still_only_run_on_the_minute(self) -> None:
+        job = ScheduledJob(job_key="cctv", job_kind="news_ingest", schedule_type="daily", run_time="21:30", trading_day_only=False)
+        self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 21, 30)))
+        self.assertFalse(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 21, 31)))
+        self.assertEqual(rhythm_scheduler._scheduled_fire_key(job, datetime(2026, 11, 5, 21, 30)), "cctv@2026-11-05T21:30")
+
 
 class ScheduleAdminSafetyTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -79,6 +79,8 @@ class Settings:
     share_ttl_days: int = int(os.getenv("STOCK_SHARE_TTL_DAYS", "30"))
     # 报告类推送有手机版链接时，卡片只放一句核心的话和按钮；false 恢复全文卡片
     feishu_brief_card: bool = os.getenv("STOCK_FEISHU_BRIEF_CARD", "true").lower() == "true"
+    # 立案、停牌这类重大消息夜里（22:30 到 07:30）也推；false 就并入第二天早盘
+    event_night_push: bool = os.getenv("STOCK_EVENT_NIGHT_PUSH", "true").lower() == "true"
     # Agent 工作区（文件读写/查找/执行）：受控 scratch 目录，与项目代码/.env/DB 物理隔离
     workspace_enabled: bool = os.getenv("STOCK_WORKSPACE_ENABLED", "true").lower() == "true"
     # 执行能力独立开关，默认关：开启=给聊天用户放开"以应用用户身份执行 Python"，生产须在独立低权账户/沙箱下才开

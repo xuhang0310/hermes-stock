@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import TradePlan, TradePlanItem
 from backend.app.data.share_service import ShareSpec
+from backend.app.events.service import flag_text, open_flags
 from backend.app.feishu.feishu import send_feishu
 from backend.app.plans import rules
 from backend.app.plans.service import (
@@ -191,6 +192,10 @@ def alert_content(
             first = f"{heading} 现价 {rules.format_price(current if current is not None else item.triggered_price)}"
         source = rules.SOURCE_LABELS.get(plan.source, "计划")
         plan_text = rules.describe_plan(item.action, item.trigger_type, item.trigger_price, item.quantity)
-        blocks.append(f"{first}\n碰到{source}：{plan_text}")
+        block = f"{first}\n碰到{source}：{plan_text}"
+        flag = open_flags(db, item.owner_user_id, {item.symbol}, plan.activated_at).get(item.symbol)
+        if flag is not None:
+            block += f"\n⚠ 计划之后出了消息，计划还没考虑：{flag_text(flag)}"
+        blocks.append(block)
     blocks.append("价格碰到不等于成交，以券商为准。成交后记得在系统里记一笔（持仓页或持仓录入 Agent），计划页才会显示已成交。")
     return "\n\n".join(blocks)
