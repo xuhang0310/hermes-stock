@@ -952,6 +952,13 @@ class SchedulerIntegrationTests(_PlanCase):
         self.assertEqual(pushed["content"], "短提醒")
         self.assertNotIn("plan_url", pushed["share"].meta)
 
+    def test_a_report_without_delegation_is_not_abandoned_while_the_agent_works(self) -> None:
+        from backend.app.scheduler import rhythm_scheduler
+
+        self.assertEqual(rhythm_scheduler._scheduled_agent_hard_timeout_seconds({"delegation_mode": "none"}), 2760)
+        long_children = {"delegation_mode": "execute_and_wait", "child_timeout_seconds": 3000}
+        self.assertGreater(rhythm_scheduler._scheduled_agent_hard_timeout_seconds(long_children), 2760)
+
     def test_evening_report_links_to_its_owners_shadow_comparison(self) -> None:
         from backend.app.core.models import ShadowAccount, ShadowNav
 

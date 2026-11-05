@@ -338,6 +338,12 @@ def _scheduled_execution_constraints(job_key: str, plan_source: str | None = Non
     return common
 
 
+# 只要 Agent 还有进展就等到这么久。单次运行实际会超过 agent_run_timeout_seconds（晚间日报常年要 25 到 40 分钟），
+# 不委派的任务如果只等 run_timeout + 60 秒，Agent 还在干活调度器就判失败，报告白跑（2026-11-05 晚间日报）。
+# 真卡住时由 idle_timeout 提前结束。
+SCHEDULED_AGENT_MIN_WAIT_SECONDS = 2760
+
+
 def _scheduled_agent_hard_timeout_seconds(snap: dict) -> int:
     """Cover leader work, delegated-child wait, and leader resume phases."""
 
@@ -349,7 +355,7 @@ def _scheduled_agent_hard_timeout_seconds(snap: dict) -> int:
         else 0
     )
     leader_phases = 2 if mode == "execute_and_wait" else 1
-    return leader_phases * run_timeout + child_timeout + 60
+    return max(leader_phases * run_timeout + child_timeout + 60, SCHEDULED_AGENT_MIN_WAIT_SECONDS)
 
 
 def _build_digital_human_context(code: str | None) -> str | None:
