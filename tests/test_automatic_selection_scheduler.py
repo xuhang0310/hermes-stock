@@ -736,6 +736,7 @@ class AutomaticSelectionDigestDeliveryTests(unittest.TestCase):
         "title": "每日选股 | 2026-10-21",
         "inbox_title": "每日选股（10 月 21 日）：甲、乙、丙等 30 只",
         "content": "**10 月 21 日收盘后，按固定规则选出 30 只，下面是排名前 5 的。**",
+        "brief": "10 月 21 日收盘后按固定规则选出 30 只，排在前面的是甲、乙、丙等。",
     }
 
     def _run(self, *, cycle=None, digest=None, feishu_status="sent", push_channel_key="feishu-daily"):
@@ -794,6 +795,7 @@ class AutomaticSelectionDigestDeliveryTests(unittest.TestCase):
         self.assertEqual(args, ("db-session", "feishu-daily", self.DIGEST["title"], self.DIGEST["content"]))
         self.assertEqual(kwargs["event_id"], "automatic-selection:selection-run-1")
         self.assertEqual(kwargs["card_template"], "green")
+        self.assertEqual(kwargs["card_brief"], self.DIGEST["brief"])
         self.assertIn(("触发方式", "自动调度"), kwargs["card_metadata"])
         share = kwargs["share"]
         self.assertEqual(

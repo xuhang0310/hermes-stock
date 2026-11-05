@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -305,6 +306,8 @@ def _scheduled_execution_constraints(job_key: str, plan_source: str | None = Non
         "版式：任务里“每只一行”“股票｜现价｜……”这类一行一只的内容，一律写成 Markdown 表格，"
         "不要写成列表或带竖线的文字行；第一列写“名称（6 位代码）”。"
         "存文件的路径、版本和校验值不要写进正文。"
+        "正文第一行单独写一句最核心的话：最要紧的是哪只、什么价、要不要动，不超过 60 字，"
+        "不以时间、标题或“结论：”开头；飞书卡片上只显示这一句，其余内容客户点开手机版看。"
     )
     if plan_source:
         common += PLAN_SAVE_INSTRUCTION
@@ -642,6 +645,7 @@ def _run_agent_report(
                     ("生成时间", now.strftime("%Y-%m-%d %H:%M:%S")),
                 ],
                 card_footer="SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议",
+                card_brief=True,
                 share=ShareSpec(
                     source_type="agent_report",
                     source_ref=report_id,
@@ -657,6 +661,20 @@ def _run_agent_report(
             if notification.status != "sent":
                 notification_error = notification.error or "飞书未确认发送成功"
     return report_id, notification_id, answer, notification_error
+
+
+_TOPNEWS_VERDICT = re.compile(r"市场定性：\s*([^|｜\n]+?)\s*[|｜][^\n]*\n[ \t]*([^\n]*)")
+
+
+def _topnews_brief(report: str) -> str:
+    """舆情简报是固定模板，开头是装饰线和标题；卡片那一句取“市场定性”和下一行的依据。"""
+    matched = _TOPNEWS_VERDICT.search(report or "")
+    if not matched:
+        return ""
+    verdict, detail = matched.group(1).strip(), matched.group(2).strip()
+    if not detail or detail == "数据不足" or not re.search(r"\w", detail):
+        return f"市场定性：{verdict}。"
+    return f"市场定性：{verdict}，{detail.rstrip('。')}。"
 
 
 def _run_topnews_brief(snapshot: dict, ran_at: datetime) -> str:
@@ -681,6 +699,7 @@ def _run_topnews_brief(snapshot: dict, ran_at: datetime) -> str:
                 ("生成时间", ran_at.strftime("%Y-%m-%d %H:%M:%S")),
             ],
             card_footer="SixRabbits Stock | 数据采集自动生成，仅供参考",
+            card_brief=_topnews_brief(report) or True,
             share=ShareSpec(
                 source_type="topnews_brief",
                 owner_user_id=snapshot.get("owner_user_id"),
@@ -1254,6 +1273,7 @@ def _push_automatic_selection_digest(snapshot: dict[str, Any], digest: dict[str,
                 ("生成时间", now.strftime("%Y-%m-%d %H:%M:%S")),
             ],
             card_footer="SixRabbits Stock | 规则选股，仅供研究与复盘，不构成投资建议",
+            card_brief=digest.get("brief") or True,
             share=ShareSpec(
                 source_type="selection_digest",
                 source_ref=str(digest["run_id"]) if digest.get("run_id") else None,

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.models import Notification, NotifyChannel
 from backend.app.core.settings import settings
+from backend.app.data.share_render import lead_brief
 from backend.app.data.share_service import SAMPLE_SHARE_MARKDOWN, ShareSpec, create_share_link
 
 
@@ -33,6 +34,8 @@ FEISHU_MAX_CARDS_PER_MESSAGE = 18
 FEISHU_MAX_TABLES_PER_CARD = 5
 RATE_LIMIT_PER_MINUTE = 20
 SHARE_BUTTON_TEXT = "📱 手机查看完整版"
+BRIEF_FALLBACK_TEXT = "这次的完整内容在手机版里，点下面的按钮查看。"
+BRIEF_MAX_CHARS = 300
 _RETRYABLE_STATUS = {500, 502, 503, 504}
 _CARD_TEMPLATES = {
     "blue", "wathet", "turquoise", "green", "yellow", "orange", "red",
@@ -484,7 +487,6 @@ def _card_payload(
     share_url: str | None = None,
     share_text: str = SHARE_BUTTON_TEXT,
 ) -> dict:
-    card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
     elements: list[dict] = []
     metadata_text = _metadata_markdown(metadata) if page == 1 else ""
     if metadata_text:
@@ -502,25 +504,32 @@ def _card_payload(
     if elements:
         elements.append({"tag": "hr"})
     elements.extend(content_elements)
+    elements.append({"tag": "hr"})
+    # 只有一张卡片时顶部的按钮就够了；长消息翻到最后一张时再给一个，不用翻回去
+    if share_url and page == page_count and page_count > 1:
+        elements.append(_share_button(share_url, "share_bottom", share_text))
+    elements.append(_footer_element(purpose, footer, f"footer_{page:02d}"))
+    page_title = title if page_count == 1 else f"{title}（{page}/{page_count}）"
+    return _card(page_title, elements, purpose=purpose, template=template)
+
+
+def _footer_element(purpose: str, footer: str | None, element_id: str) -> dict:
     footer_text = footer or (
         "SixRabbits Stock | 系统告警，请及时核查"
         if purpose == "alert"
         else "SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议"
     )
-    elements.append({"tag": "hr"})
-    # 只有一张卡片时顶部的按钮就够了；长消息翻到最后一张时再给一个，不用翻回去
-    if share_url and page == page_count and page_count > 1:
-        elements.append(_share_button(share_url, "share_bottom", share_text))
-    elements.append(
-        {
-            "tag": "markdown",
-            "element_id": f"footer_{page:02d}",
-            "content": footer_text[:200],
-            "text_size": "notation",
-            "text_align": "left",
-        }
-    )
-    page_title = title if page_count == 1 else f"{title}（{page}/{page_count}）"
+    return {
+        "tag": "markdown",
+        "element_id": element_id,
+        "content": footer_text[:200],
+        "text_size": "notation",
+        "text_align": "left",
+    }
+
+
+def _card(page_title: str, elements: list[dict], *, purpose: str, template: str | None) -> dict:
+    card_template = template if template in _CARD_TEMPLATES else ("red" if purpose == "alert" else "blue")
     return {
         "schema": "2.0",
         "config": {
@@ -586,12 +595,53 @@ def _build_payloads(
                 share_text=share_text,
             ),
         }
-        if secret:
-            timestamp = int(time.time())
-            payload["timestamp"] = str(timestamp)
-            payload["sign"] = _gen_sign(secret, timestamp)
-        payloads.append(payload)
+        payloads.append(_signed(payload, secret))
     return payloads
+
+
+def _signed(payload: dict, secret: str | None) -> dict:
+    if secret:
+        timestamp = int(time.time())
+        payload["timestamp"] = str(timestamp)
+        payload["sign"] = _gen_sign(secret, timestamp)
+    return payload
+
+
+def _brief_payload(
+    title: str,
+    brief: str,
+    secret: str | None,
+    purpose: str,
+    *,
+    footer: str | None,
+    template: str | None,
+    share_url: str,
+    share_text: str,
+) -> dict:
+    """一句话卡片：核心那句话、手机版按钮、页脚。详细内容都在手机版里。"""
+    elements = [
+        {
+            "tag": "markdown",
+            "element_id": "brief",
+            "content": brief,
+            "text_size": "normal",
+            "text_align": "left",
+        },
+        _share_button(share_url, "share_top", share_text),
+        _footer_element(purpose, footer, "footer_01"),
+    ]
+    payload = {"msg_type": "interactive", "card": _card(title[:120], elements, purpose=purpose, template=template)}
+    return _signed(payload, secret)
+
+
+def _brief_text(content: str, card_brief: bool | str) -> str | None:
+    """卡片上那一句；取不出来返回 None，调用方改发全文。"""
+    if isinstance(card_brief, str):
+        return card_brief.strip()[:BRIEF_MAX_CHARS] or None
+    try:
+        return lead_brief(content)[:BRIEF_MAX_CHARS] or BRIEF_FALLBACK_TEXT
+    except Exception:  # noqa: BLE001 - 摘要只是卡片的写法，出错就发全文
+        return None
 
 
 def _build_payload(
@@ -718,10 +768,13 @@ def send_feishu(
     card_template: str | None = None,
     card_kind: str | None = None,
     share: ShareSpec | None = None,
+    card_brief: bool | str = False,
 ) -> Notification:
     """向指定通道推送消息。先落 pending 审计记录再发送，任何失败都不抛异常、只写 failed。
 
     传了 share 且配置了 STOCK_PUBLIC_BASE_URL 时，卡片上多一个打开手机版网页的按钮。
+    再传 card_brief 时卡片只放一句核心的话和按钮，详细内容在手机版里看：传字符串就用它，
+    传 True 从正文开头取（share_render.lead_brief）。没有链接时照旧发全文，不能让内容丢掉。
     """
     if report_id or event_id:
         identity_filter = (
@@ -773,17 +826,33 @@ def send_feishu(
     # 避免重试窗口（最长约 33 秒）占用连接池，且进程中途崩溃也能留下审计痕迹
     db.commit()
 
-    payloads = _build_payloads(
-        title,
-        content,
-        secret,
-        purpose,
-        metadata=card_metadata,
-        footer=card_footer,
-        template=card_template,
-        share_url=share_url,
-        share_text=(share.button_text if share else None) or SHARE_BUTTON_TEXT,
-    )
+    share_text = (share.button_text if share else None) or SHARE_BUTTON_TEXT
+    brief = _brief_text(content, card_brief) if share_url and card_brief and settings.feishu_brief_card else None
+    if share_url and brief:
+        payloads = [
+            _brief_payload(
+                title,
+                brief,
+                secret,
+                purpose,
+                footer=card_footer,
+                template=card_template,
+                share_url=share_url,
+                share_text=share_text,
+            )
+        ]
+    else:
+        payloads = _build_payloads(
+            title,
+            content,
+            secret,
+            purpose,
+            metadata=card_metadata,
+            footer=card_footer,
+            template=card_template,
+            share_url=share_url,
+            share_text=share_text,
+        )
     if not _acquire_rate_slots(channel_key, len(payloads)):
         notification.status = "failed"
         notification.error = (
@@ -803,6 +872,7 @@ def send_feishu(
     if share_url and sent_pages == 0 and status_code == 200:
         # 飞书拒收这张卡片（HTTP 200 + 业务错误码）时，可能是按钮的问题。
         # 报告不能因为一个附加按钮送不到：去掉按钮整条重发一次，并留下告警便于修正。
+        # 一句话卡片也一样：没有按钮就看不到详细内容，所以重发的是全文。
         _log(
             db,
             "WARNING",

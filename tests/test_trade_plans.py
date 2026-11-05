@@ -888,6 +888,14 @@ class PlanPageTests(_PlanCase):
         button = next(e for e in calls[0]["card"]["body"]["elements"] if e["tag"] == "button")
         self.assertEqual(button["behaviors"][0]["default_url"], url)
 
+    def test_alert_card_keeps_the_whole_alert_text(self) -> None:
+        # 触价提醒本身就是要马上执行的内容，不走一句话卡片
+        self._ready()
+        _, calls = self._tick({SELL_SYMBOL: _quote(22.2)}, datetime(2026, 11, 3, 9, 47))
+        ids = [e.get("element_id") for e in calls[0]["card"]["body"]["elements"]]
+        self.assertNotIn("brief", ids)
+        self.assertIn("content_001", ids)
+
     def test_missing_plan_shows_the_notice_page(self) -> None:
         url = self._ready()
         with self.Session() as db:

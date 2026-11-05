@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import html
+import itertools
 import re
 from datetime import date, datetime
 from typing import NamedTuple
@@ -637,14 +638,19 @@ def _mark_fine_print(tokens: list[Token]) -> None:
         if token.type != "paragraph_open" or token.level != 0 or token.attrGet("class"):
             continue
         inline = tokens[position + 1]
-        text = _inline_text(inline)
-        children = _without_empty_text(inline.children or [])
-        limit = _FINE_PRINT_MAX_CHARS if _is_whole_bold(children) else _FINE_PRINT_PLAIN_MAX_CHARS
-        if len(text) > limit or not (_DATA_NOTE.search(text) or _DISCLAIMER.search(text)):
+        if not _is_fine_print(inline):
             continue
         token.attrSet("class", "fine")
+        children = _without_empty_text(inline.children or [])
         if _is_whole_bold(children):
             inline.children = children[1:-1]
+
+
+def _is_fine_print(inline: Token) -> bool:
+    text = _inline_text(inline)
+    children = _without_empty_text(inline.children or [])
+    limit = _FINE_PRINT_MAX_CHARS if _is_whole_bold(children) else _FINE_PRINT_PLAIN_MAX_CHARS
+    return len(text) <= limit and bool(_DATA_NOTE.search(text) or _DISCLAIMER.search(text))
 
 
 def _split_stock_item(children: list[Token]) -> tuple[_StockHead, list[Token]] | None:
@@ -738,6 +744,122 @@ def _mark_lead(tokens: list[Token]) -> None:
             return
         if token.type not in ("heading_open", "heading_close", "hr"):
             return
+
+
+# ── 飞书卡片上的那一句 ────────────────────────────────────────────────
+_BRIEF_MAX_CHARS = 80  # 超过就按句子截
+_BRIEF_MIN_CHARS = 30  # 第一行不成句（如“13:43｜暂无新变化”）又不够这么长，就接上下一行
+_BRIEF_SENTENCE_MIN_CHARS = 12  # 已经是完整的一句，到这么长就够了，不再往下接
+_BRIEF_CLAUSE = re.compile(r"[，,；;、]")
+_BRIEF_JOINED = tuple("。！？!?；;：:，,、")
+_MEANINGFUL = re.compile(r"\w")  # 只有“━━━”这类装饰线的行不算
+
+_Segments = list[tuple[str, bool]]  # [(文字, 是否粗体)]
+
+
+def _brief_paragraph(tokens: list[Token]) -> Token | None:
+    """和 _mark_lead 认同一段；开头不是段落时，取第一段不是小字说明的。"""
+    for position, token in enumerate(tokens):
+        if token.level != 0:
+            continue
+        if token.type == "paragraph_open":
+            return tokens[position + 1]
+        if token.type not in ("heading_open", "heading_close", "hr"):
+            break
+    for position, token in enumerate(tokens):
+        if token.level == 0 and token.type == "paragraph_open" and not _is_fine_print(tokens[position + 1]):
+            return tokens[position + 1]
+    return None
+
+
+def _segments_text(segments: _Segments) -> str:
+    return "".join(text for text, _ in segments)
+
+
+def _slice_segments(segments: _Segments, start: int, end: int) -> _Segments:
+    """按字符位置截取，粗体标记跟着字走。"""
+    sliced: _Segments = []
+    offset = 0
+    for text, bold in segments:
+        piece = text[max(start - offset, 0):max(end - offset, 0)]
+        if piece:
+            sliced.append((piece, bold))
+        offset += len(text)
+    return sliced
+
+
+def _brief_lines(children: list[Token]) -> list[_Segments]:
+    lines: list[_Segments] = [[]]
+    bold = 0
+    for child in children:
+        if child.type == "strong_open":
+            bold += 1
+        elif child.type == "strong_close":
+            bold -= 1
+        elif child.type in ("softbreak", "hardbreak"):
+            lines.append([])
+        elif child.type in ("text", "code_inline"):
+            lines[-1].append((child.content, bold > 0))
+    kept: list[_Segments] = []
+    for line in lines:
+        text = _segments_text(line)
+        start, end = len(text) - len(text.lstrip()), len(text.rstrip())
+        if _MEANINGFUL.search(text):
+            kept.append(_slice_segments(line, start, end))
+    return kept
+
+
+def _cut_brief(segments: _Segments, limit: int) -> _Segments:
+    text = _segments_text(segments)
+    if len(text) <= limit:
+        return segments
+    ends = [m.end() for m in _SENTENCE_END.finditer(text) if m.end() <= limit]
+    if ends and ends[-1] >= _BRIEF_MIN_CHARS:
+        return _slice_segments(segments, 0, ends[-1])
+    clauses = [m.start() for m in _BRIEF_CLAUSE.finditer(text) if _BRIEF_MIN_CHARS <= m.start() < limit]
+    return _slice_segments(segments, 0, clauses[-1] if clauses else limit - 1) + [("…", False)]
+
+
+def _segments_markdown(segments: _Segments) -> str:
+    parts: list[str] = []
+    for bold, group in itertools.groupby(segments, key=lambda segment: segment[1]):
+        text = "".join(piece for piece, _ in group)
+        core = text.strip()
+        if bold and core:
+            head, tail = text[: len(text) - len(text.lstrip())], text[len(text.rstrip()):]
+            parts.append(f"{head}**{core}**{tail}")
+        else:
+            parts.append(text)
+    return "".join(parts).strip()
+
+
+def lead_brief(source: str, limit: int = _BRIEF_MAX_CHARS) -> str:
+    """飞书卡片只放的那一句：正文开头那段的第一行，也就是手机版顶部放大的那句。
+
+    第一行不成句就接上下一行，太长按句子截（实在没有句号才按逗号截并加省略号）。
+    返回飞书 markdown，保留行内粗体；找不到像样的一段时返回空串。
+    """
+    source = _PROCESS_LINE.sub("", _PROCESS_BLOCK.sub("", source or ""))
+    inline = _brief_paragraph(_MARKDOWN.parse(source.strip(), {}))
+    if inline is None:
+        return ""
+    children = _without_empty_text(inline.children or [])
+    if _is_whole_bold(children):
+        children = children[1:-1]
+    picked: _Segments = []
+    for line in _brief_lines(children):
+        so_far = _segments_text(picked)
+        if picked:
+            complete = len(so_far) >= _BRIEF_SENTENCE_MIN_CHARS and _SENTENCE_END.fullmatch(so_far[-1])
+            if complete or len(so_far) >= _BRIEF_MIN_CHARS:
+                break
+            if not so_far.endswith(_BRIEF_JOINED):
+                picked.append(("。", False))
+        picked.extend(line)
+    if all(bold for _, bold in picked):
+        # 整句都粗等于没有重点，和手机版一样去掉，各条卡片的观感才统一
+        picked = [(text, False) for text, _ in picked]
+    return _segments_markdown(_cut_brief(picked, limit))
 
 
 def _wrap_tables(cleaned: str) -> str:

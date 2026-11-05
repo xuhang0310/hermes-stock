@@ -25,7 +25,7 @@ from backend.app.core.models import Base, Notification, NotifyChannel, ReportSha
 from backend.app.core.settings import settings as real_settings
 from backend.app.data import share_service
 from backend.app.data.share_api import router
-from backend.app.data.share_render import render_markdown, render_notice_page, render_share_page
+from backend.app.data.share_render import lead_brief, render_markdown, render_notice_page, render_share_page
 from backend.app.data.share_service import ShareSpec, create_share_link, share_status
 from backend.app.feishu import feishu
 from backend.app.feishu.feishu import _build_payloads, encrypt_value, send_feishu
@@ -674,7 +674,15 @@ class CardButtonTests(_DbCase):
         )
         session.commit()
 
-    def _send(self, session: Session, post_results: list, *, share: ShareSpec | None) -> tuple[Notification, list]:
+    def _send(
+        self,
+        session: Session,
+        post_results: list,
+        *,
+        share: ShareSpec | None,
+        content: str = "正文",
+        card_brief: bool | str = False,
+    ) -> tuple[Notification, list]:
         calls: list = []
 
         def fake_post(url, payload, attempts=3):
@@ -683,7 +691,16 @@ class CardButtonTests(_DbCase):
 
         feishu._rate_history.clear()
         with patch.object(feishu, "_post_with_retry", side_effect=fake_post), patch.object(feishu, "_log"):
-            notification = send_feishu(session, "feishu-daily", "早盘 | 2026-11-04", "正文", report_id="rhythm-1", share=share)
+            notification = send_feishu(
+                session,
+                "feishu-daily",
+                "早盘 | 2026-11-04",
+                content,
+                report_id="rhythm-1",
+                card_metadata=[("任务", "早盘")],
+                share=share,
+                card_brief=card_brief,
+            )
         return notification, calls
 
     def test_push_stores_the_same_text_as_the_card(self) -> None:
@@ -770,7 +787,225 @@ class CardButtonTests(_DbCase):
         self.assertIn("button", self._tags(calls[0]))
 
 
+class BriefCardTests(_DbCase):
+    REPORT = "**今天不加仓，只减海象新材。**  \n最先盯 16.55 元卖单。\n\n" + "\n\n".join(
+        f"第 {i} 段。" + "内容" * 800 for i in range(24)
+    )
+    MANY_OK = [(True, 200, "")] * 40
+
+    def _send(self, session: Session, post_results: list, *, content: str = REPORT, card_brief: bool | str = True):
+        session.add(
+            NotifyChannel(
+                channel_key="feishu-daily",
+                name="任务群",
+                purpose="daily",
+                webhook_url_cipher=encrypt_value("https://open.feishu.cn/open-apis/bot/v2/hook/x"),
+                status="enabled",
+            )
+        )
+        session.commit()
+        calls: list = []
+
+        def fake_post(url, payload, attempts=3):
+            calls.append(payload)
+            return post_results[len(calls) - 1]
+
+        feishu._rate_history.clear()
+        with patch.object(feishu, "_post_with_retry", side_effect=fake_post), patch.object(feishu, "_log"):
+            notification = send_feishu(
+                session,
+                "feishu-daily",
+                "早盘 | 2026-11-04",
+                content,
+                report_id="rhythm-1",
+                card_metadata=[("任务", "早盘")],
+                share=ShareSpec(source_type="agent_report", source_ref="rhythm-1", owner_user_id=7),
+                card_brief=card_brief,
+            )
+        return notification, calls
+
+    @staticmethod
+    def _elements(payload: dict) -> list[dict]:
+        return payload["card"]["body"]["elements"]
+
+    def _text(self, payloads: list[dict]) -> str:
+        return "\n".join(e.get("content", "") for payload in payloads for e in self._elements(payload))
+
+    def _has_button(self, payloads: list[dict]) -> bool:
+        return any(e["tag"] == "button" for payload in payloads for e in self._elements(payload))
+
+    def test_a_long_report_becomes_one_card_with_the_sentence_and_the_button(self) -> None:
+        with self.Session() as session:
+            notification, calls = self._send(session, [(True, 200, "")])
+            self.assertEqual(notification.status, "sent")
+            self.assertEqual(notification.content, self.REPORT)
+            row = session.scalar(select(ReportShare))
+            self.assertEqual(row.content_md, self.REPORT)
+        self.assertEqual(len(calls), 1)
+        elements = self._elements(calls[0])
+        self.assertEqual([e["tag"] for e in elements], ["markdown", "button", "markdown"])
+        self.assertEqual(elements[0]["content"], "今天不加仓，只减海象新材。")
+        self.assertTrue(elements[1]["behaviors"][0]["default_url"].endswith(row.share_id))
+        self.assertIn("不构成投资建议", elements[2]["content"])
+        self.assertEqual(calls[0]["card"]["header"]["title"]["content"], "早盘 | 2026-11-04")
+        self.assertNotIn("任务", self._text(calls))
+
+    def test_a_given_sentence_is_used_as_it_is(self) -> None:
+        with self.Session() as session:
+            _, calls = self._send(session, [(True, 200, "")], card_brief="市场定性：偏多。")
+        self.assertEqual(self._elements(calls[0])[0]["content"], "市场定性：偏多。")
+
+    def test_a_report_with_no_paragraph_still_points_to_the_page(self) -> None:
+        with self.Session() as session:
+            _, calls = self._send(session, [(True, 200, "")], content="| 名称 | 价 |\n|---|---|\n| 甲 | 1 |")
+        self.assertEqual(self._elements(calls[0])[0]["content"], feishu.BRIEF_FALLBACK_TEXT)
+        self.assertTrue(self._has_button(calls))
+
+    def test_no_link_means_the_full_text_is_sent(self) -> None:
+        with patch.object(share_service, "settings", _settings(public_base_url="")), self.Session() as session:
+            notification, calls = self._send(session, self.MANY_OK)
+            self.assertEqual(notification.status, "sent")
+        self.assertGreater(len(calls), 1)
+        self.assertFalse(self._has_button(calls))
+        self.assertIn("第 23 段", self._text(calls))
+
+    def test_a_rejected_brief_card_is_resent_in_full_without_the_button(self) -> None:
+        with self.Session() as session:
+            notification, calls = self._send(session, [(False, 200, "飞书返回错误 code=200621")] + self.MANY_OK)
+            self.assertEqual(notification.status, "sent")
+        self.assertTrue(self._has_button(calls[:1]))
+        self.assertNotIn("第 23 段", self._text(calls[:1]))
+        self.assertFalse(self._has_button(calls[1:]))
+        self.assertIn("第 23 段", self._text(calls[1:]))
+
+    def test_the_switch_restores_full_text_cards(self) -> None:
+        with patch.object(feishu, "settings", _settings(feishu_brief_card=False)), self.Session() as session:
+            _, calls = self._send(session, self.MANY_OK)
+        self.assertGreater(len(calls), 1)
+        self.assertTrue(self._has_button(calls))
+        self.assertIn("第 23 段", self._text(calls))
+
+    def test_a_broken_extraction_falls_back_to_the_full_text(self) -> None:
+        with patch.object(feishu, "lead_brief", side_effect=RuntimeError("boom")), self.Session() as session:
+            notification, calls = self._send(session, self.MANY_OK)
+            self.assertEqual(notification.status, "sent")
+        self.assertGreater(len(calls), 1)
+        self.assertIn("第 23 段", self._text(calls))
+
+    def test_without_card_brief_pushes_stay_as_they_were(self) -> None:
+        with self.Session() as session:
+            _, calls = self._send(session, self.MANY_OK, card_brief=False)
+        self.assertGreater(len(calls), 1)
+        self.assertIn("第 23 段", self._text(calls))
+
+    def test_the_card_is_signed_when_the_channel_has_a_secret(self) -> None:
+        payload = feishu._brief_payload(
+            "t", "一句话", "secret", "daily", footer=None, template=None, share_url="https://x/a", share_text="看"
+        )
+        self.assertIn("sign", payload)
+        self.assertEqual(payload["msg_type"], "interactive")
+
+
+class LeadBriefTests(unittest.TestCase):
+    def test_a_complete_first_line_stands_alone(self) -> None:
+        self.assertEqual(
+            lead_brief("**今天不加仓，只减海象新材、同力天启、民德电子。**  \n最先盯**海象新材16.55元卖单**。\n\n## 小标题"),
+            "今天不加仓，只减海象新材、同力天启、民德电子。",
+        )
+        self.assertEqual(
+            lead_brief("澜起科技继续拉升至涨12.35%，午盘退出安排不变。  \n同力天启也已到减仓价。"),
+            "澜起科技继续拉升至涨12.35%，午盘退出安排不变。",
+        )
+
+    def test_bold_inside_the_line_is_kept(self) -> None:
+        self.assertEqual(
+            lead_brief("上午走弱，下午继续减弱势仓位，**不加仓，自选下午不买**。  \n你重点盯海象新材。"),
+            "上午走弱，下午继续减弱势仓位，**不加仓，自选下午不买**。",
+        )
+
+    def test_a_line_that_is_not_a_sentence_takes_the_next_one(self) -> None:
+        self.assertEqual(
+            lead_brief("**2026-11-04 13:43｜暂无需要调整的新变化**\n你重点盯住民德电子：现价仍高于原定卖出价。\n行情更新于13:43:05。"),
+            "**2026-11-04 13:43｜暂无需要调整的新变化**。你重点盯住民德电子：现价仍高于原定卖出价。",
+        )
+        self.assertEqual(lead_brief("结论：\n今天不动，等反弹再卖。"), "结论：今天不动，等反弹再卖。")
+
+    def test_a_short_opening_sentence_keeps_the_rest_of_its_line(self) -> None:
+        text = "盘中报价暂时取不到。你先看券商，确认**海象新材15.98元止损是否触发**。\n\n**价格单位：元。**"
+        self.assertEqual(lead_brief(text), "盘中报价暂时取不到。你先看券商，确认**海象新材15.98元止损是否触发**。")
+
+    def test_a_long_paragraph_is_cut_at_a_sentence(self) -> None:
+        text = (
+            "今天的系统选股已完成，共30只。**明天（11月5日，周四）只准备一笔有条件的新买入：京沪高铁；"
+            "兴业银行已有的2,000股暂不加仓。**其余股票等待或不参与，不因为入选就全部买。"
+        )
+        self.assertEqual(
+            lead_brief(text),
+            "今天的系统选股已完成，共30只。**明天（11月5日，周四）只准备一笔有条件的新买入：京沪高铁；"
+            "兴业银行已有的2,000股暂不加仓。**",
+        )
+
+    def test_a_sentence_with_no_stop_is_cut_at_a_clause(self) -> None:
+        result = lead_brief("甲乙丙丁戊己庚辛壬癸，" * 12)
+        self.assertTrue(result.endswith("癸…"), result)
+        self.assertLessEqual(len(result), 80)
+
+    def test_a_cut_inside_bold_still_closes_the_bold(self) -> None:
+        result = lead_brief("开头**" + "甲乙丙丁戊己庚辛壬癸，" * 12 + "甲乙**后面")
+        self.assertEqual(result.count("**"), 2)
+        self.assertTrue(result.endswith("癸**…"), result)
+
+    def test_a_table_first_report_skips_the_fine_print(self) -> None:
+        text = "| a | b |\n|---|---|\n| 1 | 2 |\n\n行情更新于 10:35。\n\n澜起科技继续退出，其余按计划等。"
+        self.assertEqual(lead_brief(text), "澜起科技继续退出，其余按计划等。")
+
+    def test_process_notes_and_decoration_never_reach_the_card(self) -> None:
+        text = "<details><summary>x</summary>y</details>\n\n已保存至 notes/reviews/a.md\n\nSHA-256：abc\n\n今天不动。"
+        self.assertEqual(lead_brief(text), "今天不动。")
+        self.assertEqual(lead_brief("━━━━\n今天不动，等反弹再卖，不追高。\n━━━━"), "今天不动，等反弹再卖，不追高。")
+
+    def test_a_heading_before_the_opening_is_skipped(self) -> None:
+        self.assertEqual(lead_brief("## 结论\n\n今天不动，等反弹。"), "今天不动，等反弹。")
+
+    def test_nothing_to_show_returns_empty(self) -> None:
+        self.assertEqual(lead_brief(""), "")
+        self.assertEqual(lead_brief("| a | b |\n|---|---|\n| 1 | 2 |"), "")
+
+
 class ScheduledPushTests(unittest.TestCase):
+    def test_topnews_card_says_the_market_verdict(self) -> None:
+        from backend.app.scheduler import rhythm_scheduler
+        from backend.app.topnews.report.generator import ReportGenerator
+
+        generator = ReportGenerator()
+        verdict = {
+            "verdict_text": "偏多",
+            "avg_sentiment": 0.12,
+            "sentiment_label": "偏暖",
+            "impact_grade": "中",
+            "us_items": [{"direction": "up"}],
+            "futures_items": [],
+            "all_news": [{"sentiment": "negative"}],
+        }
+        report = "\n".join([generator._header("pre_market"), generator._verdict_section(verdict), "\n━━━ ⭐ 重要新闻 ━━━"])
+        self.assertEqual(rhythm_scheduler._topnews_brief(report), "市场定性：偏多，美股涨多跌少，有1条利空。")
+        self.assertEqual(rhythm_scheduler._topnews_brief("没有定性的文字"), "")
+
+        handler = SimpleNamespace(run_topnews_brief=lambda period: report)
+        session = MagicMock()
+        session.__enter__.return_value = "db-session"
+        session.__exit__.return_value = False
+        with (
+            patch.dict(sys.modules, {"backend.app.topnews.handler": handler}),
+            patch.object(rhythm_scheduler, "SessionLocal", return_value=session),
+            patch.object(rhythm_scheduler, "send_feishu") as push,
+        ):
+            rhythm_scheduler._run_topnews_brief(
+                {"job_key": "topnews-morning", "name": "早盘舆情简报", "owner_user_id": 7},
+                datetime(2026, 11, 4, 7, 30),
+            )
+        self.assertEqual(push.call_args.kwargs["card_brief"], "市场定性：偏多，美股涨多跌少，有1条利空。")
+
     def test_topnews_brief_carries_a_share_without_reusing_old_links(self) -> None:
         from backend.app.scheduler import rhythm_scheduler
 

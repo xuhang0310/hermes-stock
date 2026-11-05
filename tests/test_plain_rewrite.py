@@ -201,6 +201,9 @@ class ScheduledReportRewriteTests(unittest.TestCase):
         self.assertIn("不要在报告里逐条复述", question)
         self.assertIn("一律写成 Markdown 表格", question)
         self.assertIn("存文件的路径、版本和校验值不要写进正文", question)
+        self.assertIn("飞书卡片上只显示这一句", question)
+        self.assertIn("第一行单独写一句最核心的话", plain_rewrite.EDITOR_PROMPT)
+        self.assertIs(push.call_args.kwargs["card_brief"], True)
 
     def test_a_rejected_edit_pushes_the_original_and_says_why(self) -> None:
         result, report, push, _, logs = self._run(PlainRewrite(ORIGINAL, False, "改稿出现原文没有的数字 5.8"))

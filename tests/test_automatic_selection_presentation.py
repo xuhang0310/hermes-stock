@@ -243,6 +243,7 @@ class AutomaticSelectionPresentationFlowTests(unittest.TestCase):
         self.assertEqual(digest["trade_date"], TARGET_DATE)
         self.assertEqual(digest["title"], "每日选股 | 2026-08-28")
         self.assertEqual(digest["inbox_title"], "每日选股（8 月 28 日）：样本600001、样本600004、样本600002等 4 只")
+        self.assertEqual(digest["brief"], "8 月 28 日收盘后按固定规则选出 4 只，排在前面的是样本600001、样本600004、样本600002等。")
         content = digest["content"]
         self.assertIn("8 月 28 日收盘后，按固定规则从 8 只合格股票里选出 4 只，下面是排名前 4 的。", content)
         self.assertIn("1. **样本600001（600001.SH）** · 银行 · 收盘 11.05 元（+1.20%） · 新进", content)

@@ -211,6 +211,8 @@ def daily_digest(*, trade_date: str | None = None) -> dict[str, Any] | None:
         "title": f"每日选股 | {_iso_date(view['trade_date'])}",
         "inbox_title": f"每日选股（{date_text}）：{names}{more}"[:200],
         "content": "\n".join(lines),
+        # 飞书卡片只放这一句，名单和打分在手机版里
+        "brief": f"{date_text}收盘后按固定规则选出 {len(picks)} 只，排在前面的是{names}{'等' if len(picks) > 3 else ''}。",
     }
 
 
