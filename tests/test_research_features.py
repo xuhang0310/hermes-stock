@@ -75,6 +75,13 @@ class NoLookaheadTests(unittest.TestCase):
             np.testing.assert_allclose(a[mask], b[mask], rtol=1e-9, err_msg=feature.name)
             np.testing.assert_array_equal(np.isnan(a), np.isnan(b), err_msg=feature.name)
 
+    def test_coverage_counts_days_with_any_value(self) -> None:
+        values = np.full((4, 2), np.nan)
+        values[0, 1] = 1.0
+        values[3, 0] = 2.0
+        self.assertEqual(rf.coverage(values, np.arange(4)), 0.5)
+        self.assertEqual(rf.coverage(values, np.array([], dtype=int)), 0.0)
+
     def test_every_feature_has_a_group_and_a_unique_name(self) -> None:
         names = [feature.name for feature in rf.FEATURES]
         self.assertEqual(len(names), len(set(names)))
@@ -222,6 +229,29 @@ class CacheTests(unittest.TestCase):
             stamp = (out / "_cache" / "manifest.json").stat().st_mtime_ns
             build_cache(out)
             self.assertEqual((out / "_cache" / "manifest.json").stat().st_mtime_ns, stamp)
+
+    def test_a_later_download_refreshes_only_that_dataset(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            fields = "ts_code," + ",".join(FIELDS["daily"])
+            _write_table(out / "daily" / "20180102.tsv.gz", fields, [["000001.SZ", 1, 2, 0.5, 1.5, 1.4, 100, 1000]])
+            self.assertTrue(np.isnan(Panel.open(out).field("stk_limit", "up_limit")[0, 0]))
+            stamp = (out / "_cache" / "daily.close.npy").stat().st_mtime_ns
+            _write_table(out / "stk_limit" / "20180102.tsv.gz", "ts_code,up_limit,down_limit", [["000001.SZ", 1.6, 1.3]])
+            self.assertAlmostEqual(float(Panel.open(out).field("stk_limit", "up_limit")[0, 0]), 1.6, places=5)
+            self.assertEqual((out / "_cache" / "daily.close.npy").stat().st_mtime_ns, stamp)
+
+    def test_the_panel_can_be_cut_off_at_a_date(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            fields = "ts_code," + ",".join(FIELDS["daily"])
+            for day, close in (("20181228", 1.0), ("20190102", 99.0)):
+                _write_table(out / "daily" / f"{day}.tsv.gz", fields, [["000001.SZ", close, close, close, close, close, 100, 1000]])
+            panel = Panel.open(out, end="20181231")
+            self.assertEqual(panel.dates, ["20181228"])
+            self.assertEqual(panel.field("daily", "close").shape[0], 1)
+            self.assertEqual(float(panel.adj_close_filled.max()), 1.0)
+            del panel  # Release the memory maps before Windows removes the temporary directory.
 
     def test_st_ends_when_the_name_changes_back(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

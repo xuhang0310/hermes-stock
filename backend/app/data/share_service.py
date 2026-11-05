@@ -21,7 +21,7 @@ from backend.app.core.settings import settings
 
 _BEIJING = timezone(timedelta(hours=8))
 # 这些来源的页面每次打开都实时算，不靠正文快照，所以后续推送不要改动已有记录。
-LIVE_SHARE_SOURCES = frozenset({"trade_plan"})
+LIVE_SHARE_SOURCES = frozenset({"trade_plan", "shadow_compare"})
 
 # 设置页“测试”按钮用的示例，全部是虚构内容，点开就能验收手机版的排版。
 SAMPLE_SHARE_MARKDOWN = """\

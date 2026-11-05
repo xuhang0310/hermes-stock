@@ -51,6 +51,7 @@ STOCK_DB_NAME=hermes-stock
 - `tech_signals`: 技术信号存档（一只股票每个交易日一行，按 `rule_version` 分开存），能由 `daily_bars` 重算。规则还没通过验证，目前不写入，数字人也查不到
 - `documents`: 新闻、公告（`doc_type=announcement`，只有标题和链接）、研报、政策、互动问答
 - `document_symbols`: 文档和标的关联（消息盯盘任务写入）
+- `shadow_accounts` / `shadow_positions` / `shadow_orders` / `shadow_nav`: 影子账户（代码自动挂单、模拟成交，和真实账户比净值），和 `paper_*` 模拟盘无关
 - `market_events`: 持仓和自选的消息事件（规则分级、模型解读、推送状态），每位用户每只股票的同一条消息一行
 
 ### 规则与事件

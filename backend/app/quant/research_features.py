@@ -51,6 +51,11 @@ class _Ctx:
             self._memo[key] = make()
         return self._memo[key]
 
+    def trim(self) -> None:
+        """算完一个特征就放掉不常用的中间量，全市场的矩阵很占内存。"""
+        for key in [key for key in self._memo if key not in _KEEP]:
+            del self._memo[key]
+
     def raw(self, dataset: str, name: str) -> pd.DataFrame:
         return self._get(f"{dataset}.{name}", lambda: pd.DataFrame(np.asarray(self.panel.field(dataset, name), dtype=np.float64)))
 
@@ -103,6 +108,10 @@ class _Ctx:
             )
 
         return self._get("big_net", make)
+
+
+_KEEP = {"close", "high", "low", "open", "ret", "atr"}
+MIN_COVERAGE = 0.95  # 区间里有数据的交易日占比，不够说明还没下载完，这次不判定
 
 
 def _rolling_corr(x: pd.DataFrame, y: pd.DataFrame, n: int) -> pd.DataFrame:
@@ -331,15 +340,25 @@ def cross_section_corr(a: np.ndarray, b: np.ndarray, universe: np.ndarray, rows:
     return float(np.mean(values)) if values else 0.0
 
 
-def compute_all(panel: Panel, out: Path | None = None) -> dict[str, np.ndarray]:
-    """算全部特征。给了 out 就逐个存盘再用内存映射读回，内存里不同时放全部。"""
+def coverage(values: np.ndarray, rows: np.ndarray) -> float:
+    """rows 这些交易日里，有多少天至少有一只股票有值。"""
+    return float(np.mean(np.any(~np.isnan(np.asarray(values[rows])), axis=1))) if len(rows) else 0.0
+
+
+def compute_all(panel: Panel, out: Path | None = None, *, rows: np.ndarray | None = None, names: list[str] | None = None) -> dict[str, np.ndarray]:
+    """算全部特征。给了 out 就逐个存盘再用内存映射读回，内存里不同时放全部。
+
+    数据还没下载全的特征不存盘，下次再算，所以边下载边跑也不会留下残缺的缓存。
+    """
     ctx = _Ctx(panel)
     results: dict[str, np.ndarray] = {}
     traded = panel.traded
-    folder = out / "_cache" / "features" if out else None
+    folder = out / "_cache" / f"features_{panel.dates[-1]}" if out else None
     if folder:
         folder.mkdir(parents=True, exist_ok=True)
     for feature in FEATURES:
+        if names is not None and feature.name not in names:
+            continue
         path = folder / f"{feature.name}.npy" if folder else None
         if path is not None and path.exists():
             results[feature.name] = np.load(path, mmap_mode="r")
@@ -347,41 +366,52 @@ def compute_all(panel: Panel, out: Path | None = None) -> dict[str, np.ndarray]:
         frame = feature.compute(ctx)
         values = np.where(traded, frame.to_numpy(dtype=np.float64), np.nan)
         values = np.where(np.isfinite(values), values, np.nan)
-        if path is not None:
-            np.save(path, values.astype(np.float32))
+        ctx.trim()
+        complete = rows is None or coverage(values, rows) >= MIN_COVERAGE
+        if path is not None and complete:
+            tmp = path.with_name(path.name + ".tmp")
+            with open(tmp, "wb") as fh:
+                np.save(fh, values.astype(np.float32))
+            tmp.replace(path)
             results[feature.name] = np.load(path, mmap_mode="r")
         else:
-            results[feature.name] = values
+            results[feature.name] = values.astype(np.float32)
     return results
 
 
 def run_ic(out: Path, *, start: str = DEV_START, end: str = DEV_END, allow_validation_data: bool = False) -> dict:
     check_range(None, end, allow_validation_data=allow_validation_data)  # type: ignore[arg-type]
-    panel = Panel.open(out)
+    panel = Panel.open(out, end=end)
     dates = np.array(panel.dates)
     rows = np.flatnonzero((dates >= start) & (dates <= end))
-    features = compute_all(panel, out)
+    features = compute_all(panel, out, rows=rows)
     labels = {days: forward_return(panel, days, last_exit_date=end) for days in (5, 10, 20)}
     stats: dict[str, dict] = {}
+    pending: list[str] = []
     for feature in FEATURES:
+        if feature.group != CHIP_GROUP and coverage(features[feature.name], rows) < MIN_COVERAGE:
+            pending.append(feature.name)
+            continue
+        if feature.group == CHIP_GROUP:
+            continue  # 2018 年才有数据，这段只有一年，不判定（第 4.7 节）
         summary = summarize_ic(feature_ic(panel, np.asarray(features[feature.name]), labels[LABEL_DAYS], rows))
         summary["group"] = feature.group
         for days in (5, 20):
             summary[f"ic_{days}"] = float(feature_ic(panel, np.asarray(features[feature.name]), labels[days], rows).mean())
         stats[feature.name] = summary
         print(f"{feature.name:16s} {feature.group:6s} IC {summary['ic']:+.4f} ICIR {summary['icir']:+.2f} {summary['years_agree']}/{summary['years']} 年 5日 {summary['ic_5']:+.4f} 20日 {summary['ic_20']:+.4f}", flush=True)
-    eligible = [name for name, item in stats.items() if item["group"] != CHIP_GROUP and passes(item)]
+    eligible = [name for name, item in stats.items() if passes(item)]
     ranked = sorted(eligible, key=lambda name: abs(stats[name]["icir"]), reverse=True)
     sample_rows = rows[::20]
     kept, dropped = drop_correlated(
         ranked,
         lambda a, b: cross_section_corr(np.asarray(features[a]), np.asarray(features[b]), panel.universe, sample_rows),
     )
-    report = {"start": start, "end": end, "label_days": LABEL_DAYS, "stats": stats, "passed": ranked, "selected": kept, "dropped_as_duplicate": dropped}
+    report = {"start": start, "end": end, "label_days": LABEL_DAYS, "stats": stats, "passed": ranked, "selected": kept, "dropped_as_duplicate": dropped, "data_pending": pending}
     folder = out / "_reports"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / f"feature_ic_{end}.json").write_text(json.dumps(report, ensure_ascii=False, indent=1))
-    print(f"\n通过 {len(ranked)} 个，去重后 {len(kept)} 个：{kept}\n去掉：{dropped}", flush=True)
+    print(f"\n通过 {len(ranked)} 个，去重后 {len(kept)} 个：{kept}\n去掉：{dropped}\n数据还没下完，这次没判定：{pending}", flush=True)
     return report
 
 

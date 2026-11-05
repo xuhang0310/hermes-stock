@@ -57,6 +57,46 @@ def init_database(engine: Engine) -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_schema_upgrades(engine)
+    _ensure_quant_upgrades(engine)
+
+
+def _column_exists(connection, table: str, column: str) -> bool:
+    return bool(
+        connection.execute(
+            text(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = :table AND column_name = :column"
+            ),
+            {"table": table, "column": column},
+        ).scalar()
+    )
+
+
+def _index_exists(connection, table: str, index: str) -> bool:
+    return bool(
+        connection.execute(
+            text(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = :table AND index_name = :index"
+            ),
+            {"table": table, "index": index},
+        ).scalar()
+    )
+
+
+def _ensure_quant_upgrades(engine: Engine) -> None:
+    """量化挂单：换手率多存自由流通口径；影子账户加策略列，一个真实账户可以有多个影子。"""
+    if engine.dialect.name != "mysql":
+        return
+    with engine.begin() as connection:
+        if not _column_exists(connection, "stock_daily_basic", "turnover_rate_f"):
+            connection.execute(text("ALTER TABLE stock_daily_basic ADD COLUMN turnover_rate_f FLOAT NULL"))
+        if not _column_exists(connection, "shadow_accounts", "strategy"):
+            connection.execute(text("ALTER TABLE shadow_accounts ADD COLUMN strategy VARCHAR(16) NOT NULL DEFAULT 'risk' AFTER real_account_id"))
+        if _index_exists(connection, "shadow_accounts", "uq_shadow_real_account"):
+            connection.execute(text("ALTER TABLE shadow_accounts DROP INDEX uq_shadow_real_account"))
+        if not _index_exists(connection, "shadow_accounts", "uq_shadow_account_strategy"):
+            connection.execute(text("ALTER TABLE shadow_accounts ADD UNIQUE KEY uq_shadow_account_strategy (real_account_id, strategy)"))
 
 
 def _ensure_schema_upgrades(engine: Engine) -> None:

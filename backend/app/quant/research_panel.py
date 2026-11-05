@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import re
 from pathlib import Path
 
@@ -32,24 +33,40 @@ def _read_day(path: Path) -> tuple[list[str], list[list[str]]]:
     return header.split("\t"), [row.split("\t") for row in rows if row]
 
 
+def _save_atomic(path: Path, array: np.ndarray) -> None:
+    """先写临时文件再改名，进程被杀不会留下半个文件。"""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as fh:
+        np.save(fh, array)
+    os.replace(tmp, path)
+
+
 def build_cache(out: Path) -> Path:
-    """把按日文件拼成矩阵。已有且交易日数没变就不重建。"""
+    """把按日文件拼成矩阵。只重建文件数变了的数据集，所以可以边下载边用，下完再跑一次就补齐。"""
     cache = out / "_cache"
     cache.mkdir(parents=True, exist_ok=True)
     day_files = sorted((out / "daily").glob("*.tsv.gz"))
     dates = [path.name[:8] for path in day_files]
     manifest = cache / "manifest.json"
-    if manifest.exists() and json.loads(manifest.read_text()).get("dates") == dates:
+    saved = json.loads(manifest.read_text()) if manifest.exists() else {}
+    counts = {dataset: len(list((out / dataset).glob("*.tsv.gz"))) for dataset in FIELDS}
+    same_days = saved.get("dates") == dates
+    if same_days and saved.get("counts") == counts:
         return cache
 
-    codes_set: set[str] = set()
-    for path in day_files:
-        _, rows = _read_day(path)
-        codes_set.update(row[0] for row in rows if A_SHARE.fullmatch(row[0]))
-    codes = sorted(codes_set)
+    if same_days:
+        codes = saved["codes"]
+    else:
+        codes_set: set[str] = set()
+        for path in day_files:
+            _, rows = _read_day(path)
+            codes_set.update(row[0] for row in rows if A_SHARE.fullmatch(row[0]))
+        codes = sorted(codes_set)
     column = {code: j for j, code in enumerate(codes)}
     row_of = {day: i for i, day in enumerate(dates)}
     for dataset, names in FIELDS.items():
+        if same_days and saved.get("counts", {}).get(dataset) == counts[dataset]:
+            continue
         arrays = {name: np.full((len(dates), len(codes)), np.nan, dtype=np.float32) for name in names}
         for path in sorted((out / dataset).glob("*.tsv.gz")):
             i = row_of.get(path.name[:8])
@@ -65,9 +82,11 @@ def build_cache(out: Path) -> Path:
                     if k < len(row) and row[k]:
                         arrays[name][i, j] = float(row[k])
         for name, array in arrays.items():
-            np.save(cache / f"{dataset}.{name}.npy", array)
+            _save_atomic(cache / f"{dataset}.{name}.npy", array)
         del arrays
-    manifest.write_text(json.dumps({"dates": dates, "codes": codes}))
+    tmp = manifest.with_name(manifest.name + ".tmp")
+    tmp.write_text(json.dumps({"dates": dates, "codes": codes, "counts": counts}))
+    os.replace(tmp, manifest)
     return cache
 
 
@@ -95,7 +114,8 @@ def st_matrix(out: Path, dates: list[str], codes: list[str]) -> np.ndarray:
 class Panel:
     """日期 × 股票的只读矩阵。测试可以直接传数组，不用文件。"""
 
-    def __init__(self, dates: list[str], codes: list[str], arrays: dict[tuple[str, str], np.ndarray], st: np.ndarray | None = None) -> None:
+    def __init__(self, dates: list[str], codes: list[str], arrays: dict[tuple[str, str], np.ndarray], st: np.ndarray | None = None, *, min_listed: int = MIN_LISTED_BARS) -> None:
+        self.min_listed = min_listed
         self.dates = list(dates)
         self.codes = list(codes)
         self._arrays = arrays
@@ -104,12 +124,14 @@ class Panel:
         self._derived: dict[str, np.ndarray] = {}
 
     @classmethod
-    def open(cls, out: Path) -> "Panel":
+    def open(cls, out: Path, *, end: str | None = None) -> "Panel":
+        """end 之后的行直接不读：开发阶段从物理上碰不到验证数据，内存也省一半。"""
         cache = build_cache(out)
         manifest = json.loads((cache / "manifest.json").read_text())
-        panel = cls(manifest["dates"], manifest["codes"], {})
+        dates = [day for day in manifest["dates"] if end is None or day <= end]
+        panel = cls(dates, manifest["codes"], {})
         panel._cache_dir = cache
-        panel._st = st_matrix(out, panel.dates, panel.codes)
+        panel._st = st_matrix(out, dates, panel.codes)
         return panel
 
     def field(self, dataset: str, name: str) -> np.ndarray:
@@ -117,7 +139,7 @@ class Panel:
         if key not in self._arrays:
             if self._cache_dir is None:
                 return np.full((len(self.dates), len(self.codes)), np.nan, dtype=np.float32)
-            self._arrays[key] = np.load(self._cache_dir / f"{dataset}.{name}.npy", mmap_mode="r")
+            self._arrays[key] = np.load(self._cache_dir / f"{dataset}.{name}.npy", mmap_mode="r")[: len(self.dates)]
         return self._arrays[key]
 
     @property
@@ -188,5 +210,5 @@ class Panel:
         if "universe" not in self._derived:
             amount = np.asarray(self.field("daily", "amount"))
             with np.errstate(invalid="ignore"):
-                self._derived["universe"] = self.traded & (self.listed_bars >= MIN_LISTED_BARS) & ~self.st & (amount > 0)
+                self._derived["universe"] = self.traded & (self.listed_bars >= self.min_listed) & ~self.st & (amount > 0)
         return self._derived["universe"]

@@ -221,6 +221,17 @@ def _validate_items(
     issues: list[str] = []
     cleaned: list[dict[str, Any]] = []
     seen: set[tuple] = set()
+    # 这里才导入：quant_orders 依赖本模块的时间工具
+    from backend.app.plans import quant_orders
+
+    quant_levels = quant_orders.enforceable_levels(
+        db,
+        owner_user_id,
+        source,
+        plan_date,
+        {_normalize_symbol(str(raw.get("symbol") or "")) for raw in raw_items},
+        beijing_time(utc_now()),
+    )
 
     for position, raw in enumerate(raw_items, start=1):
         symbol = _normalize_symbol(str(raw.get("symbol") or ""))
@@ -299,6 +310,11 @@ def _validate_items(
             issues.append(
                 f"{label}：要卖 {rules.format_quantity(quantity)} 股，超过可卖的 {rules.format_quantity(sellable)} 股"
             )
+            continue
+
+        quant_problem = quant_orders.item_problem(quant_levels.get(symbol), action, trigger_type, float(trigger_price))
+        if quant_problem:
+            issues.append(f"{label}：{quant_problem}")
             continue
 
         if not rules.is_multi_day(source) and valid_until == plan_date:

@@ -345,6 +345,7 @@ class StockDailyBasic(Base):
     symbol: Mapped[str] = mapped_column(String(24), ForeignKey("instruments.symbol"), nullable=False, index=True)
     trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
     turnover_rate: Mapped[float | None] = mapped_column(Float)
+    turnover_rate_f: Mapped[float | None] = mapped_column(Float)  # 自由流通换手率，模型 1 的特征
     volume_ratio: Mapped[float | None] = mapped_column(Float)
     pe_ttm: Mapped[float | None] = mapped_column(Float)
     pb: Mapped[float | None] = mapped_column(Float)
@@ -2079,6 +2080,70 @@ class ReportShare(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
     view_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ShadowAccount(Base):
+    """影子账户：真实账户开始时的持仓和现金复制一份，之后由代码挂单、模拟成交（shadow/service）。"""
+
+    __tablename__ = "shadow_accounts"
+    __table_args__ = (UniqueConstraint("real_account_id", "strategy", name="uq_shadow_account_strategy"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    real_account_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy: Mapped[str] = mapped_column(String(16), nullable=False, default="risk")  # risk 影子 A / risk_rank 影子 B
+    account_label: Mapped[str] = mapped_column(String(160), nullable=False)
+    started_on: Mapped[str] = mapped_column(String(8), nullable=False)
+    idle_cash: Mapped[float] = mapped_column(Float, nullable=False, default=0)  # 开始时的现金，一直不动，只算进净值
+    pool: Mapped[float] = mapped_column(Float, nullable=False, default=0)  # 卖出款，只用来买回
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ShadowPosition(Base):
+    __tablename__ = "shadow_positions"
+    __table_args__ = (UniqueConstraint("shadow_account_id", "symbol", name="uq_shadow_position"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shadow_account_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)  # 除权后可能不是整数
+
+
+class ShadowOrder(Base):
+    __tablename__ = "shadow_orders"
+    __table_args__ = (Index("ix_shadow_order_account_status", "shadow_account_id", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shadow_account_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    basis_date: Mapped[str] = mapped_column(String(8), nullable=False)  # 用哪天收盘算的，下一个交易日挂
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    stock_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)  # sell / buy
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    basis: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending")  # pending / filled / expired
+    fill_price: Mapped[float | None] = mapped_column(Float)
+    settled_on: Mapped[str | None] = mapped_column(String(8))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ShadowNav(Base):
+    """每个交易日收盘，影子账户和真实账户的总资产。"""
+
+    __tablename__ = "shadow_nav"
+    __table_args__ = (UniqueConstraint("shadow_account_id", "trade_date", name="uq_shadow_nav"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shadow_account_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    shadow_value: Mapped[float] = mapped_column(Float, nullable=False)
+    real_value: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

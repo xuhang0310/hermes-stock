@@ -56,7 +56,7 @@ _MARKET_BY_SUFFIX = {"SH": "SH", "SZ": "SZ", "BJ": "BSE"}
 _CATALOG_SYMBOL_RE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
 _DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
-_BASIC_FIELDS = "ts_code,trade_date,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv"
+_BASIC_FIELDS = "ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,pe_ttm,pb,total_mv,circ_mv"
 _ADJ_FIELDS = "ts_code,trade_date,adj_factor"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 # TuShare 日线约 15:00–16:00、daily_basic 约 15:00–17:00 入库；此前当天的全市场截面
@@ -409,9 +409,9 @@ def _upsert_daily_basic(rows: list[dict]) -> int:
         return 0
     stmt = text(
         "INSERT INTO stock_daily_basic "
-        "(symbol, trade_date, turnover_rate, volume_ratio, pe_ttm, pb, total_mv, circ_mv) "
-        "VALUES (:symbol, :trade_date, :turnover_rate, :volume_ratio, :pe_ttm, :pb, :total_mv, :circ_mv) "
-        "ON DUPLICATE KEY UPDATE turnover_rate=VALUES(turnover_rate), volume_ratio=VALUES(volume_ratio), "
+        "(symbol, trade_date, turnover_rate, turnover_rate_f, volume_ratio, pe_ttm, pb, total_mv, circ_mv) "
+        "VALUES (:symbol, :trade_date, :turnover_rate, :turnover_rate_f, :volume_ratio, :pe_ttm, :pb, :total_mv, :circ_mv) "
+        "ON DUPLICATE KEY UPDATE turnover_rate=VALUES(turnover_rate), turnover_rate_f=VALUES(turnover_rate_f), volume_ratio=VALUES(volume_ratio), "
         "pe_ttm=VALUES(pe_ttm), pb=VALUES(pb), total_mv=VALUES(total_mv), circ_mv=VALUES(circ_mv)"
     )
     count = 0
@@ -427,6 +427,7 @@ def _upsert_daily_basic(rows: list[dict]) -> int:
                         "symbol": symbol,
                         "trade_date": str(row.get("trade_date") or ""),
                         "turnover_rate": _float(row.get("turnover_rate")),
+                        "turnover_rate_f": _float(row.get("turnover_rate_f")),
                         "volume_ratio": _float(row.get("volume_ratio")),
                         "pe_ttm": _float(row.get("pe_ttm")),
                         "pb": _float(row.get("pb")),

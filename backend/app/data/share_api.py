@@ -30,6 +30,7 @@ from backend.app.data.share_service import (
     share_status,
 )
 from backend.app.plans.page import render_plan_page
+from backend.app.shadow.page import render_shadow_page
 
 logger = logging.getLogger("hermes.share")
 
@@ -75,6 +76,10 @@ def share_page(share_id: str, db: Session = Depends(get_db)) -> HTMLResponse:
         return _notice(status)
     if row.source_type == "trade_plan":
         page = render_plan_page(db, row)
+        if page is None:
+            return _notice("missing")
+    elif row.source_type == "shadow_compare":
+        page = render_shadow_page(db, row)
         if page is None:
             return _notice("missing")
     else:

@@ -31,7 +31,7 @@ from backend.app.agent_runtime.channel_runs import (
 )
 from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.ai.plain_rewrite import rewrite_plain
-from backend.app.data.share_service import ShareSpec
+from backend.app.data.share_service import ShareSpec, create_share_link
 from backend.app.feishu.feishu import send_feishu
 from backend.app.plans.rules import MARKET_CLOSE, plan_source_for_job
 from backend.app.plans.service import (
@@ -534,6 +534,23 @@ def _event_digest(snap: dict, plan_source: str | None, now: datetime) -> tuple[s
         return "", []
 
 
+def _quant_order_block(snap: dict, plan_source: str | None, now: datetime) -> str:
+    """出计划的任务提示里放上量化挂单价。算不出来就不放，报告照常。"""
+    owner = snap.get("owner_user_id")
+    from backend.app.plans.quant_orders import QUANT_SOURCES, plan_block
+    from backend.app.plans.rules import effective_plan_date
+
+    if owner is None or plan_source not in QUANT_SOURCES:
+        return ""
+    try:
+        plan_date = effective_plan_date(plan_source, now, is_trading_day).isoformat()
+        with SessionLocal() as session:
+            return plan_block(session, int(owner), plan_date, now)
+    except Exception as exc:  # noqa: BLE001
+        _log("WARNING", "量化挂单价计算失败", {"error": str(exc)[:200]})
+        return ""
+
+
 def _mark_events_merged(event_ids: list[int]) -> None:
     if not event_ids:
         return
@@ -557,6 +574,30 @@ def _current_plan_meta(snap: dict, now: datetime) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - 手机页上的计划入口只是附加内容
         _log("WARNING", "读取今天的计划入口失败", {"error": str(exc)[:300]})
         return {}
+
+
+def _shadow_compare_link(snap: dict, now: datetime) -> str | None:
+    owner = snap.get("owner_user_id")
+    if owner is None:
+        return None
+    try:
+        from backend.app.shadow.service import SHARE_SOURCE, owner_summary
+
+        with SessionLocal() as session:
+            if not owner_summary(session, int(owner))["days"]:
+                return None
+            url = create_share_link(
+                session,
+                ShareSpec(source_type=SHARE_SOURCE, source_ref=f"owner-{owner}-{now:%Y%m%d}", owner_user_id=int(owner)),
+                title="影子账户 A/B 对比",
+                content="",
+            )
+            if url:
+                session.commit()
+            return url
+    except Exception as exc:  # noqa: BLE001 - 附加入口不能影响晚间日报
+        _log("WARNING", "创建影子账户入口失败", {"error": str(exc)[:200]})
+        return None
 
 
 def _finish_trade_plan(
@@ -616,6 +657,9 @@ def _run_agent_report(
     digest, digest_event_ids = _event_digest(snap, plan_source, now)
     if digest:
         question = f"{question}\n\n{digest}"
+    quant_block = _quant_order_block(snap, plan_source, now)
+    if quant_block:
+        question = f"{question}\n\n{quant_block}"
     answer, model_name = _run_scheduled_agent(snap, question, job_run_id)
     agent_error = None
     if agent_error:
@@ -634,6 +678,10 @@ def _run_agent_report(
             answer = f"{answer}\n\n---\n\n{plan_result.note}"
     else:
         plan_meta = _current_plan_meta(snap, now)
+    if plan_source == "evening":
+        shadow_url = _shadow_compare_link(snap, now)
+        if shadow_url:
+            answer = f"{answer}\n\n[查看影子账户 A/B 对比]({shadow_url})"
     agent_name = DH_TO_AGENT.get(snap["digital_human_code"] or "", "pm")
     title = f"{snap['name']} | {now:%Y-%m-%d}"
     notification_id: int | None = None
@@ -1502,6 +1550,10 @@ def _execute_job(job_key: str, run_id: str) -> None:
                     _log("WARNING", f"定时任务 {snapshot['job_key']} 协同任务提取失败", {"error": str(extract_exc)[:500]})
         elif snapshot["job_kind"] == "topnews_brief":
             output_content = _run_topnews_brief(snapshot, ran_at)
+        elif snapshot["job_kind"] == "shadow_settle":
+            from backend.app.shadow.service import run_shadow_day
+
+            output_content = run_shadow_day(ran_at)
         elif snapshot["job_kind"] == "message_watch":
             from backend.app.events.service import run_message_watch
 
@@ -2049,6 +2101,20 @@ DEFAULT_JOBS = [
         "schedule_type": "daily",
         "run_time": "16:30",
         "weekday_mask": "1,2,3,4,5",
+        "trading_day_only": True,
+        "enabled": True,
+    },
+    {
+        "job_key": "shadow-account-1805",
+        "name": "影子账户结算",
+        "description": "收盘数据入库后结算影子账户并计算次日挂单，结果从晚间日报查看。",
+        "job_kind": "shadow_settle",
+        "schedule_type": "interval",
+        "run_time": None,
+        # 每 30 分钟试一次，等到收盘数据为止；同一天重跑不会重复结算
+        "interval_minutes": 30,
+        "window_start": "18:05",
+        "window_end": "23:35",
         "trading_day_only": True,
         "enabled": True,
     },

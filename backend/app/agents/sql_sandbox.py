@@ -87,6 +87,10 @@ PERSONAL_TABLES: dict[str, str] = {
     "trade_plans": "owner_user_id",
     "trade_plan_items": "owner_user_id",
     "market_events": "owner_user_id",
+    "shadow_accounts": "owner_user_id",
+    "shadow_positions": "owner_user_id",
+    "shadow_orders": "owner_user_id",
+    "shadow_nav": "owner_user_id",
 }
 
 # 归属列为空的行是公共数据（宏观/市场事件、系统回测），所有用户可见；

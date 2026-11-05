@@ -952,6 +952,31 @@ class SchedulerIntegrationTests(_PlanCase):
         self.assertEqual(pushed["content"], "短提醒")
         self.assertNotIn("plan_url", pushed["share"].meta)
 
+    def test_evening_report_links_to_its_owners_shadow_comparison(self) -> None:
+        from backend.app.core.models import ShadowAccount, ShadowNav
+
+        with self.Session() as db:
+            for strategy in ("risk", "risk_rank"):
+                account = ShadowAccount(owner_user_id=OWNER, real_account_id=1, strategy=strategy,
+                                        account_label="测试账户", started_on="20261103")
+                db.add(account)
+                db.flush()
+                db.add(ShadowNav(shadow_account_id=account.id, owner_user_id=OWNER,
+                                 trade_date="20261103", shadow_value=100_000, real_value=100_000))
+            db.commit()
+
+        _, calls, pushed = self._report(
+            job_key="evening-daily-2200", name="晚间日报", answer="今天已经完成复盘。",
+            now=datetime(2026, 11, 3, 22),
+        )
+        with self.Session() as db:
+            share = db.scalar(select(ReportShare).where(ReportShare.source_type == "shadow_compare"))
+            self.assertIsNotNone(share)
+            self.assertEqual(share.owner_user_id, OWNER)
+            url = share_service.share_url(share.share_id)
+        self.assertTrue(pushed["content"].endswith(f"[查看影子账户 A/B 对比]({url})"))
+        self.assertNotIn(url, calls[0][1])
+
     def test_plan_job_gets_the_tool_and_activates_its_plan(self) -> None:
         def saves(snap, question, kwargs):
             self._save([self._sell()])
