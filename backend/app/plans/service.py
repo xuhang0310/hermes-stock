@@ -78,6 +78,10 @@ SAVE_TRADE_PLAN_SCHEMA = {
                                 "type": "string",
                                 "description": "买入要动用当天卖出款时必填，写明用哪笔卖出的钱。",
                             },
+                            "size_note": {
+                                "type": "string",
+                                "description": "股数和系统给的量化股数不一样时必填，写明为什么这样定。",
+                            },
                             "valid_until": {
                                 "type": "string",
                                 "description": "YYYY-MM-DD，默认只在计划生效当天有效。周计划、月计划可以写更晚。",
@@ -197,6 +201,7 @@ def _validate_items(
     plan_date: str,
     same_day: bool,
     raw_items: list[dict[str, Any]],
+    require_size_notes: bool = True,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     accounts = {
         row.id: row
@@ -278,6 +283,8 @@ def _validate_items(
             "trigger_price": None,
             "quantity": None,
             "funding_note": (str(raw.get("funding_note") or "").strip() or None),
+            "size_note": (str(raw.get("size_note") or "").strip() or None),
+            "advised_quantity": None,
             "valid_until": valid_until,
         }
         if action in rules.NO_TRIGGER_ACTIONS:
@@ -340,6 +347,12 @@ def _validate_items(
         cleaned.append(item)
 
     issues.extend(_cross_item_issues(cleaned, accounts, holdings, same_day=same_day))
+    if not issues:
+        # 这里才导入：quant_sizes 依赖本模块。其他问题先改好，不然少了的条目会被误报成“没有这只”
+        from backend.app.plans import quant_sizes
+
+        advice = quant_sizes.enforceable_sizes(db, owner_user_id, source, plan_date, beijing_time(utc_now()))
+        issues.extend(quant_sizes.apply_sizes(cleaned, advice, require_notes=require_size_notes))
     return cleaned, issues
 
 
@@ -402,8 +415,9 @@ def save_trade_plan(
     raw_items: list[dict[str, Any]],
     now: datetime,
     is_open: Callable[[date], bool],
+    plan_repair: bool = False,
 ) -> dict[str, Any]:
-    """校验并保存成草稿。now 是北京时间。"""
+    """校验并保存成草稿。now 是北京时间。plan_repair 是报告定稿后的补存，正文不能再改，股数改动只记不退回。"""
     existing = db.scalar(select(TradePlan).where(TradePlan.job_run_id == job_run_id).limit(1))
     if existing is not None and existing.status != "draft":
         return {"saved": False, "error": "这份计划已经生效，不能再改。"}
@@ -416,6 +430,7 @@ def save_trade_plan(
         plan_date=plan_date,
         same_day=plan_day == now.date(),
         raw_items=raw_items,
+        require_size_notes=not plan_repair,
     )
     if issues:
         return {
@@ -484,6 +499,7 @@ def execute_save_tool(args: dict[str, Any], request_payload: dict[str, Any]) -> 
             raw_items=list(args.get("items") or []),
             now=now_sh(),
             is_open=is_trading_day,
+            plan_repair=bool(context.get("repair")),
         )
 
 

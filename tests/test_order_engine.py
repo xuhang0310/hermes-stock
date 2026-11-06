@@ -12,7 +12,7 @@ from sqlalchemy import select
 from backend.app.core.models import DailyBar, MarketEvent, Position, StockModelSignal, WatchlistItem
 from backend.app.core.settings import settings as real_settings
 from backend.app.events.rules import CRITICAL
-from backend.app.plans import quant_orders
+from backend.app.plans import quant_orders, quant_sizes
 from backend.app.plans.quant_orders import QUANT_SOURCES
 from backend.app.plans.service import to_utc
 from backend.app.quant import order_engine
@@ -244,6 +244,10 @@ class PlanWiringTests(_PlanCase):
         self.settings = patch.object(quant_orders, "settings", dataclasses.replace(real_settings, quant_orders_enabled=True))
         self.settings.start()
         self.addCleanup(self.settings.stop)
+        # 这里只测价格，股数建议在 test_quant_sizes 里测
+        sizes = patch.object(quant_sizes, "settings", dataclasses.replace(real_settings, quant_sizes_enabled=False))
+        sizes.start()
+        self.addCleanup(sizes.stop)
         with self.Session() as db:
             for index, day in enumerate(np.arange(np.datetime64("2026-07-01"), np.datetime64("2026-11-03"))):
                 stamp = str(day).replace("-", "")

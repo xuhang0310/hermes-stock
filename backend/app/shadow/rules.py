@@ -37,10 +37,10 @@ class PlannedOrder:
     basis: str
 
 
-def target_shares(invested: float, close: float, atr: float) -> float:
+def target_shares(invested: float, close: float, atr: float, *, risk_budget: float = RISK_BUDGET, position_cap: float = POSITION_CAP) -> float:
     if invested <= 0 or close <= 0 or atr <= 0:
         return 0.0
-    return min(RISK_BUDGET * invested / (SIZING_ATR * atr), POSITION_CAP * invested / close)
+    return min(risk_budget * invested / (SIZING_ATR * atr), position_cap * invested / close)
 
 
 def _round_lot(symbol: str, quantity: float) -> int:
@@ -56,12 +56,13 @@ def rank_tilt(rank: float | None) -> float:
     return 1.0 if rank is None else 0.5 + rank
 
 
-def plan_order(symbol: str, shares: float, levels: OrderLevels, invested: float, pool: float, *, tilt: float = 1.0, buy_k: Any = DISCOUNT, limit_ratio: float = 0.1) -> PlannedOrder | None:
+def plan_order(symbol: str, shares: float, levels: OrderLevels, invested: float, pool: float, *, tilt: float = 1.0, buy_k: Any = DISCOUNT, limit_ratio: float = 0.1, risk_budget: float = RISK_BUDGET, position_cap: float = POSITION_CAP) -> PlannedOrder | None:
     """这只股票下一个交易日挂什么单；不挂返回 None。
 
     buy_k 是影子 C 用的：买入模型选的倍数，None 表示模型说不买。
+    risk_budget、position_cap 是真实账户按持股只数调整时用的，影子账户一直用默认值。
     """
-    target = target_shares(invested, levels.close, levels.atr) * tilt
+    target = target_shares(invested, levels.close, levels.atr, risk_budget=risk_budget, position_cap=position_cap) * tilt
     if target <= 0:
         return None
     if shares > target * (1 + BAND):

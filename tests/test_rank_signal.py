@@ -335,14 +335,17 @@ class MigrationTests(unittest.TestCase):
 
     def test_an_old_database_is_upgraded(self) -> None:
         altered = self._run(_FakeConnection(set(), {("shadow_accounts", "uq_shadow_real_account")}))
-        self.assertEqual(len(altered), 4)
+        self.assertEqual(len(altered), 6)
         self.assertIn("ADD COLUMN turnover_rate_f", altered[0])
-        self.assertIn("ADD COLUMN strategy", altered[1])
-        self.assertIn("DROP INDEX uq_shadow_real_account", altered[2])
-        self.assertIn("uq_shadow_account_strategy", altered[3])
+        self.assertIn("ADD COLUMN advised_quantity", altered[1])
+        self.assertIn("ADD COLUMN size_note", altered[2])
+        self.assertIn("ADD COLUMN strategy", altered[3])
+        self.assertIn("DROP INDEX uq_shadow_real_account", altered[4])
+        self.assertIn("uq_shadow_account_strategy", altered[5])
 
     def test_a_current_database_is_left_alone(self) -> None:
-        connection = _FakeConnection({("stock_daily_basic", "turnover_rate_f"), ("shadow_accounts", "strategy")}, {("shadow_accounts", "uq_shadow_account_strategy")})
+        columns = {("stock_daily_basic", "turnover_rate_f"), ("shadow_accounts", "strategy"), ("trade_plan_items", "advised_quantity"), ("trade_plan_items", "size_note")}
+        connection = _FakeConnection(columns, {("shadow_accounts", "uq_shadow_account_strategy")})
         self.assertEqual(self._run(connection), [])
 
     def test_only_mysql_is_touched(self) -> None:

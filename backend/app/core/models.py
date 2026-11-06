@@ -2289,6 +2289,8 @@ class TradePlanItem(Base):
     trigger_price: Mapped[float | None] = mapped_column(Float)
     quantity: Mapped[float | None] = mapped_column(Float)
     funding_note: Mapped[str | None] = mapped_column(Text)
+    advised_quantity: Mapped[float | None] = mapped_column(Float)  # 代码建议：正数卖，负数可补，0 不动，空表示没有建议
+    size_note: Mapped[str | None] = mapped_column(Text)  # 股数和建议不同的理由
     valid_until: Mapped[str] = mapped_column(String(10), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")

@@ -466,6 +466,7 @@ def _run_scheduled_agent(
     if snap.get("trade_plan_source"):
         request_payload["trade_plan_source"] = snap["trade_plan_source"]
         request_payload["trade_plan_context"] = {
+            "repair": is_repair,
             "job_key": snap["job_key"],
             "push_channel_key": snap.get("push_channel_key"),
         }
@@ -548,6 +549,7 @@ def _quant_order_block(snap: dict, plan_source: str | None, now: datetime) -> st
     """出计划的任务提示里放上量化挂单价。算不出来就不放，报告照常。"""
     owner = snap.get("owner_user_id")
     from backend.app.plans.quant_orders import QUANT_SOURCES, plan_block
+    from backend.app.plans.quant_sizes import size_block
     from backend.app.plans.rules import effective_plan_date
 
     if owner is None or plan_source not in QUANT_SOURCES:
@@ -555,7 +557,8 @@ def _quant_order_block(snap: dict, plan_source: str | None, now: datetime) -> st
     try:
         plan_date = effective_plan_date(plan_source, now, is_trading_day).isoformat()
         with SessionLocal() as session:
-            return plan_block(session, int(owner), plan_date, now)
+            parts = [plan_block(session, int(owner), plan_date, now), size_block(session, int(owner), plan_date, now)]
+        return "\n\n".join(part for part in parts if part)
     except Exception as exc:  # noqa: BLE001
         _log("WARNING", "量化挂单价计算失败", {"error": str(exc)[:200]})
         return ""

@@ -83,6 +83,7 @@ class Settings:
     event_night_push: bool = os.getenv("STOCK_EVENT_NIGHT_PUSH", "true").lower() == "true"
     # 卖价和止损价由量化统计表算，数字人改不了（plans/quant_orders）；false 恢复由数字人定价
     quant_orders_enabled: bool = os.getenv("STOCK_QUANT_ORDERS_ENABLED", "true").lower() == "true"
+    quant_sizes_enabled: bool = os.getenv("STOCK_QUANT_SIZES_ENABLED", "true").lower() == "true"
     # Agent 工作区（文件读写/查找/执行）：受控 scratch 目录，与项目代码/.env/DB 物理隔离
     workspace_enabled: bool = os.getenv("STOCK_WORKSPACE_ENABLED", "true").lower() == "true"
     # 执行能力独立开关，默认关：开启=给聊天用户放开"以应用用户身份执行 Python"，生产须在独立低权账户/沙箱下才开

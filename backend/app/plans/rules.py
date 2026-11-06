@@ -212,6 +212,15 @@ def describe_plan(action: str, trigger_type: str, price: float | None, quantity:
 
 
 # ------------------------------------------------------------------ 正文核对
+def describe_advice(advised: int | float) -> str:
+    """代码建议的股数：正数卖，负数可以补，0 不动。"""
+    if advised > 0:
+        return f"卖 {format_quantity(advised)} 股"
+    if advised < 0:
+        return f"可以补 {format_quantity(-advised)} 股"
+    return "不动"
+
+
 def _plain_number(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".")
 

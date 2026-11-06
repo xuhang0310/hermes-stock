@@ -1172,7 +1172,7 @@ class ScheduledRunGlueTests(_PlanCase):
         self.assertEqual(payload["trade_plan_source"], "premarket")
         self.assertEqual(
             payload["trade_plan_context"],
-            {"job_key": "agent-1-a80afb924e40", "push_channel_key": "feishu-daily"},
+            {"repair": False, "job_key": "agent-1-a80afb924e40", "push_channel_key": "feishu-daily"},
         )
         self.assertEqual(key, "schedule:job-1")
         self.assertEqual(self._leader(), "agent-run-1")
@@ -1188,6 +1188,7 @@ class ScheduledRunGlueTests(_PlanCase):
         payload, key, wait = self._run({"trade_plan_source": "premarket"}, repair_timeout_seconds=240)
         self.assertEqual(payload["trade_plan_source"], "premarket")
         self.assertEqual(key, "schedule:job-1:plan-repair")
+        self.assertTrue(payload["trade_plan_context"]["repair"])
         self.assertEqual((wait["timeout_seconds"], wait["hard_timeout_seconds"]), (240, 240))
         self.assertIsNone(wait["queue_timeout_seconds"])
         self.assertIsNone(self._leader())

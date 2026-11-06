@@ -118,6 +118,8 @@ def _detail(item: TradePlanItem, distance: float | None) -> str:
         parts.append("已被新计划替代，不再提醒")
     if item.funding_note:
         parts.append(f"钱从哪来：{item.funding_note}")
+    if item.size_note and item.advised_quantity is not None:
+        parts.append(f"代码建议{rules.describe_advice(item.advised_quantity)}，这里不同：{item.size_note}")
     return "。".join(parts)
 
 

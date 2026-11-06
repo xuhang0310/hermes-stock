@@ -91,6 +91,9 @@ def _ensure_quant_upgrades(engine: Engine) -> None:
     with engine.begin() as connection:
         if not _column_exists(connection, "stock_daily_basic", "turnover_rate_f"):
             connection.execute(text("ALTER TABLE stock_daily_basic ADD COLUMN turnover_rate_f FLOAT NULL"))
+        for column, ddl in (("advised_quantity", "FLOAT NULL"), ("size_note", "TEXT NULL")):
+            if not _column_exists(connection, "trade_plan_items", column):
+                connection.execute(text(f"ALTER TABLE trade_plan_items ADD COLUMN {column} {ddl}"))
         if not _column_exists(connection, "shadow_accounts", "strategy"):
             connection.execute(text("ALTER TABLE shadow_accounts ADD COLUMN strategy VARCHAR(16) NOT NULL DEFAULT 'risk' AFTER real_account_id"))
         if _index_exists(connection, "shadow_accounts", "uq_shadow_real_account"):
