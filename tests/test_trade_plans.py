@@ -1189,6 +1189,7 @@ class ScheduledRunGlueTests(_PlanCase):
         self.assertEqual(payload["trade_plan_source"], "premarket")
         self.assertEqual(key, "schedule:job-1:plan-repair")
         self.assertEqual((wait["timeout_seconds"], wait["hard_timeout_seconds"]), (240, 240))
+        self.assertIsNone(wait["queue_timeout_seconds"])
         self.assertIsNone(self._leader())
 
     def test_tool_entry_saves_with_the_runs_context(self) -> None:

@@ -133,12 +133,14 @@ def wait_for_channel_run(
     repository: AgentRunRepository = agent_run_repository,
     timeout_seconds: int | None = None,
     hard_timeout_seconds: int | None = None,
+    queue_timeout_seconds: int | None = None,
 ) -> tuple[str, str | None, str | None]:
     idle_timeout = max(30, timeout_seconds or settings.agent_run_timeout_seconds + 30)
     hard_timeout = max(idle_timeout, hard_timeout_seconds or idle_timeout)
-    started_at = time.monotonic()
-    idle_deadline = started_at + idle_timeout
-    hard_deadline = started_at + hard_timeout
+    wait_started_at = time.monotonic()
+    queue_deadline = wait_started_at + queue_timeout_seconds if queue_timeout_seconds is not None else None
+    idle_deadline = wait_started_at + idle_timeout
+    hard_deadline = wait_started_at + hard_timeout
     cursor = 0
     answer_parts: list[str] = []
     final_answer = ""
@@ -146,7 +148,7 @@ def wait_for_channel_run(
     stream_error: str | None = None
     last_status: str | None = None
     last_heartbeat: str | None = None
-    while time.monotonic() < min(idle_deadline, hard_deadline):
+    while time.monotonic() < (queue_deadline if queue_deadline is not None else idle_deadline):
         made_progress = False
         for event in repository.events_after(run_id, cursor, limit=1000):
             cursor = event.seq
@@ -169,12 +171,19 @@ def wait_for_channel_run(
         if run is None:
             return "", model_name, "Agent run disappeared."
         run_status = str(run.get("status") or "")
+        # Only the initial queue wait gets a separate budget. A resumed run
+        # retains its original execution deadline when it is requeued.
+        if queue_deadline is not None and (run_status != "queued" or run.get("started_at")):
+            queue_deadline = None
+            execution_started_at = time.monotonic()
+            idle_deadline = execution_started_at + idle_timeout
+            hard_deadline = execution_started_at + hard_timeout
         heartbeat = str(run.get("heartbeat_at") or "") or None
         if run_status != last_status or (heartbeat is not None and heartbeat != last_heartbeat):
             made_progress = True
         last_status = run_status
         last_heartbeat = heartbeat
-        if made_progress:
+        if queue_deadline is None and made_progress:
             idle_deadline = min(hard_deadline, time.monotonic() + idle_timeout)
         if run_status in {"completed", "failed", "cancelled"}:
             if run.get("result_message_id"):
@@ -190,4 +199,6 @@ def wait_for_channel_run(
             time.sleep(0.25)
             continue
         time.sleep(0.25)
+    if queue_deadline is not None:
+        return "", model_name, "Agent run timed out while waiting in the worker queue."
     return "", model_name, "Agent run timed out while waiting for a terminal result."

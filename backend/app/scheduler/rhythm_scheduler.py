@@ -338,6 +338,9 @@ def _scheduled_execution_constraints(job_key: str, plan_source: str | None = Non
     return common
 
 
+# Worker 领取任务前单独计算排队时间。
+SCHEDULED_AGENT_QUEUE_TIMEOUT_SECONDS = 30 * 60
+
 # 只要 Agent 还有进展就等到这么久。单次运行实际会超过 agent_run_timeout_seconds（晚间日报常年要 25 到 40 分钟），
 # 不委派的任务如果只等 run_timeout + 60 秒，Agent 还在干活调度器就判失败，报告白跑（2026-11-05 晚间日报）。
 # 真卡住时由 idle_timeout 提前结束。
@@ -489,6 +492,7 @@ def _run_scheduled_agent(
         hard_timeout_seconds=(
             repair_timeout_seconds if is_repair else _scheduled_agent_hard_timeout_seconds(snap)
         ),
+        queue_timeout_seconds=None if is_repair else SCHEDULED_AGENT_QUEUE_TIMEOUT_SECONDS,
     )
     if error:
         raise RuntimeError(error)

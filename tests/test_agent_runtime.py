@@ -133,6 +133,71 @@ class ChannelRunWaitTests(unittest.TestCase):
         self.assertIsNone(model)
         self.assertIsNone(error)
 
+    def test_queued_run_receives_full_execution_budget_after_worker_claim(self) -> None:
+        from backend.app.agent_runtime import channel_runs
+
+        now = 0.0
+        report = SimpleNamespace(seq=1, event_type="content_delta", payload={"content": "晚间日报"})
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        def events_after(_run_id: str, cursor: int, *, limit: int):
+            return [report] if now >= 80 and cursor == 0 else []
+
+        def get_run(_run_id: str):
+            if now < 35:
+                return {"status": "queued"}
+            return {
+                "status": "completed" if now >= 80 else "running",
+                "heartbeat_at": int(now // 10),
+            }
+
+        with (
+            patch.object(channel_runs.time, "monotonic", lambda: now),
+            patch.object(channel_runs.time, "sleep", sleep),
+        ):
+            answer, _, error = channel_runs.wait_for_channel_run(
+                "evening-report",
+                repository=SimpleNamespace(events_after=events_after, get_run=get_run),
+                timeout_seconds=30,
+                hard_timeout_seconds=60,
+                queue_timeout_seconds=40,
+            )
+
+        self.assertEqual(now, 80)
+        self.assertEqual(answer, "晚间日报")
+        self.assertIsNone(error)
+
+    def test_queue_wait_has_its_own_deadline(self) -> None:
+        from backend.app.agent_runtime import channel_runs
+
+        now = 0.0
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        repository = SimpleNamespace(
+            events_after=lambda *_args, **_kwargs: [],
+            get_run=lambda _run_id: {"status": "queued", "heartbeat_at": int(now)},
+        )
+        with (
+            patch.object(channel_runs.time, "monotonic", lambda: now),
+            patch.object(channel_runs.time, "sleep", sleep),
+        ):
+            _, _, error = channel_runs.wait_for_channel_run(
+                "queued-report",
+                repository=repository,
+                timeout_seconds=30,
+                hard_timeout_seconds=60,
+                queue_timeout_seconds=40,
+            )
+
+        self.assertEqual(now, 40)
+        self.assertEqual(error, "Agent run timed out while waiting in the worker queue.")
+
 
 class AgentRuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:

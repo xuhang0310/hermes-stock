@@ -540,6 +540,7 @@ class TaskExtractorExtractTests(unittest.TestCase):
         wait_call = wait_for_channel_run_mock.call_args
         self.assertEqual(wait_call.kwargs["timeout_seconds"], 930)
         self.assertEqual(wait_call.kwargs["hard_timeout_seconds"], 2760)
+        self.assertEqual(wait_call.kwargs["queue_timeout_seconds"], 1800)
         with self.SessionFactory() as db:
             job_run = db.scalar(
                 select(JobRun).where(JobRun.run_id == self.job_run_id)
