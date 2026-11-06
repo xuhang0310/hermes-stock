@@ -45,7 +45,8 @@ markdown.renderer.rules.link_open = (tokens, idx, options, env, self) => {
 }
 
 export function renderMarkdown(source: string) {
-  const rendered = markdown.render(source || '')
+  // 模型常在表格单元格里写 <br> 换行；这里关了原始 HTML，只把它单独放行
+  const rendered = markdown.render(source || '').replace(/&lt;br\s*\/?&gt;/gi, '<br>')
   return DOMPurify.sanitize(rendered, {
     ADD_ATTR: ['target', 'rel'],
     ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i

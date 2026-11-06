@@ -110,7 +110,7 @@ _ALLOWED_URL_SCHEMES = {"http", "https", "mailto", "tel"}
 _ACTION_HEADER = re.compile(r"怎么做|怎么执行|怎么处理|接下来|有没有碰到|碰到|操作|动作|方向|买卖")
 _NAME_HEADER = re.compile(r"股票|标的|名称|证券")
 _CURRENT_PRICE_HEADER = re.compile(r"^\s*(?:现价|最新价|收盘价|昨收)")  # “加权成本→收盘价”不算
-_NOT_PLAN_PRICE_HEADER = re.compile(r"现价|最新价|收盘价|昨收|成本价")
+_NOT_PLAN_PRICE_HEADER = re.compile(r"现价|最新价|收盘价|昨收|成本价|参考")
 _CHANGE_HEADER = re.compile(r"涨跌|涨幅|跌幅")
 _GENERIC_PRICE_HEADERS = frozenset({"价格", "价位"})
 _PRICE_HEADER = re.compile(r"价|昨收")
@@ -151,6 +151,12 @@ _PROCESS_LINE = re.compile(r"^(?:已(?:保存|存)[至到在：:]?.*notes/.*|SHA
 _RESIDUE_PUNCTUATION = re.compile(r"[\s，,。；;：:元]")
 _NUMERIC_CELL = re.compile(r"[-+]?[\d,]+(?:\.\d+)?\s*[%％元股]?")
 _EMPTY_CELLS = frozenset({"", "—", "-", "--", "/"})
+_BR_TAG = re.compile(r"<br\s*/?>", flags=re.I)  # 模型常在表格单元格里写 <br> 换行，页面关了原始 HTML 就成了字面文字
+_CELL_CLAUSE = re.compile(r"[；;、／/｜|\s，]+|(?<!\d),(?!\d)")
+# “买0股、卖0股”“委托0股”“当前持仓0股”：没有操作，不用显示
+_ZERO_SHARES = re.compile(r"(?:本次|今日|今天|上午|下午|明天)?(买入?|卖出?|加仓|减仓|补仓|委托|操作|挂单|成交|下单|当前持仓|持仓|持有|持)?\s*0\s*股")
+_NO_POSITION_WORDS = frozenset({"当前持仓", "持仓", "持有", "持"})
+_HOLD_ACTION = re.compile(r"持有|拿着|持仓|保留")
 _LEAD_BIG_MAX_CHARS = 80  # 第一句太长就不放大，整段按普通正文
 # 说明性的话够短才算小字；再长多半夹着操作要求，要当正文读。整段加粗的通常就是一句说明，放宽一点
 _FINE_PRINT_MAX_CHARS = 80
@@ -208,7 +214,7 @@ def _action_class(cell_text: str) -> str | None:
 
 def _neutral_tag(cell_text: str) -> str:
     """没有买卖动作的行，第一小句够短就当标签（拿着、等待、不参与）；各种说法的持有都归成“拿着”。"""
-    if "持有" in cell_text or "拿着" in cell_text:
+    if "持有" in cell_text or "拿着" in cell_text or "保留" in cell_text:
         return "拿着"
     clause = _first_clause(cell_text)
     return clause if 0 < len(clause) <= 4 and not re.search(r"\d", clause) else ""
@@ -444,14 +450,40 @@ def _labelled_line(cell: Token, headers: list[str], column: int) -> None:
         cell.attrSet("data-label", headers[column])
 
 
-def _decorate_plan_row(row: dict[int, tuple[Token, Token]], headers: list[str], columns: _PlanColumns) -> None:
+def _join_lines(inline: Token) -> None:
+    """账本行里一格一行，格子里的换行（多半来自 <br>）改成分号。"""
+    children = inline.children or []
+    if any(child.type == "hardbreak" for child in children):
+        inline.children = [Token("text", "", 0, content="；") if child.type == "hardbreak" else child for child in children]
+
+
+def _strip_zero_shares(inline: Token) -> tuple[bool, bool, bool]:
+    """去掉格子里“买0股、卖0股”这种话。返回 (去掉过, 还剩内容, 写明没有持仓)。"""
+    clauses = [clause for clause in _CELL_CLAUSE.split(_inline_text(inline)) if clause]
+    matches = [_ZERO_SHARES.fullmatch(clause) for clause in clauses]
+    if not any(matches):
+        return False, True, False
+    kept = [clause for clause, matched in zip(clauses, matches) if not matched]
+    inline.children = [Token("text", "", 0, content="；".join(kept))] if kept else []
+    return True, bool(kept), any(matched and matched.group(1) in _NO_POSITION_WORDS for matched in matches)
+
+
+def _decorate_plan_row(row: dict[int, tuple[Token, Token]], headers: list[str], columns: _PlanColumns) -> bool:
+    """装饰一行计划表。这只股票既没持仓也不操作时返回 False，这一行不用显示。"""
+
     def text_of(column: int | None) -> str:
         return _inline_text(row[column][1]) if column is not None and column in row else ""
 
     action = row.get(columns.action) if columns.action is not None else None
     quantity = row.get(columns.quantity) if columns.quantity is not None else None
     action_text = text_of(columns.action)
+    had_zero = False
+    if quantity is not None:
+        had_zero, has_rest, no_position = _strip_zero_shares(quantity[1])
+        if had_zero and not has_rest and not _action_class(action_text) and (no_position or not _HOLD_ACTION.search(action_text)):
+            return False
     kind = _action_class(action_text or text_of(columns.quantity))
+    no_order = had_zero and kind is None  # 写明了 0 股又没有买卖：价格只是参考，不能放大成金色的计划价
     tag = _ACTION_TAGS.get(kind or "") or _neutral_tag(action_text)
     # 现价和涨跌幅并进名称那一行；有一格解析不干净就保留原样，不丢字
     numeric = {
@@ -474,6 +506,7 @@ def _decorate_plan_row(row: dict[int, tuple[Token, Token]], headers: list[str], 
         cell.attrs.pop("style", None)
         if column == columns.name:
             continue
+        _join_lines(inline)
         if column in (columns.current, columns.change):
             parts = numeric.get(column)
             if merged and parts and not parts[2] and (parts[0] or parts[1]):
@@ -497,7 +530,7 @@ def _decorate_plan_row(row: dict[int, tuple[Token, Token]], headers: list[str], 
         elif column == columns.price:
             if _inline_text(inline) in _EMPTY_CELLS:
                 cell.attrJoin("class", "dup")
-            elif _rewrite_price_cell(inline, headers[column] if column < len(headers) else ""):
+            elif not no_order and _rewrite_price_cell(inline, headers[column] if column < len(headers) else ""):
                 cell.attrJoin("class", "c-price")
             else:
                 _labelled_line(cell, headers, column)
@@ -506,6 +539,9 @@ def _decorate_plan_row(row: dict[int, tuple[Token, Token]], headers: list[str], 
     if quantity and tag:
         quantity[0].attrSet("data-tag", tag)
         quantity[0].attrJoin("class", kind or "act-none")
+    elif quantity and not text_of(columns.quantity):
+        quantity[0].attrJoin("class", "dup")
+    return True
 
 
 def _decorate_lines_row(row: dict[int, tuple[Token, Token]], headers: list[str]) -> None:
@@ -527,8 +563,8 @@ def _decorate_plain_row(row: dict[int, tuple[Token, Token]]) -> None:
 def _decorate_table(tokens: list[Token], start: int) -> int:
     """决定一张表怎么显示，返回表格结束的位置。
 
-    计划表变成账本行（名称、动作、放大的计划价）；三列以上的长文字表变成标题加分行；
-    其他表格保持表格，放不下时横向滑动。
+    计划表变成账本行（名称、动作、放大的计划价），没持仓也不操作的行去掉，全去掉了连表一起去掉；
+    三列以上的长文字表变成标题加分行；其他表格保持表格，放不下时横向滑动。
     """
     close = next(index for index in range(start, len(tokens)) if tokens[index].type == "table_close")
     headers = [
@@ -548,11 +584,15 @@ def _decorate_table(tokens: list[Token], start: int) -> int:
 
     column = 0
     row: dict[int, tuple[Token, Token]] = {}
+    row_start = start
+    body_rows = 0
+    dropped: list[tuple[int, int]] = []
     for index in range(start, close):
         token = tokens[index]
         if token.type == "tr_open":
             column = 0
             row = {}
+            row_start = index
         elif token.type == "th_open":
             _move_align_to_class(token)
             column += 1
@@ -560,13 +600,20 @@ def _decorate_table(tokens: list[Token], start: int) -> int:
             row[column] = (token, tokens[index + 1])
             column += 1
         elif token.type == "tr_close" and row:
+            body_rows += 1
             if columns:
-                _decorate_plan_row(row, headers, columns)
+                if not _decorate_plan_row(row, headers, columns):
+                    dropped.append((row_start, index))
             elif has_long_cell:
                 _decorate_lines_row(row, headers)
             else:
                 _decorate_plain_row(row)
-    return close
+    if body_rows and len(dropped) == body_rows:
+        del tokens[start : close + 1]
+        return start - 1
+    for first, last in reversed(dropped):
+        del tokens[first : last + 1]
+    return close - sum(last - first + 1 for first, last in dropped)
 
 
 def _without_empty_text(children: list[Token]) -> list[Token]:
@@ -872,11 +919,31 @@ def _wrap_tables(cleaned: str) -> str:
     )
 
 
+def _split_br_tags(tokens: list[Token]) -> None:
+    """把文字里的 <br> 换成真正的换行。别的标签照旧当文字，页面不放行原始 HTML。"""
+    for token in tokens:
+        if token.type != "inline" or "<" not in token.content:
+            continue
+        children: list[Token] = []
+        for child in token.children or []:
+            if child.type != "text" or not _BR_TAG.search(child.content):
+                children.append(child)
+                continue
+            parts = _BR_TAG.split(child.content)
+            for position, part in enumerate(parts):
+                if position:
+                    children.append(Token("hardbreak", "br", 0))
+                if part:
+                    children.append(Token("text", "", 0, content=part))
+        token.children = children
+
+
 def render_markdown(source: str) -> tuple[str, list[tuple[str, str]]]:
     """返回 (安全的正文 HTML, [(锚点, 二级标题)])。"""
     env: dict = {}
     source = _PROCESS_LINE.sub("", _PROCESS_BLOCK.sub("", source or ""))
     tokens = _MARKDOWN.parse(source.strip(), env)
+    _split_br_tags(tokens)
     sections: list[tuple[str, str]] = []
     index = 0
     while index < len(tokens):

@@ -357,6 +357,91 @@ class RenderTests(unittest.TestCase):
                 body, _ = render_markdown(f"{header}\n{separator}\n{row}\n")
                 self.assertIn('<table class="plan">', body)
 
+    ZERO_TABLE = (
+        "| 股票及最新价 | 下午怎么做 | 买卖参考价 | 保留与买卖股数 |\n|---|---|---|---|\n"
+        "| 海象新材（003011）<br>17.03元 | 沿用早盘安排，继续持有 | 买入17.07元<br>卖出18.59元 | 保留200股<br>买0股、卖0股 |\n"
+        "| 民德电子（300656）<br>22.45元 | 按已登记持仓保留，不重复买入 | 买入22.26元<br>卖出25.22元 | 保留100股<br>买0股、卖0股 |\n"
+        "| 完美世界（002624）<br>11.33元 | 仍放在自选中，下午不买 | 10.55元，仅观察 | 买0股<br>当前持仓0股 |\n"
+    )
+
+    def test_br_in_a_cell_is_a_line_break_not_text(self) -> None:
+        body, _ = render_markdown(self.ZERO_TABLE)
+        self.assertNotIn("&lt;br", body)
+        self.assertNotIn("<br>55", body)
+        self.assertIn('<span class="cd fig">003011</span>', body)
+        self.assertIn('现价 <span class="fig">17.03</span>', body)
+
+    def test_a_break_inside_a_ledger_cell_stays_on_one_line(self) -> None:
+        body, _ = render_markdown(self.ZERO_TABLE)
+        self.assertIn("买入17.07元；卖出18.59元", body)
+
+    def test_keeping_a_position_gets_the_same_tag_as_holding(self) -> None:
+        body, _ = render_markdown(self.ZERO_TABLE)
+        self.assertEqual(body.count('data-tag="拿着"'), 2)
+
+    def test_br_outside_tables_and_other_tags(self) -> None:
+        body, _ = render_markdown("开头一句。\n\n第一行<br/>第二行 <script>alert(1)</script> <BR>第三行")
+        self.assertEqual(body.count("<br>"), 2)
+        self.assertNotIn("&lt;br", body.lower())
+        self.assertIn("&lt;script&gt;", body)
+
+    def test_br_inside_code_stays_as_written(self) -> None:
+        body, _ = render_markdown("`<br>` 是换行标签")
+        self.assertIn("&lt;br&gt;", body)
+
+    def test_zero_share_words_are_removed(self) -> None:
+        body, _ = render_markdown(self.ZERO_TABLE)
+        for word in ("买0股", "卖0股", "持仓0股"):
+            self.assertNotIn(word, body)
+        self.assertIn("保留200股", body)
+        self.assertIn("保留100股", body)
+
+    def test_a_stock_with_no_position_and_no_order_is_not_shown(self) -> None:
+        body, _ = render_markdown(self.ZERO_TABLE)
+        self.assertNotIn("完美世界", body)
+        self.assertNotIn("10.55", body)
+        self.assertIn("海象新材", body)
+
+    def test_a_watch_stock_with_a_bare_zero_is_not_shown(self) -> None:
+        table = "| 股票 | 怎么做 | 价格 | 股数 |\n|---|---|---|---|\n| 甲（000001） | 卖出 | 10.50 | 100股 |\n| 完美世界（002624） | 9、10均不买 | 10.55元仅观察，不挂买单 | 0股 |\n"
+        body, _ = render_markdown(table)
+        self.assertNotIn("完美世界", body)
+        self.assertIn("甲", body)
+
+    def test_a_held_stock_is_kept_when_only_the_order_is_zero(self) -> None:
+        table = "| 股票 | 怎么做 | 价格 | 股数 |\n|---|---|---|---|\n| 海象新材（003011） | 继续持有 | 不挂单 | 操作0股；持4,400股 |\n| 兴业银行（601166） | 拿着 | 不挂单 | 0股 |\n"
+        body, _ = render_markdown(table)
+        self.assertIn("持4,400股", body)
+        self.assertNotIn("操作0股", body)
+        self.assertIn("兴业银行", body)
+        self.assertIn('data-tag="拿着"', body)
+
+    def test_a_table_with_nothing_left_is_removed_and_the_rest_still_renders(self) -> None:
+        source = "开头一句。\n\n## 自选\n\n| 股票 | 怎么做 | 价格 | 股数 |\n|---|---|---|---|\n| 完美世界（002624） | 不买 | 10.55 | 0股 |\n\n结尾一句。\n\n## 计划\n\n| 股票 | 怎么做 | 价格 | 股数 |\n|---|---|---|---|\n| 甲（000001） | 卖出 | 10.50 | 100股 |\n"
+        body, sections = render_markdown(source)
+        self.assertNotIn("完美世界", body)
+        self.assertEqual(body.count("<table"), 1)
+        self.assertIn("结尾一句", body)
+        self.assertEqual([title for _, title in sections], ["自选", "计划"])
+
+    def test_reference_prices_are_not_shown_as_plan_prices(self) -> None:
+        body, _ = render_markdown(self.ZERO_TABLE)
+        self.assertNotIn('class="fig big"', body)
+        self.assertIn('data-label="买卖参考价"', body)
+
+    def test_a_zero_order_row_does_not_get_a_big_price_but_a_real_order_does(self) -> None:
+        table = "| 股票 | 怎么做 | 价格 | 股数 |\n|---|---|---|---|\n| 民德电子（300656） | 撤掉未成交补仓单，原仓继续拿着 | 撤22.26元补单 | 买0股；持1,000股 |\n| 盈康生命（300143） | 挂反弹卖单 | **8.32元** | **卖800股** |\n"
+        body, _ = render_markdown(table)
+        self.assertNotIn('<span class="fig big">22.26</span>', body)
+        self.assertIn('<span class="fig big">8.32</span>', body)
+        self.assertIn("撤22.26元补单", body)
+        self.assertIn("<strong>卖800股</strong>", body)
+
+    def test_a_real_order_is_never_dropped_even_with_a_zero_word(self) -> None:
+        table = "| 股票 | 怎么做 | 价格 | 股数 |\n|---|---|---|---|\n| 甲（000001） | 卖出 | 10.50 | 0股 |\n"
+        body, _ = render_markdown(table)
+        self.assertIn("甲", body)
+
     def test_plain_tables_scroll_and_keep_alignment(self) -> None:
         for header in ("| 账户 | 持股 | 成本价 | 浮亏及亏幅 |", "| 账户 | 登记现金 | 本次预留 | 都成交后的现金 |"):
             with self.subTest(header=header):
