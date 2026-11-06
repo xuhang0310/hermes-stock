@@ -187,6 +187,8 @@ class _PlanCase(unittest.TestCase):
         clock.start()
         self.addCleanup(clock.stop)
         with self.Session() as db:
+            # 这个用户是系统通道的主人，推送走任务群
+            db.add(User(id=OWNER, username="owner", display_name="owner", password_hash="x", role="super_admin", is_enabled=True))
             db.add(PositionAccount(id=ACCOUNT, owner_user_id=OWNER, broker_name="方正证券", available_cash=100000.0))
             db.add(Instrument(symbol=SELL_SYMBOL, name="同力天启", market="SH", type="stock"))
             db.add(Instrument(symbol=BUY_SYMBOL, name="兴业银行", market="SH", type="stock"))
@@ -519,6 +521,18 @@ class WatcherTests(_PlanCase):
         outcome, calls = self._tick({SELL_SYMBOL: _quote(22.5)}, datetime(2026, 11, 3, 9, 31))
         self.assertEqual(outcome["triggered"], 0)
         self.assertEqual(calls, [])
+
+    def test_an_owner_without_a_channel_gets_one_inbox_notice_and_no_retry(self) -> None:
+        self._plan_ready()
+        with self.Session() as db:
+            db.get(User, OWNER).role = "researcher"
+            db.commit()
+        with patch("backend.app.notify.notification_service.create_notification") as inbox:
+            outcome, calls = self._tick({SELL_SYMBOL: _quote(22.2)}, datetime(2026, 11, 3, 9, 47))
+            _, more = self._tick({SELL_SYMBOL: _quote(22.3)}, datetime(2026, 11, 3, 9, 48))
+        self.assertEqual(calls + more, [])  # 绝不发到任务群
+        self.assertEqual(inbox.call_count, 1)
+        self.assertEqual(outcome, {"triggered": 1, "alerts_sent": 0})
 
     def test_touching_the_plan_price_alerts_once(self) -> None:
         self._plan_ready()
@@ -905,7 +919,7 @@ class PlanPageTests(_PlanCase):
 
 
 class SchedulerIntegrationTests(_PlanCase):
-    def _report(self, *, job_key: str, name: str, answer: str, agent_side_effect=None, now: datetime = MORNING, owner: int = OWNER):
+    def _report(self, *, job_key: str, name: str, answer: str, push_status: str = "sent", agent_side_effect=None, now: datetime = MORNING, owner: int = OWNER):
         from backend.app.scheduler import rhythm_scheduler
 
         calls: list[tuple] = []
@@ -922,7 +936,7 @@ class SchedulerIntegrationTests(_PlanCase):
             pushed.update(content=content, **kwargs)
             from types import SimpleNamespace
 
-            return SimpleNamespace(id=1, status="sent", error=None)
+            return SimpleNamespace(id=1, status=push_status, error=None)
 
         snap = {
             "job_key": job_key,
@@ -951,6 +965,18 @@ class SchedulerIntegrationTests(_PlanCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(pushed["content"], "短提醒")
         self.assertNotIn("plan_url", pushed["share"].meta)
+
+    def test_a_report_is_pushed_for_its_owner(self) -> None:
+        _, _, pushed = self._report(job_key="agent-1-x", name="下午盘中短提醒", answer="短提醒")
+        self.assertEqual(pushed["owner_user_id"], OWNER)
+
+    def test_a_report_with_no_channel_is_not_a_job_failure(self) -> None:
+        result, _, _ = self._report(job_key="agent-1-x", name="下午盘中短提醒", answer="短提醒", push_status="skipped")
+        self.assertIsNone(result[3])
+
+    def test_a_failed_push_is_still_reported_as_a_failure(self) -> None:
+        result, _, _ = self._report(job_key="agent-1-x", name="下午盘中短提醒", answer="短提醒", push_status="failed")
+        self.assertEqual(result[3], "飞书未确认发送成功")
 
     def test_a_report_without_delegation_is_not_abandoned_while_the_agent_works(self) -> None:
         from backend.app.scheduler import rhythm_scheduler
@@ -1123,8 +1149,7 @@ class ScheduledRunGlueTests(_PlanCase):
         from backend.app.scheduler import rhythm_scheduler
 
         with self.Session() as db:
-            if db.scalar(select(User).where(User.id == OWNER)) is None:
-                db.add(User(id=OWNER, username="u", display_name="U", role="researcher", password_hash="x"))
+            if db.scalar(select(DigitalHumanProfile).where(DigitalHumanProfile.code == "stock-pm")) is None:
                 db.add(
                     DigitalHumanProfile(
                         code="stock-pm",

@@ -662,6 +662,20 @@ export type NotifyChannel = {
   updated_at: string | null
 }
 
+export type MyDefaultJobs = {
+  available: boolean
+  has_holdings?: boolean
+  jobs: Array<{
+    kind: string
+    name: string
+    run_time: string | null
+    interval_minutes: number | null
+    opened: boolean
+    enabled: boolean
+    last_status: string | null
+  }>
+}
+
 export type NotifyChannelTestResult = {
   ok: boolean
   message?: string

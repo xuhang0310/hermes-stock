@@ -5,12 +5,13 @@ import DataSourceSettingsView from './DataSourceSettingsView.vue'
 import DigitalHumanAdminView from './DigitalHumanAdminView.vue'
 import ModelSettingsView from './ModelSettingsView.vue'
 import NotifyChannelSettingsView from './NotifyChannelSettingsView.vue'
+import MyFeishuChannelView from './MyFeishuChannelView.vue'
 import LogsView from './LogsView.vue'
 import UserManagementView from './UserManagementView.vue'
 import McpAccessView from './McpAccessView.vue'
 import type { AgentItem, HealthPayload, UserPayload } from '../types'
 
-type SettingsTab = 'models' | 'dataSources' | 'notifyChannels' | 'digitalHumans' | 'users' | 'logs' | 'system' | 'mcp'
+type SettingsTab = 'myFeishu' | 'models' | 'dataSources' | 'notifyChannels' | 'digitalHumans' | 'users' | 'logs' | 'system' | 'mcp'
 
 const props = defineProps<{
   health: HealthPayload | null
@@ -25,6 +26,9 @@ const canManageMcp = computed(() => props.user.permissions.some(
   permission => ['all', 'data:read', 'data:write', 'schedule:manage'].includes(permission)
 ))
 
+const canUseSchedules = computed(
+  () => props.user.permissions.includes('all') || props.user.permissions.includes('schedule:manage')
+)
 const canManageChannels = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('model:manage')
 )
@@ -39,6 +43,7 @@ const canManageUsers = computed(
 )
 
 const tabs = computed<Array<{ key: SettingsTab; label: string }>>(() => [
+  ...(canUseSchedules.value ? [{ key: 'myFeishu' as SettingsTab, label: '我的飞书推送' }] : []),
   ...(canViewAdminSettings.value ? [
     { key: 'models' as SettingsTab, label: '模型与平台' },
     { key: 'dataSources' as SettingsTab, label: '数据源' },
@@ -87,7 +92,8 @@ onBeforeUnmount(() => window.removeEventListener('popstate', syncTabFromLocation
       </button>
     </header>
 
-    <McpAccessView v-if="activeTab === 'mcp' && canManageMcp" :user="user" />
+    <MyFeishuChannelView v-if="activeTab === 'myFeishu' && canUseSchedules" />
+    <McpAccessView v-else-if="activeTab === 'mcp' && canManageMcp" :user="user" />
     <ModelSettingsView v-else-if="activeTab === 'models' && canViewAdminSettings" />
     <DataSourceSettingsView v-else-if="activeTab === 'dataSources' && canViewAdminSettings" />
     <NotifyChannelSettingsView v-else-if="activeTab === 'notifyChannels' && canViewAdminSettings && canManageChannels" />

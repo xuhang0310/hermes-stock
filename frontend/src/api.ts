@@ -49,6 +49,7 @@ import type {
   DataSourceConfig,
   NotifyChannel,
   NotifyChannelTestResult,
+  MyDefaultJobs,
   FeishuBotBinding,
   FeishuBotTestResult,
   ScheduleJob,
@@ -628,6 +629,21 @@ export const api = {
     }),
   activateModelConfig: (id: number) =>
     request<ModelConfig>(`/api/model-configs/${id}/activate`, { method: 'POST' }),
+  myNotifyChannel: () =>
+    request<ApiEnvelope<{ channel: NotifyChannel | null }>>('/api/my-notify-channel').then((res) => res.data),
+  saveMyNotifyChannel: (payload: Record<string, unknown>) =>
+    request<ApiEnvelope<{ channel: NotifyChannel }>>('/api/my-notify-channel', {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    }).then((res) => res.data),
+  testMyNotifyChannel: (payload: { webhook_url?: string | null; secret?: string | null }) =>
+    request<ApiEnvelope<NotifyChannelTestResult>>('/api/my-notify-channel/test', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }).then((res) => res.data),
+  myDefaultJobs: () => request<ApiEnvelope<MyDefaultJobs>>('/api/my-default-jobs').then((res) => res.data),
+  openMyDefaultJobs: () =>
+    request<ApiEnvelope<MyDefaultJobs & { created: string[] }>>('/api/my-default-jobs', { method: 'POST' }).then((res) => res.data),
   notifyChannels: () => request<NotifyChannel[]>('/api/notify-channels'),
   saveNotifyChannel: (channelKey: string, payload: Record<string, unknown>) =>
     request<NotifyChannel>(`/api/notify-channels/${channelKey}`, {

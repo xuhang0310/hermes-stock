@@ -161,6 +161,10 @@ class Settings:
     scheduler_max_concurrent_jobs: int = int(
         os.getenv("STOCK_SCHEDULER_MAX_CONCURRENT_JOBS", "2")
     )
+    # 报告类任务单独算名额：一份要跑十几到四十分钟，不能占住价格同步、到价提醒这些系统任务的名额
+    scheduler_max_concurrent_reports: int = int(
+        os.getenv("STOCK_SCHEDULER_MAX_CONCURRENT_REPORTS", "2")
+    )
     scheduler_shutdown_grace_seconds: int = int(
         os.getenv("STOCK_SCHEDULER_SHUTDOWN_GRACE_SECONDS", "60")
     )

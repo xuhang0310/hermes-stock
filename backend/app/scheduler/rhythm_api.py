@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from backend.app.feishu.feishu import (
     BUILTIN_CHANNEL_KEYS,
     SCHEDULE_CHANNEL_KEY,
     decrypt_value,
+    own_channel_key,
     encrypt_value,
     get_channel,
     is_cipher_invalid,
@@ -33,6 +35,8 @@ from backend.app.scheduler.rhythm_scheduler import (
     is_trading_day,
     now_sh,
 )
+from backend.app.core.response import fail, ok
+from backend.app.scheduler.user_jobs import default_jobs_status, open_default_jobs
 from backend.app.core.settings import settings
 
 
@@ -82,6 +86,83 @@ def _channel_out(row: NotifyChannel) -> dict:
         "last_error": row.last_error,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+
+
+@router.get("/my-notify-channel")
+def my_notify_channel(
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
+) -> dict:
+    """我自己的飞书通道。只看得到自己的，别人的地址这里拿不到。"""
+    row = get_channel(db, own_channel_key(db, context.user.id))
+    return ok({"channel": _channel_out(row) if row else None})
+
+
+@router.put("/my-notify-channel")
+def save_my_notify_channel(
+    payload: NotifyChannelIn,
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
+) -> Any:
+    key = own_channel_key(db, context.user.id)
+    url = (payload.webhook_url or "").strip()
+    if url:
+        url_error = validate_webhook_url(url)
+        if url_error:
+            return JSONResponse(fail(url_error), status_code=400)
+    row = get_channel(db, key)
+    if row is None and not url:
+        return JSONResponse(fail("第一次保存要填 Webhook 地址"), status_code=400)
+    if row is None:
+        row = NotifyChannel(channel_key=key, name=payload.name, purpose="schedule")
+        db.add(row)
+    row.name = payload.name
+    row.status = payload.status
+    row.remark = payload.remark
+    if url:
+        row.webhook_url_cipher = encrypt_value(url)
+    if (payload.secret or "").strip():
+        row.secret_cipher = encrypt_value(payload.secret)
+    db.commit()
+    db.refresh(row)
+    return ok({"channel": _channel_out(row)})
+
+
+class MyNotifyChannelTestIn(BaseModel):
+    webhook_url: str | None = Field(default=None, max_length=500)
+    secret: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/my-notify-channel/test")
+def test_my_notify_channel(
+    payload: MyNotifyChannelTestIn,
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
+) -> dict:
+    """测试推送。通道只能是自己的，不接受别的 channel_key。"""
+    key = own_channel_key(db, context.user.id)
+    saved = get_channel(db, key)
+    return ok(test_channel(db, channel_key=key if saved else None, webhook_url=payload.webhook_url, secret=payload.secret))
+
+
+@router.get("/my-default-jobs")
+def my_default_jobs(
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
+) -> dict:
+    return ok(default_jobs_status(db, context.user.id))
+
+
+@router.post("/my-default-jobs")
+def open_my_default_jobs(
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
+) -> Any:
+    try:
+        created = open_default_jobs(db, context.user.id)
+    except ValueError as exc:
+        return JSONResponse(fail(str(exc)), status_code=400)
+    return ok({"created": created, **default_jobs_status(db, context.user.id)})
 
 
 @router.get("/notify-channels")
@@ -243,12 +324,12 @@ def _validate_agent_job(db: Session, payload: ScheduleJobIn, context: AuthContex
         raise HTTPException(status_code=403, detail="当前用户角色无权使用所选数字人")
 
 
-def _activate_agent_report_jobs(db: Session) -> list[ScheduledJob]:
-    """Enable report jobs without round-tripping their human-readable fields."""
+def _activate_agent_report_jobs(db: Session, owner_user_id: int) -> list[ScheduledJob]:
+    """Enable the caller's report jobs without round-tripping their human-readable fields."""
     jobs = list(
         db.scalars(
             select(ScheduledJob)
-            .where(ScheduledJob.job_kind == "agent_report")
+            .where(ScheduledJob.job_kind == "agent_report", ScheduledJob.owner_user_id == owner_user_id)
             .order_by(ScheduledJob.sort_order, ScheduledJob.id)
         ).all()
     )
@@ -445,7 +526,7 @@ def create_schedule_job(
     if payload.digital_human_code and payload.digital_human_code not in VALID_DIGITAL_HUMAN_CODES:
         raise HTTPException(status_code=400, detail="数字人 code 无效")
     if payload.push_channel_key and payload.push_channel_key not in BUILTIN_CHANNEL_KEYS:
-        raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
+        raise HTTPException(status_code=400, detail="定时任务只能推送到自己的飞书")
     _validate_schedule_text_encoding(payload)
     _validate_schedule_shape(payload)
     _validate_agent_job(db, payload, context)
@@ -495,7 +576,7 @@ def update_schedule_job(
     if payload.digital_human_code and payload.digital_human_code not in VALID_DIGITAL_HUMAN_CODES:
         raise HTTPException(status_code=400, detail="数字人 code 无效")
     if payload.push_channel_key and payload.push_channel_key not in BUILTIN_CHANNEL_KEYS:
-        raise HTTPException(status_code=400, detail="定时任务只能推送到统一的飞书任务群")
+        raise HTTPException(status_code=400, detail="定时任务只能推送到自己的飞书")
     _validate_schedule_text_encoding(payload)
     _validate_schedule_shape(payload)
     if not is_agent_job:
@@ -565,9 +646,9 @@ def delete_schedule_job(
 @router.post("/schedule/jobs/agent-reports/activate")
 def activate_agent_report_jobs(
     db: Session = Depends(get_db),
-    _context: AuthContext = Depends(require_permission("model:manage")),
+    context: AuthContext = Depends(require_permission("model:manage")),
 ) -> dict:
-    jobs = _activate_agent_report_jobs(db)
+    jobs = _activate_agent_report_jobs(db, context.user.id)
     return {"updated": len(jobs), "jobs": [_job_out(job) for job in jobs]}
 
 
@@ -731,7 +812,7 @@ def schedule_status(
         .group_by(JobRun.status)
     ).all():
         counts[status_value] = total
-    channel = get_channel(db, SCHEDULE_CHANNEL_KEY)
+    channel = get_channel(db, own_channel_key(db, context.user.id))
     channel_configured = bool(channel and decrypt_value(channel.webhook_url_cipher))
     return {
         "scheduler_enabled": settings.scheduler_enabled,
@@ -741,7 +822,7 @@ def schedule_status(
         "server_time": _shanghai_iso(now),
         "today": counts,
         "notify_channel": {
-            "name": channel.name if channel else "飞书任务群",
+            "name": channel.name if channel else "我的飞书",
             "configured": channel_configured,
             "signed": bool(channel and decrypt_value(channel.secret_cipher)),
             "enabled": bool(channel and channel.status == "enabled"),

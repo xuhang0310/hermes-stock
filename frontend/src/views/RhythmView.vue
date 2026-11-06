@@ -59,7 +59,7 @@ const DIGITAL_HUMANS: Array<{ code: string; label: string }> = [
 
 const CHANNELS: Array<{ key: string; label: string }> = [
   { key: '', label: '不推送' },
-  { key: 'feishu-daily', label: '飞书任务群' }
+  { key: 'feishu-daily', label: '我的飞书' }
 ]
 
 const WEEKDAYS = [
@@ -125,7 +125,7 @@ function humanLabel(code: string | null) {
 
 function channelLabel(job: ScheduleJob) {
   if (!job.push_channel_key) return '不推送'
-  if (job.job_kind === 'health_check') return '飞书任务群，仅异常'
+  if (job.job_kind === 'health_check') return '系统飞书群，仅异常'
   return CHANNELS.find((item) => item.key === job.push_channel_key)?.label || job.push_channel_key
 }
 
@@ -557,7 +557,7 @@ onUnmounted(() => {
       <div><span>今天</span><strong>{{ status.is_trading_day ? '交易日' : '休市' }}</strong></div>
     </section>
 
-    <p v-if="status && !notifyReady" class="hub-message error">飞书任务群还没配置好，报告会照常生成，但不会推送。</p>
+    <p v-if="status && !notifyReady" class="hub-message error">你的飞书还没配置好，报告会照常生成，只进站内通知。到“设置 → 我的飞书推送”配置。</p>
 
     <nav class="rhythm-view-tabs" aria-label="定时任务功能">
       <button type="button" :class="{ active: activeView === 'settings' }" @click="activeView = 'settings'">

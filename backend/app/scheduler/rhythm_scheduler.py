@@ -32,7 +32,7 @@ from backend.app.agent_runtime.channel_runs import (
 from backend.app.agent_runtime.profile_access import target_roles_allow
 from backend.app.ai.plain_rewrite import rewrite_plain
 from backend.app.data.share_service import ShareSpec, create_share_link
-from backend.app.feishu.feishu import send_feishu
+from backend.app.feishu.feishu import SKIPPED, send_feishu
 from backend.app.plans.rules import MARKET_CLOSE, plan_source_for_job
 from backend.app.plans.service import (
     PLAN_SAVE_INSTRUCTION,
@@ -78,7 +78,8 @@ _AUTOMATIC_SELECTION_CLAIM_GROUP = tuple(
 _SAME_DAY_CATCHUP_JOB_KEYS = frozenset(_AUTOMATIC_SELECTION_CLAIM_GROUP)
 # 报告类任务到点后这么久内还能补跑：名额被占满或服务刚好在重启时，不能整份报告直接丢掉。
 # 2026-11-02 到 04 晚间日报连续三晚被 22:00 的两个新闻任务挤掉，就是因为只认准点那一分钟。
-REPORT_CATCHUP_MINUTES = 30
+# 也是报告的排队窗口：多个用户的报告同一时间到点时，抢不到名额的在这里等，不能被跳过。
+REPORT_CATCHUP_MINUTES = 120
 _REPORT_JOB_KINDS = frozenset({"agent_report", "agent_task"})
 # TuShare 当天数据 17:00 前后才发齐；数据入库失败后每 30 分钟重试，22:00 后当天不再重试。
 AUTOMATIC_SELECTION_DATA_RETRY_MINUTES = 30
@@ -110,7 +111,9 @@ DH_TO_AGENT = {
 _scheduler_task: asyncio.Task | None = None
 _background_tasks: set[asyncio.Task] = set()
 _inflight_runs: set[str] = set()
+_inflight_report_runs: set[str] = set()  # _inflight_runs 里属于报告类任务的
 _semaphore: asyncio.Semaphore | None = None
+_report_semaphore: asyncio.Semaphore | None = None
 _trade_day_cache: dict[str, bool] = {}
 _position_price_sync_lock = threading.Lock()
 
@@ -751,6 +754,7 @@ def _run_agent_report(
                 ],
                 card_footer="SixRabbits Stock | 自动生成，仅供研究与复盘，不构成投资建议",
                 card_brief=True,
+                owner_user_id=snap.get("owner_user_id"),
                 share=ShareSpec(
                     source_type="agent_report",
                     source_ref=report_id,
@@ -763,7 +767,7 @@ def _run_agent_report(
                 ),
             )
             notification_id = notification.id
-            if notification.status != "sent":
+            if notification.status not in ("sent", SKIPPED):
                 notification_error = notification.error or "飞书未确认发送成功"
     return report_id, notification_id, answer, notification_error
 
@@ -797,6 +801,7 @@ def _run_topnews_brief(snapshot: dict, ran_at: datetime) -> str:
             snapshot.get("push_channel_key") or "feishu-daily",
             title,
             report,
+            owner_user_id=snapshot.get("owner_user_id"),
             card_template=_CARD_TEMPLATE_BY_JOB.get(snapshot["job_key"], "wathet"),
             card_metadata=[
                 ("任务", snapshot.get("name", "早盘舆情简报")),
@@ -1379,6 +1384,7 @@ def _push_automatic_selection_digest(snapshot: dict[str, Any], digest: dict[str,
             ],
             card_footer="SixRabbits Stock | 规则选股，仅供研究与复盘，不构成投资建议",
             card_brief=digest.get("brief") or True,
+            owner_user_id=snapshot.get("owner_user_id"),
             share=ShareSpec(
                 source_type="selection_digest",
                 source_ref=str(digest["run_id"]) if digest.get("run_id") else None,
@@ -1386,7 +1392,7 @@ def _push_automatic_selection_digest(snapshot: dict[str, Any], digest: dict[str,
                 meta={"generated_at": now.strftime("%Y-%m-%d %H:%M:%S")},
             ),
         )
-        if notification.status != "sent":
+        if notification.status not in ("sent", SKIPPED):
             return notification.error or "飞书未确认发送成功"
     return None
 
@@ -1628,6 +1634,10 @@ def _max_concurrent_jobs() -> int:
     return max(1, settings.scheduler_max_concurrent_jobs)
 
 
+def _max_concurrent_reports() -> int:
+    return max(1, settings.scheduler_max_concurrent_reports)
+
+
 def _claim_group_job_keys(job_key: str) -> tuple[str, ...]:
     if job_key in _AUTOMATIC_SELECTION_CLAIM_GROUP:
         return _AUTOMATIC_SELECTION_CLAIM_GROUP
@@ -1865,23 +1875,29 @@ def _claim_job_run(
     return {"status": "claimed", "run_id": run_id}
 
 
-def _claim_due_jobs(now: datetime, limit: int | None = None) -> list[tuple[str, str]]:
-    if limit is not None and limit <= 0:
+def _claim_due_jobs(now: datetime, limit: int | None = None, report_limit: int | None = None) -> list[tuple[str, str]]:
+    """认领到点的任务。给了 report_limit 时报告类任务单独算名额，limit 只管其他任务。"""
+    if limit is not None and limit <= 0 and (report_limit is None or report_limit <= 0):
         return []
     claimed: list[tuple[str, str]] = []
+    reports = 0
+    others = 0
     with SessionLocal() as session:
-        job_keys = list(
-            session.scalars(
-                select(ScheduledJob.job_key)
+        rows = list(
+            session.execute(
+                select(ScheduledJob.job_key, ScheduledJob.job_kind)
                 .where(ScheduledJob.enabled.is_(True))
                 .order_by(ScheduledJob.sort_order, ScheduledJob.id)
             ).all()
         )
         # End the discovery transaction before taking per-group claim locks.
         session.commit()
-        for job_key in job_keys:
-            if limit is not None and len(claimed) >= limit:
-                break
+        for job_key, job_kind in rows:
+            is_report = report_limit is not None and job_kind in _REPORT_JOB_KINDS
+            if is_report and reports >= report_limit:
+                continue
+            if not is_report and limit is not None and others >= limit:
+                continue
             result = _claim_job_run(
                 session,
                 str(job_key),
@@ -1891,6 +1907,10 @@ def _claim_due_jobs(now: datetime, limit: int | None = None) -> list[tuple[str, 
             run_id = result.get("run_id")
             if result.get("status") == "claimed" and run_id:
                 claimed.append((str(job_key), str(run_id)))
+                if is_report:
+                    reports += 1
+                else:
+                    others += 1
     return claimed
 
 
@@ -1921,14 +1941,30 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _semaphore
 
 
+def _get_report_semaphore() -> asyncio.Semaphore:
+    global _report_semaphore
+    if _report_semaphore is None:
+        _report_semaphore = asyncio.Semaphore(_max_concurrent_reports())
+    return _report_semaphore
+
+
+def _is_report_job(job_key: str) -> bool:
+    with SessionLocal() as session:
+        return session.scalar(select(ScheduledJob.job_kind).where(ScheduledJob.job_key == job_key).limit(1)) in _REPORT_JOB_KINDS
+
+
 async def _run_job_async(job_key: str, run_id: str) -> None:
     try:
-        async with _get_semaphore():
+        report = await asyncio.to_thread(_is_report_job, job_key)
+        if report:
+            _inflight_report_runs.add(run_id)
+        async with _get_report_semaphore() if report else _get_semaphore():
             await asyncio.to_thread(_execute_job, job_key, run_id)
     except Exception as exc:  # noqa: BLE001
         await asyncio.to_thread(_log, "ERROR", f"节律任务 {job_key} 线程异常", {"error": str(exc)[:500]})
     finally:
         _inflight_runs.discard(run_id)
+        _inflight_report_runs.discard(run_id)
 
 
 def _dispatch(job_key: str, run_id: str) -> None:
@@ -2017,7 +2053,8 @@ def _recover_stale_runs() -> list[tuple[str, str]]:
 
 async def _tick() -> None:
     now = now_sh()
-    available_slots = max(0, _max_concurrent_jobs() - len(_inflight_runs))
+    available_slots = max(0, _max_concurrent_jobs() - (len(_inflight_runs) - len(_inflight_report_runs)))
+    report_slots = max(0, _max_concurrent_reports() - len(_inflight_report_runs))
     await asyncio.to_thread(
         _write_scheduler_heartbeat,
         now,
@@ -2025,12 +2062,13 @@ async def _tick() -> None:
             "tick_at": now.isoformat(),
             "inflight": len(_inflight_runs),
             "available_slots": available_slots,
+            "report_slots": report_slots,
             "max_concurrency": _max_concurrent_jobs(),
         },
     )
-    if available_slots <= 0:
+    if available_slots <= 0 and report_slots <= 0:
         return
-    claimed = await asyncio.to_thread(_claim_due_jobs, now, available_slots)
+    claimed = await asyncio.to_thread(_claim_due_jobs, now, available_slots, report_slots)
     for job_key, run_id in claimed:
         if run_id in _inflight_runs:
             continue

@@ -372,6 +372,16 @@ class PushTests(_Case):
             self._announce(db, title)
         self._interpret()
 
+    def test_the_push_is_routed_by_the_event_owner(self) -> None:
+        self._ready()
+        _, calls = self._push()
+        self.assertEqual(calls[0].owner_user_id, OWNER)
+
+    def test_an_owner_without_a_channel_counts_as_delivered_and_is_not_retried(self) -> None:
+        self._ready()
+        self.assertEqual(self._push(status="skipped")[0], 1)
+        self.assertEqual(self._push()[0], 0)
+
     def test_a_replayed_announcement_is_pushed_once_with_one_sentence_and_a_link(self) -> None:
         self._ready()
         pushed, calls = self._push()

@@ -15,7 +15,7 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.models import TradePlan, TradePlanItem
 from backend.app.data.share_service import ShareSpec
 from backend.app.events.service import flag_text, open_flags
-from backend.app.feishu.feishu import send_feishu
+from backend.app.feishu.feishu import SKIPPED, send_feishu
 from backend.app.plans import rules
 from backend.app.plans.service import (
     account_labels,
@@ -157,6 +157,7 @@ def _send_due_alerts(quotes: dict[str, dict[str, Any]], now: datetime, *, sessio
                 event_id=f"plan-alert:{owner}:{now:%Y%m%d%H%M}",
                 card_template="red" if any(item.action == "stop_loss" for item in items) else "orange",
                 card_footer=_ALERT_FOOTER,
+                owner_user_id=owner,
                 share=ShareSpec(
                     source_type="trade_plan",
                     source_ref=newest_plan.plan_id,
@@ -164,10 +165,10 @@ def _send_due_alerts(quotes: dict[str, dict[str, Any]], now: datetime, *, sessio
                     button_text="📱 打开今天的计划",
                 ),
             )
-            if notification.status == "sent":
+            if notification.status in ("sent", SKIPPED):
                 for item in items:
                     item.notified_at = now_utc
-                sent += 1
+                sent += notification.status == "sent"
             else:
                 logger.warning("触价提醒发送失败，下一分钟重试: %s", (notification.error or "")[:200])
             db.commit()

@@ -36,7 +36,7 @@ from backend.app.core.models import (
 from backend.app.core.settings import settings
 from backend.app.data.share_service import ShareSpec
 from backend.app.events import rules
-from backend.app.feishu.feishu import DAILY_CHANNEL_KEY, send_feishu
+from backend.app.feishu.feishu import DAILY_CHANNEL_KEY, SKIPPED, send_feishu
 from backend.app.plans.rules import describe_plan
 from backend.app.plans.service import to_utc
 
@@ -376,6 +376,7 @@ def _push(session: Session, event: MarketEvent, channel: str, now: datetime) -> 
         event_markdown(event),
         event_id=f"market-event:{event.id}",
         card_template=template,
+        owner_user_id=event.owner_user_id,
         card_footer=_PUSH_FOOTER,
         card_brief=event.summary or True,
         share=ShareSpec(
@@ -386,7 +387,7 @@ def _push(session: Session, event: MarketEvent, channel: str, now: datetime) -> 
             meta={"generated_at": now.strftime("%Y-%m-%d %H:%M:%S")},
         ),
     )
-    return notification.status == "sent"
+    return notification.status in ("sent", SKIPPED)
 
 
 def _ordered_new(db: Session, owner_user_id: int) -> list[MarketEvent]:

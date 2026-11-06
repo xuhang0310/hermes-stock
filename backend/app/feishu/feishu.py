@@ -13,10 +13,10 @@ from urllib.parse import urlparse
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend.app.core.models import Notification, NotifyChannel
+from backend.app.core.models import Notification, NotifyChannel, User
 from backend.app.core.settings import settings
 from backend.app.data.share_render import lead_brief
 from backend.app.data.share_service import SAMPLE_SHARE_MARKDOWN, ShareSpec, create_share_link
@@ -27,6 +27,9 @@ ALERT_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
 DAILY_CHANNEL_KEY = SCHEDULE_CHANNEL_KEY
 LEGACY_CHANNEL_KEYS = ("feishu-alert",)
 BUILTIN_CHANNEL_KEYS = (SCHEDULE_CHANNEL_KEY,)
+# 这位用户没配飞书，这条只进了站内通知。不是失败：任务不报错，也不重试
+SKIPPED = "skipped"
+NO_CHANNEL_ERROR = "这位用户没有配置飞书推送"
 
 FEISHU_CONTENT_LIMIT = 3600
 FEISHU_COMPONENTS_PER_CARD = 3
@@ -723,6 +726,58 @@ def get_channel(db: Session, channel_key: str) -> NotifyChannel | None:
     return db.scalar(select(NotifyChannel).where(NotifyChannel.channel_key == channel_key).limit(1))
 
 
+def user_channel_key(user_id: int) -> str:
+    return f"feishu-user-{user_id}"
+
+
+def system_channel_owner(db: Session) -> int | None:
+    """系统通道（现在 admin 的那个群）只属于最早的超级管理员，其他管理员也有自己的通道。"""
+    return db.scalar(select(func.min(User.id)).where(User.role == "super_admin", User.is_enabled.is_(True)))
+
+
+def own_channel_key(db: Session, user_id: int) -> str:
+    """这位用户配置的是哪个通道。"""
+    return SCHEDULE_CHANNEL_KEY if user_id == system_channel_owner(db) else user_channel_key(user_id)
+
+
+def owner_channel_key(db: Session, owner_user_id: int) -> str | None:
+    """这位用户的推送走哪个通道，没配好返回 None。绝不能回退到系统通道：报告里有他的持仓和挂单。"""
+    key = own_channel_key(db, owner_user_id)
+    if key == SCHEDULE_CHANNEL_KEY:
+        return key
+    channel = get_channel(db, key)
+    if channel is None or channel.status != "enabled" or not decrypt_value(channel.webhook_url_cipher):
+        return None
+    return key
+
+
+def _record_no_channel(db: Session, owner_user_id: int, title: str, content: str, *, event_id: str | None, report_id: str | None) -> Notification:
+    """没配飞书：留一条审计记录，发一条站内通知。同一条消息只通知一次。"""
+    channel = f"feishu:{user_channel_key(owner_user_id)}"
+    if report_id or event_id:
+        existing = db.scalar(
+            select(Notification)
+            .where(
+                Notification.channel == channel,
+                Notification.report_id == report_id if report_id else Notification.event_id == event_id,
+                Notification.status == SKIPPED,
+            )
+            .limit(1)
+        )
+        if existing is not None:
+            return existing
+    notification = Notification(channel=channel, title=title[:300], content=content, event_id=event_id, report_id=report_id, status=SKIPPED, error=NO_CHANNEL_ERROR)
+    db.add(notification)
+    db.commit()
+    try:
+        from backend.app.notify.notification_service import create_notification
+
+        create_notification(owner_user_id, title, content=content[:2000], category="push")
+    except Exception as exc:  # noqa: BLE001 - 站内通知失败不能影响任务
+        _log(db, "WARNING", "站内通知写入失败", {"title": title[:80], "error": str(exc)[:200]})
+    return notification
+
+
 def _share_link(db: Session, share: ShareSpec | None, *, title: str, content: str) -> str | None:
     """建分享记录并返回链接。失败只告警：推送照常发，只是没有按钮。"""
     if share is None:
@@ -769,13 +824,22 @@ def send_feishu(
     card_kind: str | None = None,
     share: ShareSpec | None = None,
     card_brief: bool | str = False,
+    owner_user_id: int | None = None,
 ) -> Notification:
     """向指定通道推送消息。先落 pending 审计记录再发送，任何失败都不抛异常、只写 failed。
+
+    属于某位用户的内容（报告、计划、到价提醒、持仓消息）一定要传 owner_user_id，这时 channel_key 不起作用，
+    通道按这位用户定；他没配飞书就只进站内通知。不传的只有系统告警，发系统通道。
 
     传了 share 且配置了 STOCK_PUBLIC_BASE_URL 时，卡片上多一个打开手机版网页的按钮。
     再传 card_brief 时卡片只放一句核心的话和按钮，详细内容在手机版里看：传字符串就用它，
     传 True 从正文开头取（share_render.lead_brief）。没有链接时照旧发全文，不能让内容丢掉。
     """
+    if owner_user_id is not None:
+        routed = owner_channel_key(db, owner_user_id)
+        if routed is None:
+            return _record_no_channel(db, owner_user_id, title, content, event_id=event_id, report_id=report_id)
+        channel_key = routed
     if report_id or event_id:
         identity_filter = (
             Notification.report_id == report_id

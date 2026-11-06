@@ -576,12 +576,14 @@ class SchedulerDeliveryTests(unittest.TestCase):
         self.assertIn("evening", self._claim_at(2026, 11, 5, 22, 0, limit=5))
         self.assertIn("evening", self._claim_at(2026, 11, 6, 22, 1))
 
-    def test_the_catchup_window_is_thirty_minutes_after_the_run_time(self) -> None:
+    def test_the_catchup_window_is_two_hours_after_the_run_time(self) -> None:
         job = ScheduledJob(job_key="evening", job_kind="agent_report", schedule_type="daily", run_time="22:00", trading_day_only=False)
         self.assertFalse(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 21, 59)))
         self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 0)))
-        self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 30)))
-        self.assertFalse(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 31)))
+        self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 23, 59)))
+        job.run_time = "20:00"
+        self.assertTrue(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 0)))
+        self.assertFalse(rhythm_scheduler._is_due(job, datetime(2026, 11, 5, 22, 1)))
 
     def test_weekly_reports_catch_up_on_their_own_day_only(self) -> None:
         job = ScheduledJob(
@@ -625,6 +627,16 @@ class ScheduleAdminSafetyTests(unittest.TestCase):
             schedule_type="daily",
             enabled=False,
             push_channel_key=None,
+            owner_user_id=7,
+        )
+        someone_elses = ScheduledJob(
+            job_key="other-user-job",
+            name="别人的报告",
+            job_kind="agent_report",
+            schedule_type="daily",
+            enabled=False,
+            push_channel_key=None,
+            owner_user_id=8,
         )
         system_job = ScheduledJob(
             job_key="system-job",
@@ -634,10 +646,10 @@ class ScheduleAdminSafetyTests(unittest.TestCase):
             enabled=False,
             push_channel_key=None,
         )
-        self.db.add_all([report, system_job])
+        self.db.add_all([report, someone_elses, system_job])
         self.db.commit()
 
-        updated = _activate_agent_report_jobs(self.db)
+        updated = _activate_agent_report_jobs(self.db, 7)
 
         self.assertEqual([job.job_key for job in updated], ["report-job"])
         self.assertTrue(report.enabled)
@@ -646,6 +658,7 @@ class ScheduleAdminSafetyTests(unittest.TestCase):
         self.assertEqual(report.description, "保留这段说明")
         self.assertEqual(report.prompt_template, "保留这段提示词")
         self.assertFalse(system_job.enabled)
+        self.assertFalse(someone_elses.enabled)
         self.assertIsNone(system_job.push_channel_key)
 
 
