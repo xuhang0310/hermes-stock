@@ -43,6 +43,7 @@ from backend.app.mcp_gateway.server import MCPAuthMiddleware, create_mcp_server
 from backend.app.mcp_gateway.token_api import router as mcp_token_router
 from backend.app.notify.notification_api import router as notification_router
 from backend.app.paper.paper_api import router as paper_router
+from backend.app.scorecard.api import router as scorecard_router
 from backend.app.quant.agent_board_api import router as agent_board_router
 from backend.app.quant.automatic_selection_api import router as automatic_selection_router
 from backend.app.quant.automatic_selection_repository import ensure_default_strategy
@@ -188,6 +189,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(seed_router)
     app.include_router(notification_router)
     app.include_router(paper_router)
+    app.include_router(scorecard_router)
     app.include_router(runtime_overrides_router)
     app.include_router(mcp_token_router)
     app.mount("/api/mcp", mcp_app)

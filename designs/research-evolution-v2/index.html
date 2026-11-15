@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>研究进化中心 V2 · UI 评审</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0a0e11;--panel:#11181e;--line:#29343e;--text:#eef1f3;--muted:#9ba8b3;--gold:#eec261;--mint:#69d3bd}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;line-height:1.65}a{color:var(--gold);text-underline-offset:4px}button{font:inherit;cursor:pointer}a:focus-visible,button:focus-visible{outline:2px solid var(--gold);outline-offset:5px}
+    .wrap{max-width:1840px;margin:auto;padding:30px 36px 36px}.masthead{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}.eyebrow{font-size:11px;letter-spacing:2px;color:var(--gold);margin:0 0 8px}.brand{font-weight:400;font-family:Georgia,serif;font-size:20px;margin-right:12px}.badge{border:1px solid #655335;border-radius:5px;padding:4px 8px;letter-spacing:1px;font-size:10px}h1{font-size:clamp(26px,3vw,38px);letter-spacing:-.5px;font-weight:600;line-height:1.35;margin:0 0 10px}.lead{margin:0;color:var(--muted);max-width:860px;font-size:14px}.documents{display:flex;gap:18px;white-space:nowrap;font-size:13px;padding-top:12px}.tabs{display:flex;gap:8px;margin:28px 0 18px;border-bottom:1px solid var(--line)}.tab{border:0;border-bottom:3px solid transparent;background:none;color:var(--muted);padding:12px 18px;display:flex;gap:10px;align-items:center}.tab small{font-size:11px;opacity:.7}.tab[aria-selected="true"]{border-bottom-color:var(--gold);color:var(--gold);background:#eec26108}.tab:hover{color:var(--text)}
+    .toolbar{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:14px}.caption h2{margin:0 0 4px;font-size:18px;font-weight:500}.caption p{margin:0;color:var(--muted);font-size:13px}.actions{display:flex;align-items:center;gap:16px;white-space:nowrap;font-size:12px}.scale{color:var(--text);border:1px solid var(--line);border-radius:5px;background:var(--panel);padding:6px 12px}.scale:hover{border-color:var(--gold)}.viewport{overflow:auto;border:1px solid var(--line);border-radius:8px;background:#080b0e;box-shadow:0 20px 60px #0004}.viewport img{display:block;width:100%;height:auto}.viewport.original{max-height:80vh}.viewport.original img{width:auto;max-width:none}.note{display:flex;justify-content:space-between;gap:20px;margin:12px 0 20px;font-size:11px;color:var(--muted)}.note strong{font-weight:400;color:var(--gold)}.principles{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.principle{border-top:1px solid var(--line);padding:16px 0}.principle span{font-size:10px;letter-spacing:1px;color:var(--mint)}.principle h3{margin:6px 0;font-size:14px;font-weight:500}.principle p{margin:0;color:var(--muted);font-size:12px}.footer{margin-top:22px;color:#6e7d89;font-size:11px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:space-between;gap:16px}
+    @media(max-width:900px){.wrap{padding:22px 18px}.masthead,.toolbar{flex-direction:column;align-items:stretch}.documents{padding-top:0}.tabs{gap:0;overflow:auto}.tab{padding:12px 10px;white-space:nowrap;font-size:13px}.toolbar{gap:12px}.actions{justify-content:flex-end}.principles{grid-template-columns:1fr}.principle{padding:10px 0}.note,.footer{flex-direction:column;gap:5px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow"><span class="brand">SR</span>SIXRABBITS STOCK <span class="badge">DESIGN REVIEW · V2</span></p>
+        <h1>研究进化中心</h1>
+        <p class="lead">把每日研究、策略比较和人工决策连在一起。两条独立执行主线，共用一套可追溯的证据账本。</p>
+      </div>
+      <nav class="documents" aria-label="评审文档"><a href="plan-v2.md">完整实施方案 ↗</a><a href="prompts.md">ImageGen 提示词 ↗</a></nav>
+    </header>
+    <div class="tabs" role="tablist" aria-label="UI 原型页面">
+      <button class="tab" type="button" role="tab" id="tab-daily" aria-selected="true" aria-controls="screen" data-page="0"><small>01</small>每日研究台</button>
+      <button class="tab" type="button" role="tab" id="tab-evolution" aria-selected="false" aria-controls="screen" tabindex="-1" data-page="1"><small>02</small>策略进化台</button>
+      <button class="tab" type="button" role="tab" id="tab-approval" aria-selected="false" aria-controls="screen" tabindex="-1" data-page="2"><small>03</small>实验档案与审批</button>
+    </div>
+    <section id="screen" role="tabpanel" aria-labelledby="tab-daily" tabindex="0">
+      <div class="toolbar">
+        <div class="caption" aria-live="polite"><h2 id="screen-title">每日研究台</h2><p id="screen-desc">今天跑到哪了、哪些结果可信、哪个环节需要处理，一屏可见。</p></div>
+        <div class="actions"><button class="scale" id="scale" type="button" aria-pressed="false">按原始尺寸查看</button><a id="original" href="01-daily-research.png" target="_blank" rel="noopener">打开原图 ↗</a></div>
+      </div>
+      <div class="viewport" id="viewport"><img id="prototype" src="01-daily-research.png" alt="每日研究台静态原型：11 阶段研究流水线、候选执行失败详情、60 日评价等待到期和日报状态"></div>
+    </section>
+    <div class="note"><span><strong>内置 ImageGen 静态设计稿</strong> · 图内按钮不执行操作，指标与图表全部为示例数据。</span><span id="page-count">01 / 03</span></div>
+    <section class="principles" aria-label="本版设计原则">
+      <article class="principle"><span>EXECUTION</span><h3>任务完成与研究有效分开</h3><p>候选失败不阻断正式方案日常研究；未到期、证据不足与执行失败分别呈现。</p></article>
+      <article class="principle"><span>EVIDENCE</span><h3>比较收益，也解释代价</h3><p>先核对比较口径，再同时展示改善、退步、市场阶段差异及每一项判断的证据。</p></article>
+      <article class="principle"><span>GOVERNANCE</span><h3>自动研究，人工切换正式方案</h3><p>候选可以持续迭代；正式切换需要授权审批，绑定证据、版本、生效时间与回退方案。</p></article>
+    </section>
+    <footer class="footer"><span>2026.09.19 · 方案与 UI 评审 · 所有成功和失败实验均保留历史</span><span>可用 ← → 切换设计图；点击「打开原图」查看清晰细节。</span></footer>
+  </main>
+  <script>
+    const pages = [
+      {id:'daily',title:'每日研究台',desc:'今天跑到哪了、哪些结果可信、哪个环节需要处理，一屏可见。',file:'01-daily-research.png',alt:'每日研究台静态原型：11 阶段研究流水线、候选执行失败详情、60 日评价等待到期和日报状态'},
+      {id:'evolution',title:'策略进化台',desc:'同一口径比较正式、挑战者与影子方案，完整展示费用后表现、退步和观察成熟度。',file:'02-strategy-evolution.png',alt:'策略进化台静态原型：正式挑战者影子方案、同口径费用后净值、全指标对比、市场阶段表现及下一步实验'},
+      {id:'approval',title:'实验档案与人工审批',desc:'从假设和改动一路追到版本、时间线与正反证据，审查后再安排正式方案切换。',file:'03-experiment-approval.png',alt:'实验档案和人工审批静态原型：改动原因、输入代码模型版本、实验时间线、成功失败记录，以及禁用的批准按钮'}
+    ];
+    const tabs = [...document.querySelectorAll('[role="tab"]')];
+    const viewport = document.getElementById('viewport');
+    const scale = document.getElementById('scale');
+    let current = 0;
+    function showPage(index, focus) {
+      current = index;
+      const page = pages[index];
+      tabs.forEach((tab,i) => {tab.setAttribute('aria-selected', String(i === index));tab.tabIndex = i === index ? 0 : -1;});
+      document.getElementById('screen').setAttribute('aria-labelledby', 'tab-' + page.id);
+      document.getElementById('screen-title').textContent = page.title;
+      document.getElementById('screen-desc').textContent = page.desc;
+      document.getElementById('prototype').src = page.file;
+      document.getElementById('prototype').alt = page.alt;
+      document.getElementById('original').href = page.file;
+      document.getElementById('page-count').textContent = String(index+1).padStart(2,'0') + ' / 03';
+      viewport.scrollTo(0,0);
+      history.replaceState(null,'','#'+page.id);
+      if (focus) tabs[index].focus();
+    }
+    tabs.forEach((tab,i) => tab.addEventListener('click', () => showPage(i,false)));
+    document.querySelector('[role="tablist"]').addEventListener('keydown', event => {
+      let next;
+      if (event.key === 'ArrowRight') next = (current+1)%pages.length;
+      if (event.key === 'ArrowLeft') next = (current+pages.length-1)%pages.length;
+      if (event.key === 'Home') next = 0;
+      if (event.key === 'End') next = pages.length-1;
+      if (next !== undefined) {event.preventDefault();showPage(next,true);}
+    });
+    scale.addEventListener('click', () => {
+      const original = viewport.classList.toggle('original');
+      scale.setAttribute('aria-pressed',String(original));
+      scale.textContent = original ? '适应页面宽度' : '按原始尺寸查看';
+    });
+    const requestedPage = pages.findIndex(page => '#'+page.id === location.hash);
+    if (requestedPage >= 0) showPage(requestedPage,false);
+  </script>
+</body>
+</html>

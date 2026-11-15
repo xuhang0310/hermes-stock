@@ -215,6 +215,14 @@ SCHEMA_DICTIONARY: dict[str, dict[str, Any]] = {
         "label": "文档-标的关联表（多对多）",
         "fields": ["doc_id", "symbol", "relevance"],
     },
+    "advice_outcomes": {
+        "label": "建议成绩单：计划里的每条建议在 5、10、20 个交易日后和全市场平均比的结果。direction=up 是建议买或拿着，down 是建议卖；verdict 为 right/wrong/flat（差不多）/no_data，空表示还没到期；excess_return 是这只股票减全市场平均。统计时固定一个 horizon_days，样本少于 30 条不要下结论",
+        "fields": ["advice_date", "symbol", "name", "direction", "action", "horizon_days", "plan_source", "followed", "size_changed", "model_rank", "due_date", "stock_return", "market_return", "excess_return", "verdict"],
+    },
+    "market_daily_returns": {
+        "label": "全市场 A 股每天涨跌的等权平均，成绩单的基准",
+        "fields": ["trade_date", "mean_return", "stock_count"],
+    },
 }
 
 TOOLS = [

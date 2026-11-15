@@ -22,6 +22,7 @@ import ScreenerView from './views/ScreenerView.vue'
 import IndustryAnalysisView from './views/IndustryAnalysisView.vue'
 import { industryQuestion } from './utils/industry'
 import AutomaticSelectionView from './views/AutomaticSelectionView.vue'
+import ScorecardView from './views/ScorecardView.vue'
 import OpsConsoleView from './views/OpsConsoleView.vue'
 import AgentTaskBoardView from './views/AgentTaskBoardView.vue'
 import { renderMarkdown } from './utils/markdown'
@@ -62,6 +63,7 @@ type PageKey =
   | 'screener'
   | 'industryAnalysis'
   | 'automaticSelection'
+  | 'scorecard'
   | 'opsConsole'
   | 'settings'
 
@@ -282,6 +284,7 @@ const pageTitle = computed(() => {
     screener: 'AI 选股',
     industryAnalysis: '行业分析',
     automaticSelection: '自动选股',
+    scorecard: '建议成绩单',
     opsConsole: '运维控制台',
     settings: '设置'
   }
@@ -293,6 +296,7 @@ const pageSubtitle = computed(() => {
   if (activePage.value === 'automaticSelection') {
     return '每个交易日收盘后按固定规则选出观察股，并持续跟踪之后的表现'
   }
+  if (activePage.value === 'scorecard') return '计划里的每条建议，到期后和全市场平均比，算出对错'
   if (activePage.value !== 'workbench' || !dashboard.value) {
     return '问股、数字人、持仓、自选池和模型配置统一入口'
   }
@@ -1064,12 +1068,15 @@ function navigate(page: PageKey) {
     if (!/^\/automatic-selection\/?$/i.test(window.location.pathname)) {
       window.history.pushState({}, '', '/automatic-selection')
     }
+  } else if (page === 'scorecard') {
+    if (!/^\/scorecard\/?$/i.test(window.location.pathname)) window.history.pushState({}, '', '/scorecard')
   } else if (
     page !== 'backtestReport' &&
     page !== 'opsConsole' &&
     (window.location.pathname.startsWith('/backtests/') ||
       /^\/oc-console-/i.test(window.location.pathname) ||
       /^\/automatic-selection\/?$/i.test(window.location.pathname) ||
+      /^\/scorecard\/?$/i.test(window.location.pathname) ||
       /^\/settings\/?$/i.test(window.location.pathname) ||
       /^\/industries\/?$/i.test(window.location.pathname))
   ) {
@@ -1092,6 +1099,10 @@ function syncPageFromLocation() {
     activePage.value = 'automaticSelection'
     return
   }
+  if (/^\/scorecard\/?$/i.test(pathname)) {
+    activePage.value = 'scorecard'
+    return
+  }
   if (/^\/oc-console-[0-9a-f]+\/?$/i.test(pathname)) {
     activePage.value = 'opsConsole'
     return
@@ -1103,6 +1114,8 @@ function syncPageFromLocation() {
   } else if (activePage.value === 'backtestReport') {
     activePage.value = backtestReturnPage.value
   } else if (activePage.value === 'automaticSelection') {
+    activePage.value = 'workbench'
+  } else if (activePage.value === 'scorecard') {
     activePage.value = 'workbench'
   } else if (activePage.value === 'industryAnalysis') {
     activePage.value = 'workbench'
@@ -1282,6 +1295,7 @@ onBeforeUnmount(() => {
         @watchlist-added="applyWatchlistItem"
         @ask-stock="openAutomaticSelectionStockAnalysis"
       />
+      <ScorecardView v-else-if="activePage === 'scorecard'" :user="currentUser" />
       <IndustryAnalysisView
         v-else-if="activePage === 'industryAnalysis'"
         :user="currentUser"

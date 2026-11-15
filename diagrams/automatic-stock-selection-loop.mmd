@@ -1,0 +1,60 @@
+%%{init: {"flowchart": {"htmlLabels": false, "curve": "basis"}}}%%
+flowchart TB
+    subgraph DATA[① 数据底座]
+        direction LR
+        A["15:30 收盘后<br/>自动触发"] --> B["数据接入<br/>行情 · 财务<br/>公告 · 新闻"]
+        B --> C{"质量与时点检查<br/>是否通过？"}
+        C -- "通过" --> D["生成时点可用数据集<br/>PIT · 交易日 · 缺失率"]
+        C -- "不通过" --> E["暂停本轮<br/>故障与缺口留档"]
+    end
+
+    subgraph PICK[② 自动选股引擎]
+        direction LR
+        F["全 A 股可交易池<br/>剔除 ST · 退市 · 停牌<br/>新股 · 低流动性"]
+        F --> G["多因子量化评分<br/>价值 · 质量 · 成长<br/>动量 · 资金<br/>技术 · 风险"]
+        G --> H["LLM 证据解释<br/>风险复核 · 不参与打分"]
+        H --> I["组合约束<br/>行业 · 市值 · 集中度"]
+        I --> J["Top N 候选名单<br/>新增 · 保留 · 淘汰及原因"]
+    end
+
+    subgraph VERIFY[③ 验证与跟踪]
+        direction LR
+        K["成本化回测 + 样本外验证<br/>手续费 · 滑点 · 涨跌停"]
+        K -- "达到门槛" --> L["研究模拟组合<br/>只自动选股<br/>不自动交易"]
+        L --> M["5 / 20 / 60 日评估<br/>超额收益 · 回撤 · Sharpe<br/>IR · IC · 换手 · 容量"]
+        K -- "未达标也保留" --> N["失败证据<br/>进入实验台账"]
+    end
+
+    subgraph EVOLVE[④ 策略进化与汇报]
+        direction LR
+        O["实验台账<br/>正式 · 挑战者 · 影子<br/>成功与失败都保留"]
+        O --> P{"人工确认晋升？"}
+        P -- "确认" --> Q["挑战者 → 正式<br/>下一轮生效"]
+        Q --> T["人工确认后<br/>下一交易日进入新一轮"]
+        P -- "不确认" --> R["继续观察<br/>不覆盖正式策略"]
+        O --> S["日报与进化驾驶舱<br/>数据 · 理由 · 回测<br/>实验全程可追溯"]
+    end
+
+    DATA -- "仅通过质量门禁的数据进入" --> PICK
+    PICK -- "输出候选名单" --> VERIFY
+    VERIFY -- "评估结果全部留档" --> EVOLVE
+
+    classDef trigger fill:#1f2937,stroke:#111827,color:#ffffff,stroke-width:2px;
+    classDef data fill:#e8f2ff,stroke:#5b8fc9,color:#17324d,stroke-width:1.5px;
+    classDef gate fill:#fff7df,stroke:#d5a83f,color:#4a3510,stroke-width:2px;
+    classDef error fill:#fff0f0,stroke:#c95d5d,color:#6b2020,stroke-width:1.5px;
+    classDef quant fill:#fff5d6,stroke:#d5b46a,color:#3c2d0a,stroke-width:1.5px;
+    classDef verify fill:#eaf8ef,stroke:#5f9f78,color:#163d25,stroke-width:1.5px;
+    classDef evolve fill:#f2edff,stroke:#8a73bf,color:#30234f,stroke-width:1.5px;
+    class A trigger;
+    class B,D data;
+    class C,P gate;
+    class E,N error;
+    class F,G,H,I,J quant;
+    class K,L,M verify;
+    class O,Q,R,S,T evolve;
+
+    style DATA fill:#f7fbff,stroke:#bfd3e6,stroke-width:1px
+    style PICK fill:#fffdf6,stroke:#ddc989,stroke-width:1px
+    style VERIFY fill:#f7fcf8,stroke:#b7d8c3,stroke-width:1px
+    style EVOLVE fill:#fbf9ff,stroke:#cfc3e8,stroke-width:1px

@@ -24,6 +24,7 @@ export type PageKey =
   | 'screener'
   | 'industryAnalysis'
   | 'automaticSelection'
+  | 'scorecard'
   | 'opsConsole'
   | 'settings'
 
@@ -92,7 +93,8 @@ const navItems = computed<NavItem[]>(() => [
       { key: 'backtestHistory', label: '回测报告' },
       { key: 'screener', label: 'AI 选股' },
       { key: 'industryAnalysis', label: '行业分析' },
-      { key: 'automaticSelection', label: '自动选股' }
+      { key: 'automaticSelection', label: '自动选股' },
+      { key: 'scorecard', label: '建议成绩单' }
     ]
   },
   ...(canViewRhythm.value ? [{ key: 'rhythm' as PageKey, label: '定时任务' }] : []),

@@ -1571,9 +1571,11 @@ def _execute_job(job_key: str, run_id: str) -> None:
         elif snapshot["job_kind"] == "topnews_brief":
             output_content = _run_topnews_brief(snapshot, ran_at)
         elif snapshot["job_kind"] == "shadow_settle":
+            from backend.app.scorecard.service import run_daily as run_scorecard_day
             from backend.app.shadow.service import run_shadow_day
 
-            output_content = run_shadow_day(ran_at)
+            # 成绩单用同一批收盘数据，跟在影子账户后面跑；可以反复跑，失败不影响结算结果
+            output_content = f"{run_shadow_day(ran_at)}\n{run_scorecard_day(ran_at)}"
         elif snapshot["job_kind"] == "message_watch":
             from backend.app.events.service import run_message_watch
 

@@ -2304,3 +2304,53 @@ class TradePlanItem(Base):
     executed_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     trade_ids: Mapped[str | None] = mapped_column(Text)  # 对账匹配到的 position_trades.id，JSON 数组
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class MarketDailyReturn(Base):
+    """全市场 A 股当天涨跌的等权平均。成绩单拿它当基准，每天收盘数据到齐后算一次。"""
+
+    __tablename__ = "market_daily_returns"
+
+    trade_date: Mapped[str] = mapped_column(String(8), primary_key=True)
+    mean_return: Mapped[float] = mapped_column(Float, nullable=False)
+    stock_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AdviceOutcome(Base):
+    """一条建议在若干个交易日之后的结果（成绩单）。规则见 scorecard/rules.py。
+
+    一位用户、一个交易日、一只股票、一个方向只记一条建议，同一天早盘和午盘都提到时取最后那份计划里的。
+    verdict：空（还没到期）/ right / wrong / flat（差不多）/ no_data（这段时间没有行情）。
+    """
+
+    __tablename__ = "advice_outcomes"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "advice_date", "symbol", "direction", "horizon_days", name="uq_advice_outcome"),
+        Index("ix_advice_outcomes_owner_date", "owner_user_id", "advice_date"),
+        Index("ix_advice_outcomes_pending", "verdict", "advice_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    advice_date: Mapped[str] = mapped_column(String(8), nullable=False)  # 建议生效的交易日 YYYYMMDD
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(120))
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)  # up：建议买或拿着；down：建议卖
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    horizon_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_id: Mapped[str | None] = mapped_column(String(32))
+    plan_item_id: Mapped[int | None] = mapped_column(Integer)
+    plan_source: Mapped[str | None] = mapped_column(String(16))
+    digital_human_code: Mapped[str | None] = mapped_column(String(80))
+    trigger_price: Mapped[float | None] = mapped_column(Float)
+    followed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # 客户有没有照做（有成交）
+    size_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # 数字人改了代码建议的股数
+    model_rank: Mapped[float | None] = mapped_column(Float)  # 建议前一个交易日的模型排名，0 到 1
+    due_date: Mapped[str | None] = mapped_column(String(8))
+    stock_return: Mapped[float | None] = mapped_column(Float)
+    market_return: Mapped[float | None] = mapped_column(Float)
+    excess_return: Mapped[float | None] = mapped_column(Float)
+    verdict: Mapped[str | None] = mapped_column(String(8))
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

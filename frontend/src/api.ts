@@ -80,6 +80,7 @@ import type {
   ApiEnvelope,
   ScreenerQuery,
   ScreenerResult,
+  ScorecardSummary,
   ScreenerSyncStats,
   ScreenerSyncStatus,
   ScreenerParseResult,
@@ -844,6 +845,14 @@ export const api = {
     ),
   deleteNotification: (id: number) =>
     request<ApiEnvelope<null>>(`/api/notifications/${id}`, { method: 'DELETE' }),
+  scorecard: (horizon = 10, days = 180) =>
+    request<ApiEnvelope<ScorecardSummary>>(`/api/scorecard?horizon=${horizon}&days=${days}`).then(
+      (res) => res.data
+    ),
+  scorecardRefresh: () =>
+    request<ApiEnvelope<{ message: string }>>('/api/scorecard/refresh', { method: 'POST' }).then(
+      (res) => res.data
+    ),
   automaticSelectionTrackRecord: (limit = 60) =>
     request<ApiEnvelope<AutomaticSelectionTrackRecord>>(
       `/api/automatic-selection/track-record?limit=${limit}`

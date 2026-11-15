@@ -47,6 +47,7 @@ SHARED_TABLES: frozenset[str] = frozenset({
     "stock_adj_factors",
     "market_snapshots",
     "market_trading_calendar",
+    "market_daily_returns",
     "tushare_factor_catalog",
     "tushare_factor_values",
     "automatic_selection_strategies",
@@ -91,6 +92,7 @@ PERSONAL_TABLES: dict[str, str] = {
     "shadow_positions": "owner_user_id",
     "shadow_orders": "owner_user_id",
     "shadow_nav": "owner_user_id",
+    "advice_outcomes": "owner_user_id",
 }
 
 # 归属列为空的行是公共数据（宏观/市场事件、系统回测），所有用户可见；

@@ -2359,3 +2359,52 @@ export type UserLoginLogPage = {
   page: number
   page_size: number
 }
+
+export type ScorecardVerdict = 'right' | 'wrong' | 'flat' | 'no_data' | null
+
+export type ScorecardStats = {
+  total: number
+  right: number
+  wrong: number
+  flat: number
+  right_rate: number | null
+  avg_edge: number | null
+  enough: boolean
+}
+
+export type ScorecardGroup = ScorecardStats & { key: string; label: string }
+
+export type ScorecardItem = {
+  advice_date: string
+  symbol: string
+  name: string | null
+  action: string
+  action_label: string
+  plan_source: string
+  trigger_price: number | null
+  followed: boolean
+  model_view: 'agree' | 'disagree' | 'neutral' | 'unknown'
+  due_date: string | null
+  stock_return: number | null
+  market_return: number | null
+  excess_return: number | null
+  verdict: ScorecardVerdict
+}
+
+export type ScorecardSummary = {
+  horizon: number
+  horizons: number[]
+  days: number
+  min_samples: number
+  dead_band: number
+  overall: ScorecardStats
+  pending: number
+  no_data: number
+  first_advice_date: string | null
+  by_action: ScorecardGroup[]
+  by_source: ScorecardGroup[]
+  by_followed: ScorecardGroup[]
+  by_model: ScorecardGroup[]
+  by_size: ScorecardGroup[]
+  recent: ScorecardItem[]
+}
