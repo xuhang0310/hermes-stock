@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 from tests.automatic_selection_fixtures import history_dates
 
-from backend.app.quant.automatic_selection_presentation import explanation_evidence, method_view
+from backend.app.quant.automatic_selection_presentation import (
+    _rebalance_digest,
+    explanation_evidence,
+    method_view,
+    operation_view,
+)
 from backend.app.quant.automatic_selection_scoring import (
     DEFAULT_STRATEGY_CONFIG,
     MODEL_RANK_STRATEGY_CONFIG,
@@ -183,6 +188,76 @@ class ModelRankPresentationTests(unittest.TestCase):
         default = method_view(validate_config(DEFAULT_STRATEGY_CONFIG))
         self.assertTrue(any("亏损" in text for text in default["filters"]))
         self.assertNotIn("模型排名", default["scoring"])
+
+    def _picks(self, states: list[str]) -> list[dict]:
+        return [
+            {
+                "symbol": f"60000{index}.SH" if index != 2 else "688002.SH",
+                "name": f"测试{index}",
+                "industry": "银行",
+                "close_price": 10.0 * index,
+                "change_state": state,
+            }
+            for index, state in enumerate(states, start=1)
+        ]
+
+    def _model_run(self, rebalance: dict) -> dict:
+        return {
+            "run_id": "unit-operation",
+            "config": validate_config(MODEL_RANK_STRATEGY_CONFIG),
+            "sync_summary": {"rebalance": rebalance},
+        }
+
+    def test_hold_day_says_do_nothing(self) -> None:
+        run = self._model_run({"due": False, "anchor_trade_date": "20260824", "days_since_anchor": 4, "every_days": 10})
+        view = operation_view(run, self._picks(["retained", "retained", "retained"]), [])
+        self.assertEqual(view["kind"], "hold")
+        self.assertEqual(view["days_until_next"], 6)
+        self.assertEqual(view["text"], "今天不用操作。名单是 8 月 24 日定的，还有 6 个交易日换仓。")
+        self.assertEqual(view["added"], [])
+
+        dropped = operation_view(run, self._picks(["retained", "retained"]), [{"symbol": "600009.SH", "name": "测试9"}])
+        self.assertIn("测试9已不符合条件", dropped["text"])
+
+        digest = _rebalance_digest(
+            {"picks": self._picks(["retained"]), "trade_date": TARGET_DATE, "run": {"run_id": "r1"}, "track_brief": None},
+            view,
+        )
+        self.assertEqual(digest["brief"], "8 月 28 日：今天不用操作。名单是 8 月 24 日定的，还有 6 个交易日换仓。")
+        self.assertNotIn("调入", digest["content"])
+        self.assertIn("不构成投资建议", digest["content"])
+
+    def test_rebalance_day_lists_what_goes_in_and_out(self) -> None:
+        run = self._model_run({"due": True, "anchor_trade_date": TARGET_DATE, "days_since_anchor": 0, "every_days": 10})
+        picks = self._picks(["added", "retained", "added"])
+        removed = [{"symbol": "600009.SH", "name": "测试9"}]
+        view = operation_view(run, picks, removed)
+        self.assertEqual(view["kind"], "rebalance")
+        self.assertEqual(view["days_until_next"], 10)
+        self.assertTrue(view["text"].startswith("今天换仓，调入 2 只，调出 1 只，保留 1 只"))
+        self.assertEqual([item["symbol"] for item in view["added"]], ["600001.SH", "600003.SH"])
+        # 科创板一手 200 股：10×100、20×200、30×100，等额按最贵的一手算
+        self.assertEqual(view["basket"]["one_lot_total"], 8000.0)
+        self.assertEqual(view["basket"]["per_stock"], 4000.0)
+        self.assertEqual(view["basket"]["equal_total"], 12000.0)
+
+        digest = _rebalance_digest(
+            {"picks": picks, "trade_date": TARGET_DATE, "run": {"run_id": "r1"}, "track_brief": None}, view,
+        )
+        self.assertEqual(digest["inbox_title"], "选股换仓（8 月 28 日）：调入 2 只，调出 1 只")
+        self.assertIn("1. **测试1（600001.SH）** · 银行 · 收盘 10.00 元", digest["content"])
+        self.assertIn("**调出 1 只**：测试9（600009.SH）", digest["content"])
+        self.assertIn("只挑其中几只没有依据", digest["content"])
+
+        first = operation_view(run, self._picks(["added", "added"]), [])
+        self.assertTrue(first["text"].startswith("今天出第一期名单，共 2 只"))
+
+    def test_strategy_without_rebalance_is_marked_daily(self) -> None:
+        run = {"run_id": "unit-daily", "config": validate_config(DEFAULT_STRATEGY_CONFIG), "sync_summary": {}}
+        view = operation_view(run, self._picks(["added"]), [])
+        self.assertEqual(view["kind"], "daily")
+        missing_price = operation_view(run, [{**self._picks(["added"])[0], "close_price": None}], [])
+        self.assertIsNone(missing_price["basket"])
 
 
 if __name__ == "__main__":

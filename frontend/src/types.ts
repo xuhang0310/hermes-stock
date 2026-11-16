@@ -2222,6 +2222,16 @@ export type AutomaticSelectionDaily = {
   } | null
   picks: AutomaticSelectionPick[]
   removed: Array<{ symbol: string; name: string }>
+  operation?: {
+    kind: 'rebalance' | 'hold' | 'daily'
+    text: string
+    every_days: number | null
+    days_until_next: number | null
+    anchor_trade_date: string | null
+    added: Array<{ symbol: string; name: string }>
+    removed: Array<{ symbol: string; name: string }>
+    basket: { count: number; per_stock: number; equal_total: number; one_lot_total: number; text: string } | null
+  } | null
   funnel: AutomaticSelectionFunnel | null
   method: AutomaticSelectionMethod
   performance: {

@@ -1100,14 +1100,34 @@ def _nullable_text(value: Any, limit: int) -> str | None:
 
 
 def display_strategy(strategy_id: int | None = None) -> dict[str, Any] | None:
-    """普通用户默认看正式策略；没有正式策略时退回最近一次运行所属的策略。"""
+    """普通用户默认看模型排名方案（回测通过的那个），它还没出过结果或被停用时看正式策略；都没有时退回最近一次运行所属的策略。
+
+    只决定页面和每日摘要默认展示谁，不动 official_slot：正式策略的晋升记录和评估照旧。
+    """
     with SessionLocal() as db:
         if strategy_id is not None:
             row = db.get(AutomaticSelectionStrategy, strategy_id)
             return strategy_to_dict(row) if row is not None else None
         row = db.scalar(
-            select(AutomaticSelectionStrategy).where(AutomaticSelectionStrategy.official_slot == 1)
+            select(AutomaticSelectionStrategy)
+            .where(
+                AutomaticSelectionStrategy.strategy_key == MODEL_RANK_STRATEGY_KEY,
+                AutomaticSelectionStrategy.enabled.is_(True),
+                AutomaticSelectionStrategy.lifecycle_state != "retired",
+                select(AutomaticSelectionRun.run_id)
+                .where(
+                    AutomaticSelectionRun.strategy_id == AutomaticSelectionStrategy.id,
+                    AutomaticSelectionRun.status == "completed",
+                )
+                .exists(),
+            )
+            .order_by(AutomaticSelectionStrategy.version.desc())
+            .limit(1)
         )
+        if row is None:
+            row = db.scalar(
+                select(AutomaticSelectionStrategy).where(AutomaticSelectionStrategy.official_slot == 1)
+            )
         if row is None:
             latest = db.scalar(
                 select(AutomaticSelectionRun.strategy_id).order_by(*_latest_run_order()).limit(1)

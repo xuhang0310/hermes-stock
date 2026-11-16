@@ -35,7 +35,7 @@ const showExplanation = ref(false)
 const detailSymbol = ref('')
 const drawerEl = ref<HTMLElement | null>(null)
 const watchlistState = ref<Record<string, WatchState>>({})
-// 空表示正式策略（服务端默认）；挑战者和正式策略并排看
+// 空表示服务端默认（模型排名方案出过结果就是它，否则是正式策略）；两个方案并排看
 const strategyId = ref<number | null>(null)
 const strategies = ref<AutomaticSelectionStrategy[]>([])
 let dailySequence = 0
@@ -486,6 +486,21 @@ onBeforeUnmount(() => {
           <div class="conclusion-main">
             <h2 id="conclusion-title">{{ status.title }}</h2>
             <p class="conclusion-headline">{{ daily.summary?.headline }}</p>
+            <div
+              v-if="daily.is_latest && daily.operation"
+              class="operation-box"
+              :class="`operation-${daily.operation.kind}`"
+              data-testid="automatic-selection-operation"
+            >
+              <strong>{{ daily.operation.text }}</strong>
+              <p v-if="daily.operation.kind === 'rebalance' && daily.operation.added.length">
+                调入：{{ daily.operation.added.map((item) => item.name).join('、') }}
+              </p>
+              <p v-if="daily.operation.kind === 'rebalance' && daily.operation.removed.length">
+                调出：{{ daily.operation.removed.map((item) => item.name).join('、') }}
+              </p>
+              <small v-if="daily.operation.basket">{{ daily.operation.basket.text }}</small>
+            </div>
             <ul class="conclusion-facts">
               <li>
                 <span>全市场</span><strong>{{ fmtCount(daily.summary?.universe_count) }}</strong>
@@ -1068,6 +1083,11 @@ onBeforeUnmount(() => {
 .pick-spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .pick-spark polyline.pnl-up { stroke: var(--up); }
 .pick-spark polyline.pnl-down { stroke: var(--down); }
+.operation-box { display: grid; gap: 6px; margin-top: 12px; border-left: 2px solid var(--line); padding: 2px 0 2px 12px; }
+.operation-box.operation-rebalance { border-left-color: var(--accent); }
+.operation-box strong { font-size: 14px; font-weight: 500; line-height: 1.6; }
+.operation-box p { margin: 0; font-size: 13px; line-height: 1.7; }
+.operation-box small { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .removed-line { margin: 0; border-top: 1px solid var(--line); padding: 12px 16px; color: var(--muted); font-size: 12px; }
 
 .horizon-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }

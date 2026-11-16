@@ -21,6 +21,7 @@ from backend.app.auth.auth import AuthContext, get_current_user
 from backend.app.core.database import Base
 from backend.app.core.models import (
     AutomaticSelectionEvaluation,
+    AutomaticSelectionRun,
     AutomaticSelectionStrategy,
     DailyBar,
     Instrument,
@@ -256,6 +257,46 @@ class AutomaticSelectionPresentationFlowTests(unittest.TestCase):
         for jargon in ("z_score", "入选证据", "阻断"):
             self.assertNotIn(jargon, content)
         self.assertIsNone(presentation.daily_digest(trade_date="20200101"))
+
+    def test_daily_view_says_the_list_changes_every_day(self) -> None:
+        operation = presentation.daily_view()["operation"]
+
+        self.assertEqual(operation["kind"], "daily")
+        self.assertIn("每天都会变", operation["text"])
+        self.assertEqual(len(operation["added"]), 4)
+        self.assertEqual(operation["basket"]["count"], 4)
+
+    def test_default_strategy_is_the_model_rank_one_once_it_has_a_result(self) -> None:
+        model = repository.ensure_model_rank_strategy()
+        # 还没出过结果：默认仍是正式策略
+        self.assertEqual(repository.display_strategy()["id"], self.strategy["id"])
+
+        with self.SessionFactory() as db:
+            db.add(
+                AutomaticSelectionRun(
+                    run_id="model-rank-first",
+                    strategy_id=model["id"],
+                    strategy_key=model["strategy_key"],
+                    strategy_version=model["version"],
+                    strategy_name=model["name"],
+                    target_trade_date=TARGET_DATE,
+                    status="completed",
+                    config_json=canonical_json(model["config"]),
+                    config_hash=model["config_hash"],
+                    data_fingerprint="0" * 64,
+                    started_at=datetime(2026, 8, 28, 17, 50),
+                )
+            )
+            db.commit()
+        self.assertEqual(repository.display_strategy()["id"], model["id"])
+        # 指定策略时照旧，正式策略的位置也没动
+        self.assertEqual(repository.display_strategy(self.strategy["id"])["id"], self.strategy["id"])
+        self.assertTrue(repository.display_strategy(self.strategy["id"])["is_official"])
+
+        with self.SessionFactory() as db:
+            db.get(AutomaticSelectionStrategy, model["id"]).enabled = False
+            db.commit()
+        self.assertEqual(repository.display_strategy()["id"], self.strategy["id"])
 
     def test_since_selection_uses_adjusted_prices_and_pool_average(self) -> None:
         view = presentation.daily_view()

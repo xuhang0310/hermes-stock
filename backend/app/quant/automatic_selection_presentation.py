@@ -160,6 +160,7 @@ def daily_view(*, trade_date: str | None = None, strategy_id: int | None = None)
         "summary": _summary(detail, picks, removed),
         "picks": picks,
         "removed": removed,
+        "operation": operation_view(detail, picks, removed) if picks else None,
         "funnel": (
             funnel_view(detail, repository.constraint_skipped_count(detail["run_id"]) if picks else 0)
             if detail.get("universe_count")
@@ -186,6 +187,9 @@ def daily_digest(*, trade_date: str | None = None) -> dict[str, Any] | None:
     picks = view["picks"]
     if not picks or not view["trade_date"]:
         return None
+    operation = view.get("operation") or {}
+    if operation.get("kind") in ("rebalance", "hold"):
+        return _rebalance_digest(view, operation)
     summary = view["summary"] or {}
     date_text = _date_label(view["trade_date"])
     top = picks[:DIGEST_TOP_N]
@@ -229,6 +233,123 @@ def daily_digest(*, trade_date: str | None = None) -> dict[str, Any] | None:
         "content": "\n".join(lines),
         # 飞书卡片只放这一句，名单和打分在手机版里
         "brief": f"{date_text}收盘后按固定规则选出 {len(picks)} 只，排在前面的是{names}{'等' if len(picks) > 3 else ''}。",
+    }
+
+
+def _rebalance_digest(view: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
+    """定期换仓的方案：换仓日推调入调出，其余日子只说一句不用动。"""
+    picks = view["picks"]
+    date_text = _date_label(view["trade_date"])
+    base = {
+        "run_id": (view["run"] or {}).get("run_id"),
+        "trade_date": view["trade_date"],
+        "title": f"每日选股 | {_iso_date(view['trade_date'])}",
+    }
+    if operation["kind"] == "hold":
+        return {
+            **base,
+            "inbox_title": f"选股名单今天不变（{date_text}）"[:200],
+            "content": "\n".join([f"**{date_text}：{operation['text']}**", "", DISCLAIMER]),
+            "brief": f"{date_text}：{operation['text']}",
+        }
+    by_symbol = {pick["symbol"]: pick for pick in picks}
+    lines = [f"**{date_text}收盘后：{operation['text']}**", ""]
+    if operation["added"]:
+        lines.append(f"**调入 {len(operation['added'])} 只**")
+        for index, item in enumerate(operation["added"], start=1):
+            pick = by_symbol[item["symbol"]]
+            tags = [pick["industry"] or "未分类"]
+            if pick["close_price"] is not None:
+                tags.append(f"收盘 {float(pick['close_price']):.2f} 元")
+            lines.append(f"{index}. **{pick['name']}（{pick['symbol']}）** · {' · '.join(tags)}")
+        lines.append("")
+    if operation["removed"]:
+        names = "、".join(f"{item['name']}（{item['symbol']}）" for item in operation["removed"])
+        lines += [f"**调出 {len(operation['removed'])} 只**：{names}", ""]
+    basket = operation.get("basket")
+    if basket:
+        lines += [basket["text"], ""]
+    lines.append(_digest_track_line(view.get("track_brief")))
+    lines.append(f"完整的 {len(picks)} 只名单在系统「自动选股」页面查看。这份名单要整体等额持有才是验证过的用法，只挑其中几只没有依据。")
+    lines.append(DISCLAIMER)
+    return {
+        **base,
+        "inbox_title": f"选股换仓（{date_text}）：调入 {len(operation['added'])} 只，调出 {len(operation['removed'])} 只"[:200],
+        "content": "\n".join(lines),
+        "brief": f"{date_text}收盘后：{operation['text']}",
+    }
+
+
+def operation_view(
+    run: dict[str, Any], picks: list[dict[str, Any]], removed: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """今天要不要动：定期换仓的方案在换仓日列调入调出，其余日子说不用动；每天重挑的方案只说明名单会天天变。"""
+    rule = _run_config(run).get("rebalance") or {}
+    state = (run.get("sync_summary") or {}).get("rebalance") or {}
+    added = [{"symbol": pick["symbol"], "name": pick["name"]} for pick in picks if pick["change_state"] == "added"]
+    retained = sum(pick["change_state"] == "retained" for pick in picks)
+    basket = _basket_view(picks)
+    if not rule or not state:
+        return {
+            "kind": "daily",
+            "text": "这个方案每个交易日从头挑一遍，所以名单每天都会变。",
+            "every_days": None,
+            "days_until_next": None,
+            "anchor_trade_date": None,
+            "added": added,
+            "removed": removed,
+            "basket": basket,
+        }
+    every_days = int(rule["every_days"])
+    if state.get("due"):
+        if retained or removed:
+            text = f"今天换仓，调入 {len(added)} 只，调出 {len(removed)} 只，保留 {retained} 只"
+        else:
+            text = f"今天出第一期名单，共 {len(picks)} 只"
+        text += f"；回测里是下一个交易日开盘调整，之后 {every_days} 个交易日名单不变。"
+        days_until_next = every_days
+    else:
+        days_until_next = max(1, every_days - int(state.get("days_since_anchor") or 0))
+        text = (
+            f"今天不用操作。名单是 {_date_label(str(state.get('anchor_trade_date') or ''))}定的，"
+            f"还有 {days_until_next} 个交易日换仓。"
+        )
+        if removed:
+            names = "、".join(item["name"] for item in removed[:5])
+            text += f"{names}{' 等' if len(removed) > 5 else ''}已不符合条件（停牌、ST 或成交太少），位置等换仓时补。"
+    return {
+        "kind": "rebalance" if state.get("due") else "hold",
+        "text": text,
+        "every_days": every_days,
+        "days_until_next": days_until_next,
+        "anchor_trade_date": state.get("anchor_trade_date"),
+        "added": added if state.get("due") else [],
+        "removed": removed,
+        "basket": basket,
+    }
+
+
+def _basket_view(picks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """整份名单买齐大约要多少钱：按收盘价和最小交易单位估，只是量级，不含费用。"""
+    lots = [
+        float(pick["close_price"]) * (200 if str(pick["symbol"]).startswith(("688", "689")) else 100)
+        for pick in picks
+        if pick.get("close_price")
+    ]
+    if not lots or len(lots) != len(picks):
+        return None
+    per_stock = max(lots)
+    equal_total = per_stock * len(lots)
+    one_lot_total = sum(lots)
+    return {
+        "count": len(lots),
+        "per_stock": round(per_stock, 2),
+        "equal_total": round(equal_total, 2),
+        "one_lot_total": round(one_lot_total, 2),
+        "text": (
+            f"按收盘价估，{len(lots)} 只每只金额差不多地买齐，大约要 {equal_total / 10000:.1f} 万元"
+            f"（每只约 {per_stock:,.0f} 元）；每只只买最少的一手约 {one_lot_total / 10000:.1f} 万元，但各只金额相差很大。"
+        ),
     }
 
 

@@ -62,6 +62,7 @@ function dailyPayload(tradeDate, overrides = {}) {
     summary: null,
     picks: [pick(`${tradeDate}-A`), pick(`${tradeDate}-B`, { rank: 2 })],
     removed: [],
+    operation: null,
     funnel: null,
     method: {},
     performance: { since_selection: null, horizons: [] },
