@@ -13,7 +13,7 @@ pipeline {
     }
 
     triggers {
-        pollSCM('H/5 * * * *')                       // 每 5 分钟轮询 master（Gitee 未配 webhook）
+        pollSCM('H/5 * * * *')                       // 每 5 分钟轮询 GitHub master（未配 webhook）
     }
 
     environment {
