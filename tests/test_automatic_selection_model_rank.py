@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest.mock import patch
 
 from tests.automatic_selection_fixtures import history_dates
 
-from backend.app.quant.automatic_selection_presentation import method_view
+from backend.app.quant.automatic_selection_presentation import explanation_evidence, method_view
 from backend.app.quant.automatic_selection_scoring import (
     DEFAULT_STRATEGY_CONFIG,
     MODEL_RANK_STRATEGY_CONFIG,
@@ -160,6 +161,18 @@ class RebalanceTests(unittest.TestCase):
 
 
 class ModelRankPresentationTests(unittest.TestCase):
+    @patch("backend.app.quant.automatic_selection_presentation.repository.eligible_score_pool", return_value=[])
+    def test_ai_method_describes_the_actual_strategy(self, _pool) -> None:
+        model = explanation_evidence({"run_id": "unit-model-method", "config": validate_config(MODEL_RANK_STRATEGY_CONFIG)}, [])
+        self.assertIn("模型排名", model["method"])
+        self.assertIn("每 10 个交易日", model["method"])
+        self.assertNotIn("剔除亏损", model["method"])
+        self.assertNotIn("同一行业最多", model["method"])
+        official = explanation_evidence({"run_id": "unit-official-method", "config": validate_config(DEFAULT_STRATEGY_CONFIG)}, [])
+        self.assertIn("剔除亏损", official["method"])
+        self.assertIn("同一行业最多 4 只", official["method"])
+        self.assertNotIn("模型排名", official["method"])
+
     def test_method_view_explains_model_rules(self) -> None:
         view = method_view(validate_config(MODEL_RANK_STRATEGY_CONFIG))
         self.assertEqual([item["key"] for item in view["dimensions"]], ["model"])

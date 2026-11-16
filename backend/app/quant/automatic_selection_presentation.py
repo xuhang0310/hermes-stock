@@ -278,6 +278,8 @@ def track_record(*, strategy_id: int | None = None, limit: int = 60) -> dict[str
 def explanation_evidence(run: dict[str, Any], candidates: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """给模型写白话点评用的证据：分位、原始指标和规则风险，不含 z 值和哈希。"""
     picks = present_picks(run, candidates)
+    method = method_view(_run_config(run))
+    dimensions = "、".join(f"{item['label']} {item['weight_percent']}%" for item in method["dimensions"])
     return {
         "target_trade_date": run.get("target_trade_date"),
         "universe_count": run.get("universe_count"),
@@ -301,7 +303,7 @@ def explanation_evidence(run: dict[str, Any], candidates: Iterable[dict[str, Any
             }
             for pick in picks
         ],
-        "method": "全市场先剔除 ST、次新、成交太少、亏损和数据不全的股票，再按估值、走势、活跃度、稳定性加权打分，取前若干只并限制单一行业数量。",
+        "method": "；".join([*method["filters"], f"计分维度：{dimensions}", method["scoring"], *method["selection"]]),
         "limitations": RESEARCH_LIMITATIONS,
     }
 

@@ -333,3 +333,72 @@ test('switching strategy reloads the day and the track record for that strategy'
   await broken.loadStrategies()
   assert.equal(broken.strategyOptions.value.length, 0)
 })
+
+test('a previous strategy history response stays discarded after switching outside history', async () => {
+  const previous = deferred()
+  const requested = []
+  const nextTrack = { strategy: { id: 2 }, periods: [], summary: [], notes: [], disclaimer: '' }
+  const { harness } = createHarness({
+    api: {
+      automaticSelectionTrackRecord: async (_limit, strategyId) => {
+        requested.push(strategyId)
+        return strategyId === 2 ? nextTrack : previous.promise
+      },
+    },
+  })
+  harness.activeTab.value = 'history'
+  const pending = harness.loadTrack()
+  harness.selectTab('today')
+  harness.selectStrategy('2')
+  previous.resolve({ ...nextTrack, strategy: { id: 1 } })
+  await pending
+  assert.equal(harness.track.value, null)
+  harness.selectTab('history')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(requested, [null, 2])
+  assert.equal(harness.track.value.strategy.id, 2)
+})
+
+test('a pending previous strategy request does not block loading the new history', async () => {
+  const previous = deferred()
+  const requested = []
+  const nextTrack = { strategy: { id: 2 }, periods: [], summary: [], notes: [], disclaimer: '' }
+  const { harness } = createHarness({
+    api: {
+      automaticSelectionTrackRecord: async (_limit, strategyId) => {
+        requested.push(strategyId)
+        return strategyId === 2 ? nextTrack : previous.promise
+      },
+    },
+  })
+  harness.activeTab.value = 'history'
+  const pending = harness.loadTrack()
+  harness.selectTab('today')
+  harness.selectStrategy('2')
+  harness.selectTab('history')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(requested, [null, 2])
+  assert.equal(harness.track.value.strategy.id, 2)
+  previous.resolve({ ...nextTrack, strategy: { id: 1 } })
+  await pending
+  assert.equal(harness.track.value.strategy.id, 2)
+})
+
+test('switching strategy clears previous picks even when the next request fails', async () => {
+  const next = deferred()
+  const { harness } = createHarness({
+    api: {
+      automaticSelectionDaily: async (_tradeDate, strategyId) =>
+        strategyId === 2 ? next.promise : dailyPayload('20261016'),
+    },
+  })
+  await harness.loadDaily()
+  assert.equal(harness.daily.value.strategy.id, 1)
+  harness.selectStrategy('2')
+  assert.equal(harness.daily.value, null)
+  next.reject(new Error('方案读取失败'))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(harness.daily.value, null)
+  assert.equal(harness.picks.value.length, 0)
+  assert.match(harness.error.value, /方案读取失败/)
+})

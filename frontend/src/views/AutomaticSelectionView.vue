@@ -222,7 +222,11 @@ async function loadStrategies() {
 function selectStrategy(value: string) {
   const id = Number(value)
   strategyId.value = Number.isFinite(id) && id > 0 ? id : null
+  daily.value = null
+  trackSequence += 1
   track.value = null
+  trackLoading.value = false
+  trackError.value = ''
   void loadDaily()
   if (activeTab.value === 'history') void loadTrack(true)
 }
