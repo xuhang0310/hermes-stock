@@ -27,6 +27,7 @@ from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant.automatic_selection_evaluation import calculate_turnover
 from backend.app.quant.automatic_selection_presentation import explanation_evidence
 from backend.app.quant.automatic_selection_scoring import (
+    MODEL_RANK_FEATURE,
     RESEARCH_LIMITATIONS,
     SCORING_IMPLEMENTATION_VERSION,
     apply_membership_changes,
@@ -37,8 +38,10 @@ from backend.app.quant.automatic_selection_scoring import (
     exclusion_summary,
     fingerprint_payload,
     quality_gate,
+    rebalance_state,
     required_tushare_factors,
     score_candidates,
+    uses_model_rank,
     validate_config,
 )
 from backend.app.quant.tushare_factor_service import (
@@ -79,6 +82,7 @@ def _finite_float(value: Any) -> float | None:
 def sync_automatic_selection_data() -> dict[str, Any]:
     with _ingestion_lock():
         repository.ensure_default_strategy()
+        repository.ensure_model_rank_strategy()
         strategies = [
             repository.strategy_to_dict(row)
             for row in repository.active_strategy_models()
@@ -129,6 +133,7 @@ def run_automatic_selection_cycle(
     evaluation_summary = update_due_evaluations()
     with _selection_lock():
         repository.ensure_default_strategy()
+        repository.ensure_model_rank_strategy()
         strategies = [repository.strategy_to_dict(row) for row in repository.active_strategy_models()]
         if not strategies:
             raise RuntimeError("没有启用的正式、挑战者或影子策略")
@@ -160,6 +165,9 @@ def run_automatic_selection_cycle(
                 raise RuntimeError("本日不可变股票目录快照为空，无法执行自动选股")
             factor_ids, config_errors = _collect_factor_requirements(strategies)
             factor_values = _load_target_factor_values(factor_ids, target_trade_date)
+            if _any_uses_model_rank(strategies):
+                # 没算出来就是空字典，用模型排名的策略会被质量门禁拦下，其他策略照常
+                factor_values[MODEL_RANK_FEATURE] = _load_model_ranks(target_trade_date)
             rows = load_candidate_input_rows(
                 catalog,
                 target_trade_date=target_trade_date,
@@ -171,7 +179,7 @@ def run_automatic_selection_cycle(
                 "snapshot_rows_inserted": snapshot_count,
                 "catalog_count": len(catalog),
                 "factor_cache": {
-                    "requested": factor_ids,
+                    "requested": factor_ids + ([MODEL_RANK_FEATURE] if MODEL_RANK_FEATURE in factor_values else []),
                     "symbols_by_factor": {key: len(values) for key, values in factor_values.items()},
                     "configuration_errors": config_errors,
                 },
@@ -249,6 +257,37 @@ def _collect_factor_requirements(
         if config is not None:
             factor_ids.update(required_tushare_factors(config))
     return sorted(factor_ids), errors
+
+
+def _any_uses_model_rank(strategies: Iterable[dict[str, Any]]) -> bool:
+    errors: list[str] = []
+    return any(
+        config is not None and uses_model_rank(config)
+        for config in (_validated_strategy_config(strategy, errors) for strategy in strategies)
+    )
+
+
+def _load_model_ranks(target_trade_date: str) -> dict[str, float]:
+    """读当天的模型排名（stock_model_signals）。影子账户 18:05 才算，选股先到时由这里算好存表，影子账户直接复用。"""
+    from backend.app.shadow.rank_signal import latest_signals, load_signals, save_signals
+
+    try:
+        with SessionLocal() as db:
+            saved = load_signals(db, target_trade_date)
+            if saved is not None:
+                return {symbol: float(rank) for symbol, rank in saved.ranks.items() if _finite_float(rank) is not None}
+            signals = latest_signals(db, target_trade_date)
+            if signals.complete:
+                try:
+                    save_signals(db, target_trade_date, signals)
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001 - 影子任务同时存了也没关系，排名照用
+                    db.rollback()
+                    logger.warning("模型信号存表失败 trade_date=%s error=%s", target_trade_date, str(exc)[:200])
+            return {symbol: float(rank) for symbol, rank in signals.ranks.items() if _finite_float(rank) is not None}
+    except Exception as exc:  # noqa: BLE001 - 失败只影响用模型排名的策略
+        logger.warning("模型排名读取失败 trade_date=%s error=%s", target_trade_date, str(exc)[:200])
+        return {}
 
 
 def _explain_completed_runs(result: dict[str, Any]) -> None:
@@ -725,6 +764,17 @@ def run_strategy_from_rows(
         else []
     )
     previous_symbols = sorted(str(item["symbol"]) for item in previous_items)
+    previous_summary = json.loads(previous_run.sync_summary_json or "{}") if previous_run is not None else {}
+    expected_dates = next(
+        (list(item.get("input_evidence", {}).get("expected_history_dates") or []) for item in candidates),
+        [],
+    )
+    rebalance = rebalance_state(
+        config,
+        previous_anchor=(previous_summary.get("rebalance") or {}).get("anchor_trade_date") if previous_symbols else None,
+        expected_dates=expected_dates,
+        target_trade_date=target_trade_date,
+    )
     fingerprint = fingerprint_payload(
         candidates,
         config,
@@ -737,6 +787,7 @@ def run_strategy_from_rows(
                 else None
             ),
             "selected_symbols": previous_symbols,
+            **({"rebalance": rebalance} if rebalance is not None else {}),
         },
     )
     source_fingerprint = fingerprint
@@ -773,7 +824,7 @@ def run_strategy_from_rows(
     now = datetime.now()
     selected_turnover: float | None = None
     if gate["passed"]:
-        score_candidates(candidates, config)
+        score_candidates(candidates, config, previous_selected=previous_symbols, rebalance=rebalance)
         changes = apply_membership_changes(candidates, previous_symbols)
         _append_missing_removed_candidates(candidates, previous_items)
         current_symbols = [str(item["symbol"]) for item in candidates if item.get("selected")]
@@ -808,6 +859,8 @@ def run_strategy_from_rows(
             "scoring_implementation_version": SCORING_IMPLEMENTATION_VERSION,
             "source_fingerprint": source_fingerprint,
             "membership_changes": changes,
+            # 下一次运行只从“已完成”的运行里读换仓锚点，被门禁拦下的这条不会影响它
+            **({"rebalance": rebalance} if rebalance is not None else {}),
         }),
         "quality_gate_json": canonical_json(gate),
         "exclusion_summary_json": canonical_json(exclusion_summary(candidates)),

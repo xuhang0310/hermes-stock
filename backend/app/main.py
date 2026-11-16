@@ -46,7 +46,7 @@ from backend.app.paper.paper_api import router as paper_router
 from backend.app.scorecard.api import router as scorecard_router
 from backend.app.quant.agent_board_api import router as agent_board_router
 from backend.app.quant.automatic_selection_api import router as automatic_selection_router
-from backend.app.quant.automatic_selection_repository import ensure_default_strategy
+from backend.app.quant.automatic_selection_repository import ensure_default_strategy, ensure_model_rank_strategy
 from backend.app.quant.backtest_api import router as backtest_router, stocks_router
 from backend.app.quant.factor_api import router as factor_router
 from backend.app.quant.factor_composite_api import router as factor_composite_router
@@ -81,6 +81,7 @@ def create_app(init_db: bool = True) -> FastAPI:
             log_event("system", "INFO", "应用启动：初始化数据库与后台组件", to_db=False)
             initialize_default_database()
             ensure_default_strategy()
+            ensure_model_rank_strategy()
             # 保证内置飞书通道与节律任务存在（正常启动不跑 seed_demo，这里补齐基础数据）
             with session_scope() as db:
                 seed_notify_channels(db)

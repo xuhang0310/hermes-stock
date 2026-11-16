@@ -63,6 +63,7 @@ class AutomaticSelectionOrchestrationTests(unittest.TestCase):
 
         self.mock(service, "_selection_lock", side_effect=lock)
         self.mock(repository, "ensure_default_strategy")
+        self.mock(repository, "ensure_model_rank_strategy")
         self.mock(repository, "active_strategy_models", return_value=[strategy()])
         self.mock(repository, "strategy_to_dict", side_effect=lambda value: value)
         self.mock(service, "update_due_evaluations", side_effect=lambda: self.outside_lock("evaluate"))
@@ -168,6 +169,7 @@ class AutomaticSelectionOrchestrationTests(unittest.TestCase):
     def test_market_soft_error_cannot_be_hidden_by_old_ready_cache(self):
         self.mock(service, "_ingestion_lock", return_value=MagicMock())
         self.mock(repository, "ensure_default_strategy")
+        self.mock(repository, "ensure_model_rank_strategy")
         self.mock(repository, "active_strategy_models", return_value=[])
         sync = self.mock(service, "sync_market", return_value={"errors": ["daily 部分失败"]})
         self.mock(service, "selection_target_ceiling", return_value=TARGET)
@@ -182,6 +184,7 @@ class AutomaticSelectionOrchestrationTests(unittest.TestCase):
     def test_factor_error_is_disclosed_without_blocking_other_factor_free_strategies(self):
         self.mock(service, "_ingestion_lock", return_value=MagicMock())
         self.mock(repository, "ensure_default_strategy")
+        self.mock(repository, "ensure_model_rank_strategy")
         self.mock(repository, "active_strategy_models", return_value=[])
         self.mock(service, "sync_market", return_value={"errors": []})
         self.mock(service, "local_selection_cache_status", return_value={"ready": True, "expected_trade_date": TARGET})

@@ -15,7 +15,13 @@ import pandas as pd
 from backend.app.quant.factor_signal_engine import _zscore_cross_section
 
 BUILTIN_STRATEGY_KEY = "forward-multifactor"
-SCORING_IMPLEMENTATION_VERSION = "forward-selection-v4"  # v4：基础记录覆盖与估值可用性分开校验
+MODEL_RANK_STRATEGY_KEY = "model-rank-30"
+# v4：基础记录覆盖与估值可用性分开校验；v5：可选特征 model_rank 和定期换仓（旧配置的结果不变）
+SCORING_IMPLEMENTATION_VERSION = "forward-selection-v5"
+MODEL_RANK_FEATURE = "model_rank"
+# 模型只覆盖沪深 A 股里上市约满 120 个交易日、非 ST、当天有成交的股票，北交所不在训练范围内
+MODEL_RANK_UNIVERSE_RE = re.compile(r"^(?:(?:00|30)\d{4}\.SZ|(?:60|68)\d{4}\.SH)$")
+MODEL_RANK_MIN_COVERAGE = 0.80
 RESEARCH_LIMITATIONS = (
     "仅用于上线后的研究观察。未完整模拟复权、涨跌停、停牌成交失败、整手与真实容量，"
     "不构成投资建议或交易指令。"
@@ -52,13 +58,29 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "limitations": RESEARCH_LIMITATIONS,
 }
 
+# 第 4.10 节回测通过的做法：模型排名前 30、20 日日均成交额不低于 2000 万元、每 10 个交易日换仓、
+# 已持有的排名还在前 60 就不换、不设行业和市值上限、不剔除亏损股。
+MODEL_RANK_STRATEGY_CONFIG: dict[str, Any] = {
+    **copy.deepcopy(DEFAULT_STRATEGY_CONFIG),
+    "min_listing_days": 180,
+    "min_avg_amount": 20_000.0,  # daily_bars.amount 单位为千元
+    "winsor_lower": 0.0,
+    "winsor_upper": 1.0,  # 排名本身是 0 到 1 的分位，去极值会让前 1% 并列
+    "feature_weights": {MODEL_RANK_FEATURE: 1.0},
+    "constraints": {"max_per_industry": 0, "max_per_market_cap_bucket": 0},
+    "rebalance": {"every_days": 10, "hold_rank_multiple": 2.0},
+}
+OPTIONAL_CONFIG_KEYS = {"rebalance"}
+
 _ST_NAME_RE = re.compile(r"^(?:S\*ST|\*ST|SST|ST)", re.IGNORECASE)
+_VALUE_FEATURES = {"value_pe", "value_pb"}
 _BASE_FEATURES = {
     "value_pe",
     "value_pb",
     "momentum_20",
     "liquidity_20",
     "low_volatility_20",
+    MODEL_RANK_FEATURE,
 }
 
 
@@ -77,7 +99,7 @@ def data_fingerprint(*parts: Any) -> str:
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("策略配置必须是对象")
-    unknown_keys = sorted(set(config) - set(DEFAULT_STRATEGY_CONFIG))
+    unknown_keys = sorted(set(config) - set(DEFAULT_STRATEGY_CONFIG) - OPTIONAL_CONFIG_KEYS)
     if unknown_keys:
         raise ValueError(f"存在未知策略配置：{', '.join(unknown_keys)}")
 
@@ -86,7 +108,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         {
             key: copy.deepcopy(value)
             for key, value in config.items()
-            if key not in {"constraints", "quality", "costs", "feature_weights", "tushare_factors"}
+            if key not in {"constraints", "quality", "costs", "feature_weights", "tushare_factors", "rebalance"}
         }
     )
 
@@ -191,8 +213,59 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"成本参数 {key} 必须介于 0 和 0.1")
         costs[key] = value
     normalized["costs"] = costs
+    # 可选项只在配置里写了才出现，旧配置规范化后的哈希不变
+    if config.get("rebalance") is not None:
+        normalized["rebalance"] = _validated_rebalance(config["rebalance"])
     normalized["limitations"] = RESEARCH_LIMITATIONS
     return normalized
+
+
+def _validated_rebalance(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"every_days", "hold_rank_multiple"}:
+        raise ValueError("换仓配置只能包含 every_days 和 hold_rank_multiple")
+    every_days = _integer(value.get("every_days"))
+    # 换仓间隔要能在 20 日历史窗口里数出来
+    if every_days is None or not 1 <= every_days <= 20:
+        raise ValueError("换仓间隔必须介于 1 和 20 个交易日")
+    multiple = _finite(value.get("hold_rank_multiple"))
+    if multiple is None or not 1 <= multiple <= 5:
+        raise ValueError("持有带倍数必须介于 1 和 5")
+    return {"every_days": every_days, "hold_rank_multiple": multiple}
+
+
+def uses_model_rank(config: dict[str, Any]) -> bool:
+    return abs(float((config.get("feature_weights") or {}).get(MODEL_RANK_FEATURE) or 0.0)) > 1e-12
+
+
+def _requires_valuation(config: dict[str, Any]) -> bool:
+    """纯模型排名的策略不剔除亏损股（回测没有剔除）；其余策略照旧。"""
+    weights = config.get("feature_weights") or {}
+    uses_value = any(abs(float(weights.get(key) or 0.0)) > 1e-12 for key in _VALUE_FEATURES)
+    return uses_value or not uses_model_rank(config)
+
+
+def rebalance_state(
+    config: dict[str, Any],
+    *,
+    previous_anchor: str | None,
+    expected_dates: list[str],
+    target_trade_date: str,
+) -> dict[str, Any] | None:
+    """定期换仓：距上次换仓满 every_days 个交易日才重新挑，否则沿用上次的名单。"""
+    rule = config.get("rebalance")
+    if not rule:
+        return None
+    dates = sorted({str(value).replace("-", "") for value in expected_dates})
+    elapsed: int | None = None
+    if previous_anchor and target_trade_date in dates and previous_anchor in dates:
+        elapsed = dates.index(target_trade_date) - dates.index(previous_anchor)
+    due = elapsed is None or elapsed >= int(rule["every_days"])
+    return {
+        "due": due,
+        "anchor_trade_date": target_trade_date if due else previous_anchor,
+        "days_since_anchor": 0 if due else elapsed,
+        "every_days": int(rule["every_days"]),
+    }
 
 
 def required_tushare_factors(config: dict[str, Any]) -> list[str]:
@@ -212,6 +285,8 @@ def build_candidates(
     min_listing_days = int(config.get("min_listing_days") or 0)
     min_avg_amount = float(config.get("min_avg_amount") or 0.0)
     factor_ids = required_tushare_factors(config)
+    require_valuation = _requires_valuation(config)
+    model_rank_required = uses_model_rank(config)
     candidates: list[dict[str, Any]] = []
 
     for source in sorted(rows, key=lambda item: str(item.get("symbol") or "")):
@@ -253,7 +328,7 @@ def build_candidates(
         basic_data_complete = daily_basic_present and valid_market_cap
         if not basic_data_complete:
             exclusions.append("daily_basic_missing")
-        elif pe_ttm is None or pb is None or pe_ttm <= 0 or pb <= 0:
+        elif require_valuation and (pe_ttm is None or pb is None or pe_ttm <= 0 or pb <= 0):
             exclusions.append("valuation_invalid")
 
         expected_dates = [str(value).replace("-", "") for value in row.get("expected_history_dates") or []]
@@ -323,6 +398,12 @@ def build_candidates(
                 exclusions.append("required_factor_missing")
             else:
                 factor_values[factor_id] = value
+        if model_rank_required:
+            model_rank = _finite(supplied_factors.get(MODEL_RANK_FEATURE))
+            if model_rank is None:
+                exclusions.append("model_rank_missing")
+            else:
+                factor_values[MODEL_RANK_FEATURE] = model_rank
 
         feature_values: dict[str, float] = {}
         if pe_ttm is not None and pe_ttm > 0:
@@ -424,13 +505,26 @@ def quality_gate(candidates: list[dict[str, Any]], config: dict[str, Any]) -> di
             coverage,
             thresholds.get("min_factor_coverage", 0.0),
         )
+    if uses_model_rank(config):
+        # 分母只算模型覆盖的沪深 A 股；当天信号没算出来时这里会拦住，不会拿空排名选股
+        model_pool = [item for item in listed if MODEL_RANK_UNIVERSE_RE.match(str(item.get("symbol") or ""))]
+        ranked = sum(MODEL_RANK_FEATURE in (item.get("factor_values") or {}) for item in model_pool)
+        metrics["model_rank_count"] = ranked
+        metrics["model_rank_coverage"] = ranked / len(model_pool) if model_pool else 0.0
+        _require_coverage(failures, "model_rank_coverage", metrics["model_rank_coverage"], MODEL_RANK_MIN_COVERAGE)
     minimum = int(thresholds.get("min_eligible_count") or 0)
     if eligible_count < minimum:
         failures.append({"code": "eligible_count", "actual": eligible_count, "required": minimum})
     return {"passed": not failures, "metrics": metrics, "thresholds": thresholds, "failures": failures}
 
 
-def score_candidates(candidates: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+def score_candidates(
+    candidates: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    previous_selected: Iterable[str] | None = None,
+    rebalance: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     eligible = [item for item in candidates if item.get("eligible")]
     if not eligible:
         return candidates
@@ -465,8 +559,30 @@ def score_candidates(candidates: list[dict[str, Any]], config: dict[str, Any]) -
         item["composite_score"] = score_by_symbol[symbol]
         item["rank"] = rank
         item["percentile"] = 1.0 if total == 1 else 1.0 - (rank - 1) / (total - 1)
+    rule = config.get("rebalance")
+    previous = sorted({str(symbol) for symbol in previous_selected or []})
+    if rule and rebalance is not None and previous:
+        if not rebalance.get("due"):
+            _keep_previous(eligible, previous)
+            return candidates
+        keep_within = int(math.floor(int(config["top_n"]) * float(rule["hold_rank_multiple"])))
+        _select_top_n(eligible, config, held=previous, keep_within_rank=keep_within)
+        return candidates
     _select_top_n(eligible, config)
     return candidates
+
+
+def _keep_previous(eligible: list[dict[str, Any]], previous: list[str]) -> None:
+    """不换仓的日子沿用上次名单。已经不合格的（停牌、变 ST、成交不足）不再算入选，空位等下次换仓补。"""
+    keep = set(previous)
+    selected = [item for item in eligible if item["symbol"] in keep]
+    for item in eligible:
+        item["constraint_codes"] = []
+    for item in selected:
+        item["selected"] = True
+    weight = 1.0 / len(selected) if selected else None
+    for item in selected:
+        item["research_weight"] = weight
 
 
 def apply_membership_changes(
@@ -534,7 +650,13 @@ def fingerprint_payload(
     )
 
 
-def _select_top_n(eligible: list[dict[str, Any]], config: dict[str, Any]) -> None:
+def _select_top_n(
+    eligible: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    held: Iterable[str] = (),
+    keep_within_rank: int = 0,
+) -> None:
     constraints = config.get("constraints") or {}
     max_industry = int(constraints.get("max_per_industry") or 0)
     max_bucket = int(constraints.get("max_per_market_cap_bucket") or 0)
@@ -542,7 +664,12 @@ def _select_top_n(eligible: list[dict[str, Any]], config: dict[str, Any]) -> Non
     industry_counts: Counter[str] = Counter()
     bucket_counts: Counter[str] = Counter()
     selected: list[dict[str, Any]] = []
-    for item in sorted(eligible, key=lambda value: (int(value["rank"]), str(value["symbol"]))):
+    held_set = set(held)
+    by_rank = sorted(eligible, key=lambda value: (int(value["rank"]), str(value["symbol"])))
+    # 持有带：上次选中、这次排名还在 keep_within_rank 以内的先留下，再按排名补满
+    kept = [item for item in by_rank if item["symbol"] in held_set and int(item["rank"]) <= keep_within_rank]
+    kept_symbols = {item["symbol"] for item in kept}
+    for item in [*kept, *(item for item in by_rank if item["symbol"] not in kept_symbols)]:
         industry = _text_or_none(item.get("industry"))
         bucket = _text_or_none(item.get("market_cap_bucket"))
         constraint_codes: list[str] = []

@@ -6,6 +6,7 @@ import type {
   AutomaticSelectionDaily,
   AutomaticSelectionPeriodCell,
   AutomaticSelectionPick,
+  AutomaticSelectionStrategy,
   AutomaticSelectionTrackRecord,
   UserPayload,
 } from '../types'
@@ -34,6 +35,9 @@ const showExplanation = ref(false)
 const detailSymbol = ref('')
 const drawerEl = ref<HTMLElement | null>(null)
 const watchlistState = ref<Record<string, WatchState>>({})
+// 空表示正式策略（服务端默认）；挑战者和正式策略并排看
+const strategyId = ref<number | null>(null)
+const strategies = ref<AutomaticSelectionStrategy[]>([])
 let dailySequence = 0
 let trackSequence = 0
 let drawerTrigger: HTMLElement | null = null
@@ -52,6 +56,17 @@ const tabs = computed<Array<{ key: TabKey; label: string }>>(() => [
   { key: 'method', label: '选股方法' },
   ...(canSeeAdvanced.value ? [{ key: 'advanced' as TabKey, label: '高级' }] : []),
 ])
+
+const strategyOptions = computed(() =>
+  strategies.value
+    .filter((item) => item.enabled && item.lifecycle_state !== 'retired')
+    .sort((a, b) => Number(b.is_official) - Number(a.is_official) || a.id - b.id)
+)
+const currentStrategyId = computed(() => strategyId.value ?? daily.value?.strategy?.id ?? null)
+function strategyLabel(item: AutomaticSelectionStrategy): string {
+  if (item.is_official) return `${item.name}（正式）`
+  return item.name
+}
 
 const status = computed(() => daily.value?.status || null)
 const picks = computed<AutomaticSelectionPick[]>(() => daily.value?.picks || [])
@@ -169,7 +184,7 @@ async function loadDaily(tradeDate = '') {
   error.value = ''
   closeDetail(false)
   try {
-    const next = await api.automaticSelectionDaily(tradeDate || null)
+    const next = await api.automaticSelectionDaily(tradeDate || null, strategyId.value)
     if (sequence !== dailySequence) return
     daily.value = next
     showExplanation.value = false
@@ -186,7 +201,7 @@ async function loadTrack(force = false) {
   trackLoading.value = true
   trackError.value = ''
   try {
-    const next = await api.automaticSelectionTrackRecord(120)
+    const next = await api.automaticSelectionTrackRecord(120, strategyId.value)
     if (sequence !== trackSequence) return
     track.value = next
   } catch (reason) {
@@ -194,6 +209,22 @@ async function loadTrack(force = false) {
   } finally {
     if (sequence === trackSequence) trackLoading.value = false
   }
+}
+
+async function loadStrategies() {
+  try {
+    strategies.value = await api.automaticSelectionStrategies(false)
+  } catch {
+    strategies.value = [] // 拿不到方案列表时只看正式策略，不影响主流程
+  }
+}
+
+function selectStrategy(value: string) {
+  const id = Number(value)
+  strategyId.value = Number.isFinite(id) && id > 0 ? id : null
+  track.value = null
+  void loadDaily()
+  if (activeTab.value === 'history') void loadTrack(true)
 }
 
 function selectDate(tradeDate: string) {
@@ -317,7 +348,10 @@ function watchLabel(symbol: string): string {
   return '加入自选'
 }
 
-onMounted(() => void loadDaily())
+onMounted(() => {
+  void loadDaily()
+  void loadStrategies()
+})
 onBeforeUnmount(() => {
   if (detailSymbol.value && typeof document !== 'undefined') document.body.style.overflow = previousBodyOverflow
 })
@@ -342,7 +376,19 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </label>
-        <div v-if="daily?.strategy" class="strategy-chip">
+        <label v-if="strategyOptions.length > 1" class="date-picker">
+          <span>选股方案</span>
+          <select
+            :value="currentStrategyId ?? ''"
+            :disabled="loading"
+            aria-label="选择选股方案"
+            data-testid="automatic-selection-strategy"
+            @change="selectStrategy(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="item in strategyOptions" :key="item.id" :value="item.id">{{ strategyLabel(item) }}</option>
+          </select>
+        </label>
+        <div v-else-if="daily?.strategy" class="strategy-chip">
           <span>选股方案</span>
           <strong>{{ daily.strategy.name }}</strong>
         </div>

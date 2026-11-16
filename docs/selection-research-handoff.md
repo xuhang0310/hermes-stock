@@ -102,6 +102,8 @@ PYTHONPATH=. $V -m backend.app.quant.research_selection picks --out ~/hermes-sto
 
 ## 第 4 步：通过之后怎么接到线上（先出方案，等用户同意再动手）
 
+> **2026-11-16：已完成。** 用户确认后按下面的要点接入，作为挑战者 `model-rank-30`，见 `docs/automatic-selection.md`“模型排名挑战者”。
+
 不要直接改 `DEFAULT_STRATEGY_CONFIG` 或现有评分实现，那会改变 config_hash 和指纹，破坏现有运行的可追溯性。要点：
 
 - 线上每天已经在算模型 1 的排名，存在 `stock_model_signals.model_rank`（`shadow/rank_signal.latest_ranks`）。新选股可以直接读它，不用再训练。

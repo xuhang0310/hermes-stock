@@ -829,10 +829,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((res) => res.data),
-  automaticSelectionDaily: (tradeDate?: string | null) =>
-    request<ApiEnvelope<AutomaticSelectionDaily>>(
-      `/api/automatic-selection/daily${tradeDate ? `?trade_date=${encodeURIComponent(tradeDate)}` : ''}`
-    ).then((res) => res.data),
+  automaticSelectionDaily: (tradeDate?: string | null, strategyId?: number | null) => {
+    const query = new URLSearchParams()
+    if (tradeDate) query.set('trade_date', tradeDate)
+    if (strategyId) query.set('strategy_id', String(strategyId))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request<ApiEnvelope<AutomaticSelectionDaily>>(`/api/automatic-selection/daily${suffix}`).then(
+      (res) => res.data
+    )
+  },
   notifications: (unreadOnly = false, limit = 50) =>
     request<ApiEnvelope<InboxNotificationList>>(
       `/api/notifications?unread_only=${unreadOnly}&limit=${limit}`
@@ -853,9 +858,9 @@ export const api = {
     request<ApiEnvelope<{ message: string }>>('/api/scorecard/refresh', { method: 'POST' }).then(
       (res) => res.data
     ),
-  automaticSelectionTrackRecord: (limit = 60) =>
+  automaticSelectionTrackRecord: (limit = 60, strategyId?: number | null) =>
     request<ApiEnvelope<AutomaticSelectionTrackRecord>>(
-      `/api/automatic-selection/track-record?limit=${limit}`
+      `/api/automatic-selection/track-record?limit=${limit}${strategyId ? `&strategy_id=${strategyId}` : ''}`
     ).then((res) => res.data),
   automaticSelectionOverview: () =>
     request<ApiEnvelope<AutomaticSelectionOverview>>('/api/automatic-selection/overview').then(

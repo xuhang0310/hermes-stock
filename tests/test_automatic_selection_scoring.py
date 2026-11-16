@@ -297,7 +297,7 @@ class AutomaticSelectionScoringTests(unittest.TestCase):
         changed = copy.deepcopy(candidates)
         changed[0]["input_evidence"]["daily_basic_present"] = False
         self.assertNotEqual(original, fingerprint_payload(changed, _config(), TARGET_DATE))
-        self.assertEqual(scoring.SCORING_IMPLEMENTATION_VERSION, "forward-selection-v4")
+        self.assertEqual(scoring.SCORING_IMPLEMENTATION_VERSION, "forward-selection-v5")
         with patch.object(scoring, "SCORING_IMPLEMENTATION_VERSION", "forward-selection-v3"):
             self.assertNotEqual(original, fingerprint_payload(candidates, _config(), TARGET_DATE))
 

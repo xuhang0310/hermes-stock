@@ -1884,6 +1884,7 @@ export type AutomaticSelectionStrategyConfig = {
   winsor_upper: number
   feature_weights: Record<string, number>
   tushare_factors: Array<{ id: string; weight: number }>
+  rebalance?: { every_days: number; hold_rank_multiple: number }
   constraints: {
     max_per_industry: number
     max_per_market_cap_bucket: number

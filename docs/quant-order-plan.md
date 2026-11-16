@@ -396,6 +396,8 @@ python -m backend.app.quant.research_selection picks --out ~/hermes-stock-resear
 
 **下一步：** 按标准，只有 30 只可以出名单（`picks --top-n 30`）。接到线上自动选股要另写方案，等用户确认后再做。
 
+**接入（2026-11-16，用户确认后）：** 自动选股新增挑战者策略 `model-rank-30`，按回测的做法（30 只、2000 万元成交额下限、每 10 个交易日换仓、前 60 名不换），和正式策略并排跑、不替换。细节见 `docs/automatic-selection.md`“模型排名挑战者”。
+
 
 ## 5. 上线门槛
 

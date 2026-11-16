@@ -22,6 +22,8 @@ from backend.app.core.models import (
 from backend.app.quant.automatic_selection_evaluation import EVALUATION_HORIZONS
 from backend.app.quant.automatic_selection_scoring import (
     BUILTIN_STRATEGY_KEY,
+    MODEL_RANK_STRATEGY_CONFIG,
+    MODEL_RANK_STRATEGY_KEY,
     DEFAULT_STRATEGY_CONFIG,
     canonical_json,
     config_hash,
@@ -85,6 +87,55 @@ def ensure_default_strategy() -> dict[str, Any]:
             if existing is None:
                 raise
             return strategy_to_dict(existing)
+
+
+def ensure_model_rank_strategy() -> dict[str, Any] | None:
+    """幂等创建模型排名挑战者 v1（回测通过的做法，见 docs/quant-order-plan.md 第 4.10 节）。
+
+    只建一次：之后被停用或晋升都按人的操作来，不会再自动建回来。
+    """
+    config = validate_config(MODEL_RANK_STRATEGY_CONFIG)
+    with SessionLocal() as db:
+        existing = db.scalar(
+            select(AutomaticSelectionStrategy).where(
+                AutomaticSelectionStrategy.strategy_key == MODEL_RANK_STRATEGY_KEY,
+                AutomaticSelectionStrategy.version == 1,
+            )
+        )
+        if existing is not None:
+            return strategy_to_dict(existing)
+        row = AutomaticSelectionStrategy(
+            strategy_key=MODEL_RANK_STRATEGY_KEY,
+            version=1,
+            name="模型排名前 30（挑战者）",
+            lifecycle_state="challenger",
+            enabled=True,
+            config_json=canonical_json(config),
+            config_hash=config_hash(config),
+        )
+        db.add(row)
+        try:
+            db.flush()
+            db.add(
+                AutomaticSelectionStrategyEvent(
+                    strategy_id=row.id,
+                    event_type="create",
+                    to_state="challenger",
+                    note="系统幂等创建模型排名挑战者 v1：回测两关通过，和正式策略并排观察，不替换",
+                )
+            )
+            db.commit()
+            db.refresh(row)
+            return strategy_to_dict(row)
+        except IntegrityError:
+            db.rollback()
+            existing = db.scalar(
+                select(AutomaticSelectionStrategy).where(
+                    AutomaticSelectionStrategy.strategy_key == MODEL_RANK_STRATEGY_KEY,
+                    AutomaticSelectionStrategy.version == 1,
+                )
+            )
+            return strategy_to_dict(existing) if existing is not None else None
 
 
 def create_strategy(

@@ -27,12 +27,20 @@ from backend.app.quant.automatic_selection_scoring import (
     DEFAULT_STRATEGY_CONFIG,
     RESEARCH_LIMITATIONS,
     _normalized_weights,
+    _requires_valuation,
+    uses_model_rank,
     validate_config,
 )
 
 logger = logging.getLogger(__name__)
 
 DISCLAIMER = "这是按固定规则打分排序的研究结果，不是对未来涨跌的预测，也不构成投资建议。"
+MODEL_RANK_NOTE = (
+    "模型排名用 2012 到 2018 年的数据挑出的 7 项量价特征训练，在 2019 年以后的历史上验证过一次："
+    "选 30 只、每 10 个交易日换仓，扣费后年化比可选股票平均高约 15 个百分点，8 年里 7 年跑赢，"
+    "但最大回撤比平均深约 5 个百分点。选到的多是小盘、成交冷清的股票，资金量大时开盘价买不进。"
+    "历史成绩不代表以后。"
+)
 SCHEDULE_NOTE = "每个交易日 17:30 自动同步收盘数据（失败每 30 分钟重试到 22:00），成功后自动选股。"
 
 # (key, 名称, 包含的特征, 计分方向说明)
@@ -41,6 +49,12 @@ DIMENSIONS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
     ("trend", "走势", ("momentum_20",), "近 20 个交易日涨得越多越加分（已复权）"),
     ("activity", "活跃度", ("liquidity_20",), "近 20 个交易日日均成交额越大越加分"),
     ("stability", "稳定性", ("low_volatility_20",), "近 20 个交易日每天涨跌越平稳越加分"),
+    (
+        "model",
+        "模型排名",
+        ("model_rank",),
+        "模型用成交额、换手、近期涨幅、离低点远近等 7 项量价数据，估计未来 10 个交易日相对全市场的排名，越靠前越加分",
+    ),
 )
 _EXTRA_DIMENSION = ("extra", "附加因子", "策略额外配置的 TuShare 因子，按配置方向计分")
 _SHORT_PHRASES = {
@@ -48,6 +62,7 @@ _SHORT_PHRASES = {
     "trend": "走势强于 {score}% 的股票",
     "activity": "成交比 {score}% 的股票活跃",
     "stability": "波动比 {score}% 的股票小",
+    "model": "模型排名高于 {score}% 的股票",
     "extra": "附加因子好于 {score}% 的股票",
 }
 _GROUP_PHRASES = {
@@ -55,6 +70,7 @@ _GROUP_PHRASES = {
     "trend": "近期走势偏强",
     "activity": "成交活跃",
     "stability": "波动偏小",
+    "model": "模型排名靠前",
     "extra": "附加因子表现好",
 }
 CHANGE_LABELS = {"added": "新进", "retained": "保留", "removed": "移出", "unchanged": "—"}
@@ -465,6 +481,8 @@ def _dimension_detail(key: str, item: dict[str, Any], score: int | None, reverse
         if volatility is None:
             return f"波动比 {beats} 的合格股票小"
         return f"近 20 个交易日平均每天波动约 {volatility * 100:.1f}%，比 {beats} 的合格股票平稳"
+    if key == "model":
+        return f"模型估计未来 10 个交易日的表现好于 {beats} 的合格股票（只是排先后，不是涨跌预测）"
     return f"附加因子综合表现好于 {beats} 的合格股票"
 
 
@@ -797,6 +815,7 @@ _EXCLUSION_TEXT = {
     "adj_factor_missing": "缺少复权数据",
     "liquidity_low": "成交太少",
     "required_factor_missing": "缺少附加因子数据",
+    "model_rank_missing": "当天没有模型排名（北交所、上市不满约 120 个交易日或当天无成交）",
     "not_in_current_catalog": "已不在本期股票名单",
 }
 
@@ -1012,6 +1031,8 @@ def _failure_text(failure: dict[str, Any]) -> str:
             f"通过基础筛选的股票只有 {int(actual or 0)} 只（至少要 {int(required or 0)} 只），"
             "通常是当天数据还没同步完整"
         )
+    if code == "model_rank_coverage":
+        return f"模型排名只覆盖 {pct(actual)} 的沪深股票（至少要 {pct(required)}），通常是当天排名还没算出来"
     if code.startswith("factor_coverage:"):
         return f"附加因子 {code.split(':', 2)[-1]} 只覆盖 {pct(actual)}（要求全部覆盖）"
     if code == "strategy_error":
@@ -1026,6 +1047,12 @@ def funnel_view(run: dict[str, Any], constraint_skipped: int) -> dict[str, Any]:
     selected = int(run.get("selected_count") or 0)
     max_industry = int((config.get("constraints") or {}).get("max_per_industry") or 0)
     selection_note = f"按综合得分从高到低挑选前 {int(config.get('top_n') or 0)} 只"
+    rebalance = config.get("rebalance") or {}
+    if rebalance:
+        selection_note += (
+            f"；每 {int(rebalance['every_days'])} 个交易日换一次，"
+            f"排名还在前 {int(int(config.get('top_n') or 0) * float(rebalance['hold_rank_multiple']))} 的不换"
+        )
     if max_industry > 0:
         selection_note += f"，同一行业最多 {max_industry} 只"
     if constraint_skipped:
@@ -1060,7 +1087,15 @@ def method_view(config: dict[str, Any]) -> dict[str, Any]:
     min_amount_wan = float(config.get("min_avg_amount") or 0.0) / 10  # 千元 → 万元
     max_industry = int(constraints.get("max_per_industry") or 0)
     max_bucket = int(constraints.get("max_per_market_cap_bucket") or 0)
-    selection_rules = [f"按综合得分从高到低取前 {int(config.get('top_n') or 0)} 只"]
+    top_n = int(config.get("top_n") or 0)
+    selection_rules = [f"按综合得分从高到低取前 {top_n} 只"]
+    rebalance = config.get("rebalance") or {}
+    if rebalance:
+        keep = int(top_n * float(rebalance["hold_rank_multiple"]))
+        selection_rules.append(
+            f"每 {int(rebalance['every_days'])} 个交易日重新挑一次，中间沿用上次名单；"
+            f"上次选中的股票排名还在前 {keep} 就留着，空位按排名补"
+        )
     if max_industry > 0:
         selection_rules.append(f"同一行业最多 {max_industry} 只，避免押注单一行业")
     if max_bucket > 0:
@@ -1071,7 +1106,8 @@ def method_view(config: dict[str, Any]) -> dict[str, Any]:
             "剔除 ST、*ST 等风险警示股",
             f"剔除上市不满 {int(config.get('min_listing_days') or 0)} 天的股票",
             f"剔除近 20 个交易日日均成交额低于 {min_amount_wan:,.0f} 万元的股票",
-            "剔除亏损（市盈率为负）或净资产为负的股票",
+            *(["剔除亏损（市盈率为负）或净资产为负的股票"] if _requires_valuation(config) else []),
+            *(["只在有模型排名的沪深股票里挑（北交所和上市不满约 120 个交易日的不参与）"] if uses_model_rank(config) else []),
             "剔除当天停牌、近 20 个交易日行情或复权数据不全的股票",
         ],
         "dimensions": [
@@ -1086,6 +1122,7 @@ def method_view(config: dict[str, Any]) -> dict[str, Any]:
         "scoring": (
             "每个维度先在当天所有合格股票里比较（去掉极端值后标准化），再按权重加总成综合得分。"
             "页面上的维度分数表示这只股票超过了百分之多少的合格股票，100 分就是这一项最好。"
+            + (MODEL_RANK_NOTE if uses_model_rank(config) else "")
         ),
         "selection": selection_rules,
         "evaluation": [

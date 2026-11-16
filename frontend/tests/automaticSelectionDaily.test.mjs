@@ -80,6 +80,7 @@ const harnessExposure = `
   openDetail, closeDetail, addToWatchlist, askStock, watchLabel, periodCells,
   activeTab, daily, track, loading, error, notice, detailSymbol, detailPick, watchlistState,
   tabs, canDispatch, canSeeAdvanced, trackLine, trackBars, picks,
+  loadStrategies, selectStrategy, strategies, strategyOptions, strategyId, currentStrategyId,
 }
 `
 const transpiled = ts.transpileModule(`${setupMatch[1]}\n${harnessExposure}`, {
@@ -98,12 +99,14 @@ function createHarness({ permissions = ['data:read'], api: apiOverrides = {} } =
   const emitted = []
   const calls = { daily: [], track: 0, watchlist: [], dispatch: 0 }
   const api = {
-    automaticSelectionDaily: async (tradeDate) => {
+    automaticSelectionDaily: async (tradeDate, strategyId) => {
       calls.daily.push(tradeDate)
+      calls.dailyStrategy = strategyId
       return dailyPayload(tradeDate || '20261016')
     },
-    automaticSelectionTrackRecord: async () => {
+    automaticSelectionTrackRecord: async (_limit, strategyId) => {
       calls.track += 1
+      calls.trackStrategy = strategyId
       return { strategy: null, periods: [], summary: [], notes: [], disclaimer: '' }
     },
     automaticSelectionDispatch: async () => {
@@ -133,9 +136,10 @@ function createHarness({ permissions = ['data:read'], api: apiOverrides = {} } =
 }
 
 test('the page is wired into the app with plain-language endpoints and types', () => {
-  assert.match(apiSource, /automaticSelectionDaily: \(tradeDate\?: string \| null\) =>/)
-  assert.match(apiSource, /\/api\/automatic-selection\/daily\$\{tradeDate \? `\?trade_date=\$\{encodeURIComponent\(tradeDate\)\}` : ''\}/)
-  assert.match(apiSource, /\/api\/automatic-selection\/track-record\?limit=\$\{limit\}/)
+  assert.match(apiSource, /automaticSelectionDaily: \(tradeDate\?: string \| null, strategyId\?: number \| null\) =>/)
+  assert.match(apiSource, /query\.set\('trade_date', tradeDate\)/)
+  assert.match(apiSource, /query\.set\('strategy_id', String\(strategyId\)\)/)
+  assert.match(apiSource, /\/api\/automatic-selection\/track-record\?limit=\$\{limit\}\$\{strategyId \? `&strategy_id=\$\{strategyId\}` : ''\}/)
   assert.match(typesSource, /export type AutomaticSelectionDaily = \{/)
   assert.match(typesSource, /export type AutomaticSelectionPick = \{[\s\S]*headline: string[\s\S]*risks: AutomaticSelectionRisk\[\]/)
   assert.match(typesSource, /export type AutomaticSelectionTrackRecord = \{/)
@@ -298,4 +302,34 @@ test('data sync status is visible in plain words, technical detail only for oper
   assert.match(template, /beijingFromDb\(dataSync\.at\)/)
   assert.match(typesSource, /export type AutomaticSelectionDataSync = \{/)
   assert.match(typesSource, /data_sync: AutomaticSelectionDataSync \| null/)
+})
+
+test('switching strategy reloads the day and the track record for that strategy', async () => {
+  const strategy = (id, name, state, official = false) => ({
+    id, name, lifecycle_state: state, is_official: official, enabled: true,
+  })
+  const { harness, calls } = createHarness({
+    api: {
+      automaticSelectionStrategies: async () => [
+        strategy(2, '模型排名前 30（挑战者）', 'challenger'),
+        strategy(1, '前瞻多因子基准策略', 'official', true),
+        strategy(3, '旧版本', 'retired'),
+      ],
+    },
+  })
+  await harness.loadStrategies()
+  // 正式策略排第一，停用的不显示
+  assert.deepEqual([...harness.strategyOptions.value.map((item) => item.id)], [1, 2])
+  await harness.loadDaily('')
+  assert.equal(harness.currentStrategyId.value, 1)
+  harness.selectTab('history')
+  harness.selectStrategy('2')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(harness.strategyId.value, 2)
+  assert.equal(calls.dailyStrategy, 2)
+  assert.equal(calls.trackStrategy, 2)
+
+  const broken = createHarness({ api: { automaticSelectionStrategies: async () => { throw new Error('x') } } }).harness
+  await broken.loadStrategies()
+  assert.equal(broken.strategyOptions.value.length, 0)
 })
