@@ -2320,19 +2320,21 @@ class MarketDailyReturn(Base):
 class AdviceOutcome(Base):
     """一条建议在若干个交易日之后的结果（成绩单）。规则见 scorecard/rules.py。
 
-    一位用户、一个交易日、一只股票、一个方向只记一条建议，同一天早盘和午盘都提到时取最后那份计划里的。
+    一位用户的一个账户、一个交易日、一只股票、一个方向只记一条建议，同一天早盘和午盘都提到时取最后那份计划里的。
+    账户之间不合并：同一位用户名下的几个账户各算各的。account_id 为 0 表示计划条目上没有写账户。
     verdict：空（还没到期）/ right / wrong / flat（差不多）/ no_data（这段时间没有行情）。
     """
 
     __tablename__ = "advice_outcomes"
     __table_args__ = (
-        UniqueConstraint("owner_user_id", "advice_date", "symbol", "direction", "horizon_days", name="uq_advice_outcome"),
-        Index("ix_advice_outcomes_owner_date", "owner_user_id", "advice_date"),
+        UniqueConstraint("owner_user_id", "account_id", "advice_date", "symbol", "direction", "horizon_days", name="uq_advice_outcome_account"),
+        Index("ix_advice_outcomes_owner_date", "owner_user_id", "account_id", "advice_date"),
         Index("ix_advice_outcomes_pending", "verdict", "advice_date"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     advice_date: Mapped[str] = mapped_column(String(8), nullable=False)  # 建议生效的交易日 YYYYMMDD
     symbol: Mapped[str] = mapped_column(String(24), nullable=False)
     name: Mapped[str | None] = mapped_column(String(120))

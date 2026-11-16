@@ -82,10 +82,13 @@ def model_view(side: str, rank: float | None) -> str:
 
 
 def latest_per_day(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """同一天同一只股票同一个方向只留最后那份计划里的一条。items 要带 owner、advice_date、symbol、direction、order。"""
+    """同一个账户同一天同一只股票同一个方向只留最后那份计划里的一条。不同用户、不同账户各算各的。
+
+    items 要带 owner、account、advice_date、symbol、direction、order。
+    """
     kept: dict[tuple, dict[str, Any]] = {}
     for item in items:
-        key = (item["owner"], item["advice_date"], item["symbol"], item["direction"])
+        key = (item["owner"], item["account"], item["advice_date"], item["symbol"], item["direction"])
         if key not in kept or item["order"] >= kept[key]["order"]:
             kept[key] = item
     return list(kept.values())

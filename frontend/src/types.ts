@@ -2376,6 +2376,8 @@ export type ScorecardGroup = ScorecardStats & { key: string; label: string }
 
 export type ScorecardItem = {
   advice_date: string
+  account_id: number
+  account_label: string
   symbol: string
   name: string | null
   action: string
@@ -2394,6 +2396,9 @@ export type ScorecardItem = {
 export type ScorecardSummary = {
   horizon: number
   horizons: number[]
+  account_id: number | null
+  accounts: { account_id: number; label: string }[]
+  by_account: ScorecardGroup[]
   days: number
   min_samples: number
   dead_band: number

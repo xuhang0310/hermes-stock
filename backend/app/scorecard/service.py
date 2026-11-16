@@ -19,6 +19,7 @@ from backend.app.core.applog import get_logger
 from backend.app.core.database import SessionLocal
 from backend.app.core.models import AdviceOutcome, DailyBar, Instrument, MarketDailyReturn, MarketTradingCalendar, StockModelSignal, TradePlan, TradePlanItem
 from backend.app.plans.rules import SOURCE_LABELS
+from backend.app.plans.service import account_labels
 from backend.app.quant.research_panel import A_SHARE
 from backend.app.scorecard import rules
 
@@ -105,11 +106,12 @@ def record_advice(db: Session, since: str, *, owner_user_id: int | None = None) 
     candidates = []
     for item, plan in db.execute(query).all():
         side = rules.direction(item.action)
-        if side is None:
-            continue
+        if side is None or item.owner_user_id != plan.owner_user_id:
+            continue  # 条目和计划不是同一位用户的，不登记到任何人名下
         candidates.append(
             {
                 "owner": plan.owner_user_id,
+                "account": item.account_id or 0,
                 "advice_date": _compact(plan.plan_date),
                 "symbol": item.symbol,
                 "direction": side,
@@ -125,19 +127,19 @@ def record_advice(db: Session, since: str, *, owner_user_id: int | None = None) 
     calendar = open_days(db, (datetime.strptime(first, "%Y%m%d") - timedelta(days=15)).strftime("%Y%m%d"), max(entry["advice_date"] for entry in chosen))
     before = {day: calendar[i - 1] for i, day in enumerate(calendar) if i}
     ranks = _model_ranks(db, {(before[entry["advice_date"]], entry["symbol"]) for entry in chosen if entry["advice_date"] in before})
-    existing = {
-        (row.owner_user_id, row.advice_date, row.symbol, row.direction, row.horizon_days): row
-        for row in db.scalars(select(AdviceOutcome).where(AdviceOutcome.advice_date >= first)).all()
-    }
+    saved = select(AdviceOutcome).where(AdviceOutcome.advice_date >= first)
+    if owner_user_id is not None:
+        saved = saved.where(AdviceOutcome.owner_user_id == owner_user_id)
+    existing = {(row.owner_user_id, row.account_id, row.advice_date, row.symbol, row.direction, row.horizon_days): row for row in db.scalars(saved).all()}
     created = 0
     for entry in chosen:
         item, plan = entry["item"], entry["plan"]
         rank = ranks.get((before.get(entry["advice_date"], ""), entry["symbol"]))
         is_new = False
         for horizon in rules.HORIZONS:
-            row = existing.get((entry["owner"], entry["advice_date"], entry["symbol"], entry["direction"], horizon))
+            row = existing.get((entry["owner"], entry["account"], entry["advice_date"], entry["symbol"], entry["direction"], horizon))
             if row is None:
-                row = AdviceOutcome(owner_user_id=entry["owner"], advice_date=entry["advice_date"], symbol=entry["symbol"], direction=entry["direction"], horizon_days=horizon, action=item.action, model_rank=rank)
+                row = AdviceOutcome(owner_user_id=entry["owner"], account_id=entry["account"], advice_date=entry["advice_date"], symbol=entry["symbol"], direction=entry["direction"], horizon_days=horizon, action=item.action, model_rank=rank)
                 db.add(row)
                 is_new = True
             # 同一天后来的计划替换了这条建议，或者客户后来照做了：跟着更新，结果不动
@@ -157,9 +159,12 @@ def record_advice(db: Session, since: str, *, owner_user_id: int | None = None) 
     return created
 
 
-def settle(db: Session, last: str, *, now: datetime | None = None) -> int:
+def settle(db: Session, last: str, *, owner_user_id: int | None = None, now: datetime | None = None) -> int:
     """给到期的建议算结果。last 是最新一个有收盘数据的交易日（YYYYMMDD）。返回这次算出来的条数。"""
-    pending = list(db.scalars(select(AdviceOutcome).where(AdviceOutcome.verdict.is_(None), AdviceOutcome.advice_date <= last)).all())
+    query = select(AdviceOutcome).where(AdviceOutcome.verdict.is_(None), AdviceOutcome.advice_date <= last)
+    if owner_user_id is not None:
+        query = query.where(AdviceOutcome.owner_user_id == owner_user_id)
+    pending = list(db.scalars(query).all())
     if not pending:
         return 0
     first = min(row.advice_date for row in pending)
@@ -204,16 +209,20 @@ def settle(db: Session, last: str, *, now: datetime | None = None) -> int:
     return len(due_rows)
 
 
-def run_daily(now: datetime, *, session_factory: Callable[[], Session] = SessionLocal) -> str:
-    """定时任务入口，now 是北京时间。失败只记日志，不影响同一个任务里的其他步骤。"""
+def run_daily(now: datetime, *, owner_user_id: int | None = None, session_factory: Callable[[], Session] = SessionLocal) -> str:
+    """定时任务入口，now 是北京时间。失败只记日志，不影响同一个任务里的其他步骤。
+
+    定时任务不传 owner_user_id，处理所有用户；页面上手动更新只处理点按钮的那位用户自己的建议。
+    全市场平均是公共数据，谁触发都会补。
+    """
     last = now.strftime("%Y%m%d")
     since = (now - timedelta(days=LOOKBACK_DAYS)).strftime("%Y%m%d")
     try:
         with session_factory() as db:
             added = ensure_market_returns(db, since, last)
-            created = record_advice(db, since)
+            created = record_advice(db, since, owner_user_id=owner_user_id)
             latest = db.scalar(select(MarketDailyReturn.trade_date).order_by(MarketDailyReturn.trade_date.desc()).limit(1))
-            settled = settle(db, latest) if latest else 0
+            settled = settle(db, latest, owner_user_id=owner_user_id) if latest else 0
             db.commit()
         return f"成绩单：新登记 {created} 条建议，算出 {settled} 条结果，补基准 {added} 天"
     except Exception as exc:  # noqa: BLE001 - 成绩单失败不能影响影子账户结算
@@ -229,16 +238,23 @@ def _group(rows: list[dict[str, Any]], key: Callable[[dict[str, Any]], str], lab
     return sorted(result, key=lambda item: -item["total"])
 
 
-def summary(db: Session, owner_user_id: int, *, horizon: int = rules.PRIMARY_HORIZON, days: int = 180, now: datetime | None = None) -> dict[str, Any]:
-    """一位用户的成绩单：总体、按建议类型、按计划、按有没有照做、按模型看法，再加最近的明细。"""
+def summary(db: Session, owner_user_id: int, *, account_id: int | None = None, horizon: int = rules.PRIMARY_HORIZON, days: int = 180, now: datetime | None = None) -> dict[str, Any]:
+    """一位用户的成绩单：总体、按账户、按建议类型、按计划、按有没有照做、按模型看法，再加最近的明细。
+
+    只读这位用户自己的行。account_id 只在他自己的账户里筛，传了别人的账户号只会得到空结果。
+    """
     since = ((now or datetime.now()) - timedelta(days=days)).strftime("%Y%m%d")
-    outcomes = list(
+    mine = list(
         db.scalars(
             select(AdviceOutcome)
             .where(AdviceOutcome.owner_user_id == owner_user_id, AdviceOutcome.horizon_days == horizon, AdviceOutcome.advice_date >= since)
             .order_by(AdviceOutcome.advice_date.desc(), AdviceOutcome.id.desc())
         ).all()
     )
+    labels = {key or 0: value for key, value in account_labels(db, {row.account_id or None for row in mine}).items()}
+    labels[0] = "没有写账户"
+    accounts = [{"account_id": key, "label": labels[key]} for key in sorted({row.account_id for row in mine})]
+    outcomes = [row for row in mine if account_id is None or row.account_id == account_id]
     rows = [
         {
             "verdict": row.verdict,
@@ -249,12 +265,15 @@ def summary(db: Session, owner_user_id: int, *, horizon: int = rules.PRIMARY_HOR
             "followed": "照做了" if row.followed else "没有照做",
             "model": rules.model_view(row.direction, row.model_rank),
             "size": "数字人改了股数" if row.size_changed else "按代码建议的股数",
+            "account": str(row.account_id),
         }
         for row in outcomes
     ]
     recent = [
         {
             "advice_date": row.advice_date,
+            "account_id": row.account_id,
+            "account_label": labels[row.account_id],
             "symbol": row.symbol,
             "name": row.name,
             "action": row.action,
@@ -274,6 +293,9 @@ def summary(db: Session, owner_user_id: int, *, horizon: int = rules.PRIMARY_HOR
     return {
         "horizon": horizon,
         "horizons": list(rules.HORIZONS),
+        "account_id": account_id,
+        "accounts": accounts,
+        "by_account": _group(rows, lambda row: row["account"], {str(key): value for key, value in labels.items()}),
         "days": days,
         "min_samples": rules.MIN_SAMPLES,
         "dead_band": rules.DEAD_BAND,

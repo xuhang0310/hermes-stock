@@ -76,14 +76,23 @@ class ModelViewTests(unittest.TestCase):
 
 class DedupeTests(unittest.TestCase):
     def test_the_last_plan_of_the_day_wins(self) -> None:
-        base = {"owner": 1, "advice_date": "20261110", "symbol": "600000.SH", "direction": rules.DOWN}
+        base = {"owner": 1, "account": 3, "advice_date": "20261110", "symbol": "600000.SH", "direction": rules.DOWN}
         kept = rules.latest_per_day([{**base, "order": 1, "tag": "早盘"}, {**base, "order": 2, "tag": "午盘"}])
         self.assertEqual([item["tag"] for item in kept], ["午盘"])
 
     def test_other_days_stocks_directions_and_users_are_kept_apart(self) -> None:
-        base = {"owner": 1, "advice_date": "20261110", "symbol": "600000.SH", "direction": rules.DOWN, "order": 1}
+        base = {"owner": 1, "account": 3, "advice_date": "20261110", "symbol": "600000.SH", "direction": rules.DOWN, "order": 1}
         items = [base, {**base, "advice_date": "20261111"}, {**base, "symbol": "000001.SZ"}, {**base, "direction": rules.UP}, {**base, "owner": 2}]
         self.assertEqual(len(rules.latest_per_day(items)), 5)
+
+    def test_two_accounts_of_one_user_are_never_merged(self) -> None:
+        base = {"owner": 1, "advice_date": "20261110", "symbol": "600000.SH", "direction": rules.DOWN}
+        kept = rules.latest_per_day([{**base, "account": 3, "order": 1}, {**base, "account": 4, "order": 2}])
+        self.assertEqual(sorted(item["account"] for item in kept), [3, 4])
+
+    def test_the_same_account_number_under_two_users_is_not_merged(self) -> None:
+        base = {"account": 3, "advice_date": "20261110", "symbol": "600000.SH", "direction": rules.DOWN, "order": 1}
+        self.assertEqual(len(rules.latest_per_day([{**base, "owner": 1}, {**base, "owner": 2}])), 2)
 
 
 def _row(result: str, side: str = rules.UP, excess: float = 0.03) -> dict:

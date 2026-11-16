@@ -100,6 +100,17 @@ def _ensure_quant_upgrades(engine: Engine) -> None:
             connection.execute(text("ALTER TABLE shadow_accounts DROP INDEX uq_shadow_real_account"))
         if not _index_exists(connection, "shadow_accounts", "uq_shadow_account_strategy"):
             connection.execute(text("ALTER TABLE shadow_accounts ADD UNIQUE KEY uq_shadow_account_strategy (real_account_id, strategy)"))
+        # 成绩单第一版没有分账户，同一位用户的几个账户混在一起。结果都能从计划重新算出来，
+        # 所以清掉旧行、加上账户列，下一次收盘后的任务会按账户重新登记和结算。
+        if not _column_exists(connection, "advice_outcomes", "account_id"):
+            connection.execute(text("DELETE FROM advice_outcomes"))
+            connection.execute(text("ALTER TABLE advice_outcomes ADD COLUMN account_id INT NOT NULL DEFAULT 0 AFTER owner_user_id"))
+            if _index_exists(connection, "advice_outcomes", "uq_advice_outcome"):
+                connection.execute(text("ALTER TABLE advice_outcomes DROP INDEX uq_advice_outcome"))
+            if _index_exists(connection, "advice_outcomes", "ix_advice_outcomes_owner_date"):
+                connection.execute(text("ALTER TABLE advice_outcomes DROP INDEX ix_advice_outcomes_owner_date"))
+            connection.execute(text("ALTER TABLE advice_outcomes ADD UNIQUE KEY uq_advice_outcome_account (owner_user_id, account_id, advice_date, symbol, direction, horizon_days)"))
+            connection.execute(text("ALTER TABLE advice_outcomes ADD KEY ix_advice_outcomes_owner_date (owner_user_id, account_id, advice_date)"))
 
 
 def _ensure_schema_upgrades(engine: Engine) -> None:

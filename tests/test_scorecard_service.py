@@ -9,13 +9,17 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core.database import Base
-from backend.app.core.models import AdviceOutcome, DailyBar, Instrument, MarketDailyReturn, MarketTradingCalendar, StockModelSignal, TradePlan, TradePlanItem
+from backend.app.core.models import AdviceOutcome, DailyBar, Instrument, MarketDailyReturn, MarketTradingCalendar, PositionAccount, StockModelSignal, TradePlan, TradePlanItem, User
 from backend.app.scorecard import rules, service
 
 DAYS = [f"202611{day:02d}" for day in (2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27)] + ["20261130", "20261201"]
 STOCK = "600000.SH"
 OTHERS = ["600001.SH", "600002.SH", "000001.SZ"]
 OWNER = 7
+OTHER_OWNER = 99
+ACCOUNT_A = 31
+ACCOUNT_B = 32
+OTHER_ACCOUNT = 41
 
 
 def _iso(day: str) -> str:
@@ -34,6 +38,11 @@ class ScorecardServiceTests(unittest.TestCase):
             db.add(Instrument(symbol="510300.SH", name="沪深300ETF", market="SH", type="etf"))
             for day in DAYS:
                 db.add(MarketTradingCalendar(exchange="SSE", cal_date=day, is_open=True))
+            for user_id in (OWNER, OTHER_OWNER):
+                db.add(User(id=user_id, username=f"user{user_id}", display_name=f"用户{user_id}", password_hash="x", role="researcher"))
+            db.commit()
+            for account_id, owner, broker in ((ACCOUNT_A, OWNER, "华泰证券"), (ACCOUNT_B, OWNER, "中信证券"), (OTHER_ACCOUNT, OTHER_OWNER, "国泰君安")):
+                db.add(PositionAccount(id=account_id, owner_user_id=owner, broker_name=broker, account_no_masked=str(account_id)))
             db.commit()
             # STOCK 每天跌 1%，其他三只每天涨 1%：全市场平均 +0.5%
             for symbol, move in [(STOCK, -0.01), *[(other, 0.01) for other in OTHERS]]:
@@ -48,9 +57,9 @@ class ScorecardServiceTests(unittest.TestCase):
             db.add(TradePlan(plan_id=plan_id, owner_user_id=owner, plan_date=_iso(day), source=source, job_run_id=plan_id, status=status, activated_at=activated or datetime(2026, 11, 2, 1, 0)))
             db.commit()
 
-    def _item(self, plan_id: str, action: str, *, symbol: str = STOCK, owner: int = OWNER, **fields) -> int:
+    def _item(self, plan_id: str, action: str, *, symbol: str = STOCK, owner: int = OWNER, account: int | None = ACCOUNT_A, **fields) -> int:
         with self.Session() as db:
-            item = TradePlanItem(plan_id=plan_id, owner_user_id=owner, symbol=symbol, name="测试", action=action, valid_until="2026-11-30", **fields)
+            item = TradePlanItem(plan_id=plan_id, owner_user_id=owner, account_id=account, symbol=symbol, name="测试", action=action, valid_until="2026-11-30", **fields)
             db.add(item)
             db.commit()
             return item.id
@@ -190,12 +199,12 @@ class ScorecardServiceTests(unittest.TestCase):
         self._plan("p1", DAYS[0])
         self._item("p1", "sell", size_note="客户要求多卖")
         self._item("p1", "buy", symbol=OTHERS[0])
-        self._plan("other", DAYS[0], owner=99)
-        self._item("other", "buy", owner=99)
+        self._plan("other", DAYS[0], owner=OTHER_OWNER)
+        self._item("other", "buy", owner=OTHER_OWNER, account=OTHER_ACCOUNT)
         self._run()
         with self.Session() as db:
             mine = service.summary(db, OWNER, horizon=5, days=60, now=datetime(2026, 12, 2))
-            theirs = service.summary(db, 99, horizon=5, days=60, now=datetime(2026, 12, 2))
+            theirs = service.summary(db, OTHER_OWNER, horizon=5, days=60, now=datetime(2026, 12, 2))
         self.assertEqual((mine["overall"]["total"], mine["overall"]["right"]), (2, 2))
         self.assertEqual((theirs["overall"]["total"], theirs["overall"]["wrong"]), (1, 1))
         self.assertFalse(mine["overall"]["enough"])
@@ -204,6 +213,58 @@ class ScorecardServiceTests(unittest.TestCase):
         self.assertEqual({group["label"]: group["total"] for group in mine["by_size"]}, {"数字人改了股数": 1, "按代码建议的股数": 1})
         self.assertEqual(len(mine["recent"]), 2)
         self.assertEqual(mine["pending"], 0)
+        self.assertEqual([account["account_id"] for account in mine["accounts"]], [ACCOUNT_A])
+        self.assertEqual([account["account_id"] for account in theirs["accounts"]], [OTHER_ACCOUNT])
+        self.assertTrue(all(item["account_id"] == ACCOUNT_A for item in mine["recent"]))
+
+    def test_two_accounts_of_one_user_are_scored_separately(self) -> None:
+        """同一位用户两个账户同一天都卖同一只股票：是两条建议，各自记有没有照做。"""
+        self._plan("p1", DAYS[0])
+        self._item("p1", "sell", account=ACCOUNT_A, executed_qty=300)
+        self._item("p1", "sell", account=ACCOUNT_B)
+        self._item("p1", "buy", symbol=OTHERS[0], account=ACCOUNT_B)
+        self._run()
+        rows = self._outcomes(5)
+        self.assertCountEqual([(row.account_id, row.symbol) for row in rows], [(ACCOUNT_A, STOCK), (ACCOUNT_B, OTHERS[0]), (ACCOUNT_B, STOCK)])
+        self.assertEqual({row.account_id: row.followed for row in rows if row.symbol == STOCK}, {ACCOUNT_A: True, ACCOUNT_B: False})
+        with self.Session() as db:
+            everything = service.summary(db, OWNER, horizon=5, days=60, now=datetime(2026, 12, 2))
+            only_a = service.summary(db, OWNER, account_id=ACCOUNT_A, horizon=5, days=60, now=datetime(2026, 12, 2))
+            only_b = service.summary(db, OWNER, account_id=ACCOUNT_B, horizon=5, days=60, now=datetime(2026, 12, 2))
+        self.assertEqual((everything["overall"]["total"], only_a["overall"]["total"], only_b["overall"]["total"]), (3, 1, 2))
+        self.assertEqual({group["label"]: group["total"] for group in everything["by_account"]}, {f"华泰证券 账户{ACCOUNT_A}": 1, f"中信证券 账户{ACCOUNT_B}": 2})
+        self.assertEqual([account["account_id"] for account in only_a["accounts"]], [ACCOUNT_A, ACCOUNT_B])  # 筛了账户，下拉里还是自己的全部账户
+        self.assertTrue(all(item["account_id"] == ACCOUNT_B for item in only_b["recent"]))
+
+    def test_asking_for_someone_elses_account_returns_nothing(self) -> None:
+        self._plan("other", DAYS[0], owner=OTHER_OWNER)
+        self._item("other", "buy", owner=OTHER_OWNER, account=OTHER_ACCOUNT)
+        self._run()
+        with self.Session() as db:
+            peek = service.summary(db, OWNER, account_id=OTHER_ACCOUNT, horizon=5, days=60, now=datetime(2026, 12, 2))
+        self.assertEqual(peek["overall"]["total"], 0)
+        self.assertEqual(peek["recent"], [])
+        self.assertEqual(peek["accounts"], [])
+        self.assertEqual(peek["by_account"], [])
+
+    def test_an_item_whose_owner_differs_from_its_plan_is_not_recorded(self) -> None:
+        self._plan("p1", DAYS[0], owner=OWNER)
+        self._item("p1", "sell", owner=OTHER_OWNER, account=OTHER_ACCOUNT)
+        self._run()
+        self.assertEqual(self._outcomes(5), [])
+
+    def test_a_manual_refresh_only_touches_the_callers_advice(self) -> None:
+        self._plan("p1", DAYS[0])
+        self._item("p1", "sell")
+        self._plan("other", DAYS[0], owner=OTHER_OWNER)
+        self._item("other", "buy", owner=OTHER_OWNER, account=OTHER_ACCOUNT)
+        with self.Session() as db:
+            service.ensure_market_returns(db, DAYS[0], DAYS[-1], min_stocks=3)
+            db.commit()
+        service.run_daily(datetime(2026, 12, 1, 18, 30), owner_user_id=OWNER, session_factory=self.Session)
+        self.assertEqual({row.owner_user_id for row in self._outcomes(5)}, {OWNER})
+        service.run_daily(datetime(2026, 12, 1, 18, 30), session_factory=self.Session)  # 定时任务处理所有人
+        self.assertEqual({row.owner_user_id for row in self._outcomes(5)}, {OWNER, OTHER_OWNER})
 
     def test_the_daily_job_reports_what_it_did_and_survives_errors(self) -> None:
         self._plan("p1", DAYS[0])

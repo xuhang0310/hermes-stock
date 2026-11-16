@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import type { ScorecardGroup, ScorecardItem, ScorecardStats, ScorecardSummary, UserPayload } from '../types'
 
@@ -7,6 +7,7 @@ const props = defineProps<{ user: UserPayload }>()
 
 const summary = ref<ScorecardSummary | null>(null)
 const horizon = ref(10)
+const accountId = ref<number | null>(null)
 const loading = ref(false)
 const refreshing = ref(false)
 const error = ref('')
@@ -17,11 +18,16 @@ const canRefresh = computed(
   () => props.user.permissions.includes('all') || props.user.permissions.includes('schedule:manage')
 )
 const horizons = computed(() => summary.value?.horizons ?? [5, 10, 20])
+const accounts = computed(() => summary.value?.accounts ?? [])
+const showAccounts = computed(() => accounts.value.length > 1)
 const overall = computed(() => summary.value?.overall ?? null)
 const groups = computed(() => {
   const data = summary.value
   if (!data) return []
   return [
+    ...(accountId.value === null && data.by_account.length > 1
+      ? [{ title: '按账户', hint: '名下每个账户各自的成绩，账户之间不合并', rows: data.by_account }]
+      : []),
     { title: '按建议类型', hint: '买、卖、继续拿着，哪一类更准', rows: data.by_action },
     { title: '按哪份计划', hint: '早盘、午盘、晚间计划各自的成绩', rows: data.by_source },
     { title: '按模型看法', hint: '数字人的建议和量化模型一致或相反时，谁对得多', rows: data.by_model },
@@ -84,13 +90,19 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const data = await api.scorecard(horizon.value)
+    const data = await api.scorecard(horizon.value, accountId.value)
     if (current === sequence) summary.value = data
   } catch (exc) {
     if (current === sequence) error.value = exc instanceof Error ? exc.message : '成绩单加载失败'
   } finally {
     if (current === sequence) loading.value = false
   }
+}
+
+function selectAccount(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  accountId.value = value === '' ? null : Number(value)
+  void load()
 }
 
 function selectHorizon(value: number) {
@@ -129,6 +141,16 @@ async function refresh() {
 }
 
 onMounted(load)
+// 换了登录账号：上一位用户的成绩单和账户筛选都不能留在页面上
+watch(
+  () => props.user.id,
+  () => {
+    summary.value = null
+    accountId.value = null
+    notice.value = ''
+    void load()
+  }
+)
 </script>
 
 <template>
@@ -153,6 +175,15 @@ onMounted(load)
           {{ value }} 个交易日后
         </button>
       </div>
+      <label v-if="showAccounts" class="score-account">
+        <span>账户</span>
+        <select :value="accountId === null ? '' : String(accountId)" @change="selectAccount">
+          <option value="">全部账户</option>
+          <option v-for="account in accounts" :key="account.account_id" :value="String(account.account_id)">
+            {{ account.label }}
+          </option>
+        </select>
+      </label>
       <button
         v-if="canRefresh"
         class="ui-btn ui-btn--ghost ui-btn--sm"
@@ -193,7 +224,7 @@ onMounted(load)
       </div>
       <p class="score-rule">
         怎么算：从建议生效那天收盘起，过 {{ summary.horizon }} 个交易日，看这只股票比全市场平均多涨还是少涨。建议买或继续拿着的，跑赢算对；建议卖的，跑输算对。差距不到
-        {{ percent(summary.dead_band, 0) }} 算差不多。同一天同一只股票只算一次。每一类不到 {{ summary.min_samples }} 条先不下结论。
+        {{ percent(summary.dead_band, 0) }} 算差不多。同一个账户同一天同一只股票只算一次，账户之间不合并。每一类不到 {{ summary.min_samples }} 条先不下结论。
       </p>
     </section>
 
@@ -248,6 +279,7 @@ onMounted(load)
           <thead>
             <tr>
               <th>建议日</th>
+              <th v-if="showAccounts">账户</th>
               <th>股票</th>
               <th>建议</th>
               <th>来自</th>
@@ -261,8 +293,9 @@ onMounted(load)
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in summary.recent" :key="`${item.advice_date}-${item.symbol}-${item.action}`">
+            <tr v-for="item in summary.recent" :key="`${item.advice_date}-${item.account_id}-${item.symbol}-${item.action}`">
               <td class="num-left">{{ day(item.advice_date) }}</td>
+              <td v-if="showAccounts">{{ item.account_label }}</td>
               <td>{{ item.name || item.symbol }}<small class="score-code">{{ item.symbol.slice(0, 6) }}</small></td>
               <td>{{ item.action_label }}</td>
               <td>{{ item.plan_source }}</td>
@@ -296,6 +329,17 @@ onMounted(load)
 .score-command { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
 .score-command .ui-tabs { flex: 1; }
 .score-command .ui-tabs [role="tab"] { min-height: 40px; font-size: 14px; }
+
+.score-account { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.score-account select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
+  padding: 4px 8px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 13px;
+}
 
 .score-notice { margin: 0; border: 1px solid; border-radius: var(--r-ctrl); padding: 8px 12px; font-size: 13px; }
 .score-notice--danger { border-color: rgba(255, 93, 93, .4); background: rgba(255, 93, 93, .07); color: #ff9b9b; }

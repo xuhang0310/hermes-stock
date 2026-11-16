@@ -845,10 +845,10 @@ export const api = {
     ),
   deleteNotification: (id: number) =>
     request<ApiEnvelope<null>>(`/api/notifications/${id}`, { method: 'DELETE' }),
-  scorecard: (horizon = 10, days = 180) =>
-    request<ApiEnvelope<ScorecardSummary>>(`/api/scorecard?horizon=${horizon}&days=${days}`).then(
-      (res) => res.data
-    ),
+  scorecard: (horizon = 10, accountId: number | null = null, days = 180) =>
+    request<ApiEnvelope<ScorecardSummary>>(
+      `/api/scorecard?horizon=${horizon}&days=${days}${accountId === null ? '' : `&account_id=${accountId}`}`
+    ).then((res) => res.data),
   scorecardRefresh: () =>
     request<ApiEnvelope<{ message: string }>>('/api/scorecard/refresh', { method: 'POST' }).then(
       (res) => res.data
