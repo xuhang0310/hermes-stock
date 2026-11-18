@@ -238,6 +238,43 @@ def _pct_ranks(values: dict[str, float | None], *, ascending: bool = True) -> di
     return {str(k): round(float(val), 2) for k, val in ranked.items()}
 
 
+def _industry_neutral_pct_ranks(
+    values: dict[str, float | None],
+    sym_industry: dict[str, str | None],
+    *,
+    ascending: bool = True,
+    ind_weight: float = 0.65,
+    min_peers: int = 8,
+) -> dict[str, float]:
+    """行业内百分位（65%）+ 全市场百分位（35%）融合排名。
+
+    消除银行（PE≈5/PB≈0.5）或轻资产软件（毛利率>75%/低负债）跨行业直接比绝对估值与毛利时的结构性垄断偏差；
+    同行业有效样本不足 min_peers 时自动退化为全市场百分位。
+    """
+    mkt_rank = _pct_ranks(values, ascending=ascending)
+    if not mkt_rank:
+        return {}
+    by_ind: dict[str, dict[str, float | None]] = defaultdict(dict)
+    for sym, val in values.items():
+        if sym in mkt_rank:
+            ind = sym_industry.get(sym)
+            if ind:
+                by_ind[ind][sym] = val
+    ind_rank_all: dict[str, float] = {}
+    for peer_vals in by_ind.values():
+        if len(peer_vals) >= min_peers:
+            ind_rank_all.update(_pct_ranks(peer_vals, ascending=ascending))
+
+    mkt_w = 1.0 - ind_weight
+    blended: dict[str, float] = {}
+    for sym, mr in mkt_rank.items():
+        if sym in ind_rank_all:
+            blended[sym] = round(ind_weight * ind_rank_all[sym] + mkt_w * mr, 2)
+        else:
+            blended[sym] = mr
+    return blended
+
+
 def combine_layers_with_shrinkage(
     layer_scores: dict[str, float | None],
     *,
@@ -348,8 +385,10 @@ def score_cross_section_inputs(
     low_vol_vals: dict[str, float | None] = {}
     reversal_vals: dict[str, float | None] = {}
 
+    sym_industry: dict[str, str | None] = {}
     for it in items:
         sym = it["symbol"]
+        sym_industry[sym] = str(it.get("industry") or "").strip() or None
         pe = _finite(it.get("pe_ttm"))
         pb = _finite(it.get("pb"))
         if pe is not None and pe > 0:
@@ -374,12 +413,13 @@ def score_cross_section_inputs(
         low_vol_vals[sym] = _finite(it.get("vol_20"))
         reversal_vals[sym] = _finite(it.get("ret_20"))
 
-    ep_rank = _pct_ranks(ep_vals, ascending=True)
-    bp_rank = _pct_ranks(bp_vals, ascending=True)
-    roe_rank = _pct_ranks(roe_vals, ascending=True)
-    gm_rank = _pct_ranks(gm_vals, ascending=True)
-    debt_rank = _pct_ranks(debt_vals, ascending=False)  # 低负债更优
-    ocf_rank = _pct_ranks(ocf_vals, ascending=True)
+    # L3 估值与盈利质地采用「65% 同行业百分位 + 35% 全市场百分位」，杜绝银行低 PE/PB 横扫全市场
+    ep_rank = _industry_neutral_pct_ranks(ep_vals, sym_industry, ascending=True)
+    bp_rank = _industry_neutral_pct_ranks(bp_vals, sym_industry, ascending=True)
+    roe_rank = _industry_neutral_pct_ranks(roe_vals, sym_industry, ascending=True)
+    gm_rank = _industry_neutral_pct_ranks(gm_vals, sym_industry, ascending=True)
+    debt_rank = _industry_neutral_pct_ranks(debt_vals, sym_industry, ascending=False)  # 低负债更优
+    ocf_rank = _industry_neutral_pct_ranks(ocf_vals, sym_industry, ascending=True)
 
     sales_acc_rank = _pct_ranks(sales_acc_vals, ascending=True)
     profit_acc_rank = _pct_ranks(profit_acc_vals, ascending=True)
@@ -667,14 +707,42 @@ def score_cross_section_inputs(
                 }
             )
 
-    for plan in plan_types:
-        results_by_plan[plan].sort(
-            key=lambda row: (
-                0 if row["verdict"] == VERDICT_ACTION else (1 if row["verdict"] == VERDICT_WATCH else 2),
-                -float(row["total_score"]),
-                str(row["symbol"]),
-            )
+    def _sort_key(row: dict[str, Any]) -> tuple[int, float, str]:
+        return (
+            0 if row["verdict"] == VERDICT_ACTION else (1 if row["verdict"] == VERDICT_WATCH else 2),
+            -float(row["total_score"]),
+            str(row["symbol"]),
         )
+
+    apply_sector_diversity = len(items) >= 30
+    for plan in plan_types:
+        results_by_plan[plan].sort(key=_sort_key)
+        if apply_sector_diversity:
+            # 行业集中度软限（L1-L7 组合风控纪律）：同一行业前 2 只零衰减，第 3 只起阶梯扣分（-2.5/-5.0/-7.5/-9.0），
+            # 防止单一板块（如银行/白酒/公用事业）霸榜前十，确保主流精选池呈现跨行业最优龙头。
+            ind_seen: dict[tuple[str, str], int] = defaultdict(int)
+            for row in results_by_plan[plan]:
+                if row["vetoed"]:
+                    continue
+                ind = row.get("industry")
+                if not ind:
+                    continue
+                mv = row.get("total_mv_yi")
+                tier_key = "mainstream" if (mv is None or float(mv) >= 50.0) else "micro"
+                seen = ind_seen[(tier_key, ind)]
+                ind_seen[(tier_key, ind)] = seen + 1
+                if seen >= 2:
+                    penalty = round(min(9.0, 2.5 * (seen - 1)), 2)
+                    new_score = round(max(0.0, float(row["total_score"]) - penalty), 2)
+                    row["total_score"] = new_score
+                    row["evidence"]["industry_crowding_penalty"] = penalty
+                    if row["verdict"] == VERDICT_ACTION and new_score < 70.0:
+                        row["verdict"] = VERDICT_WATCH
+                        row["verdict_label"] = VERDICT_LABELS[VERDICT_WATCH]
+                    elif row["verdict"] == VERDICT_WATCH and new_score < 55.0:
+                        row["verdict"] = VERDICT_PASS
+                        row["verdict_label"] = VERDICT_LABELS[VERDICT_PASS]
+            results_by_plan[plan].sort(key=_sort_key)
     return results_by_plan
 
 
@@ -1584,7 +1652,7 @@ def update_shadow_nav_comparison(db: Session, trade_date: str) -> dict[str, Any]
         ).all()
     )
 
-    # 2) layered-swing-30 前一日非否决最高分前 30 只 + 前一日 L1 仓位上限
+    # 2) layered-swing-30 前一日主流精选池（>=50亿优先）非否决最高分前 30 只 + 前一日 L1 仓位上限
     ls_syms = list(
         db.scalars(
             select(StockSelectionDailySnapshot.symbol)
@@ -1593,7 +1661,24 @@ def update_shadow_nav_comparison(db: Session, trade_date: str) -> dict[str, Any]
                 StockSelectionDailySnapshot.plan_type == PLAN_SWING,
                 StockSelectionDailySnapshot.vetoed.is_(False),
             )
-            .order_by(StockSelectionDailySnapshot.total_score.desc())
+            .order_by(
+                case(
+                    (
+                        or_(
+                            StockSelectionDailySnapshot.total_mv_yi.is_(None),
+                            StockSelectionDailySnapshot.total_mv_yi >= 50.0,
+                        ),
+                        0,
+                    ),
+                    else_=1,
+                ),
+                case(
+                    (StockSelectionDailySnapshot.verdict == VERDICT_ACTION, 0),
+                    (StockSelectionDailySnapshot.verdict == VERDICT_WATCH, 1),
+                    else_=2,
+                ),
+                StockSelectionDailySnapshot.total_score.desc(),
+            )
             .limit(30)
         ).all()
     )

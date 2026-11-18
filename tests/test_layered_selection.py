@@ -461,6 +461,101 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
         # 冷门微盘日均成交不足 4500 万元，被机构流动性门禁拦截在 watch（观察）
         self.assertEqual(by_sym["002999.SZ"]["verdict"], VERDICT_WATCH)
 
+    def test_industry_neutral_l3_and_sector_crowding_guard(self) -> None:
+        base = {
+            "market": "SH",
+            "list_status": "L",
+            "list_date": "20160101",
+            "trade_date": "20261117",
+            "close": 25.0,
+            "pct_chg": 0.6,
+            "volume": 600_000.0,
+            "avg_amount_20": 400_000.0,
+            "amt_ratio_5_20": 0.75,
+            "ret_20": 0.03,
+            "vol_20": 0.016,
+            "ma20": 24.8,
+            "ma60": 23.5,
+            "ma60_slope": 0.015,
+            "atr14": 0.5,
+            "total_mv_yi": 450.0,
+            "turnover_rate": 1.5,
+            "buy_k": 0.5,
+            "suggested_buy_price": 24.75,
+            "stop_ref_price": 24.0,
+            "buy_basis": "测试",
+            "events": [],
+        }
+        items = []
+        # 12 只银行股：绝对 PE=5~6、PB=0.5~0.6 极低
+        for i in range(12):
+            items.append(
+                {
+                    **base,
+                    "symbol": f"6010{i:02d}.SH",
+                    "name": f"银行{i}",
+                    "industry": "银行",
+                    "pe_ttm": 5.0 + i * 0.1,
+                    "pb": 0.50 + i * 0.02,
+                    "model_rank": 0.85 - i * 0.015,
+                    "fin": {
+                        "roe": 11.5 - i * 0.2,
+                        "grossprofit_margin": 42.0 - i * 0.3,
+                        "debt_to_assets": 91.0 + i * 0.1,
+                        "tr_yoy_accel": 5.0 - i * 0.2,
+                        "profit_yoy_accel": 6.0 - i * 0.2,
+                    },
+                }
+            )
+        # 12 只半导体股：龙头 PE=26、PB=3.6，但 ROE=22%、业绩加速度领先
+        for i in range(12):
+            items.append(
+                {
+                    **base,
+                    "symbol": f"6881{i:02d}.SH",
+                    "name": f"芯片{i}",
+                    "industry": "半导体",
+                    "pe_ttm": 26.0 + i * 4.0,
+                    "pb": 3.6 + i * 0.4,
+                    "model_rank": 0.84 - i * 0.02,
+                    "fin": {
+                        "roe": 22.0 - i * 1.1,
+                        "grossprofit_margin": 56.0 - i * 1.5,
+                        "debt_to_assets": 22.0 + i * 2.0,
+                        "tr_yoy_accel": 22.0 - i * 1.5,
+                        "profit_yoy_accel": 28.0 - i * 2.0,
+                    },
+                }
+            )
+        # 10 只工程机械股：凑齐 >=30 只跨行业截面以触发行业集中度防霸榜软限
+        for i in range(10):
+            items.append(
+                {
+                    **base,
+                    "symbol": f"6003{i:02d}.SH",
+                    "name": f"机械{i}",
+                    "industry": "工程机械",
+                    "pe_ttm": 16.0 + i * 2.0,
+                    "pb": 2.0 + i * 0.2,
+                    "model_rank": 0.82 - i * 0.02,
+                    "fin": {
+                        "roe": 16.0 - i * 0.8,
+                        "grossprofit_margin": 32.0 - i * 1.0,
+                        "debt_to_assets": 45.0 + i * 1.5,
+                        "tr_yoy_accel": 18.0 - i * 1.2,
+                        "profit_yoy_accel": 20.0 - i * 1.5,
+                    },
+                }
+            )
+        scored = layered_selection.score_cross_section_inputs(items, plan_types=(PLAN_SWING,))[PLAN_SWING]
+        by_sym = {r["symbol"]: r for r in scored}
+        # 半导体龙头 688100.SH 在行业内估值/ROE/毛利均居首，L3 质地分应显著高于 70（不被银行 PE=5 压垮）
+        self.assertGreater(by_sym["688100.SH"]["l3_fundamental_score"], 72.0)
+        # 前 6 名绝不能被单一行业（如银行）全数垄断
+        top6_industries = [r["industry"] for r in scored[:6]]
+        self.assertLessEqual(top6_industries.count("银行"), 3)
+        self.assertGreaterEqual(len(set(top6_industries)), 2)
+
     def test_skill_registry_registers_unified_quant_selection_tools(self) -> None:
         registry = SkillRegistry()
         registry.discover()
