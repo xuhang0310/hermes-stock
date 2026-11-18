@@ -19,6 +19,7 @@ from backend.app.core.models import (
     Instrument,
     StockDailyBasic,
     StockModelSignal,
+    TushareFactorValue,
     User,
 )
 from backend.app.market.event_signal_sync import (
@@ -123,6 +124,14 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
             self.assertEqual(april_view["600001.SH"]["end_date"], "20251231")
             self.assertAlmostEqual(april_view["600001.SH"]["profit_yoy_accel"], 20.0)
             self.assertAlmostEqual(april_view["600001.SH"]["tr_yoy_accel"], 14.0)
+
+            # 验证付费 TuShare 因子库 PIT 截面融合
+            db.add(TushareFactorValue(factor_name="roe_ttm", symbol="600003.SH", trade_date="20260420", factor_value=0.21))
+            db.add(TushareFactorValue(factor_name="sa", symbol="600003.SH", trade_date="20260420", factor_value=0.65))
+            db.commit()
+            fused = load_pit_financials(db, as_of_date="20260421")
+            self.assertAlmostEqual(fused["600003.SH"]["roe"], 21.0)
+            self.assertAlmostEqual(fused["600003.SH"]["tr_yoy_accel"], 0.65)
 
     def test_public_event_signals_screen_non_held_stocks_with_pit_gate(self) -> None:
         anns = [

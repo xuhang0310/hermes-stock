@@ -339,11 +339,11 @@ def load_pit_financials(
         f_stmt = select(
             TushareFactorValue.symbol,
             TushareFactorValue.factor_name,
-            TushareFactorValue.value,
+            TushareFactorValue.factor_value,
         ).where(
             TushareFactorValue.trade_date == str(factor_day),
             TushareFactorValue.factor_name.in_(list(LAYERED_PIT_FACTOR_NAMES)),
-            TushareFactorValue.value.is_not(None),
+            TushareFactorValue.factor_value.is_not(None),
         )
         if allowed_set is not None and len(allowed_set) <= 500:
             f_stmt = f_stmt.where(TushareFactorValue.symbol.in_(sorted(allowed_set)))
