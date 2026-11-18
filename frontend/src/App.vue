@@ -19,6 +19,7 @@ import BacktestReportView from './views/BacktestReportView.vue'
 import BacktestHistoryView from './views/BacktestHistoryView.vue'
 import FactorAnalysisView from './views/FactorAnalysisView.vue'
 import ScreenerView from './views/ScreenerView.vue'
+import QuantSelectionView from './views/QuantSelectionView.vue'
 import IndustryAnalysisView from './views/IndustryAnalysisView.vue'
 import { industryQuestion } from './utils/industry'
 import AutomaticSelectionView from './views/AutomaticSelectionView.vue'
@@ -38,6 +39,8 @@ import type {
   PositionItem,
   PositionSymbolValidation,
   ScreenerItem,
+  LayeredSelectionItem,
+  MarketRegimeL1,
   AutomaticSelectionPick,
   IndustryMember,
   UserPayload,
@@ -60,6 +63,7 @@ type PageKey =
   | 'backtestHistory'
   | 'backtestReport'
   | 'factorAnalysis'
+  | 'quantSelection'
   | 'screener'
   | 'industryAnalysis'
   | 'automaticSelection'
@@ -281,6 +285,7 @@ const pageTitle = computed(() => {
     backtestHistory: '回测报告',
     backtestReport: '策略回测报告',
     factorAnalysis: '因子评估',
+    quantSelection: '统一量化选股（L1–L7）',
     screener: 'AI 选股',
     industryAnalysis: '行业分析',
     automaticSelection: '自动选股',
@@ -293,6 +298,9 @@ const pageTitle = computed(() => {
 
 const pageSubtitle = computed(() => {
   if (activePage.value === 'industryAnalysis') return '行业强弱、市场广度与成分股研究'
+  if (activePage.value === 'quantSelection') {
+    return 'L1 大盘总仓位温度计 · L2–L6 六层证据与一票否决 · 现货限价挂单 · L7 账户风险股数'
+  }
   if (activePage.value === 'automaticSelection') {
     return '每个交易日收盘后按固定规则选出观察股，并持续跟踪之后的表现'
   }
@@ -1064,6 +1072,10 @@ function navigate(page: PageKey) {
       const initialTab = ['admin', 'super_admin'].includes(currentUser.value?.role || '') ? 'models' : 'mcp'
       window.history.pushState({}, '', `/settings?tab=${initialTab}`)
     }
+  } else if (page === 'quantSelection') {
+    if (!/^\/quant-selection\/?$/i.test(window.location.pathname)) {
+      window.history.pushState({}, '', '/quant-selection')
+    }
   } else if (page === 'automaticSelection') {
     if (!/^\/automatic-selection\/?$/i.test(window.location.pathname)) {
       window.history.pushState({}, '', '/automatic-selection')
@@ -1075,6 +1087,7 @@ function navigate(page: PageKey) {
     page !== 'opsConsole' &&
     (window.location.pathname.startsWith('/backtests/') ||
       /^\/oc-console-/i.test(window.location.pathname) ||
+      /^\/quant-selection\/?$/i.test(window.location.pathname) ||
       /^\/automatic-selection\/?$/i.test(window.location.pathname) ||
       /^\/scorecard\/?$/i.test(window.location.pathname) ||
       /^\/settings\/?$/i.test(window.location.pathname) ||
@@ -1093,6 +1106,10 @@ function syncPageFromLocation() {
   }
   if (/^\/industries\/?$/i.test(pathname)) {
     activePage.value = 'industryAnalysis'
+    return
+  }
+  if (/^\/quant-selection\/?$/i.test(pathname)) {
+    activePage.value = 'quantSelection'
     return
   }
   if (/^\/automatic-selection\/?$/i.test(pathname)) {
@@ -1161,7 +1178,7 @@ function openBoardSession(sessionId: number) {
 
 function screenIndustry(industry: string) {
   screenerInitialIndustry.value = industry
-  navigate('screener')
+  navigate('quantSelection')
 }
 
 function openIndustryStockAnalysis(item: IndustryMember) {
@@ -1185,6 +1202,23 @@ function openScreenerStockAnalysis(item: ScreenerItem) {
     `请对 ${item.name}（${item.symbol}）进行专项解读。`,
     snapshot ? `该标的来自 AI 选股结果，当前筛选快照：${snapshot}。` : '',
     '请先查最新数据，再用大白话告诉我：现在走势怎么样、关键价位在哪，基本面和估值贵不贵，最近发生了什么事，最大的风险是什么，接下来该盯什么。'
+  ].filter(Boolean).join('\n')
+  activePage.value = 'digitalHumans'
+}
+
+function openQuantSelectionStockAnalysis(item: LayeredSelectionItem, regime: MarketRegimeL1 | null) {
+  digitalHumanInitialTab.value = 'chat'
+  digitalHumanInitialSession.value = null
+  const regimeLine = regime
+    ? `当前 L1 市场环境为【${regime.stance_label}】（建议总仓位上限 ${Math.round(regime.max_position_ratio * 100)}%，风格：${regime.style_label}）。`
+    : ''
+  digitalHumanInitialQuestion.value = [
+    `请调用 inspect_stock_layered_l1_l7 对 ${item.name}（${item.symbol}）执行 L1–L7 深度复核。`,
+    regimeLine,
+    `当前【${item.plan_label}】综合分 ${item.total_score.toFixed(1)}（结论：${item.verdict_label}，数据覆盖率 ${Math.round(item.coverage_ratio * 100)}%）。`,
+    item.expectation_thesis ? `客观线索：${item.expectation_thesis}。` : '',
+    `执行参考挂买价 ${item.suggested_buy_price ?? '暂无'} 元，证伪位 ${item.stop_ref_price ?? '暂无'} 元，L7 建议股数 ${item.l7_risk.advised_shares} 股。`,
+    '请结合最新公告与财报，按「市场以为…我认为…因为…」核验预期差是否成立，并指出最大风险与证伪退出条件。'
   ].filter(Boolean).join('\n')
   activePage.value = 'digitalHumans'
 }
@@ -1289,6 +1323,16 @@ onBeforeUnmount(() => {
         @back="closeBacktest"
       />
       <FactorAnalysisView v-else-if="activePage === 'factorAnalysis'" />
+      <QuantSelectionView
+        v-else-if="activePage === 'quantSelection'"
+        :user="currentUser"
+        :accounts="positionAgentAccounts"
+        :initial-industry="screenerInitialIndustry"
+        @watchlist-added="applyWatchlistItem"
+        @ask-stock="openQuantSelectionStockAnalysis"
+        @open-baseline="navigate('automaticSelection')"
+        @open-custom-screener="navigate('screener')"
+      />
       <AutomaticSelectionView
         v-else-if="activePage === 'automaticSelection'"
         :user="currentUser"
@@ -1302,7 +1346,7 @@ onBeforeUnmount(() => {
         @watchlist-added="applyWatchlistItem"
         @ask-stock="openIndustryStockAnalysis"
         @screen-industry="screenIndustry"
-        @open-screener="navigate('screener')"
+        @open-screener="navigate('quantSelection')"
       />
       <ScreenerView
         v-else-if="activePage === 'screener'"

@@ -28,6 +28,7 @@ const EYEBROW_EXEMPT = new Set([
   'RhythmView.vue',
 ])
 const MIGRATED_FILES = [
+  'QuantSelectionView.vue',
   'ScreenerView.vue',
   'AutomaticSelectionView.vue',
   'IndustryAnalysisView.vue',

@@ -116,6 +116,11 @@ def sync_automatic_selection_data() -> dict[str, Any]:
             *config_errors,
             *[str(item) for item in factor_sync.get("errors") or []],
         ]
+        layered_aux_sync = (
+            _sync_layered_aux_channels(target_trade_date)
+            if (not market_errors and target_trade_date and strategies)
+            else {}
+        )
         return {
             "ready": not market_errors,
             "target_trade_date": target_trade_date or None,
@@ -123,8 +128,45 @@ def sync_automatic_selection_data() -> dict[str, Any]:
             "cache_status": cache_status,
             "market_sync": market_summary,
             "factor_sync": factor_sync,
+            "layered_aux_sync": layered_aux_sync,
             "errors": errors,
         }
+
+
+def _sync_layered_aux_channels(target_trade_date: str) -> dict[str, Any]:
+    """每日 17:40 入库任务顺带增量补齐宽基指数、全市场重大公告及当季 PIT 财报（软容错，不阻塞主行情）。"""
+    out: dict[str, Any] = {}
+    try:
+        from backend.app.market.index_sync import sync_benchmark_indices
+
+        out["indices"] = sync_benchmark_indices(end_date=target_trade_date)
+    except Exception as exc:  # noqa: BLE001
+        out["indices_error"] = str(exc)[:180]
+    try:
+        from backend.app.market.event_signal_sync import sync_market_event_signals
+
+        out["events"] = sync_market_event_signals(end_date=target_trade_date, days=3)
+    except Exception as exc:  # noqa: BLE001
+        out["events_error"] = str(exc)[:180]
+    try:
+        from backend.app.core.models import StockFinancialPit
+        from backend.app.market.financial_pit_sync import recent_report_periods, sync_financial_pit
+
+        periods = recent_report_periods(count=4)
+        with SessionLocal() as db:
+            existing_cnt = int(
+                db.scalar(
+                    select(func.count(StockFinancialPit.id)).where(StockFinancialPit.end_date == periods[-1])
+                )
+                or 0
+            )
+        if existing_cnt < 1500:
+            out["financial_pit"] = sync_financial_pit(periods=periods[-2:])
+        else:
+            out["financial_pit"] = {"skipped": True, "latest_period": periods[-1], "rows": existing_cnt}
+    except Exception as exc:  # noqa: BLE001
+        out["financial_pit_error"] = str(exc)[:180]
+    return out
 
 
 def run_automatic_selection_cycle(
@@ -216,9 +258,35 @@ def run_automatic_selection_cycle(
                 "runs": runs,
             }
     _explain_completed_runs(result)
+    if target_trade_date and int(result.get("completed_count") or 0) > 0:
+        result["layered_snapshot"] = _refresh_layered_snapshots(target_trade_date)
     result["evaluation_updates"] = evaluation_summary
     result["market_sync"] = summary
     return result
+
+
+def _refresh_layered_snapshots(target_trade_date: str) -> dict[str, Any]:
+    """与每日 17:50 自动选股同周期生成 L1 市场环境、L2–L6 全市场截面宽表与前瞻模拟净值账本。"""
+    try:
+        from backend.app.quant.layered_selection import (
+            build_daily_selection_snapshots,
+            update_shadow_nav_comparison,
+        )
+
+        with SessionLocal() as db:
+            snap_info = build_daily_selection_snapshots(db, trade_date=target_trade_date)
+            nav_info = update_shadow_nav_comparison(db, target_trade_date)
+            db.commit()
+        return {
+            "status": "completed",
+            "trade_date": target_trade_date,
+            "rows_written": snap_info.get("rows_written", 0),
+            "action_counts": snap_info.get("action_counts", {}),
+            "shadow_nav": nav_info,
+        }
+    except Exception as exc:  # noqa: BLE001 - 挑战者快照异常不影响现行 model-rank-30 正式运行
+        logger.warning("分层选股截面快照刷新跳过 trade_date=%s error=%s", target_trade_date, str(exc)[:240])
+        return {"status": "skipped", "error": str(exc)[:240]}
 
 
 def _completed_ingestion_evidence(target_trade_date: str) -> dict[str, Any]:

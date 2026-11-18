@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from backend.app.ai.llm_client import chat_completion
 from backend.app.core.database import SessionLocal
 from backend.app.core.llm_config import active_llm_config
-from backend.app.core.models import DailyBar, Instrument, StockLatestPrice
+from backend.app.core.models import DailyBar, Instrument, StockAdjFactor, StockLatestPrice
 from backend.app.market.stock_tools import get_tushare_daily, normalize_a_share_symbol
 from backend.app.quant.factors.factor_analysis_core import compute_ic_series
 from backend.app.quant.factors.registry import (
@@ -120,6 +120,20 @@ def _load_panel(
             )
             .order_by(normalized_trade_date, DailyBar.symbol, DailyBar.id)
         ).all()
+        adj_rows = db.scalars(
+            select(StockAdjFactor)
+            .where(
+                StockAdjFactor.symbol.in_(normalized),
+                StockAdjFactor.trade_date >= start,
+                StockAdjFactor.trade_date <= end,
+            )
+            .order_by(StockAdjFactor.trade_date, StockAdjFactor.symbol, StockAdjFactor.id)
+        ).all()
+
+    adj_map: dict[tuple[str, str], float] = {}
+    for adj_row in adj_rows:
+        if adj_row.adj_factor is not None and math.isfinite(adj_row.adj_factor) and adj_row.adj_factor > 0:
+            adj_map[(str(adj_row.trade_date).replace("-", ""), adj_row.symbol)] = float(adj_row.adj_factor)
 
     # Multiple sources can cache the same bar. Prefer TuShare, then the newest row.
     deduped: dict[tuple[str, str], DailyBar] = {}
@@ -162,12 +176,32 @@ def _load_panel(
             .astype(float)
         )
 
-    typical_price = (panel["open"] + panel["high"] + panel["low"] + panel["close"]) / 4.0
+    typical_price_raw = (panel["open"] + panel["high"] + panel["low"] + panel["close"]) / 4.0
     with np.errstate(divide="ignore", invalid="ignore"):
         # TuShare daily amount is thousand CNY and volume is lots (100 shares).
-        implied_vwap = panel["amount"] * 10.0 / panel["volume"]
-    plausible = (implied_vwap > panel["low"] * 0.5) & (implied_vwap < panel["high"] * 1.5)
-    panel["vwap"] = implied_vwap.where(plausible, typical_price)
+        implied_vwap_raw = panel["amount"] * 10.0 / panel["volume"]
+    plausible = (implied_vwap_raw > panel["low"] * 0.5) & (implied_vwap_raw < panel["high"] * 1.5)
+    panel["vwap"] = implied_vwap_raw.where(plausible, typical_price_raw)
+
+    if adj_map:
+        adj_records = [
+            {"trade_date": pd.Timestamp(day), "symbol": sym, "adj_factor": factor}
+            for (day, sym), factor in adj_map.items()
+            if sym in normalized
+        ]
+        if adj_records:
+            adj_frame = (
+                pd.DataFrame.from_records(adj_records)
+                .pivot(index="trade_date", columns="symbol", values="adj_factor")
+                .reindex(index=panel["close"].index, columns=normalized)
+                .astype(float)
+                .ffill()
+                .bfill()
+            )
+            latest_adj = adj_frame.ffill().iloc[-1]
+            scale = adj_frame.divide(latest_adj, axis=1).fillna(1.0)
+            for price_field in ("open", "high", "low", "close", "vwap"):
+                panel[price_field] = panel[price_field] * scale
 
     close = panel["close"]
     coverage = PanelCoverage(

@@ -1,0 +1,16 @@
+{
+  "chat_modes": ["research", "stock"],
+  "roles": ["quant-analyst", "research-analyst", "stock-pm", "risk-officer"],
+  "default_roles": ["quant-analyst", "stock-pm"],
+  "triggers": ["选股", "量化选股", "波段选股", "长线选股", "事件驱动", "市场环境", "仓位上限", "分层评分", "买点", "预期差"],
+  "tool_names": ["get_market_regime_l1", "query_unified_quant_selection", "inspect_stock_layered_l1_l7"],
+  "criteria": [
+    {
+      "code": "selection.regime_and_candidates",
+      "description": "明确 L1 市场环境建议总仓位上限与 L2–L6 分层评分、否决项及 L7 风险股数依据。",
+      "tool_names": ["get_market_regime_l1", "query_unified_quant_selection", "inspect_stock_layered_l1_l7"],
+      "validation_profile": "quantitative"
+    }
+  ],
+  "output_contract": ["L1市场环境与仓位上限", "L2-L6分层证据与否决检查", "预期差与催化", "执行限价与L7风险股数", "研究边界声明"]
+}

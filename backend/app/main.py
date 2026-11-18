@@ -52,6 +52,7 @@ from backend.app.quant.factor_api import router as factor_router
 from backend.app.quant.factor_composite_api import router as factor_composite_router
 from backend.app.quant.tushare_factor_api import router as tushare_factor_router
 from backend.app.quant.screener_api import router as screener_router
+from backend.app.quant.layered_selection_api import router as layered_selection_router
 from backend.app.scheduler.rhythm_api import router as rhythm_router
 from backend.app.scheduler.rhythm_scheduler import ensure_default_jobs, start_rhythm_scheduler, stop_rhythm_scheduler
 from backend.app.seed.seed_api import router as seed_router
@@ -175,6 +176,7 @@ def create_app(init_db: bool = True) -> FastAPI:
     app.include_router(stocks_router)
     app.include_router(agent_board_router)
     app.include_router(screener_router)
+    app.include_router(layered_selection_router)
     app.include_router(industry_router)
     app.include_router(automatic_selection_router)
     app.include_router(rhythm_router)

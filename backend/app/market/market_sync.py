@@ -43,8 +43,8 @@ from backend.app.market.stock_tools import (
 logger = logging.getLogger(__name__)
 
 _SYNC_DAYS_MIN = 5
-_SYNC_DAYS_MAX = 60
-_CAL_LOOKBACK_DAYS = 120  # 交易日历回看窗口，足够覆盖 60 个交易日
+_SYNC_DAYS_MAX = 260
+_CAL_LOOKBACK_DAYS = 120  # 默认交易日历回看窗口，days > 60 时按 2 倍天数自动拉宽
 _API_SLEEP_SECONDS = 0.25
 _REQUEST_RETRIES = 3
 _UPSERT_CHUNK = 1000
@@ -831,8 +831,9 @@ def sync_market(days: int = 20, *, target_ceiling: str | None = None) -> dict:
     }
 
     today = date.today().strftime("%Y%m%d")
+    cal_lookback = max(_CAL_LOOKBACK_DAYS, int(days) * 2)
     cal = get_trade_cal(
-        start_date=(date.today() - timedelta(days=_CAL_LOOKBACK_DAYS)).strftime("%Y%m%d"),
+        start_date=(date.today() - timedelta(days=cal_lookback)).strftime("%Y%m%d"),
         end_date=today,
         exchange="SSE",
     )

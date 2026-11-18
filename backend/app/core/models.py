@@ -2356,3 +2356,188 @@ class AdviceOutcome(Base):
     verdict: Mapped[str | None] = mapped_column(String(8))
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class IndexDailyBar(Base):
+    """宽基指数日线（如 000300.SH 沪深300、000852.SH 中证1000），供 L1 市场环境趋势与均线计算。
+    不设 instruments 外键，避免与个股目录耦合。
+    """
+
+    __tablename__ = "index_daily_bars"
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_index_daily_bar_symbol_date"),
+        Index("ix_index_daily_bars_date", "trade_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    open: Mapped[float | None] = mapped_column(Float)
+    high: Mapped[float | None] = mapped_column(Float)
+    low: Mapped[float | None] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    pre_close: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    vol: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tushare")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class StockEventSignal(Base):
+    """全市场公共公告与事件排雷表（L6 事件与窗口底座）。
+    不局限于持仓与自选，全市场 5000+ 只股票的立案调查、退市风险警示、财务造假、业绩预告等客观记录在此。
+    """
+
+    __tablename__ = "stock_event_signals"
+    __table_args__ = (
+        UniqueConstraint("symbol", "content_hash", name="uq_stock_event_signal_sym_hash"),
+        Index("ix_stock_event_signal_sym_date", "symbol", "ann_date"),
+        Index("ix_stock_event_signal_date_sev", "ann_date", "severity"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    ann_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    polarity: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")  # veto / negative / positive / neutral
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    url: Mapped[str | None] = mapped_column(String(500))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tushare:anns_d")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class StockFinancialPit(Base):
+    """按真实披露日（ann_date）严格对齐的 PIT 财务指标快照，杜绝按报告期（end_date）提前偷看未来财报。"""
+
+    __tablename__ = "stock_financial_pit"
+    __table_args__ = (
+        UniqueConstraint("symbol", "end_date", "ann_date", name="uq_stock_fin_pit_sym_end_ann"),
+        Index("ix_stock_fin_pit_sym_ann", "symbol", "ann_date"),
+        Index("ix_stock_fin_pit_ann", "ann_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    ann_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    roe: Mapped[float | None] = mapped_column(Float)
+    grossprofit_margin: Mapped[float | None] = mapped_column(Float)
+    netprofit_margin: Mapped[float | None] = mapped_column(Float)
+    debt_to_assets: Mapped[float | None] = mapped_column(Float)
+    tr_yoy: Mapped[float | None] = mapped_column(Float)
+    netprofit_yoy: Mapped[float | None] = mapped_column(Float)
+    q_sales_yoy: Mapped[float | None] = mapped_column(Float)
+    q_profit_yoy: Mapped[float | None] = mapped_column(Float)
+    tr_yoy_accel: Mapped[float | None] = mapped_column(Float)
+    profit_yoy_accel: Mapped[float | None] = mapped_column(Float)
+    ocf_yoy: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="tushare.fina_indicator")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class MarketRegimeDaily(Base):
+    """L1 A 股本土市场环境温度计（只输出总仓位上限与风格象限，绝不掺入个股综合分）。"""
+
+    __tablename__ = "market_regime_daily"
+    __table_args__ = (
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    trade_date: Mapped[str] = mapped_column(String(8), primary_key=True)
+    breadth_ma20: Mapped[float | None] = mapped_column(Float)
+    breadth_ma60: Mapped[float | None] = mapped_column(Float)
+    up_down_ratio: Mapped[float | None] = mapped_column(Float)
+    total_amount_yi: Mapped[float | None] = mapped_column(Float)
+    amount_pct_120: Mapped[float | None] = mapped_column(Float)
+    hs300_close: Mapped[float | None] = mapped_column(Float)
+    hs300_ma60: Mapped[float | None] = mapped_column(Float)
+    hs300_ma200: Mapped[float | None] = mapped_column(Float)
+    hs300_trend: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    zz1000_close: Mapped[float | None] = mapped_column(Float)
+    zz1000_ma60: Mapped[float | None] = mapped_column(Float)
+    zz1000_ma200: Mapped[float | None] = mapped_column(Float)
+    zz1000_trend: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    regime_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
+    stance: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")  # attack / neutral / defense
+    max_position_ratio: Mapped[float] = mapped_column(Float, nullable=False, default=0.60)
+    style_quadrant: Mapped[str] = mapped_column(String(32), nullable=False, default="balanced")
+    summary: Mapped[str | None] = mapped_column(Text)
+    metrics_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StockSelectionDailySnapshot(Base):
+    """每日预计算的 L2–L6 分层选股截面宽表（按 plan_type 存储 swing / long / event 三档结论）。"""
+
+    __tablename__ = "stock_selection_daily_snapshot"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "symbol", "plan_type", name="uq_selection_snap_date_sym_plan"),
+        Index("ix_selection_snap_query", "trade_date", "plan_type", "verdict", "total_score"),
+        Index("ix_selection_snap_symbol", "symbol", "trade_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    market: Mapped[str | None] = mapped_column(String(24))
+    industry: Mapped[str | None] = mapped_column(String(120))
+    plan_type: Mapped[str] = mapped_column(String(16), nullable=False)  # swing / long / event
+    total_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
+    raw_score: Mapped[float | None] = mapped_column(Float)
+    coverage_ratio: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False, default="pass")  # action / watch / pass
+    vetoed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    veto_codes_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    l2_industry_score: Mapped[float | None] = mapped_column(Float)
+    l3_fundamental_score: Mapped[float | None] = mapped_column(Float)
+    l4_expectation_score: Mapped[float | None] = mapped_column(Float)
+    l5_timing_score: Mapped[float | None] = mapped_column(Float)
+    l6_event_score: Mapped[float | None] = mapped_column(Float)
+    model_rank: Mapped[float | None] = mapped_column(Float)
+    buy_k: Mapped[float | None] = mapped_column(Float)
+    close_price: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
+    atr14: Mapped[float | None] = mapped_column(Float)
+    pe_ttm: Mapped[float | None] = mapped_column(Float)
+    pb: Mapped[float | None] = mapped_column(Float)
+    total_mv_yi: Mapped[float | None] = mapped_column(Float)
+    turnover_rate: Mapped[float | None] = mapped_column(Float)
+    suggested_buy_price: Mapped[float | None] = mapped_column(Float)
+    stop_ref_price: Mapped[float | None] = mapped_column(Float)
+    expectation_thesis: Mapped[str | None] = mapped_column(Text)
+    evidence_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SelectionShadowNav(Base):
+    """选股策略连续模拟净值账本：用于 model-rank-30 与 L1–L6 分层策略无偏并排对账。"""
+
+    __tablename__ = "selection_shadow_nav"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "strategy_key", name="uq_selection_shadow_nav_date_key"),
+        Index("ix_selection_shadow_nav_key_date", "strategy_key", "trade_date"),
+        {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_ID, primary_key=True, autoincrement=True)
+    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    strategy_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    nav: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    daily_return: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    benchmark_return: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    excess_return: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_drawdown: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    position_ratio: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    holdings_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    turnover: Mapped[float | None] = mapped_column(Float)
+    holdings_json: Mapped[str | None] = mapped_column(LONG_TEXT)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

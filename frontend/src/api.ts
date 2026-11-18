@@ -119,6 +119,12 @@ import type {
   OpsChatSessionListItem,
   OpsChatSessionDetail,
   OpsLoginLog,
+  MarketRegimeL1,
+  LayeredSelectionQueryPayload,
+  LayeredSelectionResponse,
+  LayeredStockInspection,
+  ExpectationGapThesis,
+  ShadowNavPoint,
 } from './types'
 import { readSseStream } from './utils/sse'
 
@@ -938,6 +944,48 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((res) => res.data),
+  quantMarketRegime: (tradeDate?: string | null) => {
+    const suffix = tradeDate ? `?trade_date=${encodeURIComponent(tradeDate)}` : ''
+    return request<ApiEnvelope<MarketRegimeL1>>(`/api/quant/selection/regime${suffix}`).then((res) => res.data)
+  },
+  quantSelectionQuery: (payload: LayeredSelectionQueryPayload) =>
+    request<ApiEnvelope<LayeredSelectionResponse>>('/api/quant/selection/query', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
+  quantSelectionStockDetail: (
+    symbol: string,
+    params: { tradeDate?: string | null; capital?: number | null; riskPerTrade?: number; accountId?: number | null } = {}
+  ) => {
+    const q = new URLSearchParams()
+    if (params.tradeDate) q.set('trade_date', params.tradeDate)
+    if (params.capital != null) q.set('capital', String(params.capital))
+    if (params.riskPerTrade != null) q.set('risk_per_trade', String(params.riskPerTrade))
+    if (params.accountId != null) q.set('account_id', String(params.accountId))
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return request<ApiEnvelope<LayeredStockInspection>>(
+      `/api/quant/selection/stock/${encodeURIComponent(symbol)}${suffix}`
+    ).then((res) => res.data)
+  },
+  quantSelectionExpectationGap: (symbol: string, tradeDate?: string | null) =>
+    request<ApiEnvelope<ExpectationGapThesis>>('/api/quant/selection/expectation-gap', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, trade_date: tradeDate || null }),
+    }).then((res) => res.data),
+  quantSelectionRebuild: (payload: {
+    trade_date?: string | null
+    sync_indices?: boolean
+    sync_events?: boolean
+    sync_financial_pit?: boolean
+  } = {}) =>
+    request<ApiEnvelope<Record<string, unknown>>>('/api/quant/selection/rebuild', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }).then((res) => res.data),
+  quantSelectionShadowNav: (limit = 120) =>
+    request<ApiEnvelope<{ series: Record<string, ShadowNavPoint[]> }>>(
+      `/api/quant/selection/shadow-nav?limit=${limit}`
+    ).then((res) => res.data),
   industryOverview: (signal?: AbortSignal) =>
     request<ApiEnvelope<IndustryOverview>>('/api/industries/overview', { signal }).then(res => res.data),
   industryMembers: (params: { industry: string; snapshot_id: string; sort_by: string; order: string; offset: number; limit: number }, signal?: AbortSignal) =>

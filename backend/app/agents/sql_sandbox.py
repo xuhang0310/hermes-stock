@@ -55,6 +55,12 @@ SHARED_TABLES: frozenset[str] = frozenset({
     "automatic_selection_candidates",
     "automatic_selection_evaluations",
     "automatic_selection_stock_snapshots",
+    "index_daily_bars",
+    "stock_event_signals",
+    "stock_financial_pit",
+    "market_regime_daily",
+    "stock_selection_daily_snapshot",
+    "selection_shadow_nav",
 })
 
 # 共享知识库：剔除早期镜像进 documents 的个人 Agent 报告（doc_type='report'），

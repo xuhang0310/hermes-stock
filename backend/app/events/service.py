@@ -538,6 +538,13 @@ def run_message_watch(now: datetime, *, owner_user_id: int | None, channel: str 
             return "没有持仓和自选，跳过"
         announcements = fetch_announcements(now.date()) if rules.should_fetch_announcements(now) else []
         with SessionLocal() as db:
+            if announcements:
+                try:
+                    from backend.app.market.event_signal_sync import record_public_event_signals
+
+                    record_public_event_signals(db, announcements)
+                except Exception as sig_exc:  # noqa: BLE001 - 公共选股排雷表写入异常不影响持仓盯盘推送
+                    logger.warning("公共公告信号入库跳过: %s", str(sig_exc)[:180])
             candidates = store_announcements(db, announcements, targets)
             candidates += tag_recent_news(db, targets, now_utc=to_utc(now))
             created = record_events(db, candidates, targets)

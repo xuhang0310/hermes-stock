@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine, func, select
@@ -88,7 +89,7 @@ class EvidenceDrivenResearchTests(unittest.TestCase):
             run_id=self.run_id,
             tool_call_id="call-1",
             tool_name="get_latest_price",
-            result={"symbol": "600519.SH", "price": 1500.0, "trade_date": "20260723"},
+            result={"symbol": "600519.SH", "price": 1500.0, "trade_date": datetime.now(timezone.utc).strftime("%Y%m%d")},
             execution_id=None,
             criterion_codes=["market.current_price"],
             success=True,
@@ -269,7 +270,7 @@ class ProgressiveSkillTests(unittest.TestCase):
 
     def test_catalog_conforms_to_agent_skills_structure(self) -> None:
         manifests = load_core_skill_manifests()
-        self.assertEqual(len(manifests), 18)
+        self.assertEqual(len(manifests), 20)
         for manifest in manifests:
             self.assertRegex(manifest.name, r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
             self.assertEqual(manifest.skill_dir.name, manifest.name)

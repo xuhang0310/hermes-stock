@@ -2424,3 +2424,191 @@ export type ScorecardSummary = {
   by_size: ScorecardGroup[]
   recent: ScorecardItem[]
 }
+
+export type QuantPlanType = 'swing' | 'long' | 'event'
+export type QuantVerdict = 'action' | 'watch' | 'pass'
+export type QuantBoard = 'MAIN' | 'CHINEXT' | 'STAR' | 'BSE'
+
+export type MarketRegimeL1 = {
+  trade_date: string
+  breadth_ma20: number | null
+  breadth_ma60: number | null
+  up_down_ratio: number | null
+  total_amount_yi: number | null
+  amount_pct_120: number | null
+  hs300_close: number | null
+  hs300_ma60: number | null
+  hs300_ma200: number | null
+  hs300_trend: string
+  zz1000_close: number | null
+  zz1000_ma60: number | null
+  zz1000_ma200: number | null
+  zz1000_trend: string
+  regime_score: number
+  stance: 'attack' | 'neutral' | 'defense'
+  stance_label: string
+  max_position_ratio: number
+  style_quadrant: string
+  style_label: string
+  summary: string | null
+  metrics?: Record<string, unknown>
+}
+
+export type L7RiskSizing = {
+  board: QuantBoard
+  eligible: boolean
+  advised_shares: number
+  advised_amount: number
+  position_pct: number
+  max_loss_amount: number
+  risk_budget_pct?: number
+  entry_price?: number
+  stop_ref_price?: number
+  l1_max_position_ratio?: number
+  min_lot_cost?: number
+  reason: string
+}
+
+export type LayeredSelectionLayers = {
+  l2_industry: number | null
+  l3_fundamental: number | null
+  l4_expectation: number | null
+  l5_timing: number | null
+  l6_event: number | null
+}
+
+export type LayeredSelectionEvidence = {
+  l5_source?: string
+  buy_basis?: string | null
+  ma20?: number | null
+  ma60?: number | null
+  ret_20_pct?: number | null
+  avg_amount_20_yi?: number | null
+  fin_period?: string | null
+  fin_ann_date?: string | null
+  roe?: number | null
+  profit_yoy?: number | null
+  profit_yoy_accel?: number | null
+  tr_yoy_accel?: number | null
+  reaction_note?: string | null
+  recent_events?: Array<{
+    ann_date: string
+    event_type: string
+    severity: string
+    polarity: string
+    title: string
+    url?: string | null
+  }>
+  veto_labels?: string[]
+}
+
+export type LayeredSelectionItem = {
+  trade_date: string
+  symbol: string
+  name: string
+  market: string | null
+  board: QuantBoard
+  industry: string | null
+  plan_type: QuantPlanType
+  plan_label: string
+  total_score: number
+  raw_score: number | null
+  coverage_ratio: number
+  verdict: QuantVerdict
+  verdict_label: string
+  vetoed: boolean
+  veto_codes: string[]
+  veto_labels: string[]
+  layers: LayeredSelectionLayers
+  model_rank: number | null
+  buy_k: number | null
+  close_price: number | null
+  pct_chg: number | null
+  atr14: number | null
+  pe_ttm: number | null
+  pb: number | null
+  total_mv_yi: number | null
+  turnover_rate: number | null
+  suggested_buy_price: number | null
+  stop_ref_price: number | null
+  expectation_thesis: string | null
+  evidence: LayeredSelectionEvidence
+  l7_risk: L7RiskSizing
+}
+
+export type LayeredSelectionQueryPayload = {
+  plan_type?: QuantPlanType
+  trade_date?: string | null
+  verdict_filter?: QuantVerdict | null
+  industry?: string | null
+  market?: string | null
+  boards?: QuantBoard[] | null
+  keyword?: string | null
+  price_max?: number | null
+  pe_max?: number | null
+  total_mv_min?: number | null
+  total_mv_max?: number | null
+  capital?: number | null
+  risk_per_trade?: number
+  account_id?: number | null
+  limit?: number
+}
+
+export type LayeredSelectionResponse = {
+  trade_date: string | null
+  plan_type: QuantPlanType
+  plan_label: string
+  weights: Record<string, number>
+  regime: MarketRegimeL1
+  account_context?: {
+    capital: number
+    current_invested: number
+    risk_per_trade: number
+    l1_max_position_ratio: number
+  }
+  summary: {
+    total: number
+    action: number
+    watch: number
+    pass: number
+  }
+  items: LayeredSelectionItem[]
+}
+
+export type LayeredStockInspection = {
+  trade_date: string
+  symbol: string
+  name: string
+  industry: string | null
+  board: QuantBoard
+  close_price: number | null
+  pct_chg: number | null
+  suggested_buy_price: number | null
+  stop_ref_price: number | null
+  regime: MarketRegimeL1
+  plans: Record<string, LayeredSelectionItem>
+  l7_risk: L7RiskSizing
+}
+
+export type ExpectationGapThesis = {
+  symbol: string
+  name: string
+  trade_date: string
+  llm_generated: boolean
+  evidence_sufficient: boolean
+  market_consensus: string
+  our_thesis: string
+  hard_evidence: string
+  formatted_thesis: string
+}
+
+export type ShadowNavPoint = {
+  trade_date: string
+  nav: number
+  daily_return: number
+  benchmark_return: number
+  excess_return: number
+  max_drawdown: number
+  position_ratio: number
+  holdings_count: number
+}

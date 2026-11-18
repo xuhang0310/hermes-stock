@@ -88,7 +88,7 @@ def screener_run(
 
 
 class SyncIn(BaseModel):
-    days: int = Field(default=20, ge=5, le=60, description="同步最近 N 个交易日")
+    days: int = Field(default=20, ge=5, le=260, description="同步最近 N 个交易日")
 
 
 @router.post("/sync")
