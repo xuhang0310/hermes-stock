@@ -76,10 +76,10 @@ VERDICT_LABELS = {
 PLAN_WEIGHTS: dict[str, dict[str, float]] = {
     PLAN_SWING: {
         "l2_industry": 0.15,
-        "l3_fundamental": 0.15,
-        "l4_expectation": 0.20,
-        "l5_timing": 0.35,
-        "l6_event": 0.15,
+        "l3_fundamental": 0.22,
+        "l4_expectation": 0.23,
+        "l5_timing": 0.28,
+        "l6_event": 0.12,
     },
     PLAN_LONG: {
         "l2_industry": 0.15,
@@ -90,31 +90,100 @@ PLAN_WEIGHTS: dict[str, dict[str, float]] = {
     },
     PLAN_EVENT: {
         "l2_industry": 0.10,
-        "l3_fundamental": 0.10,
+        "l3_fundamental": 0.15,
         "l4_expectation": 0.35,
-        "l5_timing": 0.20,
-        "l6_event": 0.25,
+        "l5_timing": 0.18,
+        "l6_event": 0.22,
     },
 }
 
 VETO_LABELS = {
     "st_or_delist": "ST/*ST 或退市整理状态",
     "suspended_or_no_trade": "当日停牌或无成交",
-    "illiquid_20d": "近20日日均成交额不足1500万元（流动性不足）",
+    "illiquid_20d": "近20日日均成交额不足2500万元（流动性不足）",
     "young_listing": "上市未满60个自然日（次新波动未稳）",
     "event_critical_veto": "近期存在立案调查/退市风险警示/财务造假重大利空",
     "downtrend_knife": "深跌破位60日线且均线空头排列（波段防接飞刀）",
+    "zombie_downtrend": "中长期均线持续下行压制（剔除阴跌僵尸股）",
     "earnings_shock": "近期发布亏损/大幅下滑业绩预警",
     "high_debt_loss": "高负债（>80%）叠加业绩亏损（长线排雷）",
 }
 
 _ST_RE = re.compile(r"(?:S\*ST|\*ST|SST|ST|退)", re.IGNORECASE)
 _A_SHARE_RE = re.compile(r"^(?:6\d{5}\.SH|[03]\d{5}\.SZ|[489]\d{5}\.BJ)$")
-MIN_AVG_AMOUNT_20_QIAN = 15_000.0  # 1500 万元（daily_bars.amount 单位为千元）
+MIN_AVG_AMOUNT_20_QIAN = 25_000.0   # 2500 万元（低于此直接一票否决）
+ACTION_MIN_AMOUNT_20_QIAN = 45_000.0  # 4500 万元（低于此禁止进入「动手」，最高仅「观察」）
+ACTION_MIN_L3_QUALITY = 48.0        # 基本面质地分低于 48 禁止进入「动手」
 SHRINKAGE_FULL_CONF_COVERAGE = 0.85
 ACTION_MIN_COVERAGE = 0.65
 LOT = 100
 STAR_MIN_LOT = 200
+
+
+def mv_bucket_of(total_mv_yi: float | None) -> str:
+    """四档市值同温层分桶：消除小市值成交额因子跨生态位虹吸。"""
+    if total_mv_yi is None or total_mv_yi < 50.0:
+        return "small_micro"   # < 50 亿
+    if total_mv_yi < 100.0:
+        return "growth_mid"    # 50–100 亿
+    if total_mv_yi < 300.0:
+        return "mid_core"      # 100–300 亿
+    return "mega_large"        # >= 300 亿
+
+
+def compute_trend_pullback_score(
+    *,
+    close: float | None,
+    ma20: float | None,
+    ma60: float | None,
+    ma60_slope: float | None,
+    amt_ratio_5_20: float | None,
+) -> float | None:
+    """计算无市值偏见的自身趋势结构与缩量回踩企稳度（0 ~ 100）。
+
+    高分画像：60日线走平向上 + 20日线站稳60日线（上升/筑底结构） + 股价温和回踩贴近20日线 + 近5日量能相对自身20日均量适度收缩洗盘。
+    """
+    if close is None or close <= 0 or ma20 is None or ma20 <= 0:
+        return None
+
+    # 1) 中期趋势结构健康度 (50%)
+    if ma60 is not None and ma60 > 0:
+        slope_ok = ma60_slope is None or ma60_slope >= -0.004
+        if ma20 >= ma60 * 0.995 and close >= ma60 * 0.98 and slope_ok:
+            trend_part = 90.0
+        elif ma20 >= ma60 * 0.97 and close >= ma60 * 0.95:
+            trend_part = 72.0
+        elif close >= ma20:
+            trend_part = 54.0
+        else:
+            trend_part = 24.0
+    else:
+        trend_part = 72.0 if close >= ma20 else 42.0
+
+    # 2) 相对 20 日均线买点位置（不追暴涨透支、不接破位深跌）(30%)
+    gap20 = close / ma20 - 1.0
+    if -0.055 <= gap20 <= 0.045:
+        pos_part = 90.0
+    elif (0.045 < gap20 <= 0.10) or (-0.095 <= gap20 < -0.055):
+        pos_part = 66.0
+    elif 0.10 < gap20 <= 0.16:
+        pos_part = 42.0
+    else:
+        pos_part = 22.0
+
+    # 3) 相对自身 20 日均量的缩量洗盘/温和承接度 (20%)
+    if amt_ratio_5_20 is None:
+        vol_part = 65.0
+    elif 0.48 <= amt_ratio_5_20 <= 0.92:
+        vol_part = 90.0
+    elif 0.92 < amt_ratio_5_20 <= 1.35:
+        vol_part = 72.0
+    elif 0.35 <= amt_ratio_5_20 < 0.48 or 1.35 < amt_ratio_5_20 <= 1.85:
+        vol_part = 50.0
+    else:
+        vol_part = 28.0
+
+    return round(0.50 * trend_part + 0.30 * pos_part + 0.20 * vol_part, 2)
 
 
 def _compact_date(value: Any) -> str:
@@ -320,6 +389,25 @@ def score_cross_section_inputs(
     # A 股 20 日涨幅呈显著反转效应（IC = -0.056），适度回调优于高位暴涨
     rev_rank = _pct_ranks(reversal_vals, ascending=False)
 
+    # --- L5 核心去偏：在四档同市值梯队内部独立对 model_rank 做百分位排名（消除微盘成交额虹吸） ---
+    bucket_raw_ranks: dict[str, dict[str, float | None]] = defaultdict(dict)
+    for it in items:
+        sym = it["symbol"]
+        mr = _finite(it.get("model_rank"))
+        if mr is not None:
+            bkt = mv_bucket_of(_finite(it.get("total_mv_yi")))
+            bucket_raw_ranks[bkt][sym] = mr
+
+    size_neutral_mrank_pct: dict[str, float] = {}
+    for bkt, bkt_vals in bucket_raw_ranks.items():
+        if len(bkt_vals) >= 15:
+            size_neutral_mrank_pct.update(_pct_ranks(bkt_vals, ascending=True))
+        else:
+            # 样本极少（如单元测试夹具）时直接使用原分位 × 100
+            for s, val in bkt_vals.items():
+                if val is not None:
+                    size_neutral_mrank_pct[s] = round(max(0.0, min(100.0, val * 100.0)), 2)
+
     results_by_plan: dict[str, list[dict[str, Any]]] = {p: [] for p in plan_types}
 
     for it in items:
@@ -396,11 +484,25 @@ def score_cross_section_inputs(
         else:
             l4_score = None
 
-        # L5 资金与入场时机得分（核心锚定已验证 LightGBM model_rank）
+        # L5 资金与入场时机得分（同市值桶中性化 model_rank 55% + 自身趋势缩量回踩结构 45%）
         m_rank = _finite(it.get("model_rank"))
-        l5_source = "model_rank"
-        if m_rank is not None:
-            l5_score: float | None = round(max(0.0, min(100.0, m_rank * 100.0)), 2)
+        neutral_mr_score = size_neutral_mrank_pct.get(sym)
+        pullback_score = compute_trend_pullback_score(
+            close=close,
+            ma20=_finite(it.get("ma20")),
+            ma60=_finite(it.get("ma60")),
+            ma60_slope=_finite(it.get("ma60_slope")),
+            amt_ratio_5_20=_finite(it.get("amt_ratio_5_20")),
+        )
+        l5_source = "size_neutral_model_and_pullback"
+        if neutral_mr_score is not None and pullback_score is not None:
+            l5_score: float | None = round(0.55 * neutral_mr_score + 0.45 * pullback_score, 2)
+        elif neutral_mr_score is not None:
+            l5_source = "size_neutral_model_only"
+            l5_score = neutral_mr_score
+        elif pullback_score is not None and sym in low_vol_rank and sym in rev_rank:
+            l5_source = "pullback_low_vol_fallback"
+            l5_score = round(0.50 * pullback_score + 0.30 * low_vol_rank[sym] + 0.20 * rev_rank[sym], 2)
         elif sym in low_vol_rank and sym in rev_rank:
             l5_source = "low_vol_reversal_fallback"
             l5_score = round(0.55 * low_vol_rank[sym] + 0.45 * rev_rank[sym], 2)
@@ -437,6 +539,7 @@ def score_cross_section_inputs(
 
         ma20 = _finite(it.get("ma20"))
         ma60 = _finite(it.get("ma60"))
+        ma60_slope = _finite(it.get("ma60_slope"))
         ret20 = _finite(it.get("ret_20"))
         debt_ratio = _finite(fin.get("debt_to_assets"))
         profit_yoy = profit_yoy_vals.get(sym)
@@ -452,7 +555,7 @@ def score_cross_section_inputs(
         for plan in plan_types:
             plan_vetoes = list(base_vetoes)
             if plan == PLAN_SWING:
-                # 波段专属：跌破 60 日均线超 8% 且均线空头排列且近 20 日跌幅超 12% → 防接飞刀否决
+                # 波段专属：1) 深跌破位 60 日均线防接飞刀；2) 60 日线持续下行且空头排列剔除阴跌僵尸股
                 if (
                     close is not None
                     and ma60 is not None
@@ -462,6 +565,15 @@ def score_cross_section_inputs(
                     and (ret20 is not None and ret20 < -0.12)
                 ):
                     plan_vetoes.append("downtrend_knife")
+                elif (
+                    close is not None
+                    and ma60 is not None
+                    and ma20 is not None
+                    and close < ma60 * 0.96
+                    and ma20 < ma60 * 0.97
+                    and (ma60_slope is not None and ma60_slope < -0.012)
+                ):
+                    plan_vetoes.append("zombie_downtrend")
                 if has_earnings_shock:
                     plan_vetoes.append("earnings_shock")
             elif plan == PLAN_LONG:
@@ -478,6 +590,13 @@ def score_cross_section_inputs(
                 plan_type=plan,
                 veto_codes=plan_vetoes,
             )
+            # 机构流动性与基本面底线门禁：日均成交不足 4500 万元或基本面质地 <48 分的冷门弱质票，最高只能列为「观察」，不进「动手」
+            if merged["verdict"] == VERDICT_ACTION:
+                if (avg_amt_20 is not None and avg_amt_20 < ACTION_MIN_AMOUNT_20_QIAN) or (
+                    l3_score is not None and l3_score < ACTION_MIN_L3_QUALITY
+                ):
+                    merged["verdict"] = VERDICT_WATCH
+                    merged["verdict_label"] = VERDICT_LABELS[VERDICT_WATCH]
 
             thesis = _build_objective_thesis(
                 name=name,
@@ -620,6 +739,7 @@ def compute_execution_levels(
             "atr14": None,
             "ma20": None,
             "ma60": None,
+            "ma60_slope": None,
             "ret_20": None,
             "vol_20": None,
             "suggested_buy_price": None,
@@ -632,6 +752,8 @@ def compute_execution_levels(
     atr_val = _atr(adj) if len(adj) >= 5 else (last_close * 0.025)
     ma20 = sum(closes[-20:]) / 20.0 if len(closes) >= 20 else None
     ma60 = sum(closes[-60:]) / 60.0 if len(closes) >= 60 else None
+    ma60_prev5 = sum(closes[-65:-5]) / 60.0 if len(closes) >= 65 else None
+    ma60_slope = (ma60 / ma60_prev5 - 1.0) if (ma60 and ma60_prev5 and ma60_prev5 > 0) else None
     ret_20 = (closes[-1] / closes[-21] - 1.0) if len(closes) >= 21 and closes[-21] > 0 else None
 
     vol_20: float | None = None
@@ -671,6 +793,7 @@ def compute_execution_levels(
         "atr14": atr_val,
         "ma20": ma20,
         "ma60": ma60,
+        "ma60_slope": ma60_slope,
         "ret_20": ret_20,
         "vol_20": vol_20,
         "suggested_buy_price": suggested_buy,
@@ -942,6 +1065,11 @@ def build_daily_selection_snapshots(
         )
         amts = amounts_20_by_sym.get(sym, [])
         avg_amt_20 = (sum(amts[-20:]) / len(amts[-20:])) if amts else None
+        amt_ratio_5_20 = (
+            (sum(amts[-5:]) / len(amts[-5:])) / avg_amt_20
+            if len(amts) >= 10 and avg_amt_20 and avg_amt_20 > 0
+            else None
+        )
         basic = basics_by_sym.get(sym)
         total_mv_yi = (
             float(basic.total_mv) / 10_000.0
@@ -962,10 +1090,12 @@ def build_daily_selection_snapshots(
                 "pct_chg": bar_today["pct_chg"] if bar_today else None,
                 "volume": bar_today["volume"] if bar_today else 0.0,
                 "avg_amount_20": avg_amt_20,
+                "amt_ratio_5_20": amt_ratio_5_20,
                 "ret_20": exec_info["ret_20"],
                 "vol_20": exec_info["vol_20"],
                 "ma20": exec_info["ma20"],
                 "ma60": exec_info["ma60"],
+                "ma60_slope": exec_info["ma60_slope"],
                 "atr14": exec_info["atr14"],
                 "pe_ttm": _finite(basic.pe_ttm) if basic else None,
                 "pb": _finite(basic.pb) if basic else None,

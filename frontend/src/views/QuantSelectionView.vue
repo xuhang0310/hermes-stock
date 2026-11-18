@@ -30,15 +30,17 @@ const emit = defineEmits<{
 
 type ViewTab = 'pool' | 'pk' | 'method'
 type WatchStatus = 'adding' | 'added' | 'error'
+type PoolTier = 'mainstream' | 'large_core' | 'growth_mid' | 'small_micro' | 'all'
 
 const activeTab = ref<ViewTab>('pool')
 const planType = ref<QuantPlanType>('swing')
+const poolTier = ref<PoolTier>('mainstream')
 const verdictFilter = ref<QuantVerdict | ''>('action')
 const industryFilter = ref(props.initialIndustry || '')
 const keyword = ref('')
 const priceMax = ref('')
 const peMax = ref('')
-const totalMvMin = ref('')
+const totalMvMin = ref('50')
 const totalMvMax = ref('')
 const capital = ref(200000)
 const riskPerTrade = ref(0.01)
@@ -77,6 +79,14 @@ const boardOptions: Array<{ key: QuantBoard; label: string }> = [
   { key: 'CHINEXT', label: '创业板' },
   { key: 'STAR', label: '科创板' },
   { key: 'BSE', label: '北交所' },
+]
+
+const poolTierOptions: Array<{ key: PoolTier; label: string; mvMin: string; mvMax: string }> = [
+  { key: 'mainstream', label: '主流精选池（≥50亿·默认）', mvMin: '50', mvMax: '' },
+  { key: 'large_core', label: '核心大中盘（≥150亿）', mvMin: '150', mvMax: '' },
+  { key: 'growth_mid', label: '专精成长（50–200亿）', mvMin: '50', mvMax: '200' },
+  { key: 'small_micro', label: '小微盘观察（<50亿）', mvMin: '', mvMax: '50' },
+  { key: 'all', label: '全市场不限', mvMin: '', mvMax: '' },
 ]
 
 const layerMeta: Array<{
@@ -144,6 +154,23 @@ function fmtDate(compact: string | null | undefined): string {
   const s = String(compact).replace(/-/g, '')
   if (s.length !== 8) return compact
   return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`
+}
+
+function fmtTrend(trend: string | null | undefined): string {
+  if (trend === 'bull') return '多头顺风'
+  if (trend === 'bear') return '空头弱势'
+  if (trend === 'neutral') return '震荡走平'
+  return trend || '—'
+}
+
+function selectPoolTier(tier: PoolTier) {
+  poolTier.value = tier
+  const found = poolTierOptions.find((t) => t.key === tier)
+  if (found) {
+    totalMvMin.value = found.mvMin
+    totalMvMax.value = found.mvMax
+  }
+  void runQuery()
 }
 
 function returnClass(pct: number | null | undefined): string {
@@ -300,11 +327,12 @@ function watchBtnText(symbol: string): string {
 }
 
 function resetFilters() {
+  poolTier.value = 'mainstream'
   industryFilter.value = ''
   keyword.value = ''
   priceMax.value = ''
   peMax.value = ''
-  totalMvMin.value = ''
+  totalMvMin.value = '50'
   totalMvMax.value = ''
   verdictFilter.value = 'action'
   void runQuery()
@@ -382,7 +410,7 @@ onMounted(() => {
         </div>
         <div class="qs-metric-cell">
           <span>沪深300 / 中证1000</span>
-          <strong>{{ regime?.hs300_trend || '—' }} / {{ regime?.zz1000_trend || '—' }}</strong>
+          <strong>{{ fmtTrend(regime?.hs300_trend) }} / {{ fmtTrend(regime?.zz1000_trend) }}</strong>
         </div>
         <div class="qs-metric-actions">
           <span class="qs-date-label">截面 {{ fmtDate(response?.trade_date) }}</span>
@@ -507,8 +535,27 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 账户感知过滤栏（L7 风控预算 + 板块权限 + 基本约束） -->
+      <!-- 股票池生态位一键切换 + 账户感知过滤栏 -->
       <form class="qs-filter-bar" @submit.prevent="runQuery">
+        <div class="qs-pool-tier-row">
+          <div class="qs-board-toggles">
+            <span class="qs-board-label">选股生态位：</span>
+            <button
+              v-for="t in poolTierOptions"
+              :key="t.key"
+              type="button"
+              class="qs-board-chip"
+              :class="{ 'is-on': poolTier === t.key }"
+              @click="selectPoolTier(t.key)"
+            >
+              {{ t.label }}
+            </button>
+          </div>
+          <span v-if="poolTier === 'small_micro'" class="qs-micro-warn">
+            提示：小微盘流动性折价波动大，仅适合分散篮子观察，不宜单票重仓
+          </span>
+        </div>
+
         <div class="qs-filter-group">
           <label>
             <span>账户预算（元）</span>
@@ -600,7 +647,7 @@ onMounted(() => {
           <table class="qs-table">
             <thead>
               <tr>
-                <th>标的 / 行业</th>
+                <th>标的 / 行业 / 市值</th>
                 <th>结论档位</th>
                 <th>总分 / 覆盖率</th>
                 <th>L2–L6 分层证据条（点击行看详情）</th>
@@ -620,7 +667,10 @@ onMounted(() => {
                 <td>
                   <div class="qs-sym-cell">
                     <strong>{{ item.name }}</strong>
-                    <span>{{ item.symbol }} · {{ item.industry || '未分类' }}</span>
+                    <span>
+                      {{ item.symbol }} · {{ item.industry || '未分类' }} ·
+                      {{ item.total_mv_yi != null ? `${fmtNum(item.total_mv_yi, 0)}亿` : '—' }}
+                    </span>
                   </div>
                 </td>
                 <td>
@@ -1144,6 +1194,19 @@ onMounted(() => {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
+}
+.qs-pool-tier-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.qs-micro-warn {
+  color: var(--warning);
+  font-size: 12px;
 }
 .qs-filter-group {
   display: grid;

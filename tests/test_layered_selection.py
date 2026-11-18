@@ -405,6 +405,62 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
         self.assertEqual(r_nav.status_code, 200)
         self.assertIn("layered-swing-30", r_nav.json()["data"]["series"])
 
+    def test_size_neutral_l5_prevents_microcap_dominance_and_enforces_liquidity_gate(self) -> None:
+        # 构造 16 只 >=300 亿大盘股（大盘股原始 model_rank 普遍偏低：0.20~0.68），其中 600900.SH 为大盘最优 0.68
+        items = []
+        for i in range(16):
+            items.append(
+                {
+                    "symbol": f"6009{i:02d}.SH",
+                    "name": f"大盘龙头{i}",
+                    "market": "SH",
+                    "industry": "电力",
+                    "list_status": "L",
+                    "list_date": "20150101",
+                    "trade_date": "20261117",
+                    "close": 25.0,
+                    "pct_chg": 0.5,
+                    "volume": 500_000.0,
+                    "avg_amount_20": 350_000.0,  # 3.5 亿元
+                    "amt_ratio_5_20": 0.75,      # 温和缩量回踩
+                    "ret_20": 0.02,
+                    "vol_20": 0.015,
+                    "ma20": 24.8,
+                    "ma60": 23.5,
+                    "ma60_slope": 0.015,
+                    "atr14": 0.5,
+                    "pe_ttm": 12.0 + i,
+                    "pb": 1.6,
+                    "total_mv_yi": 500.0,
+                    "turnover_rate": 1.2,
+                    "model_rank": 0.68 if i == 0 else (0.20 + i * 0.025),
+                    "buy_k": 0.5,
+                    "suggested_buy_price": 24.75,
+                    "stop_ref_price": 24.0,
+                    "buy_basis": "测试",
+                    "fin": {"roe": 18.0 - i * 0.5, "tr_yoy_accel": 15.0 - i * 0.5, "profit_yoy_accel": 20.0 - i * 0.5},
+                    "events": [],
+                }
+            )
+        # 再塞入一只成交额仅 3000 万元（低于 4500 万动手门槛）的 25 亿冷门微盘股，哪怕原始 model_rank=0.99 也只能观察不能动手
+        items.append(
+            {
+                **items[0],
+                "symbol": "002999.SZ",
+                "name": "冷门微盘",
+                "total_mv_yi": 25.0,
+                "avg_amount_20": 30_000.0,  # 3000 万 < 4500 万动手门禁
+                "model_rank": 0.99,
+            }
+        )
+        scored = layered_selection.score_cross_section_inputs(items, plan_types=(PLAN_SWING,))[PLAN_SWING]
+        by_sym = {r["symbol"]: r for r in scored}
+        # 大盘股 600900.SH 虽然原始 model_rank 只有 0.68，但在 >=300 亿同温层排第 1 + 多头缩量回踩满分，L5 高分进入 action！
+        self.assertGreater(by_sym["600900.SH"]["l5_timing_score"], 90.0)
+        self.assertEqual(by_sym["600900.SH"]["verdict"], VERDICT_ACTION)
+        # 冷门微盘日均成交不足 4500 万元，被机构流动性门禁拦截在 watch（观察）
+        self.assertEqual(by_sym["002999.SZ"]["verdict"], VERDICT_WATCH)
+
     def test_skill_registry_registers_unified_quant_selection_tools(self) -> None:
         registry = SkillRegistry()
         registry.discover()
