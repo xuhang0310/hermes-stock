@@ -1,7 +1,8 @@
-"""全站统一 L1–L7 分层量化选股技能（Unified Quantitative Selection Skill）。
+"""量化选股（L1–L7）技能：给数字人查大盘环境、分层得分、排雷结果和单票体检。
 
-让数字人彻底告别“拍脑袋追涨分”，统一使用经 A 股实证校准的 L1 市场环境温度计、
-L2–L6 六层客观评分 + 一票否决门禁、量化限价买点与 L7 账户风险股数引擎。
+只查信息，不定计划：除模型排名外，分层得分、“动手/观察/放弃”和大盘仓位上限都没有经过历史回测。
+操作计划里的买价、止损和股数以 plans/quant_orders、plans/quant_sizes 算的为准，这里的买价和止损下限
+用的是同一套代码，股数对新开仓只是参考。
 """
 from __future__ import annotations
 
@@ -13,8 +14,8 @@ QUANT_SELECTION_TOOL_SCHEMAS = [
         "function": {
             "name": "get_market_regime_l1",
             "description": (
-                "读取 A 股 L1 市场环境温度计：全市场站上 20/60 日均线宽度占比、两市成交分位、"
-                "沪深300/中证1000 趋势，输出今日建议总仓位上限（进攻90%/中性60%/防守30%）与大小盘风格象限。"
+                "读取大盘环境：全市场站上 20/60 日均线的比例、两市成交额分位、沪深300/中证1000 趋势，"
+                "给出进攻/中性/防守和大小盘风格。其中的总仓位上限（90%/60%/30%）还没有经过回测，只作参考。"
             ),
             "parameters": {
                 "type": "object",
@@ -29,8 +30,9 @@ QUANT_SELECTION_TOOL_SCHEMAS = [
         "function": {
             "name": "query_unified_quant_selection",
             "description": (
-                "检索全站统一 L1–L7 分层量化选股池。支持波段(swing)、长线(long)、事件驱动(event)三档策略，"
-                "返回一票否决排雷后的候选标的、L2–L6 分层得分、动手/观察/放弃结论、量化建议挂买价及 L7 建议股数。"
+                "查量化选股（L1–L7）的分层得分。支持波段(swing)、长线(long)、事件驱动(event)三档，"
+                "返回排雷结果、L2–L6 分层得分、动手/观察/放弃、买入模型的挂买价和新开仓参考股数。"
+                "除模型排名外，分层得分和结论都没有经过回测，只作参考。"
             ),
             "parameters": {
                 "type": "object",
@@ -56,8 +58,7 @@ QUANT_SELECTION_TOOL_SCHEMAS = [
                     "pe_max": {"type": "number", "description": "正市盈率 PE(TTM) 上限"},
                     "total_mv_min": {"type": "number", "description": "总市值下限（亿元）"},
                     "total_mv_max": {"type": "number", "description": "总市值上限（亿元）"},
-                    "capital": {"type": "number", "default": 200000, "description": "账户总资金预算（元），用于 L7 风险股数测算"},
-                    "risk_per_trade": {"type": "number", "default": 0.01, "description": "单笔最大可承受风险比例（如 0.01 代表 1%）"},
+                    "capital": {"type": "number", "default": 200000, "description": "账户总资金预算（元），用于估算新开仓参考股数"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
                 },
             },
@@ -68,15 +69,14 @@ QUANT_SELECTION_TOOL_SCHEMAS = [
         "function": {
             "name": "inspect_stock_layered_l1_l7",
             "description": (
-                "对单只 A 股执行完整 L1–L7 分层深度体检：同时给出波段/长线/事件三档得分、一票否决排雷结果、"
-                "PIT 财报增速加速度、L4 预期差三段论、量化限价挂买位与 L7 账户最大风险股数。"
+                "单只 A 股的 L1–L7 体检：波段/长线/事件三档得分、排雷结果、按披露日取的财报增速变化、"
+                "预期差线索、买入模型的挂买价、止损下限和新开仓参考股数。分层得分没有经过回测，只作参考。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "description": "A 股代码，如 600519.SH 或 000001.SZ"},
                     "capital": {"type": "number", "default": 200000, "description": "账户总资金预算（元）"},
-                    "risk_per_trade": {"type": "number", "default": 0.01, "description": "单笔最大亏损比例"},
                     "with_ai_thesis": {
                         "type": "boolean",
                         "default": False,
@@ -95,7 +95,6 @@ def _exec_inspect_stock(args: dict) -> dict:
     detail = layered_selection.inspect_single_stock_layered(
         symbol,
         capital=float(args.get("capital") or 200_000.0),
-        risk_per_trade=float(args.get("risk_per_trade") or 0.01),
     )
     if args.get("with_ai_thesis"):
         detail["ai_expectation_gap"] = expectation_gap.generate_expectation_gap_thesis(
@@ -108,8 +107,8 @@ def _exec_inspect_stock(args: dict) -> dict:
 
 SKILL = {
     "name": "quant_selection",
-    "display_name": "统一分层量化选股",
-    "description": "基于 A 股实证校准的 L1–L7 分层量化选股、单票六层深度体检、限价买点与 L7 风险预算股数测算。",
+    "display_name": "量化选股（L1–L7）",
+    "description": "查大盘环境、分层得分、排雷结果和单票体检；除模型排名外的分层打分没有经过回测，只作参考。",
     "version": "1.0.0",
     "chat_modes": ["research", "stock"],
     "roles": ["quant-analyst", "research-analyst", "stock-pm", "risk-officer"],
@@ -129,15 +128,13 @@ SKILL = {
             total_mv_min=a.get("total_mv_min"),
             total_mv_max=a.get("total_mv_max"),
             capital=float(a.get("capital") or 200_000.0),
-            risk_per_trade=float(a.get("risk_per_trade") or 0.01),
             limit=int(a.get("limit") or 15),
         ),
         "inspect_stock_layered_l1_l7": _exec_inspect_stock,
     },
     "prompt_instructions": [
-        "选股或评估买点时必须优先调用 get_market_regime_l1 明确今日大盘总仓位上限（90%/60%/30%），大盘防守期严禁建议满仓进攻。",
-        "严禁使用短期放量暴涨追高逻辑推荐股票；必须以 query_unified_quant_selection 或 inspect_stock_layered_l1_l7 的 L2–L6 分层证据与一票否决（vetoed）为准。",
-        "触发一票否决（vetoed=True，如立案调查、退市警示、ST、波段深跌破位）的标的，无论其他分项多高，结论一律为「放弃」，绝不推荐买入。",
-        "给出操作计划草案时必须同时说明执行层建议限价（suggested_buy_price）、证伪参考价（stop_ref_price）与 L7 风险预算股数，且明确声明仅供研究不自动下单。",
+        "量化选股（L1–L7）的工具只用来查信息。除模型排名外，分层得分、动手/观察/放弃和大盘仓位上限都没有经过历史回测，引用时说明只作参考，不能当成买入的理由。",
+        "命中立案调查、退市风险、财务造假或 ST 的股票，可以直接说不建议买。",
+        "写操作计划时，买价、止损和股数以计划提示里系统算好的为准；和这里查到的不一致时，听计划提示的。",
     ],
 }

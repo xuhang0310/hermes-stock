@@ -1,9 +1,9 @@
 ---
 name: quant-selection
-description: 执行全站统一的 A 股 L1–L7 分层量化选股与单票体检。当用户询问量化选股、今日选什么票、波段/长线/事件选股、大盘仓位上限或某只股票能不能买、挂单价与买多少股时使用。
+description: 查量化选股（L1–L7）的大盘环境、分层得分、排雷结果和单票体检。当用户询问量化选股页面的结论、大盘环境、某只股票有没有踩雷时使用。除模型排名外的分层打分没有经过回测，只作参考。
 compatibility: Uses precomputed L1 market regime and L2-L6 daily snapshots with PIT financial and full-market announcement screening.
 metadata:
-  hermes-display-name: 统一分层量化选股
+  hermes-display-name: 量化选股（L1–L7）
   hermes-category: quantitative
   hermes-version: "1.0.0"
   hermes-risk-level: low
@@ -11,19 +11,25 @@ metadata:
 allowed-tools: get_market_regime_l1 query_unified_quant_selection inspect_stock_layered_l1_l7
 ---
 
-# 统一分层量化选股（L1–L7 判断栈）
+# 量化选股（L1–L7）
 
-本技能严格遵循 A 股实证规律与「单层单职责、观点与执行/风控解耦」原则，杜绝左右互搏与拍脑袋追涨。
+这个技能只查信息，不定计划。
 
-## 标准决策链
+## 哪些验证过，哪些没有
 
-1. **L1 市场环境定仓位上限**：先用 `get_market_regime_l1` 查看全市场均线宽度、成交分位与宽基趋势，明确今日总仓位上限（进攻 90% / 中性 60% / 防守 30%）及风格象限。
-2. **L2–L6 六层筛选与一票否决**：用 `query_unified_quant_selection` 按用户持有周期（`swing` 波段 / `long` 长线 / `event` 事件驱动）与账户预算筛选候选池；若用户询问单只标的，用 `inspect_stock_layered_l1_l7` 做完整体检。
-3. **执行与 L7 风险股数**：输出量化限价买点（`suggested_buy_price`）、证伪退出参考价（`stop_ref_price`）以及基于账户资金和单笔最大风险比例核定的整手股数。
+- 验证过：模型排名（7 项量价特征，2019 年以后的样本外回测通过）；买入模型的挂买价；止损不能比 3 倍 ATR 更近。
+- 没有验证：L2–L6 的分层得分和权重、“动手/观察/放弃”、波段的破位和阴跌否决、大盘总仓位上限（90%/60%/30%）。
+- 排雷（立案调查、退市风险、财务造假、ST）是常识性的风险排除，可以直接引用。
 
-## 硬性铁律
+## 怎么用
 
-- L1 大盘温度计只控制总仓位上限，不掺入个股打分。
-- 任何触发一票否决（`vetoed=true`：立案调查、退市风险、财务造假、ST、波段破位飞刀）的股票直接判定为「放弃」。
-- 数据覆盖率不足或预期差缺乏客观证据支撑的股票最高只能给「观察」，不得列入「动手」。
-- 所有输出均为投研与挂单计划草稿，严禁承诺收益，不触碰自动交易。
+1. 用户问大盘环境，用 `get_market_regime_l1`，说清进攻/中性/防守，并说明仓位上限还没有经过回测。
+2. 用户问某只股票，用 `inspect_stock_layered_l1_l7`。命中排雷就直接说不建议买；分层得分和结论只作参考，要说明没有经过回测。
+3. 用户要量化选股页面的名单，用 `query_unified_quant_selection`，同样说明哪些没有经过回测。
+
+## 和操作计划的关系
+
+- 操作计划里的买价、止损和股数，以计划提示里系统算好的为准。
+- 这里的挂买价和止损下限用的是同一套代码。买入模型说不挂的股票，这里也不给买价。
+- 这里的股数对新开仓只是参考：验证过的股数规则只管已有持仓。已有持仓加减多少，看操作计划。
+- 系统不接券商、不下单。

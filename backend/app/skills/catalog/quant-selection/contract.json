@@ -7,10 +7,10 @@
   "criteria": [
     {
       "code": "selection.regime_and_candidates",
-      "description": "明确 L1 市场环境建议总仓位上限与 L2–L6 分层评分、否决项及 L7 风险股数依据。",
+      "description": "说清大盘环境、分层得分和排雷结果，并说明除模型排名外的打分没有经过回测、只作参考。",
       "tool_names": ["get_market_regime_l1", "query_unified_quant_selection", "inspect_stock_layered_l1_l7"],
       "validation_profile": "quantitative"
     }
   ],
-  "output_contract": ["L1市场环境与仓位上限", "L2-L6分层证据与否决检查", "预期差与催化", "执行限价与L7风险股数", "研究边界声明"]
+  "output_contract": ["大盘环境", "分层得分和排雷结果", "预期差线索", "买入模型的价和止损下限", "哪些结论没有经过回测"]
 }

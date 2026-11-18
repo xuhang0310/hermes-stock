@@ -43,7 +43,6 @@ const peMax = ref('')
 const totalMvMin = ref('50')
 const totalMvMax = ref('')
 const capital = ref(200000)
-const riskPerTrade = ref(0.01)
 const selectedAccountId = ref<number | null>(null)
 const selectedBoards = ref<QuantBoard[]>(['MAIN', 'CHINEXT', 'STAR'])
 
@@ -216,7 +215,6 @@ async function runQuery() {
       total_mv_min: mvMin != null && mvMin >= 0 ? mvMin : null,
       total_mv_max: mvMax && mvMax > 0 ? mvMax : null,
       capital: capital.value,
-      risk_per_trade: riskPerTrade.value,
       account_id: selectedAccountId.value,
       limit: 60,
     })
@@ -271,7 +269,6 @@ async function openStockDrawer(item: LayeredSelectionItem) {
     detail.value = await api.quantSelectionStockDetail(item.symbol, {
       tradeDate: item.trade_date,
       capital: capital.value,
-      riskPerTrade: riskPerTrade.value,
       accountId: selectedAccountId.value,
     })
   } catch (err) {
@@ -561,15 +558,6 @@ onMounted(() => {
             <span>账户预算（元）</span>
             <input v-model.number="capital" type="number" min="10000" step="10000" />
           </label>
-          <label>
-            <span>单笔风险上限</span>
-            <select v-model.number="riskPerTrade">
-              <option :value="0.005">0.5%（保守）</option>
-              <option :value="0.01">1.0%（标准）</option>
-              <option :value="0.015">1.5%（积极）</option>
-              <option :value="0.02">2.0%（高弹）</option>
-            </select>
-          </label>
           <label v-if="accounts && accounts.length">
             <span>关联真实账户</span>
             <select v-model="selectedAccountId">
@@ -652,8 +640,8 @@ onMounted(() => {
                 <th>总分 / 覆盖率</th>
                 <th>L2–L6 分层证据条（点击行看详情）</th>
                 <th>现价 / 涨跌</th>
-                <th>执行限价 / 证伪位</th>
-                <th>L7 建议股数（最大可亏）</th>
+                <th>挂买价 / 止损下限</th>
+                <th>新开仓参考股数</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -708,14 +696,15 @@ onMounted(() => {
                   </span>
                 </td>
                 <td class="qs-num">
-                  <div>挂买 {{ fmtNum(item.suggested_buy_price) }}</div>
-                  <span class="qs-sub-num">证伪 {{ fmtNum(item.stop_ref_price) }}</span>
+                  <div v-if="item.suggested_buy_price != null">挂买 {{ fmtNum(item.suggested_buy_price) }}</div>
+                  <div v-else class="qs-muted-reason" :title="item.evidence.buy_basis || ''">模型说不挂</div>
+                  <span class="qs-sub-num">止损不高于 {{ fmtNum(item.stop_ref_price) }}</span>
                 </td>
                 <td class="qs-num">
                   <template v-if="item.l7_risk.eligible">
                     <strong>{{ item.l7_risk.advised_shares }} 股</strong>
                     <span class="qs-sub-num">
-                      仓位 {{ fmtPctRatio(item.l7_risk.position_pct, 1) }} · 限亏 ¥{{ fmtNum(item.l7_risk.max_loss_amount, 0) }}
+                      仓位 {{ fmtPctRatio(item.l7_risk.position_pct, 1) }} · 跌 2 倍 ATR 约亏 ¥{{ fmtNum(item.l7_risk.max_loss_amount, 0) }}
                     </span>
                   </template>
                   <span v-else class="qs-sub-num qs-muted-reason">{{ item.l7_risk.reason }}</span>
@@ -808,7 +797,8 @@ onMounted(() => {
           <li><strong>三大横截面去偏（防微盘虹吸与单一行业霸榜）</strong>：① L5 将量价分在四档市值同温层（&lt;50亿 / 50–100亿 / 100–300亿 / ≥300亿）内独立中性化，并融合 45% 自身均线多头缩量回踩结构分；② L3 估值与盈利质地采用 65% 同行业内排名 + 35% 全市场排名，防止银行低 PE/PB 跨行业通吃；③ 同一行业前 2 只零衰减、第 3 只起阶梯扣分，确保主流精选池呈现跨行业真龙头。</li>
           <li><strong>一票否决优先于总分</strong>：立案调查、退市风险警示、财务造假非标意见、ST、阴跌僵尸股及波段深跌破位飞刀直接打入「放弃」；日均成交不足 4500 万元禁止进入「动手」。</li>
           <li><strong>贝叶斯覆盖率收缩</strong>：缺失财务指标不计入权重分母，但覆盖率不足 85% 时向 50 分中性收缩，覆盖率低于 65% 禁止进入「动手」。</li>
-          <li><strong>研究与风控边界</strong>：执行层给出昨收减 k 倍 ATR 的现货量化限价参考，L7 按单笔风险容忍度倒推整手股数，仅供研究与计划制定，绝不自动下单。</li>
+          <li><strong>哪些验证过</strong>：模型排名、买入模型的挂买价、止损不能比 3 倍 ATR 更近，这三样经过历史回测；L2–L6 的分层权重、「动手」门槛、破位和阴跌否决、L1 仓位上限都还没有回测，只作参考。</li>
+          <li><strong>和操作计划同一套代码</strong>：挂买价只来自买入模型，模型说不挂就不给价；止损只给下限（不能比 3 倍 ATR 更近，也可以不设）；新开仓股数按持仓股数的同一公式估算，已有持仓以操作计划为准。系统不下单。</li>
         </ul>
       </article>
     </div>
@@ -928,22 +918,22 @@ onMounted(() => {
 
             <!-- 执行层限价与 L7 风险股数 -->
             <section class="qs-drawer-section">
-              <h3>现货量化执行限价 &amp; L7 风险预算股数</h3>
+              <h3>挂买价、止损下限和参考股数</h3>
               <dl class="qs-l7-grid">
                 <div>
                   <dt>最新收盘价</dt>
                   <dd>{{ fmtNum(detail.close_price) }} 元</dd>
                 </div>
                 <div>
-                  <dt>建议限价挂买位</dt>
-                  <dd>{{ fmtNum(detail.suggested_buy_price) }} 元</dd>
+                  <dt>买入模型挂买价</dt>
+                  <dd>{{ detail.suggested_buy_price != null ? `${fmtNum(detail.suggested_buy_price)} 元` : '不挂' }}</dd>
                 </div>
                 <div>
-                  <dt>L7 证伪参考位</dt>
+                  <dt>止损下限（可以不设）</dt>
                   <dd>{{ fmtNum(detail.stop_ref_price) }} 元</dd>
                 </div>
                 <div>
-                  <dt>L7 核定整手股数</dt>
+                  <dt>新开仓参考股数</dt>
                   <dd>
                     {{ detail.l7_risk.eligible ? `${detail.l7_risk.advised_shares} 股（约 ¥${fmtNum(detail.l7_risk.advised_amount, 0)}）` : '0 股' }}
                   </dd>

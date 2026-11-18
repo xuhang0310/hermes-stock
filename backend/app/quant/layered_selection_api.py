@@ -31,7 +31,6 @@ class LayeredSelectionQueryIn(BaseModel):
     total_mv_min: float | None = Field(default=None, ge=0, description="总市值下限（亿元）")
     total_mv_max: float | None = Field(default=None, ge=0, description="总市值上限（亿元）")
     capital: float | None = Field(default=200_000.0, gt=0, description="L7 计算使用的账户总预算（元）")
-    risk_per_trade: float = Field(default=0.01, ge=0.001, le=0.05, description="单笔最大可承受亏损比例（默认 1%）")
     account_id: int | None = Field(default=None, description="关联真实持仓账户 ID（可选）")
     limit: int = Field(default=50, ge=1, le=200, description="返回数量上限")
 
@@ -79,7 +78,6 @@ def api_query_layered_selection(
             total_mv_min=payload.total_mv_min,
             total_mv_max=payload.total_mv_max,
             capital=payload.capital,
-            risk_per_trade=payload.risk_per_trade,
             account_id=payload.account_id,
             owner_user_id=context.user.id,
             limit=payload.limit,
@@ -94,7 +92,6 @@ def api_inspect_stock_layered(
     symbol: str,
     trade_date: str | None = Query(default=None, max_length=10),
     capital: float | None = Query(default=200_000.0, gt=0),
-    risk_per_trade: float = Query(default=0.01, ge=0.001, le=0.05),
     account_id: int | None = Query(default=None),
     context: AuthContext = Depends(require_permission("data:read")),
 ) -> dict:
@@ -103,7 +100,6 @@ def api_inspect_stock_layered(
             symbol,
             trade_date=trade_date,
             capital=capital,
-            risk_per_trade=risk_per_trade,
             account_id=account_id,
             owner_user_id=context.user.id,
         )

@@ -2463,8 +2463,6 @@ export type L7RiskSizing = {
   max_loss_amount: number
   risk_budget_pct?: number
   entry_price?: number
-  stop_ref_price?: number
-  l1_max_position_ratio?: number
   min_lot_cost?: number
   reason: string
 }
@@ -2549,7 +2547,6 @@ export type LayeredSelectionQueryPayload = {
   total_mv_min?: number | null
   total_mv_max?: number | null
   capital?: number | null
-  risk_per_trade?: number
   account_id?: number | null
   limit?: number
 }
@@ -2562,9 +2559,7 @@ export type LayeredSelectionResponse = {
   regime: MarketRegimeL1
   account_context?: {
     capital: number
-    current_invested: number
-    risk_per_trade: number
-    l1_max_position_ratio: number
+    holding_count: number | null
   }
   summary: {
     total: number

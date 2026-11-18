@@ -40,12 +40,16 @@ from backend.app.quant.layered_selection import (
     VERDICT_WATCH,
     build_daily_selection_snapshots,
     combine_layers_with_shrinkage,
+    compute_execution_levels,
     compute_l7_position_sizing,
     inspect_single_stock_layered,
     query_layered_selection,
     update_shadow_nav_comparison,
 )
 from backend.app.quant.layered_selection_api import router as selection_router
+from backend.app.quant.order_engine import load_table as load_order_table, model_buy_price, plan_orders
+from backend.app.quant.tech_signal import Bar
+from backend.app.shadow import rules as shadow_rules
 from backend.app.skills.registry import SkillRegistry
 
 
@@ -184,47 +188,71 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
         self.assertTrue(vetoed["vetoed"])
         self.assertEqual(vetoed["verdict"], VERDICT_PASS)
 
-    def test_l7_position_sizing_respects_board_lots_budget_and_l1_cap(self) -> None:
-        # 科创板 688 最小 200 股：若股价 180 元，账户仅 5 万元，200 股 = 3.6万 超出单票上限 -> 诚实拒买
-        star_expensive = compute_l7_position_sizing(
-            symbol="688001.SH",
-            entry_price=180.0,
-            stop_ref_price=165.0,
-            atr14=7.0,
-            capital=50_000.0,
-            l1_max_position_ratio=0.60,
-        )
-        self.assertFalse(star_expensive["eligible"])
-        self.assertEqual(star_expensive["advised_shares"], 0)
-
-        # 主板正常标的：20 万资金，1% 单笔风险（2000元），买入价 20 元，证伪价 18 元（每股风险 2 元）
-        # 风险股数 = 2000 / 2 = 1000 股（市值 2万 = 10% <= 单票20% 且 <= L1 60%）
+    def test_l7_uses_the_plan_sizing_rule_and_skips_held_or_unpriced_stocks(self) -> None:
+        # 不指定账户按 8 只持股：风险预算 1%、单只上限 25%。20 万预算、收盘 20 元、ATR 1 元：
+        # 风险股数 = 2000 ÷ (2 × 1) = 1000 股，上限 = 50000 ÷ 20 = 2500 股，排名 0.5 不调整
         normal = compute_l7_position_sizing(
-            symbol="600036.SH",
-            entry_price=20.0,
-            stop_ref_price=18.0,
-            atr14=1.0,
-            capital=200_000.0,
-            risk_per_trade=0.01,
-            l1_max_position_ratio=0.60,
+            symbol="600036.SH", entry_price=19.8, close=20.0, atr14=1.0, model_rank=0.5, capital=200_000.0,
         )
         self.assertTrue(normal["eligible"])
         self.assertEqual(normal["advised_shares"], 1000)
+        self.assertEqual(normal["advised_shares"], int(shadow_rules.target_shares(200_000.0, 20.0, 1.0) // 100) * 100)
         self.assertAlmostEqual(normal["max_loss_amount"], 2000.0)
+        self.assertNotIn("l1_max_position_ratio", normal)
 
-        # L1 防守期（上限 30% = 6 万），若当前已持仓 5.9 万 -> 剩余额度不足 1 手，拦截新开仓！
-        capped = compute_l7_position_sizing(
-            symbol="600036.SH",
-            entry_price=20.0,
-            stop_ref_price=18.0,
-            atr14=1.0,
-            capital=200_000.0,
-            current_invested=59_000.0,
-            l1_max_position_ratio=0.30,
+        # 账户里连这只共 4 只：和计划一样放宽到 2%，排名 0.9 再乘 1.4 -> 2000 × 1.4 = 2800 股
+        few = compute_l7_position_sizing(
+            symbol="600036.SH", entry_price=19.8, close=20.0, atr14=1.0, model_rank=0.9, capital=200_000.0, stock_count=4,
         )
-        self.assertFalse(capped["eligible"])
-        self.assertEqual(capped["advised_shares"], 0)
-        self.assertIn("L1", capped["reason"])
+        self.assertEqual(few["advised_shares"], 2800)
+        self.assertEqual(few["risk_budget_pct"], 0.02)
+
+        # 买入模型说不挂：不给股数，理由沿用执行层的说明
+        no_buy = compute_l7_position_sizing(
+            symbol="600036.SH", entry_price=None, close=20.0, atr14=1.0, model_rank=0.5, capital=200_000.0,
+            no_buy_reason="买入模型今天判断不挂买单，不给买价",
+        )
+        self.assertFalse(no_buy["eligible"])
+        self.assertEqual(no_buy["reason"], "买入模型今天判断不挂买单，不给买价")
+
+        # 已经持有：以操作计划的量化股数为准，这里不另算
+        held = compute_l7_position_sizing(
+            symbol="600036.SH", entry_price=19.8, close=20.0, atr14=1.0, model_rank=0.5, capital=200_000.0, held_shares=1500,
+        )
+        self.assertFalse(held["eligible"])
+        self.assertIn("操作计划", held["reason"])
+
+        # 科创板最少 200 股：180 元、5 万预算算出来不到 200 股，不买
+        star = compute_l7_position_sizing(
+            symbol="688001.SH", entry_price=179.0, close=180.0, atr14=7.0, model_rank=0.5, capital=50_000.0,
+        )
+        self.assertFalse(star["eligible"])
+        self.assertEqual(star["advised_shares"], 0)
+
+    def test_execution_levels_use_the_plan_engine_and_never_invent_a_buy_price(self) -> None:
+        days = _trading_days(80, "20260904")
+        closes = [20.0 + (i % 4) * 0.05 for i in range(len(days))]
+        bars = [Bar(trade_date=d, high=c + 0.25, low=c - 0.25, close=c) for d, c in zip(days, closes)]
+        table = load_order_table()
+        levels = plan_orders(bars, table, limit_ratio=0.1) if table is not None else None
+        ref_close = levels.close if levels is not None else bars[-1].close
+
+        priced = compute_execution_levels(bars, symbol="600036.SH", name="招商银行", buy_k=0.5, order_table=table)
+        atr = levels.atr if levels is not None else priced["atr14"]
+        self.assertEqual(priced["suggested_buy_price"], model_buy_price(ref_close, atr, 0.5, 0.1))
+        # 止损只给下限，和计划同一个价，不比 3 倍 ATR 更近
+        if levels is not None and levels.stop is not None:
+            self.assertEqual(priced["stop_ref_price"], levels.stop.price)
+        self.assertLessEqual(priced["stop_ref_price"], ref_close - 3.0 * atr + 0.011)
+
+        refused = compute_execution_levels(bars, symbol="600036.SH", name="招商银行", buy_k=None, order_table=table)
+        self.assertIsNone(refused["suggested_buy_price"])
+        self.assertIn("不挂", refused["buy_basis"])
+        silent = compute_execution_levels(
+            bars, symbol="600036.SH", name="招商银行", buy_k=None, order_table=table, has_signal=False,
+        )
+        self.assertIsNone(silent["suggested_buy_price"])
+        self.assertIn("没有买入模型信号", silent["buy_basis"])
 
     def test_end_to_end_snapshot_builder_downtrend_veto_and_api_endpoints(self) -> None:
         days = _trading_days(65, "20260904")

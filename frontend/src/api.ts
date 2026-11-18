@@ -955,12 +955,11 @@ export const api = {
     }).then((res) => res.data),
   quantSelectionStockDetail: (
     symbol: string,
-    params: { tradeDate?: string | null; capital?: number | null; riskPerTrade?: number; accountId?: number | null } = {}
+    params: { tradeDate?: string | null; capital?: number | null; accountId?: number | null } = {}
   ) => {
     const q = new URLSearchParams()
     if (params.tradeDate) q.set('trade_date', params.tradeDate)
     if (params.capital != null) q.set('capital', String(params.capital))
-    if (params.riskPerTrade != null) q.set('risk_per_trade', String(params.riskPerTrade))
     if (params.accountId != null) q.set('account_id', String(params.accountId))
     const suffix = q.toString() ? `?${q.toString()}` : ''
     return request<ApiEnvelope<LayeredStockInspection>>(

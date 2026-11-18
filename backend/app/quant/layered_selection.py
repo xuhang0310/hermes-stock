@@ -42,12 +42,15 @@ from backend.app.quant.market_regime import (
     compute_and_store_market_regime,
     get_latest_market_regime,
 )
+from backend.app.plans.rules import limit_ratio as plan_limit_ratio
 from backend.app.quant.order_engine import (
+    STOP_ATR,
     load_table as load_order_table,
     model_buy_price,
     plan_orders,
 )
 from backend.app.quant.tech_signal import Bar, _atr, adjusted_bars
+from backend.app.shadow import rules as shadow_rules
 
 logger = logging.getLogger(__name__)
 
@@ -203,16 +206,6 @@ def _finite(value: Any) -> float | None:
 
 def _tick_down(price: float) -> float:
     return math.floor(price * 100.0 + 1e-9) / 100.0
-
-
-def _limit_ratio_for(symbol: str, name: str = "") -> float:
-    if _ST_RE.search(name or ""):
-        return 0.05
-    if symbol.endswith(".BJ"):
-        return 0.30
-    if symbol.startswith(("688", "300", "301")):
-        return 0.20
-    return 0.10
 
 
 def board_of(symbol: str) -> str:
@@ -800,8 +793,14 @@ def compute_execution_levels(
     name: str,
     buy_k: float | None,
     order_table: dict[str, Any] | None,
+    has_signal: bool = True,
 ) -> dict[str, Any]:
-    """执行层（A 股现货限价表达）：复用 buy_model + order_engine，输出建议挂买价与证伪参考价。"""
+    """执行层：买价和止损下限用操作计划同一套代码算（plans/quant_orders），页面和计划不会给出两个价。
+
+    - 买价只来自买入模型（昨收 - buy_k 倍 ATR）。模型说不挂（has_signal 且 buy_k 为空）或当天没有信号，
+      就不给买价；统计表的买价没跑赢简单基线（docs/quant-order-plan.md 第 0 节），不拿来兜底。
+    - 止损只给下限：可以不设，设了不能比 3 倍 ATR 更近。回测里 1 到 2 倍 ATR 的止损把年化打成负数。
+    """
     if not bars:
         return {
             "atr14": None,
@@ -831,31 +830,30 @@ def compute_execution_levels(
             mean_r = sum(rets) / len(rets)
             vol_20 = math.sqrt(sum((r - mean_r) ** 2 for r in rets) / len(rets))
 
-    limit_ratio = _limit_ratio_for(symbol, name)
+    limit_ratio = plan_limit_ratio(symbol, name)
+    # 和操作计划同一个函数算昨收、ATR 和止损下限（plans/quant_orders.levels_for）
+    levels = plan_orders(bars, order_table, limit_ratio=limit_ratio) if order_table is not None else None
+    ref_close = levels.close if levels is not None else last_close
+    ref_atr = levels.atr if levels is not None else atr_val
+
     suggested_buy: float | None = None
-    buy_basis: str | None = None
-
-    if buy_k is not None and atr_val > 0:
-        mbp = model_buy_price(last_close, atr_val, buy_k, limit_ratio=limit_ratio)
-        if mbp is not None:
-            suggested_buy = mbp
-            buy_basis = f"买入模型最优限价（昨收 - {buy_k:g}×ATR）"
-
-    if suggested_buy is None and order_table is not None and len(bars) >= 60:
-        levels = plan_orders(bars, order_table, limit_ratio=limit_ratio)
-        if levels is not None and levels.buy is not None:
-            suggested_buy = levels.buy.price
-            buy_basis = f"量化统计表限价（昨收 - {levels.buy.atr_multiple:g}×ATR，成交率 {levels.buy.fill * 100:.0f}%）"
-
-    if suggested_buy is None and last_close > 0 and atr_val > 0:
-        fallback_buy = _tick_down(last_close - 0.5 * atr_val)
-        floor_price = round(last_close * (1.0 - limit_ratio), 2)
-        suggested_buy = max(fallback_buy, floor_price)
-        buy_basis = "暂不追高，参考 0.5×ATR 缩量回踩位"
+    if buy_k is not None and ref_atr > 0:
+        suggested_buy = model_buy_price(ref_close, ref_atr, buy_k, limit_ratio=limit_ratio)
+        buy_basis = (
+            f"买入模型限价（昨收 - {buy_k:g} 倍 ATR）"
+            if suggested_buy is not None
+            else "买入模型的价低于跌停价，挂不上，不给买价"
+        )
+    elif has_signal:
+        buy_basis = "买入模型今天判断不挂买单，不给买价"
+    else:
+        buy_basis = "今天没有买入模型信号，不给买价"
 
     stop_ref: float | None = None
-    if last_close > 0 and atr_val > 0:
-        stop_ref = max(_tick_down(last_close - 2.0 * atr_val), 0.01)
+    if levels is not None and levels.stop is not None:
+        stop_ref = levels.stop.price
+    elif ref_close > 0 and ref_atr > 0:
+        stop_ref = max(_tick_down(ref_close - STOP_ATR * ref_atr), round(ref_close * (1.0 - limit_ratio), 2), 0.01)
 
     return {
         "atr14": atr_val,
@@ -874,109 +872,73 @@ def compute_l7_position_sizing(
     *,
     symbol: str,
     entry_price: float | None,
-    stop_ref_price: float | None,
+    close: float | None,
     atr14: float | None,
+    model_rank: float | None,
     capital: float,
-    current_invested: float = 0.0,
-    risk_per_trade: float = 0.01,
-    single_stock_cap: float = 0.20,
-    l1_max_position_ratio: float = 0.60,
+    stock_count: int | None = None,
+    held_shares: float = 0.0,
+    no_buy_reason: str | None = None,
     allowed_boards: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    """L7 账户感知风险股数计算器（错了怎么退、最多亏多少）。
+    """L7 股数：和操作计划同一条规则（shadow/rules.target_shares + plans/quant_sizes.budget_for）。
 
-    公式：
-      单股风险额 = max(entry_price - stop_ref_price, 2 * atr14, entry_price * 4%)
-      风险约束股数 = (总资金 × 单笔风险比例) ÷ 单股风险额
-      单票上限股数 = (总资金 × 单票仓位上限) ÷ entry_price
-      L1 总仓位剩余空间股数 = max(0, 总资金 × L1总仓位上限 - 当前已持仓市值) ÷ entry_price
-      最终建议整手股数 = 向下取整至 100 股（科创板 688 至少 200 股）。
+      目标股数 = min(风险预算 × 资金 ÷ 2 倍 ATR, 单只上限 × 资金 ÷ 收盘价) × (0.5 + 模型排名)
+      风险预算 = 1% × max(1, 8 ÷ 持股只数)，单只上限 = max(25%, 1 ÷ 持股只数)，持股只数算上这一只
+
+    计划里的资金只算已有持仓的市值；这里是新开仓，用账户预算代替。验证过的规则不开新仓，所以只作参考。
+    已经持有的股票不在这里另算，以操作计划里的量化股数为准。不看 L1 仓位上限，它还没有验证。
     """
+    from backend.app.plans.quant_sizes import TYPICAL_STOCKS, budget_for
+
     board = board_of(symbol)
+    empty = {
+        "board": board,
+        "eligible": False,
+        "advised_shares": 0,
+        "advised_amount": 0.0,
+        "position_pct": 0.0,
+        "max_loss_amount": 0.0,
+    }
     if allowed_boards is not None and board not in set(allowed_boards):
-        return {
-            "board": board,
-            "eligible": False,
-            "advised_shares": 0,
-            "advised_amount": 0.0,
-            "position_pct": 0.0,
-            "max_loss_amount": 0.0,
-            "reason": f"账户未勾选或未开通 {board} 板块权限",
-        }
-    if capital <= 0 or not entry_price or entry_price <= 0:
-        return {
-            "board": board,
-            "eligible": False,
-            "advised_shares": 0,
-            "advised_amount": 0.0,
-            "position_pct": 0.0,
-            "max_loss_amount": 0.0,
-            "reason": "缺少有效资金预算或参考买入价",
-        }
+        return {**empty, "reason": f"账户未勾选或未开通 {board} 板块权限"}
+    if held_shares > 0:
+        return {**empty, "reason": f"这个账户已持有 {int(held_shares)} 股，加减多少以操作计划里的量化股数为准"}
+    if not entry_price or entry_price <= 0:
+        return {**empty, "reason": no_buy_reason or "没有买入模型给的买价，不给股数"}
+    if capital <= 0 or not close or close <= 0 or not atr14 or atr14 <= 0:
+        return {**empty, "reason": "缺少资金预算或 ATR，算不出股数"}
 
+    count = stock_count if stock_count and stock_count > 0 else TYPICAL_STOCKS
+    risk_budget, position_cap = budget_for(count)
+    tilt = shadow_rules.rank_tilt(model_rank)
+    raw = shadow_rules.target_shares(capital, close, atr14, risk_budget=risk_budget, position_cap=position_cap) * tilt
     min_lot = STAR_MIN_LOT if board == "STAR" else LOT
-    min_lot_cost = min_lot * entry_price
-    if min_lot_cost > capital * min(single_stock_cap * 1.5, l1_max_position_ratio):
-        return {
-            "board": board,
-            "eligible": False,
-            "advised_shares": 0,
-            "advised_amount": 0.0,
-            "position_pct": 0.0,
-            "max_loss_amount": 0.0,
-            "min_lot_cost": round(min_lot_cost, 2),
-            "reason": f"最小整手（{min_lot}股 ≈ {min_lot_cost:,.0f}元）超出单票风险上限",
-        }
-
-    gap_stop = (entry_price - stop_ref_price) if (stop_ref_price and stop_ref_price < entry_price) else 0.0
-    gap_atr = (2.0 * atr14) if (atr14 and atr14 > 0) else 0.0
-    per_share_risk = max(gap_stop, gap_atr, entry_price * 0.04)
-
-    risk_budget_cash = capital * max(0.001, min(0.05, risk_per_trade))
-    raw_by_risk = risk_budget_cash / per_share_risk
-    raw_by_cap = (capital * max(0.05, min(0.50, single_stock_cap))) / entry_price
-    remaining_cash_by_l1 = max(0.0, capital * l1_max_position_ratio - max(0.0, current_invested))
-    raw_by_l1 = remaining_cash_by_l1 / entry_price
-
-    raw_target = min(raw_by_risk, raw_by_cap, raw_by_l1)
-    shares = int(raw_target // LOT) * LOT
+    shares = int(raw // LOT) * LOT
     if board == "STAR" and shares < STAR_MIN_LOT:
         shares = 0
-
     if shares <= 0:
-        why = (
-            f"受 L1 大盘总仓位上限（{int(l1_max_position_ratio * 100)}%）约束已无可用新开仓额度"
-            if raw_by_l1 < min_lot
-            else f"按单笔 {risk_per_trade * 100:.1f}% 风险预算折算不足 {min_lot} 股整手"
-        )
         return {
-            "board": board,
-            "eligible": False,
-            "advised_shares": 0,
-            "advised_amount": 0.0,
-            "position_pct": 0.0,
-            "max_loss_amount": 0.0,
+            **empty,
             "entry_price": round(entry_price, 2),
-            "stop_ref_price": round(entry_price - per_share_risk, 2),
-            "reason": why,
+            "min_lot_cost": round(min_lot * entry_price, 2),
+            "reason": f"按规则算出来不到 {min_lot} 股（一手约 {min_lot * entry_price:,.0f} 元），不买",
         }
 
     amount = round(shares * entry_price, 2)
-    max_loss = round(shares * per_share_risk, 2)
     return {
-        "board": board,
+        **empty,
         "eligible": True,
         "advised_shares": shares,
         "advised_amount": amount,
         "position_pct": round(amount / capital, 4),
-        "max_loss_amount": max_loss,
-        "risk_budget_pct": round(max_loss / capital, 4),
+        # 不设止损，没有“最多亏多少”；这里是跌 2 倍 ATR 时大约亏的钱，规则就是按它定的风险预算
+        "max_loss_amount": round(shares * shadow_rules.SIZING_ATR * atr14, 2),
+        "risk_budget_pct": round(risk_budget, 4),
         "entry_price": round(entry_price, 2),
-        "stop_ref_price": round(max(0.01, entry_price - per_share_risk), 2),
-        "l1_max_position_ratio": l1_max_position_ratio,
         "reason": (
-            f"按账户预算 {capital:,.0f} 元、单笔最大风险 {risk_per_trade * 100:.1f}%、"
-            f"L1 总仓位上限 {int(l1_max_position_ratio * 100)}% 核定 {shares} 股"
+            f"按持仓股数规则估算：每只风险预算 {risk_budget * 100:.1f}%、单只不超过 {position_cap * 100:.0f}%"
+            f"（按 {count} 只持股），模型排名调整 ×{tilt:.2f}；新开仓没有验证过的股数规则，只作参考"
         ),
     }
 
@@ -1130,6 +1092,7 @@ def build_daily_selection_snapshots(
             name=inst.name,
             buy_k=buy_k,
             order_table=order_table,
+            has_signal=sym in model_signals,
         )
         amts = amounts_20_by_sym.get(sym, [])
         avg_amt_20 = (sum(amts[-20:]) / len(amts[-20:])) if amts else None
@@ -1323,8 +1286,8 @@ def resolve_user_account_budget(
     owner_user_id: int | None,
     account_id: int | None = None,
     fallback_capital: float | None = None,
-) -> tuple[float, float]:
-    """解析用户账户总预算与当前持仓市值（用于 L7 股数与 L1 仓位上限联动）。"""
+) -> tuple[float, dict[str, float]]:
+    """账户预算和这个账户现有的持仓（代码 -> 股数），L7 用来定持股只数、跳过已持有的股票。"""
     if owner_user_id is not None and account_id is not None and account_id > 0:
         acct = db.scalar(
             select(PositionAccount).where(
@@ -1344,11 +1307,38 @@ def resolve_user_account_budget(
             invested = sum(
                 float(p.quantity) * float(p.last_price or p.cost_price or 0.0) for p in positions
             )
+            holdings: dict[str, float] = {}
+            for p in positions:
+                holdings[str(p.symbol)] = holdings.get(str(p.symbol), 0.0) + float(p.quantity)
             cash = float(getattr(acct, "available_cash", 0.0) or 0.0)
             total_cap = fallback_capital if (fallback_capital and fallback_capital > 0) else max(invested + cash, invested, 100_000.0)
-            return total_cap, invested
+            return total_cap, holdings
     cap = float(fallback_capital) if (fallback_capital and fallback_capital > 0) else 200_000.0
-    return cap, 0.0
+    return cap, {}
+
+
+def _l7_for_row(
+    row: StockSelectionDailySnapshot,
+    *,
+    capital: float,
+    holdings: dict[str, float],
+    account_selected: bool,
+    allowed_boards: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    evidence = json.loads(row.evidence_json) if row.evidence_json else {}
+    held = holdings.get(row.symbol, 0.0)
+    return compute_l7_position_sizing(
+        symbol=row.symbol,
+        entry_price=row.suggested_buy_price,
+        close=row.close_price,
+        atr14=row.atr14,
+        model_rank=row.model_rank,
+        capital=capital,
+        stock_count=(len(holdings) + (0 if held > 0 else 1)) if account_selected else None,
+        held_shares=held,
+        no_buy_reason=evidence.get("buy_basis") if isinstance(evidence, dict) else None,
+        allowed_boards=allowed_boards,
+    )
 
 
 def query_layered_selection(
@@ -1365,7 +1355,6 @@ def query_layered_selection(
     total_mv_min: float | None = None,
     total_mv_max: float | None = None,
     capital: float | None = None,
-    risk_per_trade: float = 0.01,
     account_id: int | None = None,
     owner_user_id: int | None = None,
     limit: int = 50,
@@ -1400,12 +1389,13 @@ def query_layered_selection(
             db.commit()
 
         regime = get_latest_market_regime(trade_date=target, compute_if_missing=True)
-        resolved_cap, current_invested = resolve_user_account_budget(
+        resolved_cap, holdings = resolve_user_account_budget(
             db,
             owner_user_id=owner_user_id,
             account_id=account_id,
             fallback_capital=capital,
         )
+        account_selected = bool(owner_user_id is not None and account_id)
 
         allowed_board_set = {str(b).upper() for b in boards} if boards else None
         conditions = [
@@ -1497,19 +1487,14 @@ def query_layered_selection(
 
     total_matched = sum(counts.values())
 
-    l1_cap = float(regime.get("max_position_ratio") or 0.60)
     items: list[dict[str, Any]] = []
     for r in top_rows:
         d = _snapshot_row_to_dict(r)
-        d["l7_risk"] = compute_l7_position_sizing(
-            symbol=r.symbol,
-            entry_price=r.suggested_buy_price or r.close_price,
-            stop_ref_price=r.stop_ref_price,
-            atr14=r.atr14,
+        d["l7_risk"] = _l7_for_row(
+            r,
             capital=resolved_cap,
-            current_invested=current_invested,
-            risk_per_trade=risk_per_trade,
-            l1_max_position_ratio=l1_cap,
+            holdings=holdings,
+            account_selected=account_selected,
             allowed_boards=allowed_board_set,
         )
         items.append(d)
@@ -1522,9 +1507,7 @@ def query_layered_selection(
         "regime": regime,
         "account_context": {
             "capital": resolved_cap,
-            "current_invested": round(current_invested, 2),
-            "risk_per_trade": risk_per_trade,
-            "l1_max_position_ratio": l1_cap,
+            "holding_count": len(holdings) if account_selected else None,
         },
         "summary": {
             "total": total_matched,
@@ -1541,7 +1524,6 @@ def inspect_single_stock_layered(
     *,
     trade_date: str | None = None,
     capital: float | None = None,
-    risk_per_trade: float = 0.01,
     account_id: int | None = None,
     owner_user_id: int | None = None,
 ) -> dict[str, Any]:
@@ -1576,27 +1558,18 @@ def inspect_single_stock_layered(
             raise ValueError(f"未在交易日 {target} 的全市场目录中找到标的 {norm_sym}")
 
         regime = get_latest_market_regime(trade_date=target, compute_if_missing=True)
-        resolved_cap, current_invested = resolve_user_account_budget(
+        resolved_cap, holdings = resolve_user_account_budget(
             db,
             owner_user_id=owner_user_id,
             account_id=account_id,
             fallback_capital=capital,
         )
+    account_selected = bool(owner_user_id is not None and account_id)
 
-    l1_cap = float(regime.get("max_position_ratio") or 0.60)
     by_plan: dict[str, dict[str, Any]] = {}
     for r in rows:
         d = _snapshot_row_to_dict(r)
-        d["l7_risk"] = compute_l7_position_sizing(
-            symbol=r.symbol,
-            entry_price=r.suggested_buy_price or r.close_price,
-            stop_ref_price=r.stop_ref_price,
-            atr14=r.atr14,
-            capital=resolved_cap,
-            current_invested=current_invested,
-            risk_per_trade=risk_per_trade,
-            l1_max_position_ratio=l1_cap,
-        )
+        d["l7_risk"] = _l7_for_row(r, capital=resolved_cap, holdings=holdings, account_selected=account_selected)
         by_plan[r.plan_type] = d
 
     primary = by_plan.get(PLAN_SWING) or next(iter(by_plan.values()))

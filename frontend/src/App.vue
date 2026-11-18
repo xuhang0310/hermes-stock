@@ -1217,7 +1217,8 @@ function openQuantSelectionStockAnalysis(item: LayeredSelectionItem, regime: Mar
     regimeLine,
     `当前【${item.plan_label}】综合分 ${item.total_score.toFixed(1)}（结论：${item.verdict_label}，数据覆盖率 ${Math.round(item.coverage_ratio * 100)}%）。`,
     item.expectation_thesis ? `客观线索：${item.expectation_thesis}。` : '',
-    `执行参考挂买价 ${item.suggested_buy_price ?? '暂无'} 元，证伪位 ${item.stop_ref_price ?? '暂无'} 元，L7 建议股数 ${item.l7_risk.advised_shares} 股。`,
+    `买入模型挂买价 ${item.suggested_buy_price ?? '不挂'}${item.suggested_buy_price != null ? ' 元' : ''}，止损如果设不能高于 ${item.stop_ref_price ?? '—'} 元，新开仓参考股数 ${item.l7_risk.advised_shares} 股（${item.l7_risk.reason}）。`,
+    '除模型排名外，分层得分和结论没有经过回测，只作参考；买价、止损和股数以操作计划里系统算的为准。',
     '请结合最新公告与财报，按「市场以为…我认为…因为…」核验预期差是否成立，并指出最大风险与证伪退出条件。'
   ].filter(Boolean).join('\n')
   activePage.value = 'digitalHumans'
