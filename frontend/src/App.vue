@@ -19,7 +19,6 @@ import BacktestReportView from './views/BacktestReportView.vue'
 import BacktestHistoryView from './views/BacktestHistoryView.vue'
 import FactorAnalysisView from './views/FactorAnalysisView.vue'
 import ScreenerView from './views/ScreenerView.vue'
-import QuantSelectionView from './views/QuantSelectionView.vue'
 import IndustryAnalysisView from './views/IndustryAnalysisView.vue'
 import { industryQuestion } from './utils/industry'
 import AutomaticSelectionView from './views/AutomaticSelectionView.vue'
@@ -63,7 +62,6 @@ type PageKey =
   | 'backtestHistory'
   | 'backtestReport'
   | 'factorAnalysis'
-  | 'quantSelection'
   | 'screener'
   | 'industryAnalysis'
   | 'automaticSelection'
@@ -91,6 +89,9 @@ type PositionAgentReviewRow = Record<string, unknown> & {
 
 const activePage = ref<PageKey>('workbench')
 const screenerInitialIndustry = ref('')
+// “选股”页打开时先看哪个标签；只在跳去分层打分时设成 'layered'，换页就清掉
+const selectionInitialTab = ref('')
+const selectionViewKey = ref(0)
 const bootstrapping = ref(false)
 const loading = ref(false)
 const loginLoading = ref(false)
@@ -285,10 +286,9 @@ const pageTitle = computed(() => {
     backtestHistory: '回测报告',
     backtestReport: '策略回测报告',
     factorAnalysis: '因子评估',
-    quantSelection: '统一量化选股（L1–L7）',
     screener: 'AI 选股',
     industryAnalysis: '行业分析',
-    automaticSelection: '自动选股',
+    automaticSelection: '选股',
     scorecard: '建议成绩单',
     opsConsole: '运维控制台',
     settings: '设置'
@@ -298,11 +298,8 @@ const pageTitle = computed(() => {
 
 const pageSubtitle = computed(() => {
   if (activePage.value === 'industryAnalysis') return '行业强弱、市场广度与成分股研究'
-  if (activePage.value === 'quantSelection') {
-    return 'L1 大盘总仓位温度计 · L2–L6 六层证据与一票否决 · 现货限价挂单 · L7 账户风险股数'
-  }
   if (activePage.value === 'automaticSelection') {
-    return '每个交易日收盘后按固定规则选出观察股，并持续跟踪之后的表现'
+    return '每天收盘后按模型排名选出观察股，分层打分并排记成绩，持续跟踪之后的表现'
   }
   if (activePage.value === 'scorecard') return '计划里的每条建议，到期后和全市场平均比，算出对错'
   if (activePage.value !== 'workbench' || !dashboard.value) {
@@ -1057,6 +1054,7 @@ function backFromChart() {
 
 function navigate(page: PageKey) {
   if (page === 'settings' && !canViewSettings.value) return
+  selectionInitialTab.value = ''
   if (page === 'digitalHumans') {
     digitalHumanInitialTab.value = 'chat'
     digitalHumanInitialSession.value = null
@@ -1071,10 +1069,6 @@ function navigate(page: PageKey) {
     if (!/^\/settings\/?$/i.test(window.location.pathname)) {
       const initialTab = ['admin', 'super_admin'].includes(currentUser.value?.role || '') ? 'models' : 'mcp'
       window.history.pushState({}, '', `/settings?tab=${initialTab}`)
-    }
-  } else if (page === 'quantSelection') {
-    if (!/^\/quant-selection\/?$/i.test(window.location.pathname)) {
-      window.history.pushState({}, '', '/quant-selection')
     }
   } else if (page === 'automaticSelection') {
     if (!/^\/automatic-selection\/?$/i.test(window.location.pathname)) {
@@ -1109,7 +1103,11 @@ function syncPageFromLocation() {
     return
   }
   if (/^\/quant-selection\/?$/i.test(pathname)) {
-    activePage.value = 'quantSelection'
+    // 量化选股并进了“选股”页的“分层打分”标签，旧链接照样能打开
+    window.history.replaceState({}, '', '/automatic-selection')
+    selectionInitialTab.value = 'layered'
+    selectionViewKey.value += 1
+    activePage.value = 'automaticSelection'
     return
   }
   if (/^\/automatic-selection\/?$/i.test(pathname)) {
@@ -1178,7 +1176,14 @@ function openBoardSession(sessionId: number) {
 
 function screenIndustry(industry: string) {
   screenerInitialIndustry.value = industry
-  navigate('quantSelection')
+  openLayeredSelection()
+}
+
+// 原来的量化选股（L1–L7）并进了“选股”页，这里直接打开它的“分层打分”标签
+function openLayeredSelection() {
+  navigate('automaticSelection')
+  selectionInitialTab.value = 'layered'
+  selectionViewKey.value += 1
 }
 
 function openIndustryStockAnalysis(item: IndustryMember) {
@@ -1324,21 +1329,17 @@ onBeforeUnmount(() => {
         @back="closeBacktest"
       />
       <FactorAnalysisView v-else-if="activePage === 'factorAnalysis'" />
-      <QuantSelectionView
-        v-else-if="activePage === 'quantSelection'"
-        :user="currentUser"
-        :accounts="positionAgentAccounts"
-        :initial-industry="screenerInitialIndustry"
-        @watchlist-added="applyWatchlistItem"
-        @ask-stock="openQuantSelectionStockAnalysis"
-        @open-baseline="navigate('automaticSelection')"
-        @open-custom-screener="navigate('screener')"
-      />
       <AutomaticSelectionView
         v-else-if="activePage === 'automaticSelection'"
+        :key="selectionViewKey"
         :user="currentUser"
+        :accounts="positionAgentAccounts"
+        :initial-tab="selectionInitialTab"
+        :initial-industry="screenerInitialIndustry"
         @watchlist-added="applyWatchlistItem"
         @ask-stock="openAutomaticSelectionStockAnalysis"
+        @ask-layered="openQuantSelectionStockAnalysis"
+        @open-custom-screener="navigate('screener')"
       />
       <ScorecardView v-else-if="activePage === 'scorecard'" :user="currentUser" />
       <IndustryAnalysisView
@@ -1347,7 +1348,7 @@ onBeforeUnmount(() => {
         @watchlist-added="applyWatchlistItem"
         @ask-stock="openIndustryStockAnalysis"
         @screen-industry="screenIndustry"
-        @open-screener="navigate('quantSelection')"
+        @open-screener="openLayeredSelection"
       />
       <ScreenerView
         v-else-if="activePage === 'screener'"

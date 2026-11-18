@@ -127,7 +127,8 @@ def api_generate_expectation_gap(
 @router.post("/rebuild")
 def api_rebuild_layered_snapshots(
     payload: RebuildSnapshotsIn,
-    context: AuthContext = Depends(require_permission("data:read")),
+    # 重算全市场快照、拉 TuShare，所有用户共用，和定时任务同一个权限
+    context: AuthContext = Depends(require_permission("schedule:manage")),
 ) -> dict:
     aux: dict[str, dict] = {}
     if payload.sync_indices:
@@ -145,15 +146,6 @@ def api_rebuild_layered_snapshots(
         if not target:
             return JSONResponse(status_code=400, content=fail("本地尚无可用交易日行情，请先同步行情", code="no_data"))
         built = layered_selection.build_daily_selection_snapshots(db, trade_date=target)
-        nav = layered_selection.update_shadow_nav_comparison(db, target)
         db.commit()
 
-    return ok({**built, "shadow_nav": nav, "aux_sync": aux})
-
-
-@router.get("/shadow-nav")
-def api_list_shadow_nav(
-    limit: int = Query(default=120, ge=5, le=500),
-    context: AuthContext = Depends(require_permission("data:read")),
-) -> dict:
-    return ok({"series": layered_selection.list_shadow_nav_series(limit=limit)})
+    return ok({**built, "aux_sync": aux})

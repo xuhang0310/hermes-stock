@@ -23,7 +23,7 @@
 | 挂买价 | 买入模型：`stock_model_signals.buy_k` → `order_engine.model_buy_price`；模型说不挂就不给价 |
 | 止损 | 可以不设；设了不能比 3 倍 ATR 更近：`order_engine.STOP_ATR`、`plan_orders(...).stop` |
 | 股数 | `shadow/rules.target_shares` + `plans/quant_sizes.budget_for` × `shadow/rules.rank_tilt` |
-| 选股名单 | 自动选股 `quant/automatic_selection_*`，验证过的是挑战者 `model-rank-30` |
+| 选股名单 | 自动选股 `quant/automatic_selection_*`，验证过的是挑战者 `model-rank-30`；分层打分 `layered-swing-30` 是没验证的挑战者，新的选股想法也照这样加成挑战者 |
 | 成绩 | 自动选股的前瞻评估；操作建议的成绩单 `scorecard/` |
 
 要加新功能，先找现有模块扩展，不要另起一套同名或同用途的东西。量化选股（L1–L7）的现状和还没做的事见 `docs/quant-selection.md`。

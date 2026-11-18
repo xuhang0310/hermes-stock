@@ -17,8 +17,12 @@ from backend.app.quant.factor_signal_engine import _zscore_cross_section
 BUILTIN_STRATEGY_KEY = "forward-multifactor"
 MODEL_RANK_STRATEGY_KEY = "model-rank-30"
 # v4：基础记录覆盖与估值可用性分开校验；v5：可选特征 model_rank 和定期换仓（旧配置的结果不变）
+# 加入 layered_swing 不改变任何已有配置的结果，所以没有升版本
 SCORING_IMPLEMENTATION_VERSION = "forward-selection-v5"
 MODEL_RANK_FEATURE = "model_rank"
+LAYERED_STRATEGY_KEY = "layered-swing-30"
+# 量化选股（L1–L7）波段档的总分，被它的排雷和否决排除的股票没有分，见 docs/quant-selection.md
+LAYERED_FEATURE = "layered_swing"
 # 模型只覆盖沪深 A 股里上市约满 120 个交易日、非 ST、当天有成交的股票，北交所不在训练范围内
 MODEL_RANK_UNIVERSE_RE = re.compile(r"^(?:(?:00|30)\d{4}\.SZ|(?:60|68)\d{4}\.SH)$")
 MODEL_RANK_MIN_COVERAGE = 0.80
@@ -70,6 +74,12 @@ MODEL_RANK_STRATEGY_CONFIG: dict[str, Any] = {
     "constraints": {"max_per_industry": 0, "max_per_market_cap_bucket": 0},
     "rebalance": {"every_days": 10, "hold_rank_multiple": 2.0},
 }
+# 分层打分的挑战者：权重是人定的，没有回测。除了换成分层总分，选股池、换仓和持有带都和模型排名前 30 一样，
+# 这样两者的前瞻评估可以直接比。
+LAYERED_STRATEGY_CONFIG: dict[str, Any] = {
+    **copy.deepcopy(MODEL_RANK_STRATEGY_CONFIG),
+    "feature_weights": {LAYERED_FEATURE: 1.0},
+}
 OPTIONAL_CONFIG_KEYS = {"rebalance"}
 
 _ST_NAME_RE = re.compile(r"^(?:S\*ST|\*ST|SST|ST)", re.IGNORECASE)
@@ -81,6 +91,7 @@ _BASE_FEATURES = {
     "liquidity_20",
     "low_volatility_20",
     MODEL_RANK_FEATURE,
+    LAYERED_FEATURE,
 }
 
 
@@ -237,11 +248,15 @@ def uses_model_rank(config: dict[str, Any]) -> bool:
     return abs(float((config.get("feature_weights") or {}).get(MODEL_RANK_FEATURE) or 0.0)) > 1e-12
 
 
+def uses_layered_score(config: dict[str, Any]) -> bool:
+    return abs(float((config.get("feature_weights") or {}).get(LAYERED_FEATURE) or 0.0)) > 1e-12
+
+
 def _requires_valuation(config: dict[str, Any]) -> bool:
-    """纯模型排名的策略不剔除亏损股（回测没有剔除）；其余策略照旧。"""
+    """纯模型排名的策略不剔除亏损股（回测没有剔除），分层打分自己在基本面层处理亏损；其余策略照旧。"""
     weights = config.get("feature_weights") or {}
     uses_value = any(abs(float(weights.get(key) or 0.0)) > 1e-12 for key in _VALUE_FEATURES)
-    return uses_value or not uses_model_rank(config)
+    return uses_value or not (uses_model_rank(config) or uses_layered_score(config))
 
 
 def rebalance_state(
@@ -287,6 +302,7 @@ def build_candidates(
     factor_ids = required_tushare_factors(config)
     require_valuation = _requires_valuation(config)
     model_rank_required = uses_model_rank(config)
+    layered_required = uses_layered_score(config)
     candidates: list[dict[str, Any]] = []
 
     for source in sorted(rows, key=lambda item: str(item.get("symbol") or "")):
@@ -404,6 +420,12 @@ def build_candidates(
                 exclusions.append("model_rank_missing")
             else:
                 factor_values[MODEL_RANK_FEATURE] = model_rank
+        if layered_required:
+            layered_score = _finite(supplied_factors.get(LAYERED_FEATURE))
+            if layered_score is None:
+                exclusions.append("layered_score_missing")
+            else:
+                factor_values[LAYERED_FEATURE] = layered_score
 
         feature_values: dict[str, float] = {}
         if pe_ttm is not None and pe_ttm > 0:

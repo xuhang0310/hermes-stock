@@ -15,6 +15,7 @@ from backend.app.quant.automatic_selection_presentation import (
 )
 from backend.app.quant.automatic_selection_scoring import (
     DEFAULT_STRATEGY_CONFIG,
+    LAYERED_STRATEGY_CONFIG,
     MODEL_RANK_STRATEGY_CONFIG,
     build_candidates,
     config_hash,
@@ -130,6 +131,42 @@ class ModelRankScoringTests(unittest.TestCase):
         gate = quality_gate(build_candidates(rows, _config(), target_trade_date=TARGET_DATE), _config())
         self.assertEqual(gate["metrics"]["model_rank_coverage"], 1.0)
         self.assertTrue(gate["passed"])
+
+
+class LayeredChallengerTests(unittest.TestCase):
+    def _layered(self, symbol: str, score: float | None, **overrides):
+        return _row(symbol, None, factor_values={} if score is None else {"layered_swing": score}, **overrides)
+
+    def test_config_only_swaps_the_feature(self) -> None:
+        # 除了换成分层总分，选股池、换仓、持有带都和模型排名前 30 一样，前瞻评估才能直接比
+        layered = validate_config(LAYERED_STRATEGY_CONFIG)
+        model = validate_config(MODEL_RANK_STRATEGY_CONFIG)
+        self.assertEqual(layered["feature_weights"], {"layered_swing": 1.0})
+        self.assertEqual({k: v for k, v in layered.items() if k != "feature_weights"},
+                         {k: v for k, v in model.items() if k != "feature_weights"})
+        self.assertNotEqual(config_hash(layered), config_hash(model))
+
+    def test_ranks_by_layered_score_and_excludes_unscored(self) -> None:
+        config = validate_config({**LAYERED_STRATEGY_CONFIG, "top_n": 2, "quality": {**LAYERED_STRATEGY_CONFIG["quality"], "min_eligible_count": 1}})
+        rows = [
+            self._layered("600001.SH", 60.0),
+            self._layered("600002.SH", 90.0, pe_ttm=-5.0),  # 亏损股不额外剔除，分层自己在基本面层处理
+            self._layered("600003.SH", 75.0),
+            self._layered("600004.SH", None),  # 被分层排雷或否决排除的没有分
+        ]
+        candidates = {item["symbol"]: item for item in build_candidates(rows, config, target_trade_date=TARGET_DATE)}
+        self.assertEqual(candidates["600004.SH"]["exclusion_codes"], ["layered_score_missing"])
+        self.assertTrue(candidates["600002.SH"]["eligible"])
+        scored = list(candidates.values())
+        score_candidates(scored, config)
+        self.assertEqual(_selected(scored), ["600002.SH", "600003.SH"])
+
+    def test_method_says_it_is_not_validated(self) -> None:
+        view = method_view(validate_config(LAYERED_STRATEGY_CONFIG))
+        self.assertEqual([item["key"] for item in view["dimensions"]], ["layered"])
+        self.assertIn("没有经过历史回测", view["scoring"])
+        self.assertFalse(any("亏损" in text for text in view["filters"]))
+        self.assertTrue(any("分层打分没有排除" in text for text in view["filters"]))
 
 
 class RebalanceTests(unittest.TestCase):

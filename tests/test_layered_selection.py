@@ -44,7 +44,6 @@ from backend.app.quant.layered_selection import (
     compute_l7_position_sizing,
     inspect_single_stock_layered,
     query_layered_selection,
-    update_shadow_nav_comparison,
 )
 from backend.app.quant.layered_selection_api import router as selection_router
 from backend.app.quant.order_engine import load_table as load_order_table, model_buy_price, plan_orders
@@ -170,7 +169,7 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
         self.assertLess(sparse["total_score"], 62.0)
         self.assertEqual(sparse["verdict"], VERDICT_WATCH)
 
-        # 2) 全覆盖高分股：正常进入 action（动手）
+        # 2) 全覆盖高分股：正常进入 action（高分）
         strong = combine_layers_with_shrinkage(
             {"l2_industry": 82.0, "l3_fundamental": 78.0, "l4_expectation": 80.0, "l5_timing": 90.0, "l6_event": 75.0},
             plan_type=PLAN_SWING,
@@ -179,7 +178,7 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
         self.assertGreaterEqual(strong["total_score"], 70.0)
         self.assertEqual(strong["verdict"], VERDICT_ACTION)
 
-        # 3) 全部 95 分但触发立案调查一票否决 -> 强制打入 pass（放弃）！
+        # 3) 全部 95 分但触发立案调查一票否决 -> 强制打入 pass（低分或排除）
         vetoed = combine_layers_with_shrinkage(
             {"l2_industry": 95.0, "l3_fundamental": 95.0, "l4_expectation": 95.0, "l5_timing": 95.0, "l6_event": 0.0},
             plan_type=PLAN_SWING,
@@ -361,21 +360,12 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
             )
             db.commit()
 
-            # 构建前一日与当日快照以验证影子净值对账
-            prev_day = days[-2]
-            for idx in range(5):
-                db.add(StockModelSignal(symbol=f"6000{idx:02d}.SH", trade_date=prev_day, model_rank=0.90 - idx * 0.05, buy_k=0.5))
-            db.commit()
-            build_daily_selection_snapshots(db, trade_date=prev_day)
             built = build_daily_selection_snapshots(db, trade_date=target)
-            nav = update_shadow_nav_comparison(db, target)
             db.commit()
 
         self.assertEqual(built["universe"], 11)
         self.assertEqual(built["regime"]["stance"], "attack")
         self.assertEqual(built["regime"]["max_position_ratio"], 0.90)
-        self.assertIn("model-rank-30", nav)
-        self.assertIn("layered-swing-30", nav)
 
         # 验证飞刀股 600009.SH 在 swing 被 downtrend_knife 一票否决，而在 long 未触发飞刀否决
         knife_detail = inspect_single_stock_layered("600009.SH", trade_date=target)
@@ -428,10 +418,11 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
         r_stock = client.get("/api/quant/selection/stock/600000.SH", headers=headers)
         self.assertEqual(r_stock.status_code, 200)
         self.assertIn("swing", r_stock.json()["data"]["plans"])
+        # 没有回测的打分只说分数高低
+        self.assertEqual(r_stock.json()["data"]["plans"]["swing"]["verdict_label"], "高分")
 
-        r_nav = client.get("/api/quant/selection/shadow-nav", headers=headers)
-        self.assertEqual(r_nav.status_code, 200)
-        self.assertIn("layered-swing-30", r_nav.json()["data"]["series"])
+        # 偏乐观的前瞻净值对比已经去掉
+        self.assertEqual(client.get("/api/quant/selection/shadow-nav", headers=headers).status_code, 404)
 
     def test_size_neutral_l5_prevents_microcap_dominance_and_enforces_liquidity_gate(self) -> None:
         # 构造 16 只 >=300 亿大盘股（大盘股原始 model_rank 普遍偏低：0.20~0.68），其中 600900.SH 为大盘最优 0.68
@@ -470,14 +461,14 @@ class LayeredSelectionArchitectureTests(unittest.TestCase):
                     "events": [],
                 }
             )
-        # 再塞入一只成交额仅 3000 万元（低于 4500 万动手门槛）的 25 亿冷门微盘股，哪怕原始 model_rank=0.99 也只能观察不能动手
+        # 再塞入一只成交额仅 3000 万元（低于 4500 万高分门槛）的 25 亿冷门微盘股，哪怕原始 model_rank=0.99 也最高只到中等
         items.append(
             {
                 **items[0],
                 "symbol": "002999.SZ",
                 "name": "冷门微盘",
                 "total_mv_yi": 25.0,
-                "avg_amount_20": 30_000.0,  # 3000 万 < 4500 万动手门禁
+                "avg_amount_20": 30_000.0,  # 3000 万 < 4500 万高分门槛
                 "model_rank": 0.99,
             }
         )

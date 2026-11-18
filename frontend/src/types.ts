@@ -2596,14 +2596,3 @@ export type ExpectationGapThesis = {
   hard_evidence: string
   formatted_thesis: string
 }
-
-export type ShadowNavPoint = {
-  trade_date: string
-  nav: number
-  daily_return: number
-  benchmark_return: number
-  excess_return: number
-  max_drawdown: number
-  position_ratio: number
-  holdings_count: number
-}

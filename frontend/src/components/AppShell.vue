@@ -21,7 +21,6 @@ export type PageKey =
   | 'skillSquare'
   | 'backtestHistory'
   | 'factorAnalysis'
-  | 'quantSelection'
   | 'screener'
   | 'industryAnalysis'
   | 'automaticSelection'
@@ -86,12 +85,11 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'positions', label: '持仓' },
   { key: 'watchlist', label: '自选池' },
   {
-    key: 'quantSelection',
+    key: 'automaticSelection',
     label: '量化参数',
     icon: 'backtestHistory.svg',
     children: [
-      { key: 'quantSelection', label: '量化选股（L1-L7）' },
-      { key: 'automaticSelection', label: '自动选股' },
+      { key: 'automaticSelection', label: '选股' },
       { key: 'industryAnalysis', label: '行业分析' },
       { key: 'factorAnalysis', label: '因子评估' },
       { key: 'backtestHistory', label: '回测报告' },

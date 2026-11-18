@@ -22,6 +22,8 @@ from backend.app.core.models import (
 from backend.app.quant.automatic_selection_evaluation import EVALUATION_HORIZONS
 from backend.app.quant.automatic_selection_scoring import (
     BUILTIN_STRATEGY_KEY,
+    LAYERED_STRATEGY_CONFIG,
+    LAYERED_STRATEGY_KEY,
     MODEL_RANK_STRATEGY_CONFIG,
     MODEL_RANK_STRATEGY_KEY,
     DEFAULT_STRATEGY_CONFIG,
@@ -94,20 +96,42 @@ def ensure_model_rank_strategy() -> dict[str, Any] | None:
 
     只建一次：之后被停用或晋升都按人的操作来，不会再自动建回来。
     """
-    config = validate_config(MODEL_RANK_STRATEGY_CONFIG)
+    return _ensure_challenger(
+        MODEL_RANK_STRATEGY_KEY,
+        MODEL_RANK_STRATEGY_CONFIG,
+        name="模型排名前 30（挑战者）",
+        note="系统幂等创建模型排名挑战者 v1：回测两关通过，和正式策略并排观察，不替换",
+    )
+
+
+def ensure_layered_strategy() -> dict[str, Any] | None:
+    """幂等创建分层打分挑战者 v1（量化选股 L1–L7 的波段总分，没有回测，见 docs/quant-selection.md）。
+
+    和模型排名前 30 用同一套选股池和换仓规则，只为在前瞻评估里比成绩。同样只建一次。
+    """
+    return _ensure_challenger(
+        LAYERED_STRATEGY_KEY,
+        LAYERED_STRATEGY_CONFIG,
+        name="分层打分前 30（挑战者，未验证）",
+        note="系统幂等创建分层打分挑战者 v1：权重是人定的、没有回测，和模型排名前 30 用同一套规则并排记成绩",
+    )
+
+
+def _ensure_challenger(strategy_key: str, raw_config: dict[str, Any], *, name: str, note: str) -> dict[str, Any] | None:
+    config = validate_config(raw_config)
     with SessionLocal() as db:
         existing = db.scalar(
             select(AutomaticSelectionStrategy).where(
-                AutomaticSelectionStrategy.strategy_key == MODEL_RANK_STRATEGY_KEY,
+                AutomaticSelectionStrategy.strategy_key == strategy_key,
                 AutomaticSelectionStrategy.version == 1,
             )
         )
         if existing is not None:
             return strategy_to_dict(existing)
         row = AutomaticSelectionStrategy(
-            strategy_key=MODEL_RANK_STRATEGY_KEY,
+            strategy_key=strategy_key,
             version=1,
-            name="模型排名前 30（挑战者）",
+            name=name,
             lifecycle_state="challenger",
             enabled=True,
             config_json=canonical_json(config),
@@ -121,7 +145,7 @@ def ensure_model_rank_strategy() -> dict[str, Any] | None:
                     strategy_id=row.id,
                     event_type="create",
                     to_state="challenger",
-                    note="系统幂等创建模型排名挑战者 v1：回测两关通过，和正式策略并排观察，不替换",
+                    note=note,
                 )
             )
             db.commit()
@@ -131,7 +155,7 @@ def ensure_model_rank_strategy() -> dict[str, Any] | None:
             db.rollback()
             existing = db.scalar(
                 select(AutomaticSelectionStrategy).where(
-                    AutomaticSelectionStrategy.strategy_key == MODEL_RANK_STRATEGY_KEY,
+                    AutomaticSelectionStrategy.strategy_key == strategy_key,
                     AutomaticSelectionStrategy.version == 1,
                 )
             )

@@ -129,7 +129,7 @@ function createViewHarness(apiOverrides = {}) {
 }
 
 test('automatic selection is mounted under quant navigation and has a durable path', () => {
-  assert.match(shellSource, /\{ key: 'automaticSelection', label: '自动选股' \}/)
+  assert.match(shellSource, /\{ key: 'automaticSelection', label: '选股' \}/)
   assert.match(appSource, /import AutomaticSelectionView from '\.\/views\/AutomaticSelectionView\.vue'/)
   assert.match(appSource, /v-else-if="activePage === 'automaticSelection'"/)
   assert.match(appSource, /window\.history\.pushState\(\{\}, '', '\/automatic-selection'\)/)

@@ -1,14 +1,11 @@
-"""全站统一 L1–L7 分层量化选股引擎（Layered Quantitative Selection Engine）。
+"""量化选股（L1–L7）分层打分。现状、哪些验证过、和操作计划怎么统一，见 docs/quant-selection.md。
 
-科学依据与工程铁律：
-1. 终结左右互搏：废除旧 /screener 的拍脑袋追涨分，全站统一基于同一客观证据底座（L1–L6 + 执行 + L7 风控）。
-2. A 股实证本土化：
-   - L1 市场环境只输出独立总仓位上限（进攻 90% / 中性 60% / 防守 30%）与风格象限，绝不掺入个股得分。
-   - L5 锚定经 2012–2026 全样本及 8 年样本外验证的 7 特征 `model_rank`（缩量企稳反转），附加波段破位接飞刀否决。
-   - L3/L4 严格按 `ann_date <= trade_date`（PIT 真实披露日）读取财务质量与增速二阶导，杜绝未来函数。
-   - L6 扫描全市场公共事件表 `stock_event_signals`，立案调查/退市风险/财务造假一票否决（Veto 优先于总分）。
-3. 贝叶斯中性收缩（Bayesian Shrinkage）：缺失指标不计入分母，但覆盖率不足 85% 时向中性 50 分收缩，覆盖率 <65% 禁止升入“动手（action）”，杜绝冷门垃圾股因单项高分登顶。
-4. 截面预计算宽表：`stock_selection_daily_snapshot` 日终一次预计算，前端与数字人查询 <50ms。
+- L1 大盘环境（market_regime）只给总仓位上限和风格，不进个股得分。仓位上限还没有回测，只作参考。
+- L2–L6 按行业、基本面、预期差、时机、事件打分，三套权重（波段/长线/事件）合成总分，分高分、中等、低分或排除。
+  权重、门槛、破位和阴跌否决都是人定的，没有回测；时机层里的模型排名按市值分组重排过，已经不是验证过的那个排名。
+- 财报按真实披露日（ann_date <= trade_date）取，全市场重大公告（立案调查、退市风险、财务造假）直接排除。
+- 挂买价、止损下限和股数和操作计划用同一套代码（compute_execution_levels、compute_l7_position_sizing）。
+- 每天收盘后算一遍存 stock_selection_daily_snapshot；波段总分同时是自动选股挑战者 layered-swing-30 的唯一特征。
 """
 from __future__ import annotations
 
@@ -28,10 +25,8 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.models import (
     DailyBar,
     Instrument,
-    MarketDailyReturn,
     Position,
     PositionAccount,
-    SelectionShadowNav,
     StockDailyBasic,
     StockModelSignal,
     StockSelectionDailySnapshot,
@@ -65,15 +60,18 @@ PLAN_LABELS = {
     PLAN_EVENT: "事件与预期差（3–10日）",
 }
 
-VERDICT_ACTION = "action"  # ≥70 且无否决且覆盖率达标：动手
-VERDICT_WATCH = "watch"    # 55–69 或高分但覆盖率不足：观察
-VERDICT_PASS = "pass"      # <55 或触发一票否决：放弃
+# 打分没有回测，结论只说分数高低，不说买不买；代码值沿用 action/watch/pass，库里和接口不变
+VERDICT_ACTION = "action"  # ≥70 且没被排除且覆盖率达标
+VERDICT_WATCH = "watch"    # 55–69，或高分但数据不全
+VERDICT_PASS = "pass"      # <55 或被排除
 
 VERDICT_LABELS = {
-    VERDICT_ACTION: "动手",
-    VERDICT_WATCH: "观察",
-    VERDICT_PASS: "放弃",
+    VERDICT_ACTION: "高分",
+    VERDICT_WATCH: "中等",
+    VERDICT_PASS: "低分或排除",
 }
+# 改打分逻辑（权重、门槛、否决、特征）就改这个版本号；自动选股的分层挑战者会记下每天用的是哪一版
+SCORE_VERSION = "layered-2026-11-18"
 
 # L2–L6 层权重配置（总和严格 = 1.0；L1 绝不进权重）
 PLAN_WEIGHTS: dict[str, dict[str, float]] = {
@@ -114,9 +112,9 @@ VETO_LABELS = {
 
 _ST_RE = re.compile(r"(?:S\*ST|\*ST|SST|ST|退)", re.IGNORECASE)
 _A_SHARE_RE = re.compile(r"^(?:6\d{5}\.SH|[03]\d{5}\.SZ|[489]\d{5}\.BJ)$")
-MIN_AVG_AMOUNT_20_QIAN = 25_000.0   # 2500 万元（低于此直接一票否决）
-ACTION_MIN_AMOUNT_20_QIAN = 45_000.0  # 4500 万元（低于此禁止进入「动手」，最高仅「观察」）
-ACTION_MIN_L3_QUALITY = 48.0        # 基本面质地分低于 48 禁止进入「动手」
+MIN_AVG_AMOUNT_20_QIAN = 25_000.0   # 2500 万元（低于此直接排除）
+ACTION_MIN_AMOUNT_20_QIAN = 45_000.0  # 4500 万元（低于此最高只到「中等」）
+ACTION_MIN_L3_QUALITY = 48.0        # 基本面分低于 48 最高只到「中等」
 SHRINKAGE_FULL_CONF_COVERAGE = 0.85
 ACTION_MIN_COVERAGE = 0.65
 LOT = 100
@@ -623,7 +621,7 @@ def score_cross_section_inputs(
                 plan_type=plan,
                 veto_codes=plan_vetoes,
             )
-            # 机构流动性与基本面底线门禁：日均成交不足 4500 万元或基本面质地 <48 分的冷门弱质票，最高只能列为「观察」，不进「动手」
+            # 机构流动性与基本面底线门禁：日均成交不足 4500 万元或基本面质地 <48 分的冷门弱质票，最高只到「中等」，不进「高分」
             if merged["verdict"] == VERDICT_ACTION:
                 if (avg_amt_20 is not None and avg_amt_20 < ACTION_MIN_AMOUNT_20_QIAN) or (
                     l3_score is not None and l3_score < ACTION_MIN_L3_QUALITY
@@ -1587,157 +1585,3 @@ def inspect_single_stock_layered(
         "plans": by_plan,
         "l7_risk": primary["l7_risk"],
     }
-
-
-def update_shadow_nav_comparison(db: Session, trade_date: str) -> dict[str, Any]:
-    """前瞻连续净值对账账本：每日对比纯量价基准 `model-rank-30` 与带 L1 仓位控制及 Veto 的 `layered-swing-30`。
-
-    规则：用前一交易日入选的前 30 只标的等权收益 × 前一交易日建议仓位上限（model-rank-30 恒为 100%，
-    layered-swing-30 使用前一交易日 L1 的 max_position_ratio），无未来函数、公开对账。
-    """
-    target = _compact_date(trade_date)
-    if not target:
-        return {}
-    prev_day = db.scalar(
-        select(func.max(StockSelectionDailySnapshot.trade_date)).where(
-            StockSelectionDailySnapshot.trade_date < target,
-        )
-    ) or db.scalar(
-        select(func.max(StockModelSignal.trade_date)).where(
-            StockModelSignal.trade_date < target,
-        )
-    )
-    if not prev_day:
-        return {}
-    prev_str = str(prev_day)
-
-    # 当日全市场基准涨跌幅（优先读 MarketDailyReturn，避免无 symbol 扫 daily_bars）
-    mkt_row = db.get(MarketDailyReturn, target)
-    bench_ret = float(mkt_row.mean_return) if mkt_row is not None else 0.0
-
-    # 1) model-rank-30 前一日选出的前 30 只
-    mr_syms = list(
-        db.scalars(
-            select(StockModelSignal.symbol)
-            .where(StockModelSignal.trade_date == prev_str, StockModelSignal.model_rank.is_not(None))
-            .order_by(StockModelSignal.model_rank.desc())
-            .limit(30)
-        ).all()
-    )
-
-    # 2) layered-swing-30 前一日主流精选池（>=50亿优先）非否决最高分前 30 只 + 前一日 L1 仓位上限
-    ls_syms = list(
-        db.scalars(
-            select(StockSelectionDailySnapshot.symbol)
-            .where(
-                StockSelectionDailySnapshot.trade_date == prev_str,
-                StockSelectionDailySnapshot.plan_type == PLAN_SWING,
-                StockSelectionDailySnapshot.vetoed.is_(False),
-            )
-            .order_by(
-                case(
-                    (
-                        or_(
-                            StockSelectionDailySnapshot.total_mv_yi.is_(None),
-                            StockSelectionDailySnapshot.total_mv_yi >= 50.0,
-                        ),
-                        0,
-                    ),
-                    else_=1,
-                ),
-                case(
-                    (StockSelectionDailySnapshot.verdict == VERDICT_ACTION, 0),
-                    (StockSelectionDailySnapshot.verdict == VERDICT_WATCH, 1),
-                    else_=2,
-                ),
-                StockSelectionDailySnapshot.total_score.desc(),
-            )
-            .limit(30)
-        ).all()
-    )
-    prev_regime = get_latest_market_regime(trade_date=prev_str, compute_if_missing=False)
-    ls_pos_ratio = float(prev_regime.get("max_position_ratio") or 0.60)
-
-    union_syms = sorted(set(mr_syms) | set(ls_syms))
-    day_returns: dict[str, float] = {}
-    if union_syms:
-        rows = db.execute(
-            select(DailyBar.symbol, DailyBar.change_pct, DailyBar.close, DailyBar.pre_close).where(
-                DailyBar.symbol.in_(union_syms),
-                DailyBar.trade_date == target,
-                DailyBar.source == "tushare",
-            )
-        ).all()
-        for r in rows:
-            pct = _finite(r.change_pct)
-            if pct is None and r.close and r.pre_close and float(r.pre_close) > 0:
-                pct = (float(r.close) / float(r.pre_close) - 1.0) * 100.0
-            if pct is not None:
-                day_returns[str(r.symbol)] = pct / 100.0
-
-    written: dict[str, Any] = {}
-    for key, picks, pos_ratio in (
-        ("model-rank-30", mr_syms, 1.0),
-        ("layered-swing-30", ls_syms, ls_pos_ratio),
-    ):
-        if not picks:
-            continue
-        rets = [day_returns.get(s, 0.0) for s in picks if s in day_returns]
-        raw_basket = (sum(rets) / len(rets)) if rets else 0.0
-        port_ret = raw_basket * pos_ratio
-        prev_navs = list(
-            db.scalars(
-                select(SelectionShadowNav)
-                .where(SelectionShadowNav.strategy_key == key, SelectionShadowNav.trade_date < target)
-                .order_by(SelectionShadowNav.trade_date)
-            ).all()
-        )
-        last_nav = float(prev_navs[-1].nav) if prev_navs else 1.0
-        new_nav = round(last_nav * (1.0 + port_ret), 6)
-        peak = max([1.0, *[float(n.nav) for n in prev_navs], new_nav])
-        mdd = round(min([0.0, *[float(n.max_drawdown) for n in prev_navs], new_nav / peak - 1.0]), 6)
-
-        cur = db.scalar(
-            select(SelectionShadowNav).where(
-                SelectionShadowNav.trade_date == target,
-                SelectionShadowNav.strategy_key == key,
-            )
-        )
-        if cur is None:
-            cur = SelectionShadowNav(trade_date=target, strategy_key=key)
-            db.add(cur)
-        cur.nav = new_nav
-        cur.daily_return = round(port_ret, 6)
-        cur.benchmark_return = round(bench_ret, 6)
-        cur.excess_return = round(port_ret - bench_ret, 6)
-        cur.max_drawdown = mdd
-        cur.position_ratio = pos_ratio
-        cur.holdings_count = len(picks)
-        cur.holdings_json = json.dumps(picks, ensure_ascii=False)
-        written[key] = {"nav": new_nav, "daily_return": cur.daily_return, "position_ratio": pos_ratio}
-    return written
-
-
-def list_shadow_nav_series(limit: int = 120) -> dict[str, list[dict[str, Any]]]:
-    """读取前瞻模拟净值对比序列（供前端展示 model-rank-30 vs layered-swing-30 实盘前瞻 PK）。"""
-    with SessionLocal() as db:
-        rows = db.scalars(
-            select(SelectionShadowNav)
-            .order_by(SelectionShadowNav.trade_date.desc())
-            .limit(max(10, limit * 2))
-        ).all()
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for r in reversed(rows):
-        grouped[r.strategy_key].append(
-            {
-                "trade_date": r.trade_date,
-                "nav": r.nav,
-                "daily_return": r.daily_return,
-                "benchmark_return": r.benchmark_return,
-                "excess_return": r.excess_return,
-                "max_drawdown": r.max_drawdown,
-                "position_ratio": r.position_ratio,
-                "holdings_count": r.holdings_count,
-            }
-        )
-    return dict(grouped)

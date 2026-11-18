@@ -176,10 +176,10 @@ test('page accessibility: underline tabs with arrow keys and a focus-trapped det
 
 test('tabs and actions follow permissions', () => {
   const viewer = createHarness().harness
-  assert.deepEqual([...viewer.tabs.value.map((tab) => tab.key)], ['today', 'history', 'method'])
+  assert.deepEqual([...viewer.tabs.value.map((tab) => tab.key)], ['today', 'history', 'layered', 'method'])
   assert.equal(viewer.canDispatch.value, false)
   const admin = createHarness({ permissions: ['all'] }).harness
-  assert.deepEqual([...admin.tabs.value.map((tab) => tab.key)], ['today', 'history', 'method', 'advanced'])
+  assert.deepEqual([...admin.tabs.value.map((tab) => tab.key)], ['today', 'history', 'layered', 'method', 'advanced'])
   assert.equal(admin.canDispatch.value, true)
 })
 

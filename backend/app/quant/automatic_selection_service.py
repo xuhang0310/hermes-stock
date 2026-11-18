@@ -27,6 +27,7 @@ from backend.app.quant import automatic_selection_repository as repository
 from backend.app.quant.automatic_selection_evaluation import calculate_turnover
 from backend.app.quant.automatic_selection_presentation import explanation_evidence
 from backend.app.quant.automatic_selection_scoring import (
+    LAYERED_FEATURE,
     MODEL_RANK_FEATURE,
     RESEARCH_LIMITATIONS,
     SCORING_IMPLEMENTATION_VERSION,
@@ -41,6 +42,7 @@ from backend.app.quant.automatic_selection_scoring import (
     rebalance_state,
     required_tushare_factors,
     score_candidates,
+    uses_layered_score,
     uses_model_rank,
     validate_config,
 )
@@ -83,6 +85,7 @@ def sync_automatic_selection_data() -> dict[str, Any]:
     with _ingestion_lock():
         repository.ensure_default_strategy()
         repository.ensure_model_rank_strategy()
+        repository.ensure_layered_strategy()
         strategies = [
             repository.strategy_to_dict(row)
             for row in repository.active_strategy_models()
@@ -164,6 +167,7 @@ def run_automatic_selection_cycle(
     with _selection_lock():
         repository.ensure_default_strategy()
         repository.ensure_model_rank_strategy()
+        repository.ensure_layered_strategy()
         strategies = [repository.strategy_to_dict(row) for row in repository.active_strategy_models()]
         if not strategies:
             raise RuntimeError("没有启用的正式、挑战者或影子策略")
@@ -195,9 +199,14 @@ def run_automatic_selection_cycle(
                 raise RuntimeError("本日不可变股票目录快照为空，无法执行自动选股")
             factor_ids, config_errors = _collect_factor_requirements(strategies)
             factor_values = _load_target_factor_values(factor_ids, target_trade_date)
-            if _any_uses_model_rank(strategies):
+            if _any_uses(strategies, uses_model_rank):
                 # 没算出来就是空字典，用模型排名的策略会被质量门禁拦下，其他策略照常
                 factor_values[MODEL_RANK_FEATURE] = _load_model_ranks(target_trade_date)
+            layered_version: str | None = None
+            if _any_uses(strategies, uses_layered_score):
+                # 要在模型排名之后：分层打分的时机层用当天存好的模型信号。没算出来同样是空字典，
+                # 用它的策略因为合格股票太少被门禁拦下
+                factor_values[LAYERED_FEATURE], layered_version = _load_layered_scores(target_trade_date)
             rows = load_candidate_input_rows(
                 catalog,
                 target_trade_date=target_trade_date,
@@ -209,7 +218,9 @@ def run_automatic_selection_cycle(
                 "snapshot_rows_inserted": snapshot_count,
                 "catalog_count": len(catalog),
                 "factor_cache": {
-                    "requested": factor_ids + ([MODEL_RANK_FEATURE] if MODEL_RANK_FEATURE in factor_values else []),
+                    "requested": factor_ids + [key for key in (MODEL_RANK_FEATURE, LAYERED_FEATURE) if key in factor_values],
+                    # 分层打分的代码还会改，记下当天用的是哪一版
+                    **({"layered_score_version": layered_version} if layered_version else {}),
                     "symbols_by_factor": {key: len(values) for key, values in factor_values.items()},
                     "configuration_errors": config_errors,
                 },
@@ -254,23 +265,29 @@ def run_automatic_selection_cycle(
 
 
 def _refresh_layered_snapshots(target_trade_date: str) -> dict[str, Any]:
-    """与每日 17:50 自动选股同周期生成 L1 市场环境、L2–L6 全市场截面宽表与前瞻模拟净值账本。"""
+    """量化选股页面用的 L1 大盘环境和 L2–L6 分层快照。分层挑战者已经算过的当天不重算，两边用同一份。
+
+    原来这里还记一条“前瞻净值对比”，它按前一天收盘价买、每天换仓、不扣费，已经去掉，成绩看自动选股的前瞻评估。
+    """
     try:
-        from backend.app.quant.layered_selection import (
-            build_daily_selection_snapshots,
-            update_shadow_nav_comparison,
-        )
+        from backend.app.core.models import StockSelectionDailySnapshot
+        from backend.app.quant.layered_selection import build_daily_selection_snapshots
 
         with SessionLocal() as db:
+            existing = db.scalar(
+                select(func.count())
+                .select_from(StockSelectionDailySnapshot)
+                .where(StockSelectionDailySnapshot.trade_date == target_trade_date)
+            )
+            if existing:
+                return {"status": "exists", "trade_date": target_trade_date, "rows": int(existing)}
             snap_info = build_daily_selection_snapshots(db, trade_date=target_trade_date)
-            nav_info = update_shadow_nav_comparison(db, target_trade_date)
             db.commit()
         return {
             "status": "completed",
             "trade_date": target_trade_date,
             "rows_written": snap_info.get("rows_written", 0),
             "action_counts": snap_info.get("action_counts", {}),
-            "shadow_nav": nav_info,
         }
     except Exception as exc:  # noqa: BLE001 - 挑战者快照异常不影响现行 model-rank-30 正式运行
         logger.warning("分层选股截面快照刷新跳过 trade_date=%s error=%s", target_trade_date, str(exc)[:240])
@@ -315,12 +332,44 @@ def _collect_factor_requirements(
     return sorted(factor_ids), errors
 
 
-def _any_uses_model_rank(strategies: Iterable[dict[str, Any]]) -> bool:
+def _any_uses(strategies: Iterable[dict[str, Any]], uses: Any) -> bool:
     errors: list[str] = []
     return any(
-        config is not None and uses_model_rank(config)
+        config is not None and uses(config)
         for config in (_validated_strategy_config(strategy, errors) for strategy in strategies)
     )
+
+
+def _load_layered_scores(target_trade_date: str) -> tuple[dict[str, float], str | None]:
+    """读当天量化选股（L1–L7）波段档的总分；当天还没算就先算一遍。被排雷或否决排除的股票不给分。"""
+    from backend.app.core.models import StockSelectionDailySnapshot
+    from backend.app.quant.layered_selection import PLAN_SWING, SCORE_VERSION, build_daily_selection_snapshots
+
+    try:
+        with SessionLocal() as db:
+            built = db.scalar(
+                select(func.count())
+                .select_from(StockSelectionDailySnapshot)
+                .where(
+                    StockSelectionDailySnapshot.trade_date == target_trade_date,
+                    StockSelectionDailySnapshot.plan_type == PLAN_SWING,
+                )
+            )
+            if not built:
+                build_daily_selection_snapshots(db, trade_date=target_trade_date)
+                db.commit()
+            rows = db.execute(
+                select(StockSelectionDailySnapshot.symbol, StockSelectionDailySnapshot.total_score).where(
+                    StockSelectionDailySnapshot.trade_date == target_trade_date,
+                    StockSelectionDailySnapshot.plan_type == PLAN_SWING,
+                    StockSelectionDailySnapshot.vetoed.is_(False),
+                )
+            ).all()
+        scores = {str(symbol): float(score) for symbol, score in rows if _finite_float(score) is not None}
+        return scores, SCORE_VERSION
+    except Exception as exc:  # noqa: BLE001 - 失败只影响用分层打分的策略
+        logger.warning("分层打分读取失败 trade_date=%s error=%s", target_trade_date, str(exc)[:200])
+        return {}, None
 
 
 def _load_model_ranks(target_trade_date: str) -> dict[str, float]:

@@ -75,6 +75,13 @@
 - 每日摘要（飞书和站内信）跟着默认方案走：换仓日推调入调出清单，其余日子只推一句不用动。模型排名当天被门禁拦下时没有摘要，照旧发运行状态通知。
 - 摘要里写明这份名单要整体等额持有才是验证过的用法。
 
+### 分层打分挑战者和页面合并（2026-11-18）
+
+- 新增挑战者 `layered-swing-30` v1（“分层打分前 30（挑战者，未验证）”）：唯一特征是量化选股（L1–L7）波段档的总分 `layered_swing`，权重是人定的、没有回测；其余配置和 `model-rank-30` 完全一样（`scoring.LAYERED_STRATEGY_CONFIG`），所以两者的前瞻评估可以直接比。`repository.ensure_layered_strategy` 幂等创建一次，和 `ensure_model_rank_strategy` 共用 `_ensure_challenger`。
+- 排名时先读模型排名，再读分层快照（`service._load_layered_scores`，当天没算就先算）；被分层排雷或否决排除的股票没有分，记 `layered_score_missing`。没有快照时合格股票不足 1000 只，被门禁拦下。分层打分的代码版本记在运行的 `sync_summary.factor_cache.layered_score_version`。
+- 加入这个可选特征不改变任何已有配置的结果，所以评分实现版本没有升，仍是 `forward-selection-v5`。
+- 页面：菜单只留一个“选股”，多了“分层打分（未验证）”标签，嵌入原来的量化选股页面；默认展示的方案仍是模型排名前 30。
+
 ## 页面与权限
 
 入口：量化菜单下的“自动选股”，路径 `/automatic-selection`。页面面向普通用户，分四个标签：

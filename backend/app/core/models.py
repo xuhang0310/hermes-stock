@@ -2519,7 +2519,10 @@ class StockSelectionDailySnapshot(Base):
 
 
 class SelectionShadowNav(Base):
-    """选股策略连续模拟净值账本：用于 model-rank-30 与 L1–L6 分层策略无偏并排对账。"""
+    """量化选股页面原来的“前瞻净值对比”，2026-11-18 起停用、不再写入，旧数据留着。
+
+    它按前一天收盘价买、每天换仓、不扣费，偏乐观；分层打分和模型排名的成绩改看自动选股的前瞻评估。
+    """
 
     __tablename__ = "selection_shadow_nav"
     __table_args__ = (

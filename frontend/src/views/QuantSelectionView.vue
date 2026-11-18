@@ -11,7 +11,6 @@ import type {
   QuantBoard,
   QuantPlanType,
   QuantVerdict,
-  ShadowNavPoint,
   UserPayload,
 } from '../types'
 
@@ -19,6 +18,8 @@ const props = defineProps<{
   user: UserPayload
   accounts?: PositionAccount[]
   initialIndustry?: string
+  // 嵌在“选股”页里时不显示跳回自动选股的入口
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -28,7 +29,7 @@ const emit = defineEmits<{
   openCustomScreener: []
 }>()
 
-type ViewTab = 'pool' | 'pk' | 'method'
+type ViewTab = 'pool' | 'method'
 type WatchStatus = 'adding' | 'added' | 'error'
 type PoolTier = 'mainstream' | 'large_core' | 'growth_mid' | 'small_micro' | 'all'
 
@@ -51,8 +52,6 @@ const rebuilding = ref(false)
 const error = ref('')
 const notice = ref('')
 const response = ref<LayeredSelectionResponse | null>(null)
-const navSeries = ref<Record<string, ShadowNavPoint[]>>({})
-const navLoading = ref(false)
 
 const drawerOpen = ref(false)
 const drawerLoading = ref(false)
@@ -65,6 +64,8 @@ const watchMap = ref<Record<string, WatchStatus>>({})
 const permissions = computed(() => props.user.permissions || [])
 const hasPerm = (p: string) => permissions.value.includes('all') || permissions.value.includes(p)
 const canWrite = computed(() => hasPerm('data:write'))
+// 重算全市场快照所有用户共用，和定时任务同一个权限
+const canRebuild = computed(() => hasPerm('schedule:manage'))
 const canAsk = computed(() => hasPerm('agent:use'))
 
 const planOptions: Array<{ key: QuantPlanType; label: string; desc: string }> = [
@@ -111,31 +112,6 @@ const stanceTone = computed(() => {
   if (s === 'attack') return 'is-attack'
   if (s === 'defense') return 'is-defense'
   return 'is-neutral'
-})
-
-const pkComparison = computed(() => {
-  const baseline = navSeries.value['model-rank-30'] || []
-  const layered = navSeries.value['layered-swing-30'] || []
-  const summarize = (pts: ShadowNavPoint[], title: string, desc: string) => {
-    if (!pts.length) {
-      return { title, desc, latestNav: 1.0, totalRet: 0, maxDd: 0, latestPos: null as number | null, days: 0, points: pts }
-    }
-    const last = pts[pts.length - 1]
-    return {
-      title,
-      desc,
-      latestNav: last.nav,
-      totalRet: (last.nav - 1.0) * 100,
-      maxDd: Math.min(...pts.map((p) => p.max_drawdown)) * 100,
-      latestPos: last.position_ratio * 100,
-      days: pts.length,
-      points: pts,
-    }
-  }
-  return [
-    summarize(layered, 'L1–L6 分层挑战者（layered-swing-30）', '接入 L1 大盘总仓位上限刹车 + L6 全市场公告排雷否决'),
-    summarize(baseline, '纯量价基准标尺（model-rank-30）', '已验证 7 特征树模型排名 Top30，恒定满仓对照基准'),
-  ]
 })
 
 function fmtNum(val: number | null | undefined, digits = 2): string {
@@ -225,18 +201,6 @@ async function runQuery() {
   }
 }
 
-async function loadShadowNav() {
-  navLoading.value = true
-  try {
-    const res = await api.quantSelectionShadowNav(120)
-    navSeries.value = res.series || {}
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : '加载前瞻净值对比失败'
-  } finally {
-    navLoading.value = false
-  }
-}
-
 async function rebuildSnapshots(withAuxSync = false) {
   rebuilding.value = true
   error.value = ''
@@ -250,7 +214,6 @@ async function rebuildSnapshots(withAuxSync = false) {
     const count = Number(res.rows_written || 0)
     notice.value = `已完成 ${fmtDate(String(res.trade_date || ''))} 分层截面重算（共写入 ${count} 条策略快照）`
     await runQuery()
-    if (activeTab.value === 'pk') await loadShadowNav()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '重算分层截面失败'
   } finally {
@@ -337,13 +300,10 @@ function resetFilters() {
 
 function switchTab(tab: ViewTab) {
   activeTab.value = tab
-  if (tab === 'pk' && !Object.keys(navSeries.value).length) {
-    void loadShadowNav()
-  }
 }
 
 function handleTabKeydown(e: KeyboardEvent) {
-  const order: ViewTab[] = ['pool', 'pk', 'method']
+  const order: ViewTab[] = ['pool', 'method']
   const idx = order.indexOf(activeTab.value)
   if (e.key === 'ArrowRight') {
     e.preventDefault()
@@ -412,6 +372,7 @@ onMounted(() => {
         <div class="qs-metric-actions">
           <span class="qs-date-label">截面 {{ fmtDate(response?.trade_date) }}</span>
           <button
+            v-if="canRebuild"
             class="ui-btn ui-btn--ghost ui-btn--sm"
             type="button"
             :disabled="rebuilding"
@@ -437,17 +398,7 @@ onMounted(() => {
           :aria-selected="activeTab === 'pool'"
           @click="switchTab('pool')"
         >
-          L1–L7 分层选股池
-        </button>
-        <button
-          type="button"
-          role="tab"
-          class="ui-tab"
-          :class="{ 'is-active': activeTab === 'pk' }"
-          :aria-selected="activeTab === 'pk'"
-          @click="switchTab('pk')"
-        >
-          前瞻净值对账（PK 标尺）
+          分层打分（未验证）
         </button>
         <button
           type="button"
@@ -457,13 +408,13 @@ onMounted(() => {
           :aria-selected="activeTab === 'method'"
           @click="switchTab('method')"
         >
-          科学依据与铁律
+          打分方法
         </button>
       </div>
 
       <div class="qs-cross-links">
-        <button class="ui-btn ui-btn--ghost ui-btn--sm" type="button" @click="emit('openBaseline')">
-          查看 model-rank-30 每日基准
+        <button v-if="!embedded" class="ui-btn ui-btn--ghost ui-btn--sm" type="button" @click="emit('openBaseline')">
+          看模型排名前 30（验证过）
         </button>
         <button class="ui-btn ui-btn--ghost ui-btn--sm" type="button" @click="emit('openCustomScreener')">
           传统指标条件器
@@ -499,7 +450,7 @@ onMounted(() => {
             :class="{ 'is-selected': verdictFilter === 'action' }"
             @click="selectVerdict('action')"
           >
-            <span>动手（≥70·无否决）</span>
+            <span>高分（≥70·未排除）</span>
             <strong>{{ summary.action }}</strong>
           </button>
           <button
@@ -508,7 +459,7 @@ onMounted(() => {
             :class="{ 'is-selected': verdictFilter === 'watch' }"
             @click="selectVerdict('watch')"
           >
-            <span>观察（55–69或待核）</span>
+            <span>中等（55–69 或数据不全）</span>
             <strong>{{ summary.watch }}</strong>
           </button>
           <button
@@ -517,7 +468,7 @@ onMounted(() => {
             :class="{ 'is-selected': verdictFilter === 'pass' }"
             @click="selectVerdict('pass')"
           >
-            <span>放弃（&lt;55或一票否决）</span>
+            <span>低分或排除（&lt;55 或排雷、否决）</span>
             <strong>{{ summary.pass }}</strong>
           </button>
           <button
@@ -623,9 +574,9 @@ onMounted(() => {
           <p>当前过滤条件下暂无匹配标的（可能处于严格门禁保护或尚未同步本地日线）。</p>
           <div class="qs-empty-actions">
             <button class="ui-btn ui-btn--ghost ui-btn--sm" type="button" @click="selectVerdict('')">
-              切换到「全池标的」查看观察与否决原因
+              切换到「全部」看中等和被排除的原因
             </button>
-            <button class="ui-btn ui-btn--primary ui-btn--sm" type="button" @click="rebuildSnapshots(true)">
+            <button v-if="canRebuild" class="ui-btn ui-btn--primary ui-btn--sm" type="button" @click="rebuildSnapshots(true)">
               同步指数/公告并重算截面
             </button>
           </div>
@@ -666,7 +617,7 @@ onMounted(() => {
                     {{ item.verdict_label }}
                   </span>
                   <div v-if="item.vetoed" class="qs-veto-hint">
-                    {{ item.veto_labels[0] || '触发一票否决' }}
+                    {{ item.veto_labels[0] || '被排除' }}
                   </div>
                 </td>
                 <td class="qs-num">
@@ -737,67 +688,24 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- Tab 2: 前瞻模拟净值对账（model-rank-30 vs layered-swing-30） -->
-    <div v-else-if="activeTab === 'pk'" role="tabpanel" class="qs-pk-panel">
-      <div class="qs-pk-intro">
-        <div>
-          <h2>实盘前瞻影子净值公开对账（杜绝事后拟合自嗨）</h2>
-          <p>
-            已通过 8 年样本外检验的纯量价策略 <strong>model-rank-30</strong> 保持原样每日运行作为硬标尺；
-            新上线的 <strong>layered-swing-30</strong> 叠加了 L1 大盘总仓位刹车（90%/60%/30%）与 L6 全市场公告排雷，两者按前一日入选名单在次日真实行情上无偏记账对比。
-          </p>
-        </div>
-        <button class="ui-btn ui-btn--ghost ui-btn--sm" type="button" :disabled="navLoading" @click="loadShadowNav">
-          {{ navLoading ? '刷新中…' : '刷新对账账本' }}
-        </button>
-      </div>
-
-      <div class="qs-pk-cards">
-        <article v-for="card in pkComparison" :key="card.title" class="qs-pk-card">
-          <h3>{{ card.title }}</h3>
-          <p class="qs-pk-desc">{{ card.desc }}</p>
-          <dl class="qs-pk-stats">
-            <div>
-              <dt>最新单位净值</dt>
-              <dd>{{ fmtNum(card.latestNav, 4) }}</dd>
-            </div>
-            <div>
-              <dt>累计净值涨跌</dt>
-              <dd :class="returnClass(card.totalRet)">
-                {{ card.totalRet > 0 ? '+' : '' }}{{ fmtNum(card.totalRet, 2) }}%
-              </dd>
-            </div>
-            <div>
-              <dt>最大回撤</dt>
-              <dd class="pnl-down">{{ fmtNum(card.maxDd, 2) }}%</dd>
-            </div>
-            <div>
-              <dt>当前执行仓位 / 记录天数</dt>
-              <dd>{{ card.latestPos != null ? `${fmtNum(card.latestPos, 0)}%` : '—' }} · {{ card.days }} 日</dd>
-            </div>
-          </dl>
-        </article>
-      </div>
-    </div>
-
-    <!-- Tab 3: L1-L7 科学依据与工程铁律 -->
+    <!-- 打分方法 -->
     <div v-else role="tabpanel" class="qs-method-panel">
       <article class="qs-method-card">
-        <h3>一、为什么要统一全站量化选股（消灭左右互搏）？</h3>
+        <h3>一、这个打分是什么，验证到哪一步</h3>
         <p>
-          2012–2026 年中国 A 股全历史实证表明：20 日成交额与短期涨幅在 A 股呈显著负向反转（IC 分别为 -0.096 与 -0.056），
-          追高放量热门股在样本外长期稳定亏损。本工作台彻底统一全站选股证据栈：以经 8 年样本外验证的 7 特征树模型排名（model_rank）锚定 L5 入场时机，
-          向上叠加 L1 本土市场宽度仓位刹车、L2 行业景气、L3 按真实披露日（ann_date）对齐的 PIT 财报质量、L4 增速二阶导预期差与 L6 全市场公告一票否决。
+          分层打分把行业、基本面、预期差、时机、事件五层的分数按人定的权重合成总分，L1 大盘环境单独给仓位参考。
+          其中只有时机层用到的模型排名经过了历史回测（2019 年以后年化超额约 15 个百分点）；五层权重、70 分的高分线、破位和阴跌否决、大盘仓位上限都没有回测。
+          所以这里的“高分”只说明按这套规则分数高，不是买入信号。波段档的总分已经作为挑战者“分层打分前 30”接进自动选股，和模型排名前 30 用同一套规则记成绩，好不好看那边的历史战绩。
         </p>
       </article>
       <article class="qs-method-card">
-        <h3>二、七层职责边界与防糊弄铁律</h3>
+        <h3>二、各层做什么，哪些验证过</h3>
         <ul class="qs-rule-list">
           <li><strong>L1 市场环境独立控仓</strong>：依据全 A 站上 20/60 日均线占比、成交分位与宽基趋势输出 90%/60%/30% 总仓位上限，绝不掺入个股分数。</li>
           <li><strong>三大横截面去偏（防微盘虹吸与单一行业霸榜）</strong>：① L5 将量价分在四档市值同温层（&lt;50亿 / 50–100亿 / 100–300亿 / ≥300亿）内独立中性化，并融合 45% 自身均线多头缩量回踩结构分；② L3 估值与盈利质地采用 65% 同行业内排名 + 35% 全市场排名，防止银行低 PE/PB 跨行业通吃；③ 同一行业前 2 只零衰减、第 3 只起阶梯扣分，确保主流精选池呈现跨行业真龙头。</li>
-          <li><strong>一票否决优先于总分</strong>：立案调查、退市风险警示、财务造假非标意见、ST、阴跌僵尸股及波段深跌破位飞刀直接打入「放弃」；日均成交不足 4500 万元禁止进入「动手」。</li>
-          <li><strong>贝叶斯覆盖率收缩</strong>：缺失财务指标不计入权重分母，但覆盖率不足 85% 时向 50 分中性收缩，覆盖率低于 65% 禁止进入「动手」。</li>
-          <li><strong>哪些验证过</strong>：模型排名、买入模型的挂买价、止损不能比 3 倍 ATR 更近，这三样经过历史回测；L2–L6 的分层权重、「动手」门槛、破位和阴跌否决、L1 仓位上限都还没有回测，只作参考。</li>
+          <li><strong>排除优先于总分</strong>：立案调查、退市风险警示、财务造假非标意见、ST 直接排除；波段档还排除深跌破位和阴跌的股票（没有回测，而且和模型排名偏爱的方向相反）；日均成交不足 4500 万元最高只到「中等」。</li>
+          <li><strong>贝叶斯覆盖率收缩</strong>：缺失财务指标不计入权重分母，但覆盖率不足 85% 时向 50 分中性收缩，覆盖率低于 65% 最高只到「中等」。</li>
+          <li><strong>哪些验证过</strong>：模型排名、买入模型的挂买价、止损不能比 3 倍 ATR 更近，这三样经过历史回测；L2–L6 的分层权重、「高分」门槛、破位和阴跌否决、L1 仓位上限都还没有回测，只作参考。</li>
           <li><strong>和操作计划同一套代码</strong>：挂买价只来自买入模型，模型说不挂就不给价；止损只给下限（不能比 3 倍 ATR 更近，也可以不设）；新开仓股数按持仓股数的同一公式估算，已有持仓以操作计划为准。系统不下单。</li>
         </ul>
       </article>
@@ -856,12 +764,12 @@ onMounted(() => {
               </div>
             </section>
 
-            <!-- 当前视角一票否决警示 -->
+            <!-- 当前档位被排除的原因 -->
             <section
               v-if="detail.plans[planType]?.vetoed"
               class="qs-drawer-section qs-veto-box"
             >
-              <h3>触发一票否决（禁止动手）</h3>
+              <h3>被排除的原因</h3>
               <ul>
                 <li v-for="reason in detail.plans[planType].veto_labels" :key="reason">{{ reason }}</li>
               </ul>
@@ -1418,70 +1326,25 @@ onMounted(() => {
   margin-top: 12px;
 }
 
-.qs-pk-panel,
 .qs-method-panel {
   display: grid;
   gap: 12px;
 }
-.qs-pk-intro {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-}
-.qs-pk-intro h2 {
-  margin: 0 0 6px;
-  font-size: 16px;
-}
-.qs-pk-intro p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
-}
-.qs-pk-cards {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-.qs-pk-card,
 .qs-method-card {
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
 }
-.qs-pk-card h3,
 .qs-method-card h3 {
   margin: 0 0 6px;
   font-size: 16px;
 }
-.qs-pk-desc,
 .qs-method-card p {
   margin: 0 0 12px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
-}
-.qs-pk-stats {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin: 0;
-}
-.qs-pk-stats dt {
-  color: var(--muted);
-  font-size: 12px;
-}
-.qs-pk-stats dd {
-  margin: 2px 0 0;
-  font-size: 16px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
 }
 .qs-rule-list {
   margin: 0;
@@ -1679,8 +1542,7 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
-  .qs-top-grid,
-  .qs-pk-cards {
+  .qs-top-grid {
     grid-template-columns: 1fr;
   }
   .qs-plan-cards {

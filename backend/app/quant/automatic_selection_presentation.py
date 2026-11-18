@@ -28,6 +28,7 @@ from backend.app.quant.automatic_selection_scoring import (
     RESEARCH_LIMITATIONS,
     _normalized_weights,
     _requires_valuation,
+    uses_layered_score,
     uses_model_rank,
     validate_config,
 )
@@ -40,6 +41,11 @@ MODEL_RANK_NOTE = (
     "选 30 只、每 10 个交易日换仓，扣费后年化比可选股票平均高约 15 个百分点，8 年里 7 年跑赢，"
     "但最大回撤比平均深约 5 个百分点。选到的多是小盘、成交冷清的股票，资金量大时开盘价买不进。"
     "历史成绩不代表以后。"
+)
+LAYERED_NOTE = (
+    "分层打分是量化选股（L1–L7）波段档的总分：行业、基本面、预期差、时机、事件五层按人定的权重合成，"
+    "没有经过历史回测。它作为挑战者，和模型排名前 30 用同一个选股池、同样每 10 个交易日换仓，"
+    "并排记录上线后的成绩，好不好要看前瞻评估。"
 )
 SCHEDULE_NOTE = "每个交易日 17:30 自动同步收盘数据（失败每 30 分钟重试到 22:00），成功后自动选股。"
 
@@ -55,6 +61,12 @@ DIMENSIONS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
         ("model_rank",),
         "模型用成交额、换手、近期涨幅、离低点远近等 7 项量价数据，估计未来 10 个交易日相对全市场的排名，越靠前越加分",
     ),
+    (
+        "layered",
+        "分层打分",
+        ("layered_swing",),
+        "量化选股（L1–L7）波段档的总分，五层权重是人定的，没有经过回测，越高越加分",
+    ),
 )
 _EXTRA_DIMENSION = ("extra", "附加因子", "策略额外配置的 TuShare 因子，按配置方向计分")
 _SHORT_PHRASES = {
@@ -63,6 +75,7 @@ _SHORT_PHRASES = {
     "activity": "成交比 {score}% 的股票活跃",
     "stability": "波动比 {score}% 的股票小",
     "model": "模型排名高于 {score}% 的股票",
+    "layered": "分层打分高于 {score}% 的股票",
     "extra": "附加因子好于 {score}% 的股票",
 }
 _GROUP_PHRASES = {
@@ -71,6 +84,7 @@ _GROUP_PHRASES = {
     "activity": "成交活跃",
     "stability": "波动偏小",
     "model": "模型排名靠前",
+    "layered": "分层打分靠前",
     "extra": "附加因子表现好",
 }
 CHANGE_LABELS = {"added": "新进", "retained": "保留", "removed": "移出", "unchanged": "—"}
@@ -606,6 +620,8 @@ def _dimension_detail(key: str, item: dict[str, Any], score: int | None, reverse
         return f"近 20 个交易日平均每天波动约 {volatility * 100:.1f}%，比 {beats} 的合格股票平稳"
     if key == "model":
         return f"模型估计未来 10 个交易日的表现好于 {beats} 的合格股票（只是排先后，不是涨跌预测）"
+    if key == "layered":
+        return f"分层打分高于 {beats} 的合格股票（权重是人定的，没有回测）"
     return f"附加因子综合表现好于 {beats} 的合格股票"
 
 
@@ -939,6 +955,7 @@ _EXCLUSION_TEXT = {
     "liquidity_low": "成交太少",
     "required_factor_missing": "缺少附加因子数据",
     "model_rank_missing": "当天没有模型排名（北交所、上市不满约 120 个交易日或当天无成交）",
+    "layered_score_missing": "分层打分里被排除或没有打分（排雷、破位、成交不足、上市太短等）",
     "not_in_current_catalog": "已不在本期股票名单",
 }
 
@@ -1231,6 +1248,7 @@ def method_view(config: dict[str, Any]) -> dict[str, Any]:
             f"剔除近 20 个交易日日均成交额低于 {min_amount_wan:,.0f} 万元的股票",
             *(["剔除亏损（市盈率为负）或净资产为负的股票"] if _requires_valuation(config) else []),
             *(["只在有模型排名的沪深股票里挑（北交所和上市不满约 120 个交易日的不参与）"] if uses_model_rank(config) else []),
+            *(["只在分层打分没有排除的股票里挑（排雷、破位、阴跌、成交不足等被排除的不参与）"] if uses_layered_score(config) else []),
             "剔除当天停牌、近 20 个交易日行情或复权数据不全的股票",
         ],
         "dimensions": [
@@ -1246,6 +1264,7 @@ def method_view(config: dict[str, Any]) -> dict[str, Any]:
             "每个维度先在当天所有合格股票里比较（去掉极端值后标准化），再按权重加总成综合得分。"
             "页面上的维度分数表示这只股票超过了百分之多少的合格股票，100 分就是这一项最好。"
             + (MODEL_RANK_NOTE if uses_model_rank(config) else "")
+            + (LAYERED_NOTE if uses_layered_score(config) else "")
         ),
         "selection": selection_rules,
         "evaluation": [

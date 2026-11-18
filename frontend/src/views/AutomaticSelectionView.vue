@@ -2,27 +2,39 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 import AutomaticSelectionAudit from '../components/AutomaticSelectionAudit.vue'
+import QuantSelectionView from './QuantSelectionView.vue'
 import type {
   AutomaticSelectionDaily,
   AutomaticSelectionPeriodCell,
   AutomaticSelectionPick,
   AutomaticSelectionStrategy,
   AutomaticSelectionTrackRecord,
+  LayeredSelectionItem,
+  MarketRegimeL1,
+  PositionAccount,
   UserPayload,
 } from '../types'
 import { renderMarkdown } from '../utils/markdown'
 import { beijingFromDb } from '../utils/datetime'
 
-const props = defineProps<{ user: UserPayload }>()
+const props = defineProps<{
+  user: UserPayload
+  accounts?: PositionAccount[]
+  // 'layered' 时直接打开分层打分（原来的量化选股页面、行业页“按行业选股”都跳到这里）
+  initialTab?: string
+  initialIndustry?: string
+}>()
 const emit = defineEmits<{
   askStock: [pick: AutomaticSelectionPick, tradeDate: string]
+  askLayered: [item: LayeredSelectionItem, regime: MarketRegimeL1 | null]
   watchlistAdded: [item: Awaited<ReturnType<typeof api.addWatchlist>>]
+  openCustomScreener: []
 }>()
 
-type TabKey = 'today' | 'history' | 'method' | 'advanced'
+type TabKey = 'today' | 'history' | 'layered' | 'method' | 'advanced'
 type WatchState = 'adding' | 'added' | 'error'
 
-const activeTab = ref<TabKey>('today')
+const activeTab = ref<TabKey>(props.initialTab === 'layered' ? 'layered' : 'today')
 const daily = ref<AutomaticSelectionDaily | null>(null)
 const track = ref<AutomaticSelectionTrackRecord | null>(null)
 const loading = ref(true)
@@ -53,6 +65,7 @@ const canAsk = computed(() => hasPermission('agent:use'))
 const tabs = computed<Array<{ key: TabKey; label: string }>>(() => [
   { key: 'today', label: '今日选股' },
   { key: 'history', label: '历史战绩' },
+  { key: 'layered', label: '分层打分（未验证）' },
   { key: 'method', label: '选股方法' },
   ...(canSeeAdvanced.value ? [{ key: 'advanced' as TabKey, label: '高级' }] : []),
 ])
@@ -363,7 +376,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="auto-page" aria-label="每日自动选股" :aria-busy="loading">
-    <header class="auto-command" data-testid="automatic-selection-command">
+    <header v-if="activeTab !== 'layered'" class="auto-command" data-testid="automatic-selection-command">
       <div class="auto-context">
         <label class="date-picker">
           <span>交易日</span>
@@ -412,7 +425,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <p class="auto-disclaimer" role="note">
+    <p v-if="activeTab !== 'layered'" class="auto-disclaimer" role="note">
       每个交易日收盘后，系统按固定规则从全市场挑出一批观察股，并持续跟踪它们之后的表现。{{ daily?.disclaimer || '这是按固定规则打分排序的研究结果，不是对未来涨跌的预测，也不构成投资建议。' }}
     </p>
 
@@ -770,6 +783,29 @@ onBeforeUnmount(() => {
           <li v-for="note in track.notes" :key="note">{{ note }}</li>
         </ul>
       </template>
+    </section>
+
+    <!-- 分层打分（原量化选股 L1–L7）：只作参考，成绩看历史战绩里的“分层打分前 30（挑战者）” -->
+    <section
+      v-else-if="activeTab === 'layered'"
+      id="auto-panel-layered"
+      class="tab-panel"
+      role="tabpanel"
+      aria-labelledby="auto-tab-layered"
+      data-testid="automatic-selection-layered"
+    >
+      <p class="auto-disclaimer" role="note">
+        分层打分的权重是人定的，没有经过历史回测，分数高不等于该买。它的波段总分已经作为“分层打分前 30（挑战者）”和模型排名前 30 用同一套规则记成绩，在“历史战绩”里切换方案就能比。
+      </p>
+      <QuantSelectionView
+        embedded
+        :user="user"
+        :accounts="accounts"
+        :initial-industry="initialIndustry"
+        @watchlist-added="emit('watchlistAdded', $event)"
+        @ask-stock="(item, regime) => emit('askLayered', item, regime)"
+        @open-custom-screener="emit('openCustomScreener')"
+      />
     </section>
 
     <!-- 选股方法 -->
