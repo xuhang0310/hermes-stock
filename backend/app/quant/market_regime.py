@@ -315,10 +315,12 @@ def compute_and_store_market_regime(
 
     ma20_above, ma20_total = 0, 0
     ma60_above, ma60_total = 0, 0
+    adj_by_sym: dict[str, dict[str, float]] = {}
     for sym, sym_bars in bars_by_sym.items():
         if not sym_bars or sym_bars[-1].trade_date != compact:
             continue
         adj = adjusted_bars(sym_bars)
+        adj_by_sym[sym] = {b.trade_date: b.close for b in adj}
         closes = [b.close for b in adj]
         last_close = closes[-1]
         if len(closes) >= 20:
@@ -334,9 +336,49 @@ def compute_and_store_market_regime(
     breadth_ma60 = (ma60_above / ma60_total) if ma60_total >= 10 else None
     up_down_ratio = (up_count / max(down_count, 1)) if (up_count + down_count) > 0 else None
 
-    # 3. 宽基指数趋势（沪深300 & 中证1000）
+    # 3. 宽基指数趋势（优先 index_daily_bars；当网关未开通指数日线时，自动用市值前300与800-1800构建大盘/中小盘真实等权净值曲线）
     hs300_closes = [c for _, c in load_index_closes(db, "000300.SH", as_of_date=compact, limit=250)]
     zz1000_closes = [c for _, c in load_index_closes(db, "000852.SH", as_of_date=compact, limit=250)]
+    if (not hs300_closes or not zz1000_closes) and len(adj_by_sym) >= 50:
+        mv_rows = db.execute(
+            select(StockDailyBasic.symbol, StockDailyBasic.total_mv)
+            .where(StockDailyBasic.trade_date == compact, StockDailyBasic.total_mv.is_not(None))
+            .order_by(StockDailyBasic.total_mv.desc())
+        ).all()
+        ranked_syms = [str(s) for s, _ in mv_rows if str(s) in adj_by_sym]
+        if len(ranked_syms) >= 30:
+            large_basket = ranked_syms[: min(300, max(10, len(ranked_syms) // 5))]
+            mid_start = min(800, len(ranked_syms) // 3)
+            small_basket = ranked_syms[mid_start : min(mid_start + 1000, len(ranked_syms))]
+
+            def _synthetic_curve(basket: list[str]) -> list[float]:
+                if not basket:
+                    return []
+                nav = 1000.0
+                curve: list[float] = []
+                prev_d: str | None = None
+                for d in breadth_days:
+                    if prev_d is None:
+                        curve.append(round(nav, 2))
+                        prev_d = d
+                        continue
+                    rets = []
+                    for s in basket:
+                        p0 = adj_by_sym[s].get(prev_d)
+                        p1 = adj_by_sym[s].get(d)
+                        if p0 and p1 and p0 > 0:
+                            rets.append(p1 / p0 - 1.0)
+                    if rets:
+                        nav *= 1.0 + sum(rets) / len(rets)
+                        curve.append(round(nav, 2))
+                        prev_d = d
+                return curve
+
+            if not hs300_closes:
+                hs300_closes = _synthetic_curve(large_basket)
+            if not zz1000_closes:
+                zz1000_closes = _synthetic_curve(small_basket)
+
     hs300_info = classify_index_trend(hs300_closes)
     zz1000_info = classify_index_trend(zz1000_closes)
 

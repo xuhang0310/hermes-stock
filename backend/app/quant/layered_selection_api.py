@@ -139,7 +139,10 @@ def api_rebuild_layered_snapshots(
     if payload.sync_events:
         aux["events"] = event_signal_sync.sync_market_event_signals(end_date=payload.trade_date, days=7)
     if payload.sync_financial_pit:
-        aux["financial_pit"] = financial_pit_sync.sync_financial_pit()
+        with SessionLocal() as db:
+            fin_day = layered_selection._resolve_latest_trade_date(db, payload.trade_date)
+        if fin_day:
+            aux["financial_pit"] = financial_pit_sync.sync_financial_pit_for_date(fin_day)
 
     with SessionLocal() as db:
         target = layered_selection._resolve_latest_trade_date(db, payload.trade_date)

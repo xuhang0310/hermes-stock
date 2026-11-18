@@ -149,21 +149,9 @@ def _sync_layered_aux_channels(target_trade_date: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         out["events_error"] = str(exc)[:180]
     try:
-        from backend.app.core.models import StockFinancialPit
-        from backend.app.market.financial_pit_sync import recent_report_periods, sync_financial_pit
+        from backend.app.market.financial_pit_sync import sync_financial_pit_for_date
 
-        periods = recent_report_periods(count=4)
-        with SessionLocal() as db:
-            existing_cnt = int(
-                db.scalar(
-                    select(func.count(StockFinancialPit.id)).where(StockFinancialPit.end_date == periods[-1])
-                )
-                or 0
-            )
-        if existing_cnt < 1500:
-            out["financial_pit"] = sync_financial_pit(periods=periods[-2:])
-        else:
-            out["financial_pit"] = {"skipped": True, "latest_period": periods[-1], "rows": existing_cnt}
+        out["financial_pit"] = sync_financial_pit_for_date(target_trade_date)
     except Exception as exc:  # noqa: BLE001
         out["financial_pit_error"] = str(exc)[:180]
     return out

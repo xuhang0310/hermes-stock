@@ -19,10 +19,22 @@ from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
-from backend.app.core.models import StockFinancialPit
+from backend.app.core.models import StockFinancialPit, TushareFactorValue
 from backend.app.market.stock_tools import _tushare_request
 
 logger = logging.getLogger(__name__)
+
+# 付费 TuShare PIT 截面因子库字段（单次按 trade_date 拉全市场 5500+ 只，严格 PIT 口径）
+LAYERED_PIT_FACTOR_NAMES: tuple[str, ...] = (
+    "roe_ttm",
+    "gpm_q",
+    "debt_asset_ratio",
+    "yoy_ocf",
+    "yoy_net_profit",
+    "yoy_revenue",
+    "sa",
+    "delta_roe",
+)
 
 _FINA_FIELDS = (
     "ts_code,ann_date,end_date,roe,grossprofit_margin,netprofit_margin,"
@@ -238,17 +250,36 @@ def sync_financial_pit(*, periods: Sequence[str] | None = None) -> dict[str, Any
     }
 
 
+def sync_financial_pit_for_date(trade_date: str) -> dict[str, Any]:
+    """优先使用已开通的 TuShare PIT 因子库截面接口同步 8 个核心财务质量与增长加速度因子（全市场仅 8 次调用）。"""
+    compact = _compact_date(trade_date)
+    if not compact:
+        return {"ready": False, "errors": [f"无效日期: {trade_date}"]}
+    from backend.app.quant import tushare_factor_service
+
+    res = tushare_factor_service.sync_factor_values(
+        list(LAYERED_PIT_FACTOR_NAMES),
+        start_date=compact,
+        end_date=compact,
+    )
+    return {
+        "trade_date": compact,
+        "stored_rows": res.get("stored_rows", 0),
+        "errors": res.get("errors", []),
+        "ready": not res.get("errors"),
+    }
+
+
 def load_pit_financials(
     db: Session,
     *,
     as_of_date: str,
     symbols: Iterable[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """严格 PIT 查询：返回每只股票在 ann_date <= as_of_date 时已真实披露的最新一期财务快照。"""
+    """严格 PIT 查询：融合 StockFinancialPit（按 ann_date<=as_of_date）与 TushareFactorValue（按 trade_date<=as_of_date）。"""
     compact = _compact_date(as_of_date)
     if not compact:
         return {}
-    # 超过 18 个月未更新财报的陈旧数据不作为有效基本面依据
     as_of_dt = datetime.strptime(compact, "%Y%m%d").date()
     min_end_date = f"{as_of_dt.year - 2}0101"
 
@@ -265,7 +296,6 @@ def load_pit_financials(
         if len(sym_list) <= 500:
             stmt = stmt.where(StockFinancialPit.symbol.in_(sym_list))
 
-    # 按 end_date DESC, ann_date DESC 排序，每个 symbol 取第一条即为当时可见的最新财报
     rows = db.scalars(
         stmt.order_by(
             StockFinancialPit.end_date.desc(),
@@ -295,4 +325,70 @@ def load_pit_financials(
             "profit_yoy_accel": row.profit_yoy_accel,
             "ocf_yoy": row.ocf_yoy,
         }
+
+    # 融合 tushare_factor_values 中 <= compact 的最近一日 PIT 财务与增速加速度因子
+    from sqlalchemy import func as sa_func
+
+    factor_day = db.scalar(
+        select(sa_func.max(TushareFactorValue.trade_date)).where(
+            TushareFactorValue.factor_name.in_(list(LAYERED_PIT_FACTOR_NAMES)),
+            TushareFactorValue.trade_date <= compact,
+        )
+    )
+    if factor_day:
+        f_stmt = select(
+            TushareFactorValue.symbol,
+            TushareFactorValue.factor_name,
+            TushareFactorValue.value,
+        ).where(
+            TushareFactorValue.trade_date == str(factor_day),
+            TushareFactorValue.factor_name.in_(list(LAYERED_PIT_FACTOR_NAMES)),
+            TushareFactorValue.value.is_not(None),
+        )
+        if allowed_set is not None and len(allowed_set) <= 500:
+            f_stmt = f_stmt.where(TushareFactorValue.symbol.in_(sorted(allowed_set)))
+        for sym_raw, fname, fval in db.execute(f_stmt).all():
+            sym = str(sym_raw).strip().upper()
+            if allowed_set is not None and sym not in allowed_set:
+                continue
+            val = _finite_float(fval)
+            if val is None:
+                continue
+            entry = latest_by_symbol.setdefault(
+                sym,
+                {
+                    "symbol": sym,
+                    "end_date": None,
+                    "ann_date": str(factor_day),
+                    "roe": None,
+                    "grossprofit_margin": None,
+                    "netprofit_margin": None,
+                    "debt_to_assets": None,
+                    "tr_yoy": None,
+                    "netprofit_yoy": None,
+                    "q_sales_yoy": None,
+                    "q_profit_yoy": None,
+                    "tr_yoy_accel": None,
+                    "profit_yoy_accel": None,
+                    "ocf_yoy": None,
+                },
+            )
+            if fname == "roe_ttm" and entry["roe"] is None:
+                # TuShare roe_ttm 若为小数（如 0.12）转百分比以统一展示口径
+                entry["roe"] = val * 100.0 if abs(val) <= 2.0 else val
+            elif fname == "gpm_q" and entry["grossprofit_margin"] is None:
+                entry["grossprofit_margin"] = val
+            elif fname == "debt_asset_ratio" and entry["debt_to_assets"] is None:
+                entry["debt_to_assets"] = val * 100.0 if 0 < val <= 1.5 else val
+            elif fname == "yoy_ocf" and entry["ocf_yoy"] is None:
+                entry["ocf_yoy"] = val
+            elif fname == "yoy_net_profit" and entry["netprofit_yoy"] is None:
+                entry["netprofit_yoy"] = val
+            elif fname == "yoy_revenue" and entry["tr_yoy"] is None:
+                entry["tr_yoy"] = val
+            elif fname == "sa" and entry["tr_yoy_accel"] is None:
+                entry["tr_yoy_accel"] = val
+            elif fname == "delta_roe" and entry["profit_yoy_accel"] is None:
+                entry["profit_yoy_accel"] = val
+
     return latest_by_symbol
