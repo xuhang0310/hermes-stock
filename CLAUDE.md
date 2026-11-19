@@ -169,6 +169,8 @@ Adjacent flows: `agents/position_agent.py` (natural-language / screenshot positi
 
 ## Frontend architecture
 
+数字人对话页（`DigitalHumanCenter.vue`）把简介、推荐问题和刷新入口放在标题行的原生折叠区，默认收起。
+
 Vue 3 + TypeScript + Vite, no router library — `App.vue` switches views via an `activePage` string. Views in `frontend/src/views/` (Workbench, AskStock, PositionChart, Settings, model/data-source config, DigitalHumanCenter, Login). `api.ts` centralizes fetch calls and holds the bearer token in `localStorage` (`hermes_stock_token`); `types.ts` mirrors backend payloads. SSE chat responses are consumed manually from `fetch` streams. Charts use `lightweight-charts`; assistant markdown is rendered via `markdown-it` + `dompurify` (`utils/markdown.ts`).
 
 ## Conventions

@@ -1134,11 +1134,12 @@ function requestIsVisible(request: ActiveChatRequest) {
 
     <main class="chat-workspace page-section">
       <button type="button" class="chat-rail-toggle" :aria-expanded="mobileRailOpen" aria-label="切换会话列表" @click="mobileRailOpen = !mobileRailOpen">≡</button>
-      <section v-if="selectedProfile" class="persona-strip">
-        <div>
+      <details v-if="selectedProfile" class="persona-strip">
+        <summary>
           <strong>{{ selectedProfile.name }}</strong>
-          <span>{{ selectedProfile.avatar_tone }}</span>
-        </div>
+          <span class="persona-tone">{{ selectedProfile.avatar_tone }}</span>
+          <span class="prompt-toggle">推荐问题</span>
+        </summary>
         <p>{{ selectedProfile.description }}</p>
         <div class="quick-prompts">
           <button
@@ -1156,7 +1157,7 @@ function requestIsVisible(request: ActiveChatRequest) {
             {{ loadingPrompts ? '推荐生成中' : '刷新推荐' }}
           </button>
         </div>
-      </section>
+      </details>
 
       <section ref="chatScroll" class="message-list">
         <div v-if="selectedSessionReadOnly" class="external-session-notice">
@@ -1347,6 +1348,36 @@ function requestIsVisible(request: ActiveChatRequest) {
 </template>
 
 <style scoped>
+.persona-strip summary {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+}
+.persona-strip summary::-webkit-details-marker { display: none; }
+.persona-strip summary:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.persona-tone { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.persona-strip .prompt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 0 auto;
+  color: var(--gold-2);
+  white-space: nowrap;
+}
+.prompt-toggle::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+}
+.persona-strip[open] .prompt-toggle::after { transform: rotate(45deg); }
+@media (max-width: 680px) {
+  .persona-strip { padding-block: 4px; }
+  .persona-strip summary { min-height: 44px; }
+}
 .session-date-group { display: grid; gap: 8px; min-width: 0; }
 .session-date-heading { margin: 8px 2px 2px; color: var(--muted); font-size: 11px; font-weight: 500; line-height: 1.5; }
 .session-date-group + .session-date-group { margin-top: 10px; }
