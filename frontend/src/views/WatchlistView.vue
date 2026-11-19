@@ -92,7 +92,6 @@ const activeModel = computed(
   () =>
     models.value.find((item) => item.id === selectedModelId.value) ||
     models.value.find((item) => item.is_active) ||
-    models.value[0] ||
     null
 )
 
@@ -218,8 +217,8 @@ async function openAgent() {
   try {
     const payload = await api.modelConfigs()
     models.value = payload.filter((item) => item.status !== 'disabled')
-    if (!selectedModelId.value || !models.value.some((item) => item.id === selectedModelId.value)) {
-      selectedModelId.value = models.value.find((item) => item.is_active)?.id || models.value[0]?.id || null
+    if (!models.value.some((item) => item.id === selectedModelId.value)) {
+      selectedModelId.value = null
     }
   } catch (err) {
     agentMessage.value = err instanceof Error ? err.message : '模型列表加载失败'
@@ -551,6 +550,7 @@ function stepLabel(step: PositionAgentStep) {
         ></textarea>
         <div class="watchlist-agent-actions">
           <select v-model.number="selectedModelId" :disabled="agentBusy || !models.length" :title="modelLabel(activeModel)">
+            <option :value="null">跟随系统默认</option>
             <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
               <option v-for="item in group.rows" :key="item.id" :value="item.id">{{ modelLabel(item) }}</option>
             </optgroup>

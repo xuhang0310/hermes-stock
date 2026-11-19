@@ -74,7 +74,8 @@ def build_channel_request(
         "digital_human_id": profile.id if profile else chat_session.digital_human_id,
         "digital_human_code": digital_human_code,
         "digital_human_context": digital_context,
-        "model_config_id": model_config_id or chat_session.model_config_id,
+        # The session records the last model used, including temporary fallbacks.
+        "model_config_id": model_config_id,
         "chat_mode": "research",
         "skills": [],
         "memory_context": "",

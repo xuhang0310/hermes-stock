@@ -330,7 +330,6 @@ const activePositionModel = computed(
   () =>
     positionModels.value.find((item) => item.id === selectedPositionModelId.value) ||
     positionModels.value.find((item) => item.is_active) ||
-    positionModels.value[0] ||
     null
 )
 
@@ -575,13 +574,11 @@ function modelOptionLabel(model: ModelConfig | null | undefined) {
 async function loadPositionModels() {
   const payload = await api.modelConfigs()
   positionModels.value = payload.filter((item) => item.status !== 'disabled')
-  // 默认用“设置 → 模型配置”里标为默认的模型；上传截图时后端会自动换成支持识图的模型
-  const preferred = positionModels.value.find((item) => item.is_active) || positionModels.value[0]
-  selectedPositionModelId.value = preferred?.id || null
 }
 
 async function openPositionAgent(accountId: number | null = null) {
   resetPositionAgentSessionMemory()
+  selectedPositionModelId.value = null
   positionAgentClientSessionId.value = createPositionAgentClientSessionId()
   positionAgentTargetAccount.value = accountId
   positionDrawerOpen.value = true
@@ -1567,6 +1564,7 @@ onBeforeUnmount(() => {
               :disabled="positionAgentBusy || !positionModels.length"
               :title="modelOptionLabel(activePositionModel)"
             >
+              <option :value="null">跟随系统默认</option>
               <optgroup v-for="group in positionModelGroups" :key="group.platform" :label="group.platform">
                 <option v-for="item in group.rows" :key="item.id" :value="item.id">
                   {{ modelOptionLabel(item) }}

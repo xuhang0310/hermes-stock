@@ -201,7 +201,6 @@ const activeModel = computed(
   () =>
     models.value.find((item) => item.id === selectedModelId.value) ||
     models.value.find((item) => item.is_active) ||
-    models.value[0] ||
     null
 )
 
@@ -245,7 +244,6 @@ async function load() {
     : strategies.value[0]
       ? [strategies.value[0].id]
       : []
-  selectedModelId.value = models.value.find((item) => item.is_active)?.id || models.value[0]?.id || null
   void loadStockRecommendations()
 }
 
@@ -267,7 +265,7 @@ async function openSession(id: number) {
   try {
     const detail = await api.agentSession(id)
     selectedSessionId.value = detail.id
-    selectedModelId.value = detail.model_config_id || selectedModelId.value
+    selectedModelId.value = models.value.find((item) => item.id === detail.model_config_id)?.id ?? null
     messages.value = detail.messages.map((item) => ({
       id: item.id,
       role: item.role,
@@ -367,6 +365,7 @@ async function refreshStockRecommendations() {
 function newSession() {
   if (sending.value) return
   selectedSessionId.value = null
+  selectedModelId.value = null
   messages.value = []
   question.value = ''
   selectedCoreSkills.value = []
@@ -569,7 +568,7 @@ function handleRunEvent(reply: ChatMessage, event: AgentStreamEvent) {
     return
   }
   if (event.type === 'model_selected') {
-    if (event.model?.id) selectedModelId.value = event.model.id
+    if (selectedModelId.value !== null && event.model?.id) selectedModelId.value = event.model.id
     pushStep(reply, {
       type: 'model',
       content: `${event.model?.display_name || '默认模型'} / ${event.model?.model_name || ''}`
@@ -1153,6 +1152,7 @@ onMounted(async () => {
           <ApprovalPolicyControl v-model="approvalPolicy" :disabled="sending" :exec-available="workspaceExecAvailable" />
           <span class="chat-composer-spacer"></span>
           <select v-model.number="selectedModelId" :disabled="sending || !models.length" :title="modelOptionLabel(activeModel)">
+            <option :value="null">跟随系统默认</option>
             <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
               <option v-for="item in group.rows" :key="item.id" :value="item.id">{{ modelOptionLabel(item) }}</option>
             </optgroup>

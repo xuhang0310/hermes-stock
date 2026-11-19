@@ -220,7 +220,6 @@ const activeModel = computed(
   () =>
     models.value.find((item) => item.id === selectedModelId.value) ||
     models.value.find((item) => item.is_active) ||
-    models.value[0] ||
     null
 )
 
@@ -282,9 +281,6 @@ async function load() {
     const pm = profiles.value.find((item) => item.code === 'stock-pm')
     selectedProfileId.value = (pm || profiles.value[0])?.id ?? null
   }
-  if (!selectedModelId.value || !models.value.some((item) => item.id === selectedModelId.value)) {
-    selectedModelId.value = models.value.find((item) => item.is_active)?.id || models.value[0]?.id || null
-  }
   const profileId = selectedProfileId.value
   await Promise.all([
     refreshSessions(profileId),
@@ -336,7 +332,7 @@ function selectSessionDetail(detail: AgentSessionDetail, sessionMessages: ChatMe
   skillSlashMenu.value?.close()
   selectedSessionId.value = detail.id
   selectedProfileId.value = detail.digital_human_id || selectedProfileId.value
-  selectedModelId.value = detail.model_config_id || selectedModelId.value
+  selectedModelId.value = models.value.find((item) => item.id === detail.model_config_id)?.id ?? null
   selectedSessionSourceType.value = detail.source_type || 'web'
   selectedSessionSourceLabel.value = detail.source_label || '网页'
   selectedSessionSourceIdentifier.value = detail.source_identifier || null
@@ -354,7 +350,7 @@ async function openSession(id: number) {
   if (activeRequest) {
     selectedSessionId.value = id
     selectedProfileId.value = activeRequest.profileId || selectedProfileId.value
-    selectedModelId.value = activeRequest.modelId || selectedModelId.value
+    selectedModelId.value = activeRequest.modelId
     selectedSessionSourceType.value = 'web'
     selectedSessionSourceLabel.value = '网页'
     selectedSessionSourceIdentifier.value = null
@@ -381,6 +377,7 @@ async function openSession(id: number) {
 
 function newSession(profileId?: number | null) {
   selectedSessionId.value = null
+  selectedModelId.value = null
   selectedDraftKey.value = createDraftKey()
   selectedSessionSourceType.value = 'web'
   selectedSessionSourceLabel.value = '网页'
@@ -423,8 +420,8 @@ function applyQuickPrompt(prompt: string) {
 
 function selectStrategyPrompt(payload: { instruction: string; label: string }) {
   if (selectedSessionRunning.value) return
-  if (!selectedProfileId.value || !selectedModelId.value) {
-    error.value = '请先在上方选择数字人和模型，再选择策略。'
+  if (!selectedProfileId.value) {
+    error.value = '请先选择数字人，再选择策略。'
     return
   }
   strategySelection.value = payload
@@ -651,7 +648,7 @@ async function downloadFile(file: GeneratedFile) {
 function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: AgentStreamEvent) {
   if (event.type === 'session') {
     if (event.profile?.id) request.profileId = event.profile.id
-    if (event.model?.id) request.modelId = event.model.id
+    if (request.modelId !== null && event.model?.id) request.modelId = event.model.id
     if (event.session_id) {
       const previousKey = request.key
       request.sessionId = event.session_id
@@ -672,7 +669,7 @@ function handleRunEvent(reply: ChatMessage, request: ActiveChatRequest, event: A
     return
   }
   if (event.type === 'model_selected') {
-    if (event.model?.id) {
+    if (request.modelId !== null && event.model?.id) {
       request.modelId = event.model.id
       if (requestIsVisible(request)) selectedModelId.value = event.model.id
     }
@@ -1325,6 +1322,7 @@ function requestIsVisible(request: ActiveChatRequest) {
           <ApprovalPolicyControl v-model="approvalPolicy" :disabled="selectedSessionRunning" :exec-available="workspaceExecAvailable" />
           <span class="chat-composer-spacer"></span>
           <select v-model.number="selectedModelId" :disabled="selectedSessionRunning || !models.length" :title="modelOptionLabel(activeModel)">
+            <option :value="null">跟随系统默认</option>
             <optgroup v-for="group in modelGroups" :key="group.platform" :label="group.platform">
               <option v-for="item in group.rows" :key="item.id" :value="item.id">{{ modelOptionLabel(item) }}</option>
             </optgroup>

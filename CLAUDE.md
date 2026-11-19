@@ -41,6 +41,8 @@ Health check: `http://127.0.0.1:8000/api/health`.
 
 ## Configuration & environment
 
+New web chats, text position entry, watchlist entry, Feishu turns and scheduled runs use the model marked as default in Settings unless the request selects a model. Web chat sends an explicit null to follow the default. Omitting the field in an existing web session preserves its saved selection. Image recognition uses the vision router. See `docs/ask-stock.md`.
+
 - **MySQL only.** `core/database.py` hard-rejects any URL that is not `mysql+pymysql://` — there is no SQLite path.
 - Settings resolution order (`backend/app/core/settings.py`): it loads a **hardcoded** `hermes-rabbit/backend/.env` (`C:\Users\Administrator\Documents\hermes-rabbit\backend\.env`, `RABBIT_DB_*` etc.) first without override, then `backend/.env` (`STOCK_*`) with override. So `STOCK_*` wins, falling back to `RABBIT_*`. The database name is forced to `hermes-stock` by default regardless of the rabbit env.
 - `DATABASE_URL` (full SQLAlchemy URL), if set, overrides all `STOCK_DB_*`/`RABBIT_DB_*` pieces.

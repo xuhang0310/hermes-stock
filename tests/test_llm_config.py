@@ -8,6 +8,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from backend.app.agent_runtime.channel_runs import build_channel_request
+from backend.app.ai.ai_api import AgentChatIn, ModelConfigIn, _prepare_agent_chat, update_model_config
+from backend.app.auth.auth import AuthContext
 from backend.app.core.database import Base
 from backend.app.core.llm_config import (
     active_llm_config,
@@ -15,9 +18,9 @@ from backend.app.core.llm_config import (
     persist_chat_session_model,
     resolve_chat_model_config_ids,
     resolve_model_config_ids_by_priority,
+    resolve_position_agent_model_config_id,
     resolve_vision_model_config_id,
 )
-from backend.app.ai.ai_api import ModelConfigIn, update_model_config
 from backend.app.core.models import AiChatSession, LlmModelConfig, LlmModelPlatform, User
 
 
@@ -71,6 +74,65 @@ class LlmVisionRoutingTests(unittest.TestCase):
         self.assertTrue(model_supports_vision("qwen3-vl-plus"))
         self.assertFalse(model_supports_vision("qwen3.7-max"))
         self.assertFalse(model_supports_vision("deepseek-v4-pro"))
+
+    def test_text_position_entry_follows_active_model_and_accepts_override(self) -> None:
+        primary, other = self._seed_models()
+        with patch("backend.app.core.llm_config.SessionLocal", self.SessionFactory):
+            self.assertEqual(resolve_position_agent_model_config_id(), primary)
+            self.assertEqual(resolve_position_agent_model_config_id(other), other)
+            with self.SessionFactory.begin() as db:
+                db.get(LlmModelConfig, primary).is_active = False
+                db.get(LlmModelConfig, primary).status = "disabled"
+                db.get(LlmModelConfig, other).is_active = True
+            self.assertEqual(resolve_position_agent_model_config_id(), other)
+            with self.assertRaisesRegex(RuntimeError, "已停用"):
+                resolve_position_agent_model_config_id(primary)
+
+    def test_existing_session_can_follow_current_default(self) -> None:
+        primary, other = self._seed_models()
+        with (
+            self.SessionFactory() as db,
+            patch("backend.app.core.llm_config.SessionLocal", self.SessionFactory),
+            patch("backend.app.agent_runtime.channel_runs.SessionLocal", self.SessionFactory),
+            patch("backend.app.ai.ai_api.retrieve_memories", return_value=""),
+            patch("backend.app.ai.ai_api.retrieve_experiences", return_value=""),
+        ):
+            user = User(
+                username="model-picker",
+                display_name="Test",
+                role="researcher",
+                permission_scope="agent:use",
+                password_hash="test",
+            )
+            db.add(user)
+            db.commit()
+            context = AuthContext(user=user, permissions={"agent:use"})
+            chat = _prepare_agent_chat(
+                AgentChatIn(question="test", chat_mode="stock", model_config_id=other), db, context
+            )
+            session_id = chat["session_id"]
+            for source in ("scheduler", "feishu"):
+                with self.subTest(source=source):
+                    channel = build_channel_request(
+                        session_id=session_id,
+                        question="test",
+                        history=[],
+                        digital_human_code=None,
+                        source_type=source,
+                        source_ref=None,
+                    )
+                    self.assertEqual(active_llm_config(channel["model_config_id"])["id"], primary)
+
+            continuation = dict(question="test", chat_mode="stock", session_id=session_id)
+            inherited = _prepare_agent_chat(AgentChatIn(**continuation), db, context)
+            self.assertEqual(inherited["request_payload"]["model_config_id"], other)
+            follow = _prepare_agent_chat(AgentChatIn(**continuation, model_config_id=None), db, context)
+            self.assertIsNone(follow["request_payload"]["model_config_id"])
+            persisted = persist_chat_session_model(
+                session_id=session_id, user_id=user.id, model_config_id=other
+            )
+            self.assertFalse(persisted)
+            self.assertIsNone(db.get(AiChatSession, session_id).model_config_id)
 
     def test_text_model_routes_to_enabled_vision_model_on_same_platform(self) -> None:
         text_model_id, vision_model_id = self._seed_models()

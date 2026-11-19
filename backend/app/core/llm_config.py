@@ -29,7 +29,6 @@ _VISION_MODEL_PREFIXES = (
     "k3",
 )
 
-_POSITION_AGENT_MODEL_PRIORITY = ("qwen3.7-plus", "k3")
 
 def resolve_chat_model_config_ids(model_config_id: int | None = None) -> list[int]:
     """Return enabled chat models in failover order.
@@ -77,7 +76,7 @@ def resolve_chat_model_config_ids(model_config_id: int | None = None) -> list[in
 
 
 def persist_chat_session_model(*, session_id: int, user_id: int, model_config_id: int) -> bool:
-    """Bind an owned chat session to the model that actually handled it."""
+    """Update an owned session's explicit model after failover. Null follows the default."""
     with SessionLocal() as session:
         chat_session = session.scalar(
             select(AiChatSession)
@@ -85,7 +84,9 @@ def persist_chat_session_model(*, session_id: int, user_id: int, model_config_id
                 AiChatSession.id == session_id,
                 AiChatSession.user_id == user_id,
                 AiChatSession.status != "deleted",
+                AiChatSession.model_config_id.is_not(None),
             )
+            .with_for_update()
             .limit(1)
         )
         model = session.scalar(
@@ -167,50 +168,11 @@ def resolve_model_config_ids_by_priority(model_names: tuple[str, ...]) -> list[i
 
 
 def resolve_position_agent_model_config_id(model_config_id: int | None = None) -> int | None:
-    """Choose the position-entry model, preferring Qwen3.7 Plus then k3."""
-    with SessionLocal() as session:
-        query = select(LlmModelConfig).options(selectinload(LlmModelConfig.platform))
-        if model_config_id:
-            selected = session.scalar(
-                query.where(
-                    LlmModelConfig.id == model_config_id,
-                    LlmModelConfig.status != "disabled",
-                ).limit(1)
-            )
-            if selected is None or (
-                selected.platform is not None and selected.platform.status == "disabled"
-            ):
-                raise RuntimeError("所选模型配置不存在或已停用。")
-            return selected.id
-
-        candidates = session.scalars(
-            query.where(
-                LlmModelConfig.status != "disabled",
-            ).order_by(
-                LlmModelConfig.is_active.desc(),
-                LlmModelConfig.updated_at.desc(),
-                LlmModelConfig.id.desc(),
-            )
-        ).all()
-        candidates = [
-            row
-            for row in candidates
-            if row.platform is None or row.platform.status != "disabled"
-        ]
-        for preferred_name in _POSITION_AGENT_MODEL_PRIORITY:
-            preferred = next(
-                (
-                    row
-                    for row in candidates
-                    if (row.model_name or "").strip().lower() == preferred_name
-                ),
-                None,
-            )
-            if preferred is not None:
-                return preferred.id
-        if candidates:
-            return candidates[0].id
-        return None
+    """Use the chat default for text entry and validate explicit model choices."""
+    candidates = resolve_chat_model_config_ids(model_config_id)
+    if model_config_id is not None and model_config_id not in candidates:
+        raise RuntimeError("所选模型配置不存在或已停用。")
+    return candidates[0] if candidates else None
 
 
 def resolve_vision_model_config_id(model_config_id: int | None = None) -> int | None:

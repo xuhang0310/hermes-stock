@@ -2526,7 +2526,10 @@ def _prepare_agent_chat(
         )
         if model_config is None:
             raise HTTPException(status_code=404, detail="模型配置不存在或已停用")
-    if chat_session is not None and model_config is None and chat_session.model_config_id:
+    # Older API clients omit the field to continue with the session's model.
+    # The model picker sends an explicit null to follow the current default.
+    model_specified = "model_config_id" in payload.model_fields_set
+    if chat_session is not None and not model_specified and chat_session.model_config_id:
         existing_model = db.get(LlmModelConfig, chat_session.model_config_id)
         if existing_model and existing_model.status != "disabled":
             model_config = existing_model
@@ -2549,7 +2552,7 @@ def _prepare_agent_chat(
         chat_session.digital_human_id = None
     elif payload.digital_human_id:
         chat_session.digital_human_id = profile.id if profile else None
-    if payload.model_config_id:
+    if model_specified:
         chat_session.model_config_id = model_config.id if model_config else None
 
     if payload.session_id:
