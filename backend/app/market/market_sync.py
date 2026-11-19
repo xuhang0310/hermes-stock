@@ -411,7 +411,8 @@ def _upsert_daily_basic(rows: list[dict]) -> int:
         "INSERT INTO stock_daily_basic "
         "(symbol, trade_date, turnover_rate, turnover_rate_f, volume_ratio, pe_ttm, pb, total_mv, circ_mv) "
         "VALUES (:symbol, :trade_date, :turnover_rate, :turnover_rate_f, :volume_ratio, :pe_ttm, :pb, :total_mv, :circ_mv) "
-        "ON DUPLICATE KEY UPDATE turnover_rate=VALUES(turnover_rate), turnover_rate_f=VALUES(turnover_rate_f), volume_ratio=VALUES(volume_ratio), "
+        "ON DUPLICATE KEY UPDATE turnover_rate=VALUES(turnover_rate), "
+        "turnover_rate_f=COALESCE(VALUES(turnover_rate_f), turnover_rate_f), volume_ratio=VALUES(volume_ratio), "
         "pe_ttm=VALUES(pe_ttm), pb=VALUES(pb), total_mv=VALUES(total_mv), circ_mv=VALUES(circ_mv)"
     )
     count = 0

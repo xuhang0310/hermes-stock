@@ -2186,6 +2186,7 @@ export type AutomaticSelectionStrategyBrief = {
 }
 
 export type AutomaticSelectionDaily = {
+  can_dispatch: boolean
   strategy: AutomaticSelectionStrategyBrief | null
   available_dates: Array<{ trade_date: string; status: string; status_label: string }>
   trade_date: string | null

@@ -114,6 +114,12 @@ def sync_automatic_selection_data() -> dict[str, Any]:
         ]
         if not cache_status.get("ready") and not market_errors:
             market_errors.append("本地行情缓存未通过完整性检查")
+        model_input_issue = None
+        if not market_errors and target_trade_date and _any_uses(strategies, uses_model_rank):
+            from backend.app.shadow.rank_signal import turnover_input_issue
+
+            with SessionLocal() as db:
+                model_input_issue = turnover_input_issue(db, target_trade_date)
         errors = [
             *market_errors,
             *config_errors,
@@ -126,6 +132,7 @@ def sync_automatic_selection_data() -> dict[str, Any]:
         )
         return {
             "ready": not market_errors,
+            "model_input_issue": model_input_issue,
             "target_trade_date": target_trade_date or None,
             "strategy_count": len(strategies),
             "cache_status": cache_status,

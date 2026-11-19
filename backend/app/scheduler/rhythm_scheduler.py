@@ -1223,6 +1223,7 @@ def _run_automatic_selection_data(
     summary = {
         "target_trade_date": result.get("target_trade_date"),
         "ready": bool(result.get("ready")),
+        "model_input_issue": result.get("model_input_issue"),
         "strategy_count": int(result.get("strategy_count") or 0),
         "bar_rows_upserted": int(
             market_sync.get("bars_upserted") or 0
@@ -1742,12 +1743,15 @@ def _scheduled_automatic_selection_target(session, now: datetime) -> str | None:
     return str(previous) if previous else None
 
 
-def _scheduled_automatic_selection_data_ready(session, now: datetime) -> bool:
-    """Use only local evidence to gate the scheduled ranking run."""
+def _scheduled_automatic_selection_data_state(session, now: datetime) -> str | None:
+    """区分通用行情未就绪、仅模型输入待补、全部就绪。"""
     expected_trade_date = _scheduled_automatic_selection_target(session, now)
     if not expected_trade_date:
-        return False
-    return successful_automatic_selection_ingestion(session, expected_trade_date) is not None
+        return None
+    ingestion = successful_automatic_selection_ingestion(session, expected_trade_date)
+    if ingestion is None:
+        return None
+    return "partial" if json.loads(ingestion.output_content).get("model_input_issue") else "ready"
 
 
 def successful_automatic_selection_ingestion(session, target_trade_date: str) -> JobRun | None:
@@ -1820,21 +1824,15 @@ def _claim_job_run(
             session.rollback()
             return {"status": "already_running", "run_id": run_id}
 
-    if (
-        trigger_type == "schedule"
-        and job_key == AUTOMATIC_SELECTION_JOB_KEY
-        and not _scheduled_automatic_selection_data_ready(session, ran_at)
-    ):
-        session.rollback()
-        return {"status": "waiting_dependency", "run_id": None}
-    if (
-        trigger_type == "schedule"
-        and job_key == AUTOMATIC_SELECTION_DATA_JOB_KEY
-        and _scheduled_automatic_selection_data_ready(session, ran_at)
-    ):
-        # 当前目标日已入库成功（含手动触发），重试槽位不再重复同步。
-        session.rollback()
-        return {"status": "not_due", "run_id": None}
+    data_state = None
+    if trigger_type == "schedule" and job_key in _AUTOMATIC_SELECTION_CLAIM_GROUP:
+        data_state = _scheduled_automatic_selection_data_state(session, ran_at)
+        if job_key == AUTOMATIC_SELECTION_JOB_KEY and data_state is None:
+            session.rollback()
+            return {"status": "waiting_dependency", "run_id": None}
+        if job_key == AUTOMATIC_SELECTION_DATA_JOB_KEY and data_state == "ready":
+            session.rollback()
+            return {"status": "not_due", "run_id": None}
 
     run_id = uuid4().hex
     fire_key = (
@@ -1842,6 +1840,9 @@ def _claim_job_run(
         if manual_trigger
         else _scheduled_fire_key(job, ran_at)
     )
+    if job_key == AUTOMATIC_SELECTION_JOB_KEY and data_state == "partial":
+        # 其他策略照常出结果；换手率补齐后，原来的 fire_key 可再排名一次。
+        fire_key += "~partial"
     # 补跑窗口里每一轮都会走到这里，先查一下，免得已经跑过的任务每 30 秒撞一次唯一索引
     if (
         not manual_trigger

@@ -172,9 +172,11 @@ class LatestRankTests(_Db):
 
     def test_no_turnover_yet_means_no_ranks_and_no_bar_scan(self) -> None:
         with self.Session() as db:
+            self.assertIsNone(rank_signal.turnover_input_issue(db, TODAY))
             for row in db.scalars(select(StockDailyBasic)).all():
                 row.turnover_rate_f = None
             db.commit()
+            self.assertIn("仅有 0 只", rank_signal.turnover_input_issue(db, TODAY))
         with patch.object(rank_signal, "panel_from_rows") as panel:
             self.assertEqual(self._ranks(), {})
         panel.assert_not_called()

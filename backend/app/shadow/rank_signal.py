@@ -18,7 +18,7 @@ from typing import Any, Iterable, Iterator
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.applog import get_logger
@@ -158,6 +158,15 @@ def _bar_rows(db: Session, codes: list[str], first_day: str, last_day: str) -> I
                 DailyBar.close.is_not(None),
             )
         ).all()
+
+
+def turnover_input_issue(db: Session, trade_date: str) -> str | None:
+    count = db.scalar(
+        select(func.count(StockDailyBasic.turnover_rate_f)).where(StockDailyBasic.trade_date == trade_date)
+    )
+    if count < _MIN_STOCKS_TODAY:
+        return f"{trade_date} 自由流通换手率仅有 {count} 只，模型排名至少需要 {_MIN_STOCKS_TODAY} 只。"
+    return None
 
 
 def _live_panel(db: Session, trade_date: str) -> Panel | None:

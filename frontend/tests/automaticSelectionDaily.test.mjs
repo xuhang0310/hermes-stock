@@ -180,6 +180,8 @@ test('tabs and actions follow permissions', () => {
   assert.equal(viewer.canDispatch.value, false)
   const admin = createHarness({ permissions: ['all'] }).harness
   assert.deepEqual([...admin.tabs.value.map((tab) => tab.key)], ['today', 'history', 'layered', 'method', 'advanced'])
+  assert.equal(admin.canDispatch.value, false)
+  admin.daily.value = dailyPayload('20261016', { can_dispatch: true })
   assert.equal(admin.canDispatch.value, true)
 })
 
@@ -256,6 +258,10 @@ test('recalculation is only for schedulers and tells the user what happens next'
   await viewer.harness.dispatchRun()
   assert.equal(viewer.calls.dispatch, 0)
   const admin = createHarness({ permissions: ['schedule:manage'] })
+  admin.harness.daily.value = dailyPayload('20261016', { can_dispatch: false })
+  await admin.harness.dispatchRun()
+  assert.equal(admin.calls.dispatch, 0)
+  admin.harness.daily.value = dailyPayload('20261016', { can_dispatch: true })
   await admin.harness.dispatchRun()
   assert.equal(admin.calls.dispatch, 1)
   assert.match(admin.harness.notice.value, /几分钟内完成/)

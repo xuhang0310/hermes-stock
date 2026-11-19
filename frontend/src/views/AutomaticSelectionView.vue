@@ -57,7 +57,7 @@ let previousBodyOverflow = ''
 
 const permissions = computed(() => props.user.permissions || [])
 const hasPermission = (name: string) => permissions.value.includes('all') || permissions.value.includes(name)
-const canDispatch = computed(() => hasPermission('schedule:manage'))
+const canDispatch = computed(() => hasPermission('schedule:manage') && daily.value?.can_dispatch === true)
 const canSeeAdvanced = computed(() => hasPermission('model:manage') || hasPermission('schedule:manage'))
 const canWrite = computed(() => hasPermission('data:write'))
 const canAsk = computed(() => hasPermission('agent:use'))

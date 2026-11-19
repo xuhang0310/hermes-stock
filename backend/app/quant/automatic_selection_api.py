@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from backend.app.auth.auth import AuthContext, require_permission
+from backend.app.auth.auth import AuthContext, has_permission, require_permission
 from backend.app.core.database import get_db
 from backend.app.core.response import fail, ok
 from backend.app.quant import automatic_selection_presentation as presentation
@@ -76,13 +76,23 @@ def automatic_selection_overview(
 def automatic_selection_daily(
     trade_date: str | None = Query(default=None, pattern=r"^\d{8}$"),
     strategy_id: int | None = Query(default=None, ge=1),
-    _context: AuthContext = Depends(require_permission("data:read")),
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("data:read")),
 ) -> dict:
     """面向普通用户的某日选股结果：入选理由、风险、选出后表现与白话状态。"""
     try:
-        return ok(presentation.daily_view(trade_date=trade_date, strategy_id=strategy_id))
+        view = presentation.daily_view(trade_date=trade_date, strategy_id=strategy_id)
     except LookupError as exc:
         return JSONResponse(status_code=404, content=fail(str(exc), code="not_found"))
+    can_dispatch = has_permission(context, "schedule:manage")
+    if can_dispatch:
+        try:
+            _require_pipeline_owner(db, context.user.id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            can_dispatch = False
+    return ok({**view, "can_dispatch": can_dispatch})
 
 
 @router.get("/track-record")
@@ -158,22 +168,24 @@ def automatic_selection_retire_strategy(
     return ok(strategy, "策略已退役")
 
 
-@router.post("/runs/dispatch")
-async def automatic_selection_dispatch(
-    db: Session = Depends(get_db),
-    context: AuthContext = Depends(
-        require_permission("schedule:manage")
-    ),
-) -> dict:
+def _require_pipeline_owner(db: Session, user_id: int) -> None:
     for job_key in (
         AUTOMATIC_SELECTION_DATA_JOB_KEY,
         AUTOMATIC_SELECTION_JOB_KEY,
     ):
         _owned_job(
             db,
-            user_id=context.user.id,
+            user_id=user_id,
             job_key=job_key,
         )
+
+
+@router.post("/runs/dispatch")
+async def automatic_selection_dispatch(
+    db: Session = Depends(get_db),
+    context: AuthContext = Depends(require_permission("schedule:manage")),
+) -> dict:
+    _require_pipeline_owner(db, context.user.id)
     claim = await dispatch_automatic_selection_pipeline_result(
         actor_user_id=context.user.id,
     )

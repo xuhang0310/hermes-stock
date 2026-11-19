@@ -969,7 +969,7 @@ def status_view(run: dict[str, Any] | None, *, last_completed_trade_date: str | 
         return {
             "code": "empty",
             "title": "还没有选股结果",
-            "message": f"{SCHEDULE_NOTE}管理员也可以点击“重新计算”立即生成。",
+            "message": f"{SCHEDULE_NOTE}任务负责人也可以点击“重新计算”立即生成。",
             "issues": [],
             "detail": None,
             "fallback_trade_date": None,
@@ -1002,7 +1002,7 @@ def status_view(run: dict[str, Any] | None, *, last_completed_trade_date: str | 
             "title": f"{_date_label(trade_date)} 的数据不完整，系统暂停出结果",
             "message": (
                 "为了不用残缺数据误导判断，数据检查没通过时整批暂停，不会只拿部分股票硬算。"
-                f"{SCHEDULE_NOTE}数据补齐后管理员也可以点击“重新计算”。"
+                f"{SCHEDULE_NOTE}数据补齐后，任务负责人也可以点击“重新计算”。"
             ),
             "issues": [_failure_text(failure) for failure in gate.get("failures") or []],
             "detail": None,
@@ -1029,7 +1029,7 @@ def status_view(run: dict[str, Any] | None, *, last_completed_trade_date: str | 
     return {
         "code": "failed",
         "title": title,
-        "message": "错误已记录，管理员可以在“高级”里查看详情后重新计算。",
+        "message": "错误已记录，可在“高级”里查看详情。任务负责人可以重新计算。",
         "issues": [error[:300]],
         "detail": error[:2000],
         "fallback_trade_date": fallback,
@@ -1099,7 +1099,7 @@ def data_sync_view(now: datetime | None = None) -> dict[str, Any]:
             "target_trade_date": None,
             "issues": [],
             "detail": None,
-            "next_step": f"{schedule}；管理员也可以点击“重新计算”立即同步并选股。",
+            "next_step": f"{schedule}。任务负责人也可以点击“重新计算”立即同步并选股。",
         }
     try:
         output = json.loads(row.output_content or "{}")
@@ -1118,7 +1118,8 @@ def data_sync_view(now: datetime | None = None) -> dict[str, Any]:
         "detail": None,
         "next_step": None,
     }
-    if row.status == "success":
+    model_issue = output.get("model_input_issue") if isinstance(output, dict) else None
+    if row.status == "success" and not model_issue:
         return {**base, "title": f"{_date_label(target)} 收盘数据已同步" if target else "行情数据已同步"}
     if row.status == "running":
         return {**base, "title": "正在同步行情数据", "next_step": "通常一两分钟完成，完成后会自动选股。"}
@@ -1130,9 +1131,18 @@ def data_sync_view(now: datetime | None = None) -> dict[str, Any]:
         )
     else:
         next_step = (
-            f"{schedule}；管理员也可以点击“重新计算”立即重试"
+            f"{schedule}。任务负责人也可以点击“重新计算”立即重试"
             "（17:00 前会使用上一个交易日的收盘数据）。"
         )
+    if row.status == "success" and model_issue:
+        return {
+            **base,
+            "status": "partial",
+            "ok": False,
+            "title": "模型排名等待自由流通换手率",
+            "issues": [model_issue],
+            "next_step": next_step,
+        }
     error = str(row.error or "")
     return {
         **base,

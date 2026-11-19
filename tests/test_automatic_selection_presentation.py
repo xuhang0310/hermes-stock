@@ -495,6 +495,12 @@ class AutomaticSelectionPresentationFlowTests(unittest.TestCase):
         done = presentation.data_sync_view(datetime(2026, 10, 20, 18, 5))
         self.assertTrue(done["ok"])
         self.assertEqual(done["title"], "10 月 20 日 收盘数据已同步")
+        self._data_job_run(status="success", trigger="schedule", started=datetime(2026, 10, 20, 18, 30),
+                           output={"ready": True, "target_trade_date": "20261020", "model_input_issue": "自由流通换手率仅有 0 只"})
+        partial = presentation.data_sync_view(datetime(2026, 10, 20, 18, 35))
+        self.assertEqual((partial["ok"], partial["status"]), (False, "partial"))
+        self.assertIn("仅有 0 只", partial["issues"][0])
+        self.assertIn("22:00", partial["next_step"])
         self.assertIsNotNone(presentation.daily_view()["data_sync"])
 
     def test_undated_cache_failure_is_shown_only_when_nothing_else_exists(self) -> None:

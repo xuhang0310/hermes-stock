@@ -67,6 +67,19 @@ class AutomaticSelectionApiTests(unittest.TestCase):
         self.assertIn("不构成投资建议", body["data"]["limitations"])
         self.assertTrue(strategies["data"][0]["is_official"])
 
+    def test_daily_reports_dispatch_only_for_owner_of_both_jobs(self) -> None:
+        with patch.object(api.presentation, "daily_view", return_value={"picks": []}):
+            endpoint = "/api/automatic-selection/daily"
+            self.assertTrue(self.client.get(endpoint).json()["data"]["can_dispatch"])
+            self.owned_job.side_effect = [object(), HTTPException(404, "任务不存在")]
+            view = self.client.get(endpoint).json()["data"]
+            self.assertFalse(view["can_dispatch"])
+            self.assertEqual(view["picks"], [])
+            self.permissions.remove("schedule:manage")
+            self.owned_job.reset_mock()
+            self.assertFalse(self.client.get(endpoint).json()["data"]["can_dispatch"])
+            self.owned_job.assert_not_called()
+
     def test_permissions_separate_read_dispatch_and_strategy_management(self) -> None:
         self.permissions.clear()
         self.permissions.add("data:read")
