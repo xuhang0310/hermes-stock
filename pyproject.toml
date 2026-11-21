@@ -34,6 +34,7 @@ dependencies = [
     "opentelemetry-api==1.42.1",
     "opentelemetry-sdk==1.42.1",
     "opentelemetry-exporter-otlp==1.42.1",
+    "tushare>=1.4.29,<2",
 ]
 
 # 可选：position_import v2 试点（STOCK_POSITION_AGENT_V2=true 时才用）。

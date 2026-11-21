@@ -847,6 +847,155 @@ STOCK_TOOL_SCHEMAS = [
             "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "A 股代码或 ts_code。"}, "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"}, "start_date": {"type": "string", "description": "起始 YYYYMMDD。"}, "end_date": {"type": "string", "description": "结束 YYYYMMDD。"}}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pro_bar",
+            "description": "TuShare 官方 SDK 综合行情（pro_bar）：支持股票/ETF(asset=E)、指数(I)、期货(FT)、期权(O)、可转债(CB)、基金(FD)的前复权(qfq)/后复权(hfq)/不复权日周月分钟行情，以及均线(ma)与换手量比(factors=tor,vr)合成。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "标的代码，如 600519.SH、510300.SH、000300.SH、IF2612.CFX。"},
+                    "asset": {"type": "string", "description": "资产类别：E 股票/ETF（默认）、I 指数、FT 期货、O 期权、CB 可转债、FD 基金。"},
+                    "freq": {"type": "string", "description": "周期：D 日线（默认）、W 周线、M 月线、1min/5min/15min/30min/60min。"},
+                    "adj": {"type": "string", "description": "复权类型：qfq 前复权（股票默认）、hfq 后复权、none 不复权。"},
+                    "start_date": {"type": "string", "description": "起始日期 YYYYMMDD。"},
+                    "end_date": {"type": "string", "description": "结束日期 YYYYMMDD。"},
+                    "ma": {"type": "string", "description": "可选均线周期，逗号分隔如 5,10,20,60。"},
+                    "factors": {"type": "string", "description": "可选附加指标，逗号分隔如 tor,vr（换手率/量比，仅股票日线支持）。"},
+                    "limit": {"type": "integer", "description": "最多返回条数，默认 120。"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stk_seasoned",
+            "description": "TuShare 股票增发（stk_seasoned）：查询上市公司定向增发、公开增发等再融资记录。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A 股代码或 ts_code（可选，不传则按日期区间查全市场）。"},
+                    "ann_date": {"type": "string", "description": "公告日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始日期 YYYYMMDD。"},
+                    "end_date": {"type": "string", "description": "结束日期 YYYYMMDD。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fx_midrate",
+            "description": "TuShare 人民币汇率中间价（fx_midrate）：查询央行授权公布的人民币兑美元/欧元/日元/港币等汇率中间价。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始日期 YYYYMMDD。"},
+                    "end_date": {"type": "string", "description": "结束日期 YYYYMMDD。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_vix_index",
+            "description": "TuShare 美股恐慌指数行情（vix_index）：查询 CBOE VIX 波动率恐慌指数日线行情。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "trade_date": {"type": "string", "description": "交易日 YYYYMMDD。"},
+                    "start_date": {"type": "string", "description": "起始日期 YYYYMMDD。"},
+                    "end_date": {"type": "string", "description": "结束日期 YYYYMMDD。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_us_macro",
+            "description": "TuShare 美国核心宏观经济指标：查询美联储核心 PCE(us_pce)、PPI(us_ppi)、PMI(us_pmi)、失业率与非农(us_unemployment)、零售销售(us_rs)、新房开工(us_hs)、建筑许可(us_bp)、JOLTS职位空缺(us_job_offers)及美债收益率曲线(us_tycr)。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "indicator": {
+                        "type": "string",
+                        "enum": [
+                            "us_pce",
+                            "us_ppi",
+                            "us_pmi",
+                            "us_unemployment",
+                            "us_rs",
+                            "us_hs",
+                            "us_bp",
+                            "us_job_offers",
+                            "us_tycr",
+                        ],
+                        "description": "美国宏观指标 api_name，默认 us_pce。",
+                    },
+                    "start_m": {"type": "string", "description": "起始月份 YYYYMM（月度指标适用）。"},
+                    "end_m": {"type": "string", "description": "结束月份 YYYYMM（月度指标适用）。"},
+                    "start_date": {"type": "string", "description": "起始日期 YYYYMMDD（日频或按发布日筛选适用）。"},
+                    "end_date": {"type": "string", "description": "结束日期 YYYYMMDD。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cn_gdp",
+            "description": "TuShare 国内生产总值 GDP（cn_gdp）：季度 GDP 及同比增速（如 2025Q1~2026Q3）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string", "description": "单季度，如 2026Q3。"},
+                    "start_q": {"type": "string", "description": "起始季度，如 2024Q1。"},
+                    "end_q": {"type": "string", "description": "结束季度，如 2026Q4。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cn_ppi",
+            "description": "TuShare 工业生产者出厂价格指数 PPI（cn_ppi）：月度 PPI 同比与环比。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_m": {"type": "string", "description": "起始月份 YYYYMM。"},
+                    "end_m": {"type": "string", "description": "结束月份 YYYYMM。"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cn_pmi",
+            "description": "TuShare 中国采购经理指数 PMI（cn_pmi）：制造业与非制造业月度 PMI 景气度。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_m": {"type": "string", "description": "起始月份 YYYYMM。"},
+                    "end_m": {"type": "string", "description": "结束月份 YYYYMM。"},
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -2218,6 +2367,214 @@ def _tushare_audit(record: dict) -> None:
         pass
 
 
+class _HermesTushareSdkBridge:
+    """将官方 tushare.pro_bar SDK 的底层请求桥接至 Hermes 统一的 _tushare_request。
+
+    自动复用后台数据源配置中的 token 与自定义网关 base_url，杜绝 SDK 默认直连明文 http 或读取全局 ~/tk.csv。
+    """
+
+    def __init__(self) -> None:
+        self.last_error: str | None = None
+
+    def query(self, api_name: str, fields: str = "", **kwargs: Any) -> Any:
+        import pandas as pd
+
+        clean = {
+            k: v
+            for k, v in kwargs.items()
+            if v is not None and v != "" and k != "ts_type_name"
+        }
+        resp = _tushare_request(api_name, clean, fields or "")
+        if "error" in resp:
+            self.last_error = str(resp["error"])
+            raise RuntimeError(self.last_error)
+        rows = resp.get("rows") or []
+        if not rows:
+            if api_name == "adj_factor":
+                return pd.DataFrame(columns=["ts_code", "trade_date", "adj_factor"])
+            if api_name == "daily_basic":
+                return pd.DataFrame(columns=["ts_code", "trade_date", "turnover_rate", "volume_ratio"])
+            if "min" in api_name:
+                return pd.DataFrame(
+                    columns=["ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount"]
+                )
+            return pd.DataFrame(
+                columns=["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"]
+            )
+        df = pd.DataFrame(rows)
+        if "trade_time" in df.columns:
+            df = df.sort_values("trade_time", ascending=False).reset_index(drop=True)
+        elif "trade_date" in df.columns:
+            df = df.sort_values("trade_date", ascending=False).reset_index(drop=True)
+        return df
+
+    def __getattr__(self, name: str) -> Any:
+        from functools import partial
+
+        return partial(self.query, name)
+
+
+def _normalize_pro_bar_symbol(raw: str, asset: str) -> str:
+    val = str(raw or "").strip().upper().replace("_", ".")
+    if not val:
+        return ""
+    if asset.upper() == "E":
+        if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", val):
+            return val
+        digits = re.sub(r"\D", "", val)
+        if re.fullmatch(r"\d{6}", digits):
+            if digits.startswith(("51", "56", "58")):
+                return f"{digits}.SH"
+            if digits.startswith(("15", "16", "18")):
+                return f"{digits}.SZ"
+        return normalize_a_share_symbol(val)
+    return val
+
+
+def _parse_ma_arg(ma: Any) -> list[int]:
+    if ma is None or ma == "":
+        return []
+    raw_items = ma if isinstance(ma, (list, tuple)) else str(ma).split(",")
+    out: list[int] = []
+    for item in raw_items:
+        try:
+            n = int(str(item).strip())
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= 250 and n not in out:
+            out.append(n)
+    return out
+
+
+def _parse_factors_arg(factors: Any) -> list[str] | None:
+    if factors is None or factors == "":
+        return None
+    raw_items = factors if isinstance(factors, (list, tuple)) else str(factors).split(",")
+    allowed = {"tor", "vr"}
+    out = [str(x).strip().lower() for x in raw_items if str(x).strip().lower() in allowed]
+    return out or None
+
+
+def _df_to_json_rows(df: Any) -> list[dict[str, Any]]:
+    import math
+    import pandas as pd
+
+    if df is None or getattr(df, "empty", True):
+        return []
+    records = df.to_dict(orient="records")
+    cleaned: list[dict[str, Any]] = []
+    for rec in records:
+        row: dict[str, Any] = {}
+        for k, v in rec.items():
+            key = str(k)
+            if v is None:
+                row[key] = None
+            elif isinstance(v, float):
+                row[key] = None if (math.isnan(v) or math.isinf(v)) else v
+            elif pd.isna(v):
+                row[key] = None
+            elif hasattr(v, "item"):
+                iv = v.item()
+                if isinstance(iv, float) and (math.isnan(iv) or math.isinf(iv)):
+                    row[key] = None
+                else:
+                    row[key] = iv
+            else:
+                row[key] = v
+        cleaned.append(row)
+    return cleaned
+
+
+def _tushare_pro_bar_request(params: dict[str, Any], fields: str = "") -> dict[str, Any]:
+    """通过官方 tushare SDK 执行 pro_bar 综合复权/均线/多资产行情提取。"""
+    import contextlib
+    import io
+
+    try:
+        import tushare as ts
+    except ImportError:
+        return {"error": "未安装 tushare Python SDK（请执行 pip install tushare）。"}
+
+    asset = str(params.get("asset") or "E").strip().upper() or "E"
+    raw_code = str(params.get("ts_code") or params.get("symbol") or "").strip()
+    ts_code = _normalize_pro_bar_symbol(raw_code, asset)
+    if not ts_code:
+        return {"error": "pro_bar 必须提供 ts_code（或 symbol）参数。"}
+
+    freq = str(params.get("freq") or "D").strip() or "D"
+    raw_adj = params.get("adj")
+    adj: str | None
+    if raw_adj is None or str(raw_adj).strip().lower() in ("", "none", "raw", "null"):
+        adj = None
+    else:
+        adj_low = str(raw_adj).strip().lower()
+        if adj_low not in ("qfq", "hfq"):
+            return {"error": f"不支持的复权类型 adj={raw_adj!r}（仅支持 qfq 前复权、hfq 后复权或留空不复权）。"}
+        adj = adj_low
+        if asset != "E":
+            adj = None  # ts.pro_bar 仅对股票/场内基金(E)执行 adj_factor 复权
+
+    today = date.today()
+    end_date = _valid_yyyymmdd(str(params.get("end_date") or "")) or (
+        "" if "min" in freq.lower() else today.strftime("%Y%m%d")
+    )
+    start_date = _valid_yyyymmdd(str(params.get("start_date") or "")) or (
+        "" if "min" in freq.lower() else (today - timedelta(days=240)).strftime("%Y%m%d")
+    )
+    if "min" in freq.lower():
+        if params.get("start_date"):
+            start_date = str(params["start_date"]).strip()
+        if params.get("end_date"):
+            end_date = str(params["end_date"]).strip()
+
+    ma_list = _parse_ma_arg(params.get("ma"))
+    factors_list = _parse_factors_arg(params.get("factors"))
+    adjfactor_flag = bool(params.get("adjfactor", False))
+    exchange = str(params.get("exchange") or "").strip()
+    contract_type = str(params.get("contract_type") or "").strip()
+    offset = int(params["offset"]) if params.get("offset") is not None else None
+    limit_val = int(params["limit"]) if params.get("limit") is not None else None
+
+    bridge = _HermesTushareSdkBridge()
+    started = time.monotonic()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            df = ts.pro_bar(
+                ts_code=ts_code,
+                api=bridge,
+                start_date=start_date,
+                end_date=end_date,
+                freq=freq,
+                asset=asset,
+                exchange=exchange,
+                adj=adj,
+                ma=ma_list,
+                factors=factors_list,
+                adjfactor=adjfactor_flag,
+                offset=offset,
+                limit=limit_val,
+                fields=fields or "",
+                contract_type=contract_type,
+                retry_count=1,
+            )
+    except Exception as exc:  # noqa: BLE001
+        err_msg = bridge.last_error or buf.getvalue().strip() or str(exc)
+        return {"error": err_msg if err_msg.startswith("TuShare") or "未配置" in err_msg else f"TuShare pro_bar 调用失败: {err_msg[:400]}"}
+
+    if bridge.last_error:
+        return {"error": bridge.last_error}
+    rows = _df_to_json_rows(df)
+    return {
+        "rows": rows,
+        "ms": int((time.monotonic() - started) * 1000),
+        "ts_code": ts_code,
+        "asset": asset,
+        "freq": freq,
+        "adj": adj or "none",
+    }
+
+
 def tushare_query(
     api_name: str,
     params: dict | None = None,
@@ -2226,14 +2583,14 @@ def tushare_query(
 ) -> dict:
     """通用 TuShare 接口透传：白名单（TUSHARE_API_SET）+ 字段名校验 + 行数截断 + 审计。
 
-    聚焦 A 股核心的任一已收录接口都可调用；未收录接口直接拒绝，避免 LLM 乱调。
+    2026-11-21 全量 281 个接口均已收录（其中 pro_bar 自动路由至官方 SDK 桥接层）；未收录接口直接拒绝。
     """
     api_name = (api_name or "").strip()
     if api_name not in TUSHARE_API_SET:
         return {
             "error": (
                 f"未收录的 TuShare 接口: {api_name}"
-                "（仅允许调用目录内聚焦 A 股核心的接口，先 list_tushare_apis 查可用接口）"
+                "（请先通过 list_tushare_apis 查可用接口目录）"
             )
         }
     entry = by_api_name(api_name) or {}
@@ -2245,6 +2602,8 @@ def tushare_query(
     clean_params: dict[str, Any] = {}
     for key, value in params.items():
         if isinstance(value, (str, int, float, bool)) or value is None:
+            clean_params[key] = value
+        elif api_name == "pro_bar" and key in ("ma", "factors") and isinstance(value, list):
             clean_params[key] = value
         else:
             return {"error": f"params 字段 {key} 的值类型不被允许（仅支持标量）"}
@@ -2266,7 +2625,10 @@ def tushare_query(
         requested = _TUSHARE_QUERY_CUT
     cut = max(1, min(requested, _TUSHARE_QUERY_CUT))
     started = time.monotonic()
-    response = _tushare_request(api_name, clean_params, field_str)
+    if api_name == "pro_bar":
+        response = _tushare_pro_bar_request(clean_params, field_str)
+    else:
+        response = _tushare_request(api_name, clean_params, field_str)
     ms = int((time.monotonic() - started) * 1000)
 
     if "error" in response:
@@ -2302,7 +2664,7 @@ def tushare_query(
 def list_tushare_apis(category: str | None = None, scope: str | None = None) -> dict:
     """列出 TuShare 接口目录：无参返回分类索引；指定 category 返回该分类精简条目。
 
-    三层分类避免一次返回全量（~150 条）被 OBSERVATION_CHAR_LIMIT 7000 截成碎片。
+    三层分类避免一次返回全量（~289 条）被 OBSERVATION_CHAR_LIMIT 7000 截成碎片。
     semantic_tool 字段运行时按 skill_registry 已注册工具过滤，避免标注未实现工具。
     """
     try:
@@ -2317,7 +2679,7 @@ def list_tushare_apis(category: str | None = None, scope: str | None = None) -> 
             "categories": catalog_category_index(),
             "total": len(TUSHARE_API_SET),
             "tip": "先用 list_tushare_apis(category=...) 查看某分类的接口；"
-            "高价值接口可用专用语义工具（semantic_tool），其余用 tushare_query 通用透传。",
+            "高价值接口可用专用语义工具（semantic_tool），其余用 tushare_query 通用透传（pro_bar 自动走官方 SDK）。",
         }
 
     entries = catalog_by_category_scope(category, scope)
@@ -2326,14 +2688,17 @@ def list_tushare_apis(category: str | None = None, scope: str | None = None) -> 
         semantic = entry.get("semantic_tool")
         if semantic and not is_registered(semantic):
             semantic = None
-        items.append({
+        item_dict: dict[str, Any] = {
             "api_name": entry["api_name"],
             "name_cn": entry["name_cn"],
             "scope": entry["scope"],
             "params": entry.get("params") or [],
             "semantic_tool": semantic,
             "desc": entry.get("desc") or "",
-        })
+        }
+        if entry.get("status"):
+            item_dict["status"] = entry["status"]
+        items.append(item_dict)
     return {
         "category": category,
         "scope": scope,
@@ -3008,6 +3373,211 @@ def get_ccass_hold(ts_code: str | None = None, trade_date: str | None = None,
     return _semantic_tushare("ccass_hold", params, fields, name_cn="中央结算系统持股统计", tool_name="get_ccass_hold")
 
 
+# -------------------------------------------------------------------- 三批语义封装（2026-11-21 新接口与 SDK 综合行情）
+_US_MACRO_NAME_MAP: dict[str, str] = {
+    "us_pce": "美国核心 PCE 物价指数",
+    "us_ppi": "美国生产者价格指数",
+    "us_pmi": "美国采购经理人指数 PMI",
+    "us_unemployment": "美国劳工统计局失业率与就业",
+    "us_rs": "美国零售销售月度变化",
+    "us_hs": "美国新房开工数量",
+    "us_bp": "美国新发建筑许可",
+    "us_job_offers": "美国 JOLTS 职位空缺调查",
+    "us_tycr": "美国国债收益率曲线利率",
+}
+
+
+def get_pro_bar(
+    symbol: str,
+    *,
+    asset: str | None = "E",
+    freq: str | None = "D",
+    adj: str | None = "qfq",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    ma: str | list[int] | None = None,
+    factors: str | list[str] | None = None,
+    limit: int = 120,
+) -> dict:
+    """TuShare 官方 SDK 通用行情接口（pro_bar）：复权/多周期/均线/换手量比一体提取。"""
+    safe_limit = max(1, min(int(limit or 120), MAX_MINUTE_ROWS))
+    resolved_asset = str(asset or "E").strip().upper() or "E"
+    # 指数/期货/期权默认不传复权，股票/ETF 默认前复权 qfq
+    resolved_adj = adj if resolved_asset == "E" else None
+    req_params: dict[str, Any] = {
+        "ts_code": symbol,
+        "asset": resolved_asset,
+        "freq": freq or "D",
+        "adj": resolved_adj,
+        "start_date": start_date,
+        "end_date": end_date,
+        "ma": ma,
+        "factors": factors,
+    }
+    resp = _tushare_pro_bar_request(req_params)
+    if "error" in resp:
+        _tushare_audit({
+            "tool": "get_pro_bar",
+            "api_name": "pro_bar",
+            "params": {k: v for k, v in req_params.items() if v is not None},
+            "error": resp["error"],
+        })
+        return resp
+    rows = resp.get("rows") or []
+    time_key = "trade_time" if (rows and "trade_time" in rows[0]) else "trade_date"
+    rows = sorted(rows, key=lambda r: str(r.get(time_key) or ""))
+    total = len(rows)
+    truncated = total > safe_limit
+    sliced = rows[-safe_limit:]
+    _tushare_audit({
+        "tool": "get_pro_bar",
+        "api_name": "pro_bar",
+        "params": {k: v for k, v in req_params.items() if v is not None},
+        "rows": total,
+        "truncated": truncated,
+        "ms": resp.get("ms", 0),
+    })
+    return {
+        "symbol": resp.get("ts_code") or symbol,
+        "asset": resp.get("asset", resolved_asset),
+        "freq": resp.get("freq", freq or "D"),
+        "adj": resp.get("adj", "none"),
+        "name_cn": "通用行情接口",
+        "count": len(sliced),
+        "total_fetched": total,
+        "truncated": truncated,
+        "bars": sliced,
+        "rows": sliced,
+        "ms": resp.get("ms", 0),
+        "source": "tushare.pro_bar",
+    }
+
+
+def get_stk_seasoned(
+    ts_code: str | None = None,
+    ann_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """股票增发（stk_seasoned）。"""
+    params: dict[str, Any] = {}
+    if ts_code:
+        params["ts_code"] = normalize_a_share_symbol(ts_code)
+    ad = _valid_yyyymmdd(ann_date)
+    if ad:
+        params["ann_date"] = ad
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=365)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    return _semantic_tushare("stk_seasoned", params, "", name_cn="股票增发", tool_name="get_stk_seasoned")
+
+
+def get_fx_midrate(
+    trade_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """人民币汇率中间价（fx_midrate）。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=60)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    return _semantic_tushare("fx_midrate", params, "", name_cn="人民币汇率中间价", tool_name="get_fx_midrate")
+
+
+def get_vix_index(
+    trade_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """美股恐慌指数行情（vix_index）。"""
+    params: dict[str, Any] = {}
+    td = _valid_yyyymmdd(trade_date)
+    if td:
+        params["trade_date"] = td
+    else:
+        today = date.today()
+        end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+        start = _valid_yyyymmdd(start_date) or (today - timedelta(days=90)).strftime("%Y%m%d")
+        params["start_date"] = start
+        params["end_date"] = end
+    return _semantic_tushare("vix_index", params, "", name_cn="美股恐慌指数行情", tool_name="get_vix_index")
+
+
+def get_us_macro(
+    indicator: str = "us_pce",
+    start_m: str | None = None,
+    end_m: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """美国核心宏观经济指标统一语义查询。"""
+    api = str(indicator or "us_pce").strip().lower()
+    if api not in _US_MACRO_NAME_MAP:
+        return {
+            "error": f"不支持的美国宏观指标: {indicator!r}，可选: {', '.join(_US_MACRO_NAME_MAP.keys())}"
+        }
+    today = date.today()
+    params: dict[str, Any] = {}
+    if api == "us_tycr":
+        params["start_date"] = _valid_yyyymmdd(start_date) or (today - timedelta(days=90)).strftime("%Y%m%d")
+        params["end_date"] = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
+    else:
+        sm = _valid_yyyymm(start_m)
+        em = _valid_yyyymm(end_m)
+        sd = _valid_yyyymmdd(start_date)
+        ed = _valid_yyyymmdd(end_date)
+        if sm or em:
+            params["start_m"] = sm or (today - timedelta(days=730)).strftime("%Y%m")
+            params["end_m"] = em or today.strftime("%Y%m")
+        elif sd or ed:
+            params["start_date"] = sd or (today - timedelta(days=730)).strftime("%Y%m%d")
+            params["end_date"] = ed or today.strftime("%Y%m%d")
+    return _semantic_tushare(api, params, "", name_cn=_US_MACRO_NAME_MAP[api], tool_name="get_us_macro")
+
+
+def get_cn_gdp(
+    q: str | None = None,
+    start_q: str | None = None,
+    end_q: str | None = None,
+) -> dict:
+    """国内生产总值 GDP（cn_gdp）。"""
+    params: dict[str, Any] = {}
+    if q:
+        params["q"] = str(q).strip().upper()
+    else:
+        today = date.today()
+        cur_q = (today.month - 1) // 3 + 1
+        params["start_q"] = str(start_q).strip().upper() if start_q else f"{today.year - 2}Q1"
+        params["end_q"] = str(end_q).strip().upper() if end_q else f"{today.year}Q{cur_q}"
+    return _semantic_tushare("cn_gdp", params, "", name_cn="国内生产总值GDP", tool_name="get_cn_gdp")
+
+
+def get_cn_ppi(start_m: str | None = None, end_m: str | None = None) -> dict:
+    """工业生产者出厂价格指数 PPI（cn_ppi）。"""
+    today = date.today()
+    end = _valid_yyyymm(end_m) or today.strftime("%Y%m")
+    start = _valid_yyyymm(start_m) or (today - timedelta(days=365)).strftime("%Y%m")
+    return _semantic_tushare("cn_ppi", {"start_m": start, "end_m": end}, "", name_cn="工业生产者出厂价格指数PPI", tool_name="get_cn_ppi")
+
+
+def get_cn_pmi(start_m: str | None = None, end_m: str | None = None) -> dict:
+    """中国采购经理指数 PMI（cn_pmi）。"""
+    today = date.today()
+    end = _valid_yyyymm(end_m) or today.strftime("%Y%m")
+    start = _valid_yyyymm(start_m) or (today - timedelta(days=365)).strftime("%Y%m")
+    return _semantic_tushare("cn_pmi", {"start_m": start, "end_m": end}, "", name_cn="采购经理指数PMI", tool_name="get_cn_pmi")
+
+
 def _data_source_row(provider: str) -> dict[str, Any] | None:
     try:
         with engine.connect() as conn:
@@ -3557,6 +4127,14 @@ _STOCK_TOOL_DISPLAY_NAMES = {
     "get_latest_price": "查询最新价格",
     "tushare_query": "TuShare 数据查询",
     "list_tushare_apis": "查询数据接口目录",
+    "get_pro_bar": "获取复权综合行情",
+    "get_stk_seasoned": "查询股票增发",
+    "get_fx_midrate": "查询人民币汇率中间价",
+    "get_vix_index": "查询VIX恐慌指数",
+    "get_us_macro": "查询美国宏观数据",
+    "get_cn_gdp": "查询国内GDP",
+    "get_cn_ppi": "查询国内PPI",
+    "get_cn_pmi": "查询国内PMI",
     "get_realtime_quote": "获取实时行情",
     "get_tushare_daily": "获取历史K线",
     "get_daily_history": "获取历史K线",

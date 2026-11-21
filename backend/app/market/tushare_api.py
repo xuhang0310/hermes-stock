@@ -14,7 +14,7 @@ def tushare_catalog_list(
     scope: str | None = Query(default=None),
     _context: AuthContext = Depends(require_permission("dashboard:view")),
 ) -> dict:
-    """TuShare 接口元数据目录（聚焦 A 股核心约 150 接口）。供前端管理页与 LLM 目录查询共用。"""
+    """TuShare 接口元数据目录（全量覆盖 2026-11-21 官方 281 个调用标识及历史兼容接口）。供前端管理页与 LLM 目录查询共用。"""
     from backend.app.market.tushare_catalog import (
         TUSHARE_CATALOG,
         by_category_scope as catalog_by_category_scope,

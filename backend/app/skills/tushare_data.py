@@ -1,4 +1,4 @@
-"""技能：TuShare 数据 —— 通用透传 + 目录查询 + 39 个语义封装（聚焦 A 股核心约 150 接口）。
+"""技能：TuShare 数据 —— 通用透传（覆盖 2026-11-21 全量 281 接口）+ 目录查询 + 47 个语义封装（含 SDK pro_bar 综合复权行情）。
 
 Phase 2：registry 接管分发；prompt_instructions 补齐。
 """
@@ -14,12 +14,16 @@ from backend.app.market.stock_tools import (
     get_cashflow,
     get_ccass_hold,
     get_cn_cpi,
+    get_cn_gdp,
+    get_cn_pmi,
+    get_cn_ppi,
     get_daily_info,
     get_disclosure_date,
     get_dividend,
     get_express,
     get_fina_mainbz,
     get_forecast,
+    get_fx_midrate,
     get_hm_detail,
     get_holdertrade,
     get_holdernumber,
@@ -34,11 +38,13 @@ from backend.app.market.stock_tools import (
     get_moneyflow_hsgt,
     get_namechange,
     get_pledge_stat,
+    get_pro_bar,
     get_repurchase,
     get_report_rc,
     get_share_float,
     get_stk_factor,
     get_stk_limit,
+    get_stk_seasoned,
     get_suspend,
     get_sw_daily,
     get_top10_float_holders,
@@ -47,6 +53,8 @@ from backend.app.market.stock_tools import (
     get_top_list,
     get_trade_cal,
     get_tushare_minutes,
+    get_us_macro,
+    get_vix_index,
     list_tushare_apis,
     tushare_query,
 )
@@ -62,8 +70,8 @@ def _pick(*names: str) -> list[dict]:
 SKILL = {
     "name": "tushare_data",
     "display_name": "TuShare 数据",
-    "description": "TuShare 通用透传 + 接口目录 + 39 个语义封装（交易日历/停复牌/涨跌停/龙虎榜/游资/两融/北向/解禁/大宗/十大股东/增减持/回购/质押/三大表/业绩预告快报/分红/主营/披露/指数/申万/市场统计/券商预测/公告/技术因子等）",
-    "version": "1.2.0",
+    "description": "TuShare 通用透传（全量 281 接口）+ 接口目录 + 47 个语义封装（SDK pro_bar 复权综合行情/交易日历/停复牌/涨跌停/龙虎榜/游资/两融/解禁/大宗/十大股东/增减持/增发/回购/质押/三大表/业绩预告快报/分红/主营/披露/指数/申万/VIX/人民币汇率/中美宏观/券商预测/公告/技术因子等）",
+    "version": "1.3.0",
     "chat_modes": ["stock", "research"],
     "roles": [],
     "tools": _pick(
@@ -82,6 +90,10 @@ SKILL = {
         "get_disclosure_date", "get_index_weight", "get_index_member",
         "get_daily_info", "get_report_rc", "get_anns", "get_namechange",
         "get_stk_factor", "get_ccass_hold",
+        # 三批（2026-11-21 全量补齐：SDK pro_bar + 增发 + 汇率 + VIX + 中美宏观）
+        "get_pro_bar", "get_stk_seasoned", "get_fx_midrate",
+        "get_vix_index", "get_us_macro",
+        "get_cn_gdp", "get_cn_ppi", "get_cn_pmi",
     ),
     "executors": {
         "tushare_query": lambda a: tushare_query(
@@ -296,6 +308,54 @@ SKILL = {
             trade_date=_optional_str(a.get("trade_date")),
             start_date=_optional_str(a.get("start_date")),
             end_date=_optional_str(a.get("end_date")),
+        ),
+        # 三批
+        "get_pro_bar": lambda a: get_pro_bar(
+            str(a.get("symbol") or ""),
+            asset=_optional_str(a.get("asset")) or "E",
+            freq=_optional_str(a.get("freq")) or "D",
+            adj=_optional_str(a.get("adj")) if a.get("adj") is not None else "qfq",
+            start_date=_optional_str(a.get("start_date")),
+            end_date=_optional_str(a.get("end_date")),
+            ma=a.get("ma"),
+            factors=a.get("factors"),
+            limit=_int_arg(a.get("limit"), 120, MAX_MINUTE_ROWS),
+        ),
+        "get_stk_seasoned": lambda a: get_stk_seasoned(
+            ts_code=_optional_str(a.get("symbol")),
+            ann_date=_optional_str(a.get("ann_date")),
+            start_date=_optional_str(a.get("start_date")),
+            end_date=_optional_str(a.get("end_date")),
+        ),
+        "get_fx_midrate": lambda a: get_fx_midrate(
+            trade_date=_optional_str(a.get("trade_date")),
+            start_date=_optional_str(a.get("start_date")),
+            end_date=_optional_str(a.get("end_date")),
+        ),
+        "get_vix_index": lambda a: get_vix_index(
+            trade_date=_optional_str(a.get("trade_date")),
+            start_date=_optional_str(a.get("start_date")),
+            end_date=_optional_str(a.get("end_date")),
+        ),
+        "get_us_macro": lambda a: get_us_macro(
+            indicator=str(a.get("indicator") or "us_pce"),
+            start_m=_optional_str(a.get("start_m")),
+            end_m=_optional_str(a.get("end_m")),
+            start_date=_optional_str(a.get("start_date")),
+            end_date=_optional_str(a.get("end_date")),
+        ),
+        "get_cn_gdp": lambda a: get_cn_gdp(
+            q=_optional_str(a.get("q")),
+            start_q=_optional_str(a.get("start_q")),
+            end_q=_optional_str(a.get("end_q")),
+        ),
+        "get_cn_ppi": lambda a: get_cn_ppi(
+            start_m=_optional_str(a.get("start_m")),
+            end_m=_optional_str(a.get("end_m")),
+        ),
+        "get_cn_pmi": lambda a: get_cn_pmi(
+            start_m=_optional_str(a.get("start_m")),
+            end_m=_optional_str(a.get("end_m")),
         ),
     },
     # 留空：TuShare 优先、先查目录再透传等已在基础问股/研究提示词覆盖，避免二次注入。

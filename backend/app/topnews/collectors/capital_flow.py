@@ -95,4 +95,61 @@ class CapitalFlowCollector(BaseCollector):
         except Exception as e:
             logger.error("融资融券 TuShare 采集失败: %s", e)
 
+        # 大盘主力资金与人民币汇率中间价（补充已停更的北向日频披露缺口）
+        try:
+            extra = await asyncio.to_thread(_fetch_mkt_flow_and_fx_tushare)
+            items.extend(extra)
+        except Exception as e:
+            logger.error("大盘资金/汇率采集失败: %s", e)
+
         return MarketData(category=self.category, items=items)
+
+
+def _fetch_mkt_flow_and_fx_tushare() -> list[dict]:
+    """补充东财大盘主力净流向（moneyflow_mkt_dc）与人民币汇率中间价（fx_midrate）。"""
+    out: list[dict] = []
+    try:
+        from backend.app.market.stock_tools import _tushare_request
+
+        end = date.today().strftime("%Y%m%d")
+        start = (date.today() - timedelta(days=10)).strftime("%Y%m%d")
+
+        dc_resp = _tushare_request("moneyflow_mkt_dc", {"start_date": start, "end_date": end}, "")
+        dc_rows = sorted(dc_resp.get("rows") or [], key=lambda r: str(r.get("trade_date") or ""))
+        if dc_rows:
+            d_last = dc_rows[-1]
+            net_amt = float(d_last.get("net_amount") or 0)
+            if net_amt != 0:
+                out.append({
+                    "name": "两市主力净流向",
+                    "value": round(net_amt / 1e8, 2),
+                    "unit": "亿元",
+                    "date": d_last.get("trade_date", ""),
+                    "direction": "up" if net_amt > 0 else "down",
+                    "detail": f"净占比 {d_last.get('net_amount_rate', '-')}%",
+                    "source": "tushare.moneyflow_mkt_dc",
+                })
+
+        fx_resp = _tushare_request("fx_midrate", {"start_date": start, "end_date": end}, "")
+        fx_rows = sorted(
+            fx_resp.get("rows") or [],
+            key=lambda r: str(r.get("trade_date") or r.get("date") or ""),
+        )
+        if fx_rows:
+            f_last = fx_rows[-1]
+            usd_cny = f_last.get("usd") or f_last.get("usd_cny") or f_last.get("close")
+            if usd_cny is not None:
+                val = float(usd_cny)
+                if val > 0:
+                    out.append({
+                        "name": "美元兑人民币中间价",
+                        "value": round(val, 4),
+                        "unit": "",
+                        "date": f_last.get("trade_date") or f_last.get("date") or "",
+                        "direction": "flat",
+                        "detail": "央行授权中间价",
+                        "source": "tushare.fx_midrate",
+                    })
+    except Exception as e:
+        logger.error("TuShare 大盘资金/汇率采集失败: %s", e)
+    return out

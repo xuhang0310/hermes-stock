@@ -40,6 +40,9 @@ SixRabbits Stock 已有可承接的表：
 ```text
 resolve_stock        股票代码/名称解析
 get_tushare_daily    获取 TuShare 日线并缓存 daily_bars
+get_pro_bar          通过官方 tushare SDK 获取复权/多周期/均线/换手量比综合行情（桥接后台数据源网关）
+list_tushare_apis    按三级分类检索 2026-11-21 全量 281 个 TuShare 接口目录
+tushare_query        通用白名单透传（含 pro_bar SDK 路由、*_vip 季度批量、外汇/期货/美韩宏观等）
 analyze_daily_bars   计算 MA、量比、支撑压力、回撤和风险点
 search_stock_news    使用 Tavily Search 搜索消息面
 ```

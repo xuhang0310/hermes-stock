@@ -31,3 +31,5 @@ akshare==1.18.81
 opentelemetry-api==1.42.1
 opentelemetry-sdk==1.42.1
 opentelemetry-exporter-otlp==1.42.1
+# TuShare 官方 Python SDK（用于 pro_bar 综合复权/均线/多资产行情合成）
+tushare==1.4.29

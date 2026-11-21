@@ -58,6 +58,30 @@ def _fetch_tushare_global_indices() -> list[dict]:
                 "trade_date": row.get("trade_date"),
                 "source": "tushare.index_global",
             })
+
+        # 若 index_global 未包含 VIX，则通过新接入的 vix_index 接口补齐恐慌指数
+        if not any(it.get("code") == "VIX" for it in items):
+            vix_resp = _tushare_request("vix_index", {"start_date": start, "end_date": end}, "")
+            vix_rows = sorted(
+                vix_resp.get("rows") or [],
+                key=lambda r: str(r.get("trade_date") or r.get("date") or ""),
+            )
+            if vix_rows:
+                v_last = vix_rows[-1]
+                v_close = float(v_last.get("close") or v_last.get("vix_close") or 0)
+                if v_close > 0:
+                    v_pct = float(v_last.get("pct_chg") or v_last.get("chg_pct") or 0)
+                    v_chg = float(v_last.get("change") or v_last.get("chg") or 0)
+                    items.append({
+                        "name": "VIX恐慌指数",
+                        "code": "VIX",
+                        "price": round(v_close, 2),
+                        "change": round(v_chg, 2),
+                        "change_pct": round(v_pct, 2),
+                        "direction": "up" if v_pct > 0 else "down" if v_pct < 0 else "flat",
+                        "trade_date": v_last.get("trade_date") or v_last.get("date"),
+                        "source": "tushare.vix_index",
+                    })
         return items
     except Exception as e:
         logger.error("TuShare 国际指数采集失败: %s", e)
