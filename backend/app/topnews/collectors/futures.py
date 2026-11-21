@@ -68,7 +68,8 @@ def _fetch_tushare_futures() -> list[dict]:
             s_close = float(s_last.get("close") or 0)
             if s_close > 0:
                 s_chg = float(s_last.get("change") or 0)
-                s_pct = float(s_last.get("pct_change") or 0)
+                s_prev = s_close - s_chg
+                s_pct = (s_chg / s_prev * 100.0) if s_prev > 0 else 0.0
                 items.append({
                     "name": "上海现货黄金 Au99.99",
                     "code": "Au99.99",

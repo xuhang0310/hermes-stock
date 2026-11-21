@@ -130,16 +130,28 @@ def _fetch_mkt_flow_and_fx_tushare() -> list[dict]:
                     "source": "tushare.moneyflow_mkt_dc",
                 })
 
-        fx_resp = _tushare_request("fx_midrate", {"start_date": start, "end_date": end}, "")
-        fx_rows = sorted(
-            fx_resp.get("rows") or [],
-            key=lambda r: str(r.get("trade_date") or r.get("date") or ""),
+        fx_resp = _tushare_request(
+            "fx_midrate",
+            {"ts_code": "CNYUSD", "start_date": start, "end_date": end},
+            "",
         )
+        fx_rows = [
+            r for r in (fx_resp.get("rows") or [])
+            if str(r.get("ts_code") or "CNYUSD").upper() in ("CNYUSD", "USDCNY")
+        ]
+        fx_rows.sort(key=lambda r: str(r.get("trade_date") or r.get("date") or ""))
         if fx_rows:
             f_last = fx_rows[-1]
-            usd_cny = f_last.get("usd") or f_last.get("usd_cny") or f_last.get("close")
-            if usd_cny is not None:
-                val = float(usd_cny)
+            raw_rate = (
+                f_last.get("mid_rate")
+                or f_last.get("usd")
+                or f_last.get("usd_cny")
+                or f_last.get("close")
+            )
+            if raw_rate is not None:
+                val = float(raw_rate)
+                if val > 50.0:  # CFETS 100美元兑人民币口径（如 671.31 -> 6.7131）
+                    val = val / 100.0
                 if val > 0:
                     out.append({
                         "name": "美元兑人民币中间价",

@@ -70,7 +70,12 @@ def _fetch_tushare_global_indices() -> list[dict]:
                 v_last = vix_rows[-1]
                 v_close = float(v_last.get("close") or v_last.get("vix_close") or 0)
                 if v_close > 0:
-                    v_pct = float(v_last.get("pct_chg") or v_last.get("chg_pct") or 0)
+                    v_pct = float(
+                        v_last.get("pct_chg")
+                        or v_last.get("pct_change")
+                        or v_last.get("chg_pct")
+                        or 0
+                    )
                     v_chg = float(v_last.get("change") or v_last.get("chg") or 0)
                     items.append({
                         "name": "VIX恐慌指数",

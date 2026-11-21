@@ -230,7 +230,7 @@ class TushareFullCatalogAndSdkTests(unittest.TestCase):
                 }
             if api_name == "vix_index":
                 return {
-                    "rows": [{"trade_date": "20261120", "close": 15.82, "change": -0.65, "pct_chg": -3.95}]
+                    "rows": [{"trade_date": "20261120", "close": "35.89", "pct_change": "26.2"}]
                 }
             if api_name == "moneyflow_mkt_dc":
                 return {
@@ -238,7 +238,7 @@ class TushareFullCatalogAndSdkTests(unittest.TestCase):
                 }
             if api_name == "fx_midrate":
                 return {
-                    "rows": [{"trade_date": "20261120", "usd": 7.1856}]
+                    "rows": [{"trade_date": "20261120", "ts_code": "CNYUSD", "mid_rate": 671.31}]
                 }
             return {"rows": []}
 
