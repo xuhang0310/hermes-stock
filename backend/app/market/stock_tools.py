@@ -30,6 +30,8 @@ BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 MAX_DAILY_ROWS = 180
 MAX_MINUTE_ROWS = 8000
 _STOCK_BASIC_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": []}
+_ETF_BASIC_CACHE: dict[str, Any] = {"expires_at": 0.0, "rows": []}
+_ETF_LIMIT_CACHE: dict[tuple[str, str], tuple[float, float]] = {}
 _TAVILY_KEY_LOCK = threading.Lock()
 _TAVILY_ACTIVE_KEY_INDEX = 0
 _TAVILY_RETRYABLE_STATUS_CODES = frozenset(
@@ -1073,6 +1075,22 @@ def stock_system_prompt_with_skills(extra_context: str | None = None, skills: li
 {ANSWER_STYLE_RULES}{skill_rules_block}{context}"""
 
 
+def is_etf_symbol(raw: str) -> bool:
+    """判断是否为沪深场内 ETF / LOF 基金代码（51/52/53/56/58.SH 或 15/16/18.SZ）。"""
+    code = str(raw or "").strip().upper().replace("_", ".")
+    base = code.split(".")[0]
+    if not re.fullmatch(r"\d{6}", base):
+        return False
+    if "." in code:
+        suffix = code.split(".")[-1]
+        if suffix == "SH":
+            return base.startswith(("51", "52", "53", "56", "58"))
+        if suffix == "SZ":
+            return base.startswith(("15", "16", "18"))
+        return False
+    return base.startswith(("51", "52", "53", "56", "58", "15", "16", "18"))
+
+
 def normalize_a_share_symbol(raw: str) -> str:
     value = raw.strip().upper().replace("_", ".")
     if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", value):
@@ -1080,9 +1098,9 @@ def normalize_a_share_symbol(raw: str) -> str:
     digits = re.sub(r"\D", "", value)
     if not re.fullmatch(r"\d{6}", digits):
         return value
-    if digits.startswith(("60", "68", "90")):
+    if digits.startswith(("60", "68", "90", "51", "52", "53", "56", "58")):
         return f"{digits}.SH"
-    if digits.startswith(("00", "20", "30")):
+    if digits.startswith(("00", "20", "30", "15", "16", "18")):
         return f"{digits}.SZ"
     if digits.startswith(("43", "83", "87", "88", "92")):
         return f"{digits}.BJ"
@@ -1147,6 +1165,29 @@ def resolve_stock(query: str) -> dict:
                     "source": "tushare",
                 }
             )
+    if is_etf_symbol(normalized) or "etf" in key_lower or not remote_candidates:
+        for row in _etf_basic_rows():
+            ts_code = str(row.get("ts_code") or "")
+            symbol = ts_code.split(".")[0] if "." in ts_code else ts_code
+            name = str(row.get("csname") or row.get("extname") or "")
+            fullname = str(row.get("cname") or "")
+            if (
+                normalized == ts_code
+                or key == symbol
+                or (name and key_lower in name.lower())
+                or (fullname and key_lower in fullname.lower())
+            ):
+                remote_candidates.append(
+                    {
+                        "ts_code": ts_code,
+                        "symbol": symbol,
+                        "name": name or ts_code,
+                        "market": row.get("exchange"),
+                        "exchange": row.get("exchange"),
+                        "list_date": row.get("list_date"),
+                        "source": "tushare.etf_basic",
+                    }
+                )
 
     exact_remote = [
         item
@@ -1197,7 +1238,8 @@ def get_tushare_daily(
     end = _valid_yyyymmdd(end_date) or today.strftime("%Y%m%d")
     start = _valid_yyyymmdd(start_date) or (today - timedelta(days=240)).strftime("%Y%m%d")
     fields = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
-    response = _tushare_request("daily", {"ts_code": ts_code, "start_date": start, "end_date": end}, fields)
+    api_name = "fund_daily" if is_etf_symbol(ts_code) else "daily"
+    response = _tushare_request(api_name, {"ts_code": ts_code, "start_date": start, "end_date": end}, fields)
     if "error" in response:
         return response
     rows = response.get("rows", [])
@@ -1207,7 +1249,7 @@ def get_tushare_daily(
     saved = _cache_daily_bars(ts_code, bars)
     return {
         "symbol": ts_code,
-        "source": "tushare.daily",
+        "source": f"tushare.{api_name}",
         "start_date": start,
         "end_date": end,
         "bars": bars,
@@ -1241,8 +1283,9 @@ def get_tushare_minutes(
     end = _valid_minute_datetime(end_date) or now.strftime("%Y-%m-%d %H:%M:%S")
     start = _valid_minute_datetime(start_date) or (now - timedelta(days=lookback_days)).strftime("%Y-%m-%d 09:00:00")
     fields = "ts_code,trade_time,open,close,high,low,vol,amount"
+    api_name = "etf_mins" if is_etf_symbol(ts_code) else "stk_mins"
     response = _tushare_request(
-        "stk_mins",
+        api_name,
         {"ts_code": ts_code, "freq": normalized_freq, "start_date": start, "end_date": end},
         fields,
     )
@@ -1254,7 +1297,7 @@ def get_tushare_minutes(
     safe_limit = max(30, min(int(limit or 800), MAX_MINUTE_ROWS))
     return {
         "symbol": ts_code,
-        "source": f"tushare.stk_mins.{normalized_freq}",
+        "source": f"tushare.{api_name}.{normalized_freq}",
         "freq": normalized_freq,
         "start_date": start,
         "end_date": end,
@@ -1645,7 +1688,7 @@ def get_latest_price(symbol: str) -> dict:
         return {"error": f"获取最新价失败: {daily.get('error') or '无行情数据'}"}
 
     latest, previous = bars[-1], (bars[-2] if len(bars) >= 2 else {})
-    info = _stock_basic_item(ts_code) or {}
+    info = (_etf_basic_item(ts_code) if is_etf_symbol(ts_code) else _stock_basic_item(ts_code)) or {}
     price = latest.get("close")
     pre_close = latest.get("pre_close") or previous.get("close")
     pct_chg = latest.get("pct_chg")
@@ -1737,11 +1780,12 @@ def get_realtime_quote(symbol: str) -> dict:
         return {"error": f"没有可用行情快照: {symbol}"}
     latest = bars[-1]
     previous = bars[-2] if len(bars) >= 2 else {}
-    basic = _latest_daily_basic(ts_code, end_date=latest.get("trade_date"))
+    etf_flag = is_etf_symbol(ts_code)
+    basic = {} if etf_flag else _latest_daily_basic(ts_code, end_date=latest.get("trade_date"))
     pct_chg = latest.get("pct_chg")
     if pct_chg is None and previous.get("close"):
         pct_chg = _pct(float(latest["close"]), float(previous["close"]))
-    info = _stock_basic_item(ts_code) or {}
+    info = (_etf_basic_item(ts_code) if etf_flag else _stock_basic_item(ts_code)) or {}
     now = _sh_now()
     market_open = _in_market_window(now)
     trade_date = str(latest.get("trade_date") or "")
@@ -1810,30 +1854,68 @@ def get_realtime_quotes(symbols: list[str] | tuple[str, ...]) -> dict:
             "ms": 0,
         }
 
+    stock_syms = [s for s in requested if not is_etf_symbol(s)]
+    etf_syms = [s for s in requested if is_etf_symbol(s)]
+
     fields = (
         "ts_code,name,pre_close,high,open,low,close,vol,amount,num,"
         "ask_price1,ask_volume1,bid_price1,bid_volume1,trade_time"
     )
+    etf_fields = "ts_code,name,pre_close,high,open,low,close,vol,amount,num"
     started = time.monotonic()
-    raw_rows: list[dict[str, Any]] = []
-    for offset in range(0, len(requested), 100):
-        chunk = requested[offset : offset + 100]
+    raw_rows: list[tuple[str, dict[str, Any]]] = []
+    errors: list[str] = []
+
+    for offset in range(0, len(stock_syms), 100):
+        chunk = stock_syms[offset : offset + 100]
         result = _tushare_request("rt_k", {"ts_code": ",".join(chunk)}, fields)
         if "error" in result:
-            return {
-                "error": result["error"],
-                "source": "tushare.rt_k",
-                "requested_count": len(requested),
-                "quote_count": 0,
-                "missing_symbols": requested,
-                "ms": int((time.monotonic() - started) * 1000),
-            }
-        raw_rows.extend(result.get("rows") or [])
+            errors.append(str(result["error"]))
+            break
+        raw_rows.extend(("tushare.rt_k", r) for r in (result.get("rows") or []))
+
+    for offset in range(0, len(etf_syms), 100):
+        chunk = etf_syms[offset : offset + 100]
+        result = _tushare_request("rt_etf_k", {"ts_code": ",".join(chunk)}, etf_fields)
+        if "error" in result:
+            errors.append(str(result["error"]))
+            break
+        fetched_etf_rows = result.get("rows") or []
+        raw_rows.extend(("tushare.rt_etf_k", r) for r in fetched_etf_rows)
+        got_etfs = {normalize_a_share_symbol(str(r.get("ts_code") or "")) for r in fetched_etf_rows}
+        # 非盘中或网关未返回某只 ETF 实时快照时，回退最近 fund_daily 收盘快照
+        for miss_etf in chunk:
+            if miss_etf not in got_etfs:
+                fb = get_tushare_daily(miss_etf, limit=1)
+                fb_bars = fb.get("bars") or [] if isinstance(fb, dict) else []
+                if fb_bars:
+                    last_b = fb_bars[-1]
+                    etf_meta = _etf_basic_item(miss_etf) or {}
+                    raw_rows.append(
+                        (
+                            "tushare.fund_daily",
+                            {
+                                **last_b,
+                                "name": etf_meta.get("name"),
+                                "trade_time": str(last_b.get("trade_date") or ""),
+                            },
+                        )
+                    )
+
+    if not raw_rows and errors:
+        return {
+            "error": errors[0],
+            "source": "tushare.rt_k",
+            "requested_count": len(requested),
+            "quote_count": 0,
+            "missing_symbols": requested,
+            "ms": int((time.monotonic() - started) * 1000),
+        }
 
     fetched_at = _sh_now()
     quotes: dict[str, dict[str, Any]] = {}
     cache_rows: list[dict[str, Any]] = []
-    for row in raw_rows:
+    for row_source, row in raw_rows:
         symbol = normalize_a_share_symbol(str(row.get("ts_code") or ""))
         price = _float(row.get("close"))
         if symbol not in requested or price is None or price <= 0:
@@ -1841,14 +1923,16 @@ def get_realtime_quotes(symbols: list[str] | tuple[str, ...]) -> dict:
         pre_close = _float(row.get("pre_close"))
         pct_chg = _pct(price, pre_close) if pre_close else None
         trade_time = str(row.get("trade_time") or "").strip()
-        trade_date = (
-            trade_time[:10].replace("-", "")
-            if re.match(r"^\d{4}-\d{2}-\d{2}", trade_time)
-            else fetched_at.strftime("%Y%m%d")
-        )
+        if re.match(r"^\d{4}-\d{2}-\d{2}", trade_time):
+            trade_date = trade_time[:10].replace("-", "")
+        elif re.fullmatch(r"\d{8}", trade_time):
+            trade_date = trade_time
+        else:
+            trade_date = fetched_at.strftime("%Y%m%d")
+        clean_name = str(row.get("name") or "").strip() or None
         quote = {
             "symbol": symbol,
-            "name": row.get("name"),
+            "name": clean_name,
             "trade_date": trade_date,
             "trade_time": trade_time,
             "price": price,
@@ -1859,20 +1943,20 @@ def get_realtime_quotes(symbols: list[str] | tuple[str, ...]) -> dict:
             "low": _float(row.get("low")),
             "volume": _float(row.get("vol")),
             "amount": _float(row.get("amount")),
-            "source": "tushare.rt_k",
-            "is_realtime": True,
+            "source": row_source,
+            "is_realtime": row_source != "tushare.fund_daily",
             "fetched_at": fetched_at.isoformat(timespec="seconds"),
         }
         quotes[symbol] = quote
         cache_rows.append(
             {
                 "symbol": symbol,
-                "name": row.get("name"),
+                "name": clean_name,
                 "price": price,
                 "pre_close": pre_close,
                 "pct_chg": pct_chg,
                 "trade_date": trade_date,
-                "source": "tushare.rt_k",
+                "source": row_source,
                 "fetched_at": fetched_at,
             }
         )
@@ -3635,8 +3719,68 @@ def _stock_basic_rows() -> list[dict[str, Any]]:
     return list(rows)
 
 
+def _etf_basic_rows() -> list[dict[str, Any]]:
+    now = time.monotonic()
+    if _ETF_BASIC_CACHE["expires_at"] > now:
+        return list(_ETF_BASIC_CACHE["rows"])
+    fields = "ts_code,csname,extname,cname,index_code,index_name,list_date,list_status,exchange,mgr_name,etf_type"
+    response = _tushare_request("etf_basic", {"list_status": "L"}, fields)
+    if "error" in response:
+        return []
+    rows = response.get("rows") or []
+    _ETF_BASIC_CACHE["rows"] = rows
+    _ETF_BASIC_CACHE["expires_at"] = now + 86400
+    return list(rows)
+
+
+def _etf_basic_item(ts_code: str) -> dict[str, Any] | None:
+    normalized = normalize_a_share_symbol(ts_code)
+    for row in _etf_basic_rows():
+        if str(row.get("ts_code") or "") == normalized:
+            name = str(row.get("csname") or row.get("extname") or normalized).strip()
+            return {
+                **row,
+                "symbol": normalized.split(".")[0],
+                "name": name,
+                "fullname": row.get("cname") or name,
+                "market": row.get("exchange"),
+                "industry": "ETF",
+            }
+    return None
+
+
+def get_etf_price_limits(ts_code: str, trade_date: str) -> tuple[float, float] | None:
+    """通过 TuShare etf_limit 查询场内 ETF 当日官方涨跌停价（三位小数精度）。"""
+    normalized = normalize_a_share_symbol(ts_code)
+    td = _valid_yyyymmdd(trade_date)
+    if not normalized or not td or not is_etf_symbol(normalized):
+        return None
+    cache_key = (normalized, td)
+    if cache_key in _ETF_LIMIT_CACHE:
+        return _ETF_LIMIT_CACHE[cache_key]
+    resp = _tushare_request(
+        "etf_limit",
+        {"ts_code": normalized, "trade_date": td},
+        "ts_code,trade_date,up_limit,down_limit",
+    )
+    rows = resp.get("rows") or [] if isinstance(resp, dict) else []
+    if not rows:
+        return None
+    down = _float(rows[0].get("down_limit"))
+    up = _float(rows[0].get("up_limit"))
+    if down is None or up is None or down <= 0 or up <= 0:
+        return None
+    pair = (round(down, 3), round(up, 3))
+    if len(_ETF_LIMIT_CACHE) > 4000:
+        _ETF_LIMIT_CACHE.clear()
+    _ETF_LIMIT_CACHE[cache_key] = pair
+    return pair
+
+
 def _stock_basic_item(ts_code: str) -> dict[str, Any] | None:
     normalized = normalize_a_share_symbol(ts_code)
+    if is_etf_symbol(normalized):
+        return _etf_basic_item(normalized)
     for row in _stock_basic_rows():
         if str(row.get("ts_code") or "") == normalized:
             return row
@@ -3644,8 +3788,21 @@ def _stock_basic_item(ts_code: str) -> dict[str, Any] | None:
 
 
 def lookup_a_share_instrument(ts_code: str) -> dict[str, Any]:
-    """Look up one listed A-share in the authoritative TuShare stock catalog."""
+    """Look up one listed A-share or exchange-traded ETF in the authoritative TuShare catalog."""
     normalized = normalize_a_share_symbol(ts_code)
+    if is_etf_symbol(normalized):
+        etf_rows = _etf_basic_rows()
+        if not etf_rows:
+            return {
+                "available": False,
+                "normalized_symbol": normalized,
+                "instrument": None,
+            }
+        return {
+            "available": True,
+            "normalized_symbol": normalized,
+            "instrument": _etf_basic_item(normalized),
+        }
     rows = _stock_basic_rows()
     if not rows:
         return {
@@ -3799,24 +3956,30 @@ def _ensure_instrument(symbol: str, name: str | None = None) -> None:
     dialect = engine.dialect.name
     exchange = symbol.split(".")[-1] if "." in symbol else "CN"
     exchange = {"BJ": "BSE"}.get(exchange, exchange)  # 北交所统一记 BSE，与前端过滤一致
+    inst_type = "etf" if is_etf_symbol(symbol) else "stock"
+    resolved_name = name
+    if not resolved_name and inst_type == "etf":
+        meta = _etf_basic_item(symbol)
+        if meta:
+            resolved_name = str(meta.get("name") or "")
     try:
         with engine.begin() as conn:
             if dialect == "mysql":
                 conn.execute(
                     text(
                         "INSERT INTO instruments (symbol, name, market, type, status) "
-                        "VALUES (:symbol, :name, :market, 'stock', 'active') "
+                        "VALUES (:symbol, :name, :market, :type, 'active') "
                         "ON DUPLICATE KEY UPDATE market=VALUES(market)"
                     ),
-                    {"symbol": symbol, "name": name or symbol, "market": exchange},
+                    {"symbol": symbol, "name": resolved_name or symbol, "market": exchange, "type": inst_type},
                 )
             else:
                 conn.execute(
                     text(
                         "INSERT OR IGNORE INTO instruments (symbol, name, market, type, status) "
-                        "VALUES (:symbol, :name, :market, 'stock', 'active')"
+                        "VALUES (:symbol, :name, :market, :type, 'active')"
                     ),
-                    {"symbol": symbol, "name": name or symbol, "market": exchange},
+                    {"symbol": symbol, "name": resolved_name or symbol, "market": exchange, "type": inst_type},
                 )
     except Exception:
         pass

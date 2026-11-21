@@ -30,13 +30,17 @@ from backend.app.core.models import (
     DailyBar,
     Instrument,
     MarketTradingCalendar,
+    Position,
+    PositionHoldingSnapshot,
     StockAdjFactor,
     StockDailyBasic,
     StockLatestPrice,
+    WatchlistItem,
 )
 from backend.app.market.stock_tools import (
     _tushare_request,
     get_trade_cal,
+    is_etf_symbol,
     normalize_a_share_symbol,
 )
 
@@ -231,7 +235,7 @@ def _ensure_instruments_for_bars(rows: list[dict]) -> None:
                     "symbol": s,
                     "name": s,
                     "market": _market_of(s),
-                    "type": "stock",
+                    "type": "etf" if is_etf_symbol(s) else "stock",
                     "status": "active",
                 }
                 for s in missing
@@ -259,7 +263,7 @@ def _upsert_instruments(basic_rows: list[dict]) -> int:
         "(symbol, name, market, type, status, list_date, list_status, industry) "
         "VALUES (:symbol, :name, :market, :type, :status, :list_date, :list_status, :industry) "
         "ON DUPLICATE KEY UPDATE "
-        "name=VALUES(name), market=VALUES(market), list_date=VALUES(list_date), "
+        "name=VALUES(name), market=VALUES(market), type=VALUES(type), list_date=VALUES(list_date), "
         "list_status=VALUES(list_status), industry=VALUES(industry)"
     )
     count = 0
@@ -275,7 +279,7 @@ def _upsert_instruments(basic_rows: list[dict]) -> int:
                         "symbol": symbol,
                         "name": str(row.get("name") or symbol)[:120],
                         "market": _market_of(symbol),
-                        "type": "stock",
+                        "type": str(row.get("type") or ("etf" if is_etf_symbol(symbol) else "stock")),
                         "status": "active",
                         "list_date": str(row.get("list_date") or "") or None,
                         "list_status": str(row.get("list_status") or "").upper() or None,
@@ -960,6 +964,13 @@ def sync_market(days: int = 20, *, target_ceiling: str | None = None) -> dict:
             if last_exc is not None:
                 stats["errors"].append(str(last_exc))
     stats["latest_prices_upserted"] = _upsert_latest_prices(latest_rows or [], names)
+    try:
+        etf_stats = sync_held_and_watched_etfs(start_date=targets[-1], end_date=latest)
+        stats["etf_symbols"] = etf_stats["symbols"]
+        stats["etf_bars_upserted"] = etf_stats["bars_upserted"]
+        stats["etf_adj_upserted"] = etf_stats["adj_upserted"]
+    except Exception as etf_exc:  # noqa: BLE001 - ETF 补充同步异常不阻塞 A 股主干水位
+        logger.warning("held/watched ETF sync skipped: %s", str(etf_exc)[:240])
 
     stats["ready"] = not stats["errors"]
     stats["elapsed_seconds"] = round(time.monotonic() - started, 1)
@@ -974,6 +985,105 @@ def sync_market(days: int = 20, *, target_ceiling: str | None = None) -> dict:
         stats["elapsed_seconds"],
     )
     return stats
+
+
+def sync_held_and_watched_etfs(*, start_date: str, end_date: str) -> dict[str, int]:
+    """针对当前持仓与自选中的场内 ETF，通过 etf_basic / fund_daily / fund_adj 补齐目录、日线、复权因子与最新价。
+
+    隔离原则：instruments.type 记为 'etf'，绝不混入 Instrument.type == 'stock' 的 A 股选股候选池。
+    """
+    with SessionLocal() as db:
+        snap_syms = set(
+            db.scalars(
+                select(func.distinct(PositionHoldingSnapshot.symbol)).where(
+                    PositionHoldingSnapshot.status == "open",
+                    PositionHoldingSnapshot.position_quantity > 0,
+                )
+            ).all()
+        )
+        pos_syms = set(
+            db.scalars(
+                select(func.distinct(Position.symbol)).where(
+                    Position.status == "open",
+                    Position.quantity > 0,
+                )
+            ).all()
+        )
+        watch_syms = set(
+            db.scalars(
+                select(func.distinct(WatchlistItem.symbol)).where(
+                    WatchlistItem.status == "active",
+                )
+            ).all()
+        )
+    etf_symbols = sorted(
+        {
+            normalize_a_share_symbol(str(s or ""))
+            for s in (snap_syms | pos_syms | watch_syms)
+            if is_etf_symbol(str(s or ""))
+        }
+    )
+    if not etf_symbols:
+        return {"symbols": 0, "bars_upserted": 0, "adj_upserted": 0}
+
+    etf_names: dict[str, str] = {}
+    meta_resp = _tushare_request(
+        "etf_basic",
+        {"list_status": "L"},
+        "ts_code,csname,extname,list_date,list_status,exchange",
+    )
+    if "error" not in meta_resp:
+        meta_rows = []
+        wanted = set(etf_symbols)
+        for r in meta_resp.get("rows") or []:
+            code = normalize_a_share_symbol(str(r.get("ts_code") or ""))
+            if code in wanted:
+                nm = str(r.get("csname") or r.get("extname") or code).strip()
+                etf_names[code] = nm
+                meta_rows.append(
+                    {
+                        "ts_code": code,
+                        "name": nm,
+                        "type": "etf",
+                        "list_date": r.get("list_date"),
+                        "list_status": r.get("list_status") or "L",
+                        "industry": "ETF",
+                    }
+                )
+        if meta_rows:
+            _upsert_instruments(meta_rows)
+
+    bars_all: list[dict] = []
+    latest_etf_rows: list[dict] = []
+    adj_all: list[dict] = []
+    for sym in etf_symbols:
+        bar_resp = _tushare_request(
+            "fund_daily",
+            {"ts_code": sym, "start_date": start_date, "end_date": end_date},
+            _DAILY_FIELDS,
+        )
+        if "error" not in bar_resp and bar_resp.get("rows"):
+            s_rows = sorted(bar_resp["rows"], key=lambda r: _compact_date(r.get("trade_date")))
+            bars_all.extend(s_rows)
+            latest_etf_rows.append(s_rows[-1])
+        adj_resp = _tushare_request(
+            "fund_adj",
+            {"ts_code": sym, "start_date": start_date, "end_date": end_date},
+            _ADJ_FIELDS,
+        )
+        if "error" not in adj_resp and adj_resp.get("rows"):
+            adj_all.extend(adj_resp["rows"])
+        time.sleep(0.08)
+
+    bars_upserted = _upsert_daily_bars(bars_all) if bars_all else 0
+    adj_upserted = _upsert_adj_factors(adj_all) if adj_all else 0
+    if latest_etf_rows:
+        _upsert_latest_prices(latest_etf_rows, etf_names)
+    return {
+        "symbols": len(etf_symbols),
+        "bars_upserted": bars_upserted,
+        "adj_upserted": adj_upserted,
+    }
 
 
 def sync_status() -> dict:

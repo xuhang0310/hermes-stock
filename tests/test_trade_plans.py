@@ -111,6 +111,9 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(rules.price_limits("688008.SH", "澜起科技", 10), (8.0, 12.0))
         self.assertEqual(rules.price_limits("600000.SH", "*ST某某", 10), (9.5, 10.5))
         self.assertEqual(rules.price_limits("920001.BJ", "某某", 10), (7.0, 13.0))
+        self.assertEqual(rules.price_limits("510300.SH", "沪深300ETF", 4.123), (3.711, 4.535))
+        self.assertEqual(rules.price_limits("588000.SH", "科创50ETF", 1.055), (0.844, 1.266))
+        self.assertEqual(rules.price_limits("159915.SZ", "创业板ETF", 2.345), (1.876, 2.814))
 
     def test_trigger_directions(self) -> None:
         self.assertEqual(rules.watch_direction("sell", "limit"), "up")
@@ -384,6 +387,24 @@ class SaveValidationTests(_PlanCase):
         issues = self._issues([self._sell(trigger_price=24.0)])
         self.assertIn("超出 2026-11-03 的涨跌停范围", issues)
         self.assertIn("19.41–23.73", issues)
+
+    def test_etf_plan_item_uses_exact_etf_limit_with_three_decimals(self) -> None:
+        from backend.app.market import stock_tools
+
+        etf_symbol = "588000.SH"
+        with self.Session() as db:
+            db.add(Instrument(symbol=etf_symbol, name="科创50ETF", market="SH", type="etf"))
+            db.add(WatchlistItem(owner_user_id=OWNER, symbol=etf_symbol, group_id=1, status="active"))
+            db.add(StockLatestPrice(symbol=etf_symbol, name="科创50ETF", price=1.055, pre_close=1.050, trade_date="20261102", fetched_at=MORNING))
+            db.commit()
+
+        buy_ok = {"account_id": ACCOUNT, "symbol": etf_symbol, "action": "buy", "trigger_price": 1.266, "quantity": 1000}
+        buy_too_high = {**buy_ok, "trigger_price": 1.268}
+        with patch.object(stock_tools, "get_etf_price_limits", return_value=(0.844, 1.266)) as mock_lim:
+            self.assertTrue(self._save([buy_ok])["saved"])
+            mock_lim.assert_called_with(etf_symbol, "20261103")
+            issues = self._issues([buy_too_high], job_run_id="job-etf-2")
+            self.assertIn("0.844–1.266", issues)
 
     def test_limit_uses_pre_close_once_the_quote_is_from_the_plan_day(self) -> None:
         with self.Session() as db:

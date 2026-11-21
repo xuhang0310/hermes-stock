@@ -103,12 +103,69 @@ def watch_targets(db: Session, owner_user_id: int) -> dict[int, dict[str, str]]:
     return targets
 
 
+def format_seasoned_offering_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """将 TuShare stk_seasoned 结构化增发记录转为标准公告事件行。
+
+    实战意义：不少公司在 anns_d 中的原始标题仅为《第X届董事会第X次会议决议公告》，纯标题正则会漏掉
+    隐藏其中的定增预案；stk_seasoned 直接提供发行方式、阶段、募资额与股本上限，实现精准抽血排雷。
+    """
+    symbol = str(row.get("ts_code") or "").strip().upper()
+    ann_date = str(row.get("ann_date") or "").strip().replace("-", "")
+    if not symbol or len(ann_date) != 8:
+        return None
+    fo_type = str(row.get("fo_type") or "定向").strip()
+    stage = str(row.get("cur_stage") or "最新进展").strip()
+    type_phrase = "非公开发行股票" if "非公开" in fo_type else f"{fo_type}股票增发"
+
+    raise_yi: str | None = None
+    try:
+        raw_raise = float(row["fo_raise_total"]) if row.get("fo_raise_total") is not None else 0.0
+        if raw_raise > 0:
+            raise_yi = f"{raw_raise / 1e8:.2f}亿元" if raw_raise >= 1e7 else f"{raw_raise / 1e4:.0f}万元"
+    except (TypeError, ValueError):
+        raise_yi = None
+
+    title_parts = [f"{type_phrase}（{stage}）"]
+    if raise_yi:
+        title_parts.append(f"拟募资{raise_yi}")
+    title = "：".join(title_parts)
+
+    detail_lines = [
+        f"公告日期：{ann_date}",
+        f"再融资类型：{fo_type}（{row.get('fo_stock_type') or 'A股增发'}）",
+        f"当前进度：{stage}",
+    ]
+    if raise_yi:
+        detail_lines.append(f"预计募集资金总额：{raise_yi}")
+    if row.get("fo_vol_high"):
+        try:
+            detail_lines.append(f"发行数量上限：{float(row['fo_vol_high']) / 1e4:,.1f}万股")
+        except (TypeError, ValueError):
+            detail_lines.append(f"发行数量上限：{row['fo_vol_high']}股")
+    if row.get("price_basis"):
+        detail_lines.append(f"定价基准：{str(row['price_basis']).strip()[:180]}")
+    if row.get("fo_investor"):
+        detail_lines.append(f"发行对象：{str(row['fo_investor']).strip()[:120]}")
+    if row.get("fo_purpose"):
+        detail_lines.append(f"募投用途：{str(row['fo_purpose']).strip()[:400]}")
+
+    return {
+        "ts_code": symbol,
+        "ann_date": ann_date,
+        "title": title,
+        "content": "\n".join(detail_lines),
+        "doc_source": "tushare:stk_seasoned",
+        "url": None,
+    }
+
+
 def fetch_announcements(today: date) -> list[dict[str, Any]]:
-    """拉全市场当天和明天的公告，调用方再按持仓过滤。比逐只查省调用。单页失败只记日志。"""
+    """拉全市场当天和明天的公告及结构化股票增发（stk_seasoned），调用方再按持仓过滤。单页失败只记日志。"""
     from backend.app.market.stock_tools import _tushare_request
 
+    dates = rules.announcement_dates(today)
     rows: list[dict[str, Any]] = []
-    for day in rules.announcement_dates(today):
+    for day in dates:
         for page in range(_ANNOUNCEMENT_MAX_PAGES):
             result = _tushare_request(
                 "anns_d",
@@ -122,6 +179,20 @@ def fetch_announcements(today: date) -> list[dict[str, Any]]:
             rows.extend(batch)
             if len(batch) < _ANNOUNCEMENT_PAGE:
                 break
+
+    # 补充拉取 stk_seasoned 结构化股票增发，捕获隐藏在普通董事会决议标题下的定增抽血事件
+    seasoned_res = _tushare_request(
+        "stk_seasoned",
+        {"start_date": dates[0], "end_date": dates[-1]},
+        "",
+    )
+    if "error" in seasoned_res:
+        logger.warning("股票增发拉取失败 %s-%s: %s", dates[0], dates[-1], str(seasoned_res["error"])[:200])
+    else:
+        for s_row in seasoned_res.get("rows") or []:
+            formatted = format_seasoned_offering_row(s_row)
+            if formatted is not None:
+                rows.append(formatted)
     return rows
 
 
@@ -141,7 +212,9 @@ def store_announcements(db: Session, rows: list[dict[str, Any]], targets: dict[i
         if symbol not in watched or not title:
             continue
         ann_date = str(row.get("ann_date") or "")
-        digest = hashlib.sha256(f"tushare:anns_d:{symbol}:{ann_date}:{title}".encode("utf-8")).hexdigest()[:64]
+        doc_source = str(row.get("doc_source") or "tushare:anns_d")
+        body_content = str(row.get("content") or title).strip() or title
+        digest = hashlib.sha256(f"{doc_source}:{symbol}:{ann_date}:{title}".encode("utf-8")).hexdigest()[:64]
         doc_id = db.scalar(select(Document.id).where(Document.content_hash == digest).limit(1))
         url = str(row.get("url") or "").strip() or None
         try:
@@ -152,8 +225,8 @@ def store_announcements(db: Session, rows: list[dict[str, Any]], targets: dict[i
             doc = Document(
                 doc_type="announcement",
                 title=title[:500],
-                content=title,
-                source="tushare:anns_d",
+                content=body_content,
+                source=doc_source,
                 source_url=url,
                 published_at=published,
                 trust_level="normal",
@@ -163,7 +236,7 @@ def store_announcements(db: Session, rows: list[dict[str, Any]], targets: dict[i
             db.add(doc)
             db.flush()
             doc_id = doc.id
-        _tag(db, doc_id, symbol, "公告")
+        _tag(db, doc_id, symbol, "再融资公告" if doc_source == "tushare:stk_seasoned" else "公告")
         candidates.append(
             {"symbol": symbol, "source": "announcement", "doc_id": doc_id, "title": title, "url": url, "published_at": published}
         )

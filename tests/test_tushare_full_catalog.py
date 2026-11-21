@@ -263,6 +263,121 @@ class TushareFullCatalogAndSdkTests(unittest.TestCase):
             {"两市主力净流向", "美元兑人民币中间价"},
         )
 
+    def test_etf_symbol_routing_and_realtime_split(self) -> None:
+        self.assertEqual(stock_tools.normalize_a_share_symbol("510300"), "510300.SH")
+        self.assertEqual(stock_tools.normalize_a_share_symbol("588000"), "588000.SH")
+        self.assertEqual(stock_tools.normalize_a_share_symbol("159915"), "159915.SZ")
+        self.assertTrue(stock_tools.is_etf_symbol("510300.SH"))
+        self.assertTrue(stock_tools.is_etf_symbol("159915.SZ"))
+        self.assertFalse(stock_tools.is_etf_symbol("600519.SH"))
+
+        seen_apis: list[tuple[str, dict]] = []
+
+        def fake_req(api_name: str, params: dict | None = None, fields: str | None = None) -> dict:
+            seen_apis.append((api_name, dict(params or {})))
+            if api_name == "rt_k":
+                return {
+                    "rows": [
+                        {
+                            "ts_code": "600519.SH",
+                            "name": "贵州茅台",
+                            "close": 1520.0,
+                            "pre_close": 1500.0,
+                            "open": 1505.0,
+                            "high": 1525.0,
+                            "low": 1501.0,
+                            "vol": 12000,
+                            "amount": 18000000,
+                            "trade_time": "2026-11-20 14:35:00",
+                        }
+                    ]
+                }
+            if api_name == "rt_etf_k":
+                return {
+                    "rows": [
+                        {
+                            "ts_code": "510300.SH",
+                            "name": "沪深300ETF",
+                            "close": 4.123,
+                            "pre_close": 4.100,
+                            "open": 4.105,
+                            "high": 4.130,
+                            "low": 4.098,
+                            "vol": 500000,
+                            "amount": 205000000,
+                            "trade_time": "2026-11-20 14:35:00",
+                        }
+                    ]
+                }
+            if api_name == "fund_daily":
+                return {
+                    "rows": [
+                        {
+                            "ts_code": "510300.SH",
+                            "trade_date": "20261120",
+                            "open": 4.105,
+                            "high": 4.130,
+                            "low": 4.098,
+                            "close": 4.123,
+                            "pre_close": 4.100,
+                            "change": 0.023,
+                            "pct_chg": 0.561,
+                            "vol": 500000,
+                            "amount": 205000,
+                        }
+                    ]
+                }
+            if api_name == "etf_mins":
+                return {
+                    "rows": [
+                        {
+                            "ts_code": "510300.SH",
+                            "trade_time": "2026-11-20 14:35:00",
+                            "open": 4.121,
+                            "high": 4.124,
+                            "low": 4.120,
+                            "close": 4.123,
+                            "vol": 12000,
+                            "amount": 4947600,
+                        }
+                    ]
+                }
+            if api_name == "etf_limit":
+                return {
+                    "rows": [
+                        {
+                            "ts_code": "588000.SH",
+                            "trade_date": "20261120",
+                            "up_limit": 1.266,
+                            "down_limit": 0.844,
+                        }
+                    ]
+                }
+            return {"rows": []}
+
+        stock_tools._ETF_LIMIT_CACHE.clear()
+        with (
+            patch.object(stock_tools, "_tushare_request", side_effect=fake_req),
+            patch.object(stock_tools, "_ensure_instrument", return_value=None),
+        ):
+            quotes = stock_tools.get_realtime_quotes(["600519.SH", "510300.SH"])
+            daily = stock_tools.get_tushare_daily("510300", limit=5)
+            mins = stock_tools.get_tushare_minutes("510300", freq="5min", limit=5)
+            lims = stock_tools.get_etf_price_limits("588000.SH", "2026-11-20")
+
+        self.assertEqual(quotes["quotes"]["600519.SH"]["price"], 1520.0)
+        self.assertEqual(quotes["quotes"]["510300.SH"]["price"], 4.123)
+        self.assertEqual(quotes["quotes"]["510300.SH"]["source"], "tushare.rt_etf_k")
+        self.assertEqual(daily["bars"][0]["close"], 4.123)
+        self.assertEqual(mins["bars"][0]["close"], 4.123)
+        self.assertEqual(lims, (0.844, 1.266))
+        api_names = [a for a, _ in seen_apis]
+        self.assertIn("rt_k", api_names)
+        self.assertIn("rt_etf_k", api_names)
+        self.assertIn("fund_daily", api_names)
+        self.assertIn("etf_mins", api_names)
+        self.assertIn("etf_limit", api_names)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.app.quant import research_data
-from backend.app.quant.research_data import DAILY_DATASETS, Puller, check, read_table
+from backend.app.quant.research_data import (
+    DAILY_DATASETS,
+    QUARTERLY_VIP_DATASETS,
+    Puller,
+    check,
+    read_table,
+    report_quarters,
+)
 
 
 class _Api:
@@ -119,8 +126,63 @@ class PullTests(unittest.TestCase):
                 self.assertNotIn("token", fh.read())
 
     def test_every_dataset_has_a_code_column_first(self) -> None:
-        for dataset in DAILY_DATASETS:
+        for dataset in (*DAILY_DATASETS, *QUARTERLY_VIP_DATASETS):
             self.assertTrue(dataset.fields.startswith("ts_code,"), dataset.name)
+        for q_dataset in QUARTERLY_VIP_DATASETS:
+            self.assertIn("ann_date", q_dataset.fields.split(","), q_dataset.name)
+
+    def test_quarterly_vip_datasets_support_only_quarterly_and_paging(self) -> None:
+        self.assertEqual(
+            report_quarters("20170101", "20181231"),
+            ["20170331", "20170630", "20170930", "20171231", "20180331", "20180630", "20180930", "20181231"],
+        )
+
+        class PagedVip(_Api):
+            def __call__(self, api, params, fields):
+                self.calls.append((api, params))
+                width = len(fields.split(","))
+                size = research_data._PAGE_SIZE if params.get("offset", 0) == 0 and api == "cashflow_vip" else 1
+                return [["000001.SZ"] + [2.0] * (width - 1)] * size
+
+        api = PagedVip([])
+        missing = Puller(api, self.out, workers=2, log=lambda m: None).run(
+            "20180101", "20180630", only_quarterly=True
+        )
+        self.assertEqual(missing, [])
+        self.assertFalse(any(name == "trade_cal" for name, _ in api.calls))
+        self.assertEqual(
+            len(read_table(self.out / "cashflow_vip" / "20180331.tsv.gz")),
+            research_data._PAGE_SIZE + 1,
+        )
+        (self.out / "income_vip" / "20180630.tsv.gz").unlink()
+        report = check(self.out)
+        self.assertEqual(report["income_vip"]["missing"], ["20180630"])
+        self.assertEqual(report["cashflow_vip"]["missing"], [])
+
+    def test_unsettled_recent_quarter_refreshes_after_disclosure_advances(self) -> None:
+        import os as _os
+        from datetime import datetime as _dt
+
+        first_api = _Api([])
+        Puller(first_api, self.out, workers=2, log=lambda m: None).run(
+            "20261001", "20261231", only_quarterly=True
+        )
+        feb_ts = _dt(2027, 2, 15, 12, 0).timestamp()
+        for q_ds in QUARTERLY_VIP_DATASETS:
+            _os.utime(self.out / q_ds.name / "20261231.tsv.gz", (feb_ts, feb_ts))
+
+        same_day_api = _Api([])
+        Puller(same_day_api, self.out, workers=2, log=lambda m: None).run(
+            "20261001", "20270215", only_quarterly=True
+        )
+        self.assertEqual(same_day_api.calls, [], "同一截止日不重复重拉")
+
+        settled_api = _Api([])
+        Puller(settled_api, self.out, workers=2, log=lambda m: None).run(
+            "20261001", "20270510", only_quarterly=True
+        )
+        refreshed_2026 = [c for c in settled_api.calls if c[1].get("period") == "20261231"]
+        self.assertEqual(len(refreshed_2026), len(QUARTERLY_VIP_DATASETS), "披露期推进后自动补刷未定稿年报")
 
 
 if __name__ == "__main__":

@@ -6,10 +6,14 @@
 用法（token 从环境变量读，不写进代码和文件）：
 
     STOCK_TUSHARE_TOKEN=... python -m backend.app.quant.research_data pull --out ~/hermes-stock-research
+    STOCK_TUSHARE_TOKEN=... python -m backend.app.quant.research_data pull --out ~/hermes-stock-research --only-quarterly
     python -m backend.app.quant.research_data check --out ~/hermes-stock-research
 
-文件布局：<out>/<数据集>/<YYYYMMDD>.tsv.gz，第一行是字段名。可以中断后续跑；已经拉到的不再拉。
-一个交易日写完才改名，所以目录里的文件都是完整的。
+文件布局：
+- 日频数据集：<out>/<数据集>/<YYYYMMDD>.tsv.gz
+- 季频 VIP 财报：<out>/<数据集>/<YYYY0331|0630|0930|1231>.tsv.gz（保留 ann_date / f_ann_date 披露日供 PIT 回测）
+第一行都是字段名。可以中断后续跑；已经拉到且过完法定披露期的不再拉。
+一个文件写完才改名，所以目录里的文件都是完整的。
 """
 from __future__ import annotations
 
@@ -53,9 +57,93 @@ DAILY_DATASETS = (
     # 筹码数据 TuShare 从 2018 年开始才有
     DailyDataset("cyq_perf", "cyq_perf", "ts_code,cost_5pct,cost_50pct,cost_95pct,weight_avg,winner_rate", start="20180101"),
 )
+
+
+@dataclass(frozen=True)
+class QuarterlyDataset:
+    """按财报报告期（YYYY0331/0630/0930/1231）批量拉取的全市场 VIP 财报数据集。
+
+    保留原始 ann_date / f_ann_date 公告披露日，回测时只取 ann_date <= 交易日 的记录（PIT 口径）。
+    """
+
+    name: str
+    api: str
+    fields: str
+    start: str = HISTORY_START
+
+
+QUARTERLY_VIP_DATASETS = (
+    QuarterlyDataset(
+        "income_vip",
+        "income_vip",
+        "ts_code,ann_date,f_ann_date,end_date,report_type,basic_eps,diluted_eps,total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp,rd_exp,operate_profit,total_profit,n_income,n_income_attr_p",
+    ),
+    QuarterlyDataset(
+        "balancesheet_vip",
+        "balancesheet_vip",
+        "ts_code,ann_date,f_ann_date,end_date,report_type,total_share,money_cap,accounts_receiv,inventories,total_cur_assets,total_assets,st_borr,lt_borr,total_cur_liab,total_liab,total_hldr_eqy_exc_min_int",
+    ),
+    QuarterlyDataset(
+        "cashflow_vip",
+        "cashflow_vip",
+        "ts_code,ann_date,f_ann_date,end_date,report_type,net_profit,c_fr_sale_sg,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act,free_cashflow,c_cash_equ_end_period",
+    ),
+    QuarterlyDataset(
+        "fina_indicator_vip",
+        "fina_indicator_vip",
+        "ts_code,ann_date,end_date,eps,dt_eps,roe,roe_waa,roe_dt,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,quick_ratio,tr_yoy,or_yoy,netprofit_yoy,dt_netprofit_yoy,q_sales_yoy,q_profit_yoy,ocf_yoy",
+    ),
+    QuarterlyDataset(
+        "forecast_vip",
+        "forecast_vip",
+        "ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min,net_profit_max,last_parent_net,first_ann_date,summary",
+    ),
+    QuarterlyDataset(
+        "express_vip",
+        "express_vip",
+        "ts_code,ann_date,end_date,revenue,operate_profit,total_profit,n_income,total_assets,total_hldr_eqy_exc_min_int,diluted_eps,diluted_roe,yoy_net_profit,bps",
+    ),
+)
+_QUARTER_ENDS = ("0331", "0630", "0930", "1231")
 INDEX_CODES = ("000300.SH", "000001.SH", "399001.SZ", "399006.SZ", "000905.SH", "000852.SH")
 INDEX_FIELDS = "ts_code,trade_date,open,high,low,close,pre_close,vol,amount"
 _PAGE_SIZE = 5000
+
+
+def report_quarters(start: str, end: str) -> list[str]:
+    """返回 [start, end] 区间内的标准财报报告期（YYYY0331/0630/0930/1231）。"""
+    if not start or not end or start > end:
+        return []
+    start_year = int(start[:4])
+    end_year = int(end[:4])
+    quarters: list[str] = []
+    for year in range(start_year, end_year + 1):
+        for suffix in _QUARTER_ENDS:
+            period = f"{year}{suffix}"
+            if start <= period <= end:
+                quarters.append(period)
+    return quarters
+
+
+def quarter_settled_date(period: str) -> str:
+    """返回某报告期法定披露截止日之后的稳定日期（过此日期拉取过的文件不再重拉）。"""
+    year = int(period[:4])
+    suffix = period[4:8]
+    if suffix == "0331":
+        return f"{year}0505"
+    if suffix == "0630":
+        return f"{year}0905"
+    if suffix == "0930":
+        return f"{year}1105"
+    return f"{year + 1}0505"
+
+
+def _quarter_is_complete(target: Path, period: str, end: str) -> bool:
+    if not target.exists():
+        return False
+    written_day = datetime.fromtimestamp(target.stat().st_mtime).strftime("%Y%m%d")
+    settled = quarter_settled_date(period)
+    return written_day >= settled or written_day >= end
 
 
 def tushare_caller(token: str) -> Caller:
@@ -141,6 +229,24 @@ class Puller:
 
         self._with_retry(f"{dataset.name}/{day}", action)
 
+    def _pull_quarter(self, dataset: QuarterlyDataset, period: str, end: str) -> None:
+        target = self.out / dataset.name / f"{period}.tsv.gz"
+        if _quarter_is_complete(target, period, end):
+            return
+
+        def action() -> None:
+            rows: list[list[Any]] = []
+            offset = 0
+            while True:
+                page = self.call(dataset.api, {"period": period, "limit": _PAGE_SIZE, "offset": offset}, dataset.fields)
+                rows.extend(page)
+                if len(page) < _PAGE_SIZE:
+                    break
+                offset += _PAGE_SIZE
+            _write_table(target, dataset.fields, rows)
+
+        self._with_retry(f"{dataset.name}/{period}", action)
+
     def _pull_index(self, code: str, start: str, end: str) -> None:
         target = self.out / "index_daily" / f"{code}.{end}.tsv.gz"
         if target.exists():
@@ -167,10 +273,27 @@ class Puller:
 
         self._with_retry(target.name, action)
 
-    def run(self, start: str, end: str) -> list[str]:
+    def run(self, start: str, end: str, *, only_quarterly: bool = False) -> list[str]:
+        q_jobs = [
+            (dataset, period)
+            for dataset in QUARTERLY_VIP_DATASETS
+            for period in report_quarters(max(start, dataset.start), end)
+        ]
+        if only_quarterly:
+            self.log(f"{time.strftime('%H:%M:%S')} 仅拉季频 VIP 财报：{len(q_jobs)} 个文件（{start} 至 {end}）")
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                list(pool.map(lambda job: self._pull_quarter(job[0], job[1], end), q_jobs))
+            missing_q = [
+                f"{dataset.name}/{period}"
+                for dataset, period in q_jobs
+                if not (self.out / dataset.name / f"{period}.tsv.gz").exists()
+            ]
+            self.log(f"{time.strftime('%H:%M:%S')} 结束：共 {len(q_jobs)} 个文件，缺 {len(missing_q)} 个 {missing_q[:5]}")
+            return missing_q
+
         calendar = self.call("trade_cal", {"exchange": "SSE", "start_date": start, "end_date": end, "is_open": "1"}, "cal_date")
         days = sorted(str(row[0]) for row in calendar)
-        self.log(f"{time.strftime('%H:%M:%S')} 交易日 {len(days)} 个（{days[0]} 至 {days[-1]}）")
+        self.log(f"{time.strftime('%H:%M:%S')} 交易日 {len(days)} 个（{days[0]} 至 {days[-1]}），季频财报任务 {len(q_jobs)} 个")
         self._pull_paged(self.out / "namechange.tsv.gz", "namechange", {}, "ts_code,name,start_date,end_date")
         for status in ("L", "D", "P"):
             self._pull_paged(
@@ -184,13 +307,20 @@ class Puller:
         jobs = [(dataset, day) for dataset in DAILY_DATASETS for day in days if day >= dataset.start]
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             list(pool.map(lambda job: self._pull_day(*job), jobs))
+            list(pool.map(lambda job: self._pull_quarter(job[0], job[1], end), q_jobs))
         missing = [f"{dataset.name}/{day}" for dataset, day in jobs if not (self.out / dataset.name / f"{day}.tsv.gz").exists()]
-        self.log(f"{time.strftime('%H:%M:%S')} 结束：共 {len(jobs)} 个文件，缺 {len(missing)} 个 {missing[:5]}")
+        missing.extend(
+            f"{dataset.name}/{period}"
+            for dataset, period in q_jobs
+            if not (self.out / dataset.name / f"{period}.tsv.gz").exists()
+        )
+        total_jobs = len(jobs) + len(q_jobs)
+        self.log(f"{time.strftime('%H:%M:%S')} 结束：共 {total_jobs} 个文件，缺 {len(missing)} 个 {missing[:5]}")
         return missing
 
 
 def check(out: Path) -> dict[str, Any]:
-    """数据完整性：每个数据集覆盖到哪天、缺哪些交易日、行数和日线差多少。"""
+    """数据完整性：每个数据集覆盖到哪天/哪一季、缺哪些交易日或报告期、行数和日线差多少。"""
     daily_dir = out / "daily"
     days = sorted(path.name[:8] for path in daily_dir.glob("*.tsv.gz"))
     report: dict[str, Any] = {"daily_days": len(days), "first": days[0] if days else None, "last": days[-1] if days else None}
@@ -198,6 +328,26 @@ def check(out: Path) -> dict[str, Any]:
         expected = [day for day in days if day >= dataset.start]
         have = {path.name[:8] for path in (out / dataset.name).glob("*.tsv.gz")}
         report[dataset.name] = {"files": len(have & set(expected)), "expected": len(expected), "missing": sorted(set(expected) - have)[:5]}
+    q_periods_on_disk = sorted(
+        {
+            path.name[:8]
+            for dataset in QUARTERLY_VIP_DATASETS
+            for path in (out / dataset.name).glob("*.tsv.gz")
+            if len(path.name) >= 8 and path.name[:8].isdigit()
+        }
+    )
+    span_starts = [x for x in (days[0] if days else None, q_periods_on_disk[0] if q_periods_on_disk else None) if x]
+    span_ends = [x for x in (days[-1] if days else None, q_periods_on_disk[-1] if q_periods_on_disk else None) if x]
+    q_start = min(span_starts) if span_starts else None
+    q_end = max(span_ends) if span_ends else None
+    for dataset in QUARTERLY_VIP_DATASETS:
+        expected_q = report_quarters(max(q_start, dataset.start), q_end) if q_start and q_end else []
+        have_q = {path.name[:8] for path in (out / dataset.name).glob("*.tsv.gz")}
+        report[dataset.name] = {
+            "files": len(have_q & set(expected_q)),
+            "expected": len(expected_q),
+            "missing": sorted(set(expected_q) - have_q)[:5],
+        }
     if days:
         report["daily_rows_last_day"] = len(read_table(daily_dir / f"{days[-1]}.tsv.gz"))
     return report
@@ -220,6 +370,7 @@ def main() -> int:
     parser.add_argument("--start", default=HISTORY_START)
     parser.add_argument("--end", default=datetime.now().strftime("%Y%m%d"))
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--only-quarterly", action="store_true", help="仅拉取季频 VIP 财报数据集")
     parser.add_argument("--not-before", help="今天几点之后才开始，如 15:05")
     args = parser.parse_args()
     if args.command == "check":
@@ -232,7 +383,9 @@ def main() -> int:
     if args.not_before:
         _wait_until(args.not_before)
     log = lambda message: print(message, flush=True)  # noqa: E731
-    missing = Puller(tushare_caller(token), args.out, workers=args.workers, log=log).run(args.start, args.end)
+    missing = Puller(tushare_caller(token), args.out, workers=args.workers, log=log).run(
+        args.start, args.end, only_quarterly=args.only_quarterly
+    )
     return 1 if missing else 0
 
 

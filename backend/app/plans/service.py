@@ -328,10 +328,19 @@ def _validate_items(
             continue
 
         if not rules.is_multi_day(source) and valid_until == plan_date:
-            reference = _reference_close(db.get(StockLatestPrice, symbol), plan_date)
-            if reference:
-                low, high = rules.price_limits(symbol, name, float(reference))
-                if not low - 0.01 <= float(trigger_price) <= high + 0.01:
+            limits: tuple[float, float] | None = None
+            tolerance = 0.001 if rules.is_etf(symbol) else 0.01
+            if rules.is_etf(symbol):
+                from backend.app.market.stock_tools import get_etf_price_limits
+
+                limits = get_etf_price_limits(symbol, plan_date.replace("-", ""))
+            if limits is None:
+                reference = _reference_close(db.get(StockLatestPrice, symbol), plan_date)
+                if reference:
+                    limits = rules.price_limits(symbol, name, float(reference))
+            if limits is not None:
+                low, high = limits
+                if not low - tolerance <= float(trigger_price) <= high + tolerance:
                     issues.append(
                         f"{label}：计划价 {rules.format_price(trigger_price)} 超出 {plan_date} 的涨跌停范围"
                         f" {rules.format_price(low)}–{rules.format_price(high)}"

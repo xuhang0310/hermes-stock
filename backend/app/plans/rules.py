@@ -108,17 +108,25 @@ def _is_bse(symbol: str) -> bool:
     return symbol.endswith(".BJ")
 
 
+def is_etf(symbol: str) -> bool:
+    code = str(symbol or "").strip().upper().split(".")[0]
+    return len(code) == 6 and code.isdigit() and code.startswith(("51", "52", "53", "56", "58", "15", "16", "18"))
+
+
 def limit_ratio(symbol: str, name: str | None) -> float:
     if _is_bse(symbol):
         return 0.30
-    if _is_star(symbol) or symbol.startswith(("300", "301", "302")):
+    if _is_star(symbol) or symbol.startswith(("300", "301", "302", "588", "589")):
+        return 0.20
+    if is_etf(symbol) and any(k in str(name or "") for k in ("创业板", "科创")):
         return 0.20
     return 0.05 if "ST" in str(name or "").upper() else 0.10
 
 
 def price_limits(symbol: str, name: str | None, reference: float) -> tuple[float, float]:
     ratio = limit_ratio(symbol, name)
-    return round(reference * (1 - ratio), 2), round(reference * (1 + ratio), 2)
+    digits = 3 if is_etf(symbol) else 2
+    return round(reference * (1 - ratio), digits), round(reference * (1 + ratio), digits)
 
 
 def quantity_problem(symbol: str, action: str, quantity: float, held: float = 0) -> str | None:

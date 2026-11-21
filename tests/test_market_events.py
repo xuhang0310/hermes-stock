@@ -640,6 +640,63 @@ class WiringTests(_Case):
         self.assertIn("title", call.call_args.args[2].split(","))
         self.assertNotIn("ann_title", call.call_args.args[2].split(","))
 
+    def test_seasoned_offering_captures_hidden_board_resolution_dilution(self) -> None:
+        from backend.app.market import stock_tools
+
+        def fake_req(api_name: str, params: dict | None = None, fields: str | None = None) -> dict:
+            p = params or {}
+            if api_name == "anns_d" and p.get("ann_date") == "20261105":
+                # 原始公告标题仅写董事会决议，纯标题正则只能判成 minor
+                return {"rows": [{"ts_code": SYMBOL, "ann_date": "20261105", "title": "第八届董事会第八次会议决议公告", "url": None}]}
+            if api_name == "stk_seasoned":
+                return {
+                    "rows": [
+                        {
+                            "ts_code": SYMBOL,
+                            "ann_date": "20261105",
+                            "fo_type": "非公开",
+                            "fo_stock_type": "A股",
+                            "cur_stage": "董事会预案",
+                            "fo_vol_high": 80000000.0,
+                            "fo_raise_total": 550000000.0,
+                            "price_basis": "不低于定价基准日前20个交易日均价的80%",
+                            "fo_investor": "不超过35名特定投资者",
+                            "fo_purpose": "新一代产线扩建及补充流动资金",
+                        }
+                    ]
+                }
+            return {"rows": []}
+
+        dilution_reply = {
+            "summary": "海象新材：拟定增募资5.50亿元",
+            "direction": "negative",
+            "reliability": "高",
+            "impact": "新增股本上限8000万股，短期存在摊薄预期",
+            "plan_effect": "关注持仓仓位风险",
+            "important": True,
+        }
+        with (
+            patch.object(service, "SessionLocal", self.Session),
+            patch.object(stock_tools, "_tushare_request", side_effect=fake_req),
+            patch.object(service, "interpret_with_model", return_value=dilution_reply) as interpret,
+            patch.object(service, "send_feishu", return_value=SimpleNamespace(status="sent")) as push,
+        ):
+            summary = service.run_message_watch(datetime(2026, 11, 5, 10, 18), owner_user_id=OWNER)
+            self.assertIn("解读 1 条，推送 1 条", summary)
+            prompt_sent = interpret.call_args.args[0]
+            self.assertIn("5.50亿元", prompt_sent)
+            self.assertIn("新一代产线扩建及补充流动资金", prompt_sent)
+            push.assert_called_once()
+
+        with self.Session() as db:
+            events = self._events(db)
+            major_events = [e for e in events if e.severity == rules.MAJOR]
+            self.assertEqual(len(major_events), 1)
+            self.assertEqual(major_events[0].event_type, "再融资")
+            seasoned_doc = db.scalar(select(Document).where(Document.source == "tushare:stk_seasoned"))
+            self.assertIsNotNone(seasoned_doc)
+            self.assertIn("8,000.0万股", seasoned_doc.content or "")
+
 
 if __name__ == "__main__":
     unittest.main()
